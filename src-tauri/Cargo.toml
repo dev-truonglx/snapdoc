@@ -1,0 +1,70 @@
+[package]
+name = "snapdoc"
+version = "0.1.0"
+description = "SnapDoc — fast screenshot + annotation app"
+authors = ["SnapDoc"]
+edition = "2021"
+
+[lib]
+name = "snapdoc_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-opener = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Native screen capture (monitors + windows), cross-platform.
+# - macOS: chỉ dùng xcap để LIỆT KÊ màn hình/cửa sổ (metadata). Việc grab pixel
+#   chuyển sang ScreenCaptureKit (xem capture/mac_sck.rs).
+# - Windows: bật feature "wgc" → dùng Windows.Graphics.Capture (API hiện đại
+#   Microsoft khuyến nghị) thay cho GDI BitBlt mặc định.
+xcap = { version = "0.9", features = ["wgc"] }
+# Image encode/decode + crop
+image = "0.25"
+# Robust cross-platform image clipboard (arboard handles RGBA -> native formats)
+arboard = "3"
+
+base64 = "0.22"
+
+# macOS: đọc trạng thái nút chuột / phím toàn cục để xử lý input cho overlay
+# mà không cần focus cửa sổ.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-graphics = { version = "0.3", features = ["CGEventSource", "CGEventTypes", "CGRemoteOperation", "CGWindow", "CGEvent"] }
+# AppKit để cấu hình NSWindow của overlay: level cao + collectionBehavior, như
+# UI Cmd+Shift+5 của macOS (phủ menu bar, xuất hiện trên mọi Space, hiện cùng
+# lúc trên TẤT CẢ màn hình).
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSWindow",
+    "NSResponder",
+    "NSApplication",
+    "NSScreen",
+    "NSGraphics",
+] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "SCScreenshotManager", "SCShareableContent", "SCStream", "SCError", "block2", "dispatch2", "objc2-core-graphics", "objc2-core-media", "objc2-core-foundation"] }
+block2 = "0.6.2"
+objc2-foundation = "0.3.2"
+objc2-core-foundation = "0.3.2"
+
+# Tối ưu DEPENDENCIES ngay cả trong bản debug (dev:mac). Code của ta vẫn build
+# nhanh + debug được, nhưng image/miniz_oxide/xcap/base64 chạy ở opt-level 3 nên
+# mã hoá PNG ảnh full-screen Retina không còn chậm hàng giây như debug thuần.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
