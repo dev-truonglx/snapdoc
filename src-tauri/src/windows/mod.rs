@@ -236,12 +236,6 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
     let handle = app.clone();
 
     std::thread::spawn(move || {
-        // Windows: đợi WM_DPICHANGED xử lý xong trước khi bắt đầu poll input.
-        // Nếu spawn ngay, snapshot trong AppState có thể chưa phản ánh kích thước
-        // thực sau khi Windows rescale cửa sổ do DPI thay đổi.
-        #[cfg(not(target_os = "macos"))]
-        std::thread::sleep(Duration::from_millis(80));
-
         input_loop(handle, gen, cursor_idx);
     });
 
@@ -377,6 +371,17 @@ pub fn close_overlays(app: &AppHandle) {
     for (label, win) in app.webview_windows() {
         if label.starts_with("overlay") {
             let _ = win.close();
+        }
+    }
+        // Windows: win.close() là async (WM_CLOSE). Đợi overlay thực sự
+    // biến mất trước khi return để open_overlays không gặp duplicate label.
+    #[cfg(target_os = "windows")]
+    {
+        let deadline = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < deadline {
+            let any = app.webview_windows().keys().any(|l| l.starts_with("overlay"));
+            if !any { break; }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
