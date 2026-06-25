@@ -88,8 +88,16 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
     }
 }
 
-/// Đã chọn xong vùng trên overlay `win`. (x,y,w,h) = CSS px trong overlay đó.
-/// Tìm màn hình chứa tâm vùng chọn → chụp region trên đúng màn hình ấy.
+/// Đã chọn xong vùng trên overlay `win`. (x,y,w,h) = CSS px (logical) trong
+/// overlay đó.
+///
+/// # Chuyển đổi toạ độ (quan trọng — đây là nguồn gốc crash cũ)
+///
+/// Frontend gửi toạ độ **CSS px = logical pixels** (đã chia scale).
+/// `MonitorSnap.{x,y,w,h}` trên macOS = points (= logical) → không cần đổi.
+/// Trên Windows/Linux = **physical pixels** → phải nhân `s.scale` trước khi:
+///   1. Tính `center_x/y` để gọi `Monitor::from_point` (physical).
+///   2. Truyền `rx/ry/rw/rh` vào `capture_region` (physical).
 pub fn finalize_region(
     app: &AppHandle,
     win: WebviewWindow,
@@ -98,25 +106,35 @@ pub fn finalize_region(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
-    // (x,y,w,h) là CSS px = points tương đối gốc overlay = gốc màn hình ấy.
     let s = overlay_snap(app, &win)
         .ok_or_else(|| "Không xác định được màn hình của overlay".to_string())?;
 
-    // Tâm vùng chọn theo points toàn cục → lấy đúng xcap Monitor để chụp.
-    let center_x = (s.x + x + w / 2.0) as i32;
-    let center_y = (s.y + y + h / 2.0) as i32;
+    // Hệ số nhân để đổi CSS px → đơn vị của snapshot.
+    // macOS: scale_in_snap = 1.0 (points = CSS px).
+    // Windows/Linux: scale_in_snap = s.scale (physical = CSS × scale).
+    #[cfg(target_os = "macos")]
+    let scale_in_snap: f64 = 1.0;
+    #[cfg(not(target_os = "macos"))]
+    let scale_in_snap: f64 = s.scale;
+
+    // Tâm vùng chọn trong hệ snapshot toàn cục → lấy đúng xcap Monitor.
+    let center_x = (s.x + (x + w / 2.0) * scale_in_snap) as i32;
+    let center_y = (s.y + (y + h / 2.0) * scale_in_snap) as i32;
     let m = capture::monitor::at_point(center_x, center_y)?;
 
-    // Vùng chọn tương đối gốc màn hình (points), kẹp trong biên màn.
-    let rx = x.max(0.0);
-    let ry = y.max(0.0);
-    let mut rw = w - (rx - x);
-    let mut rh = h - (ry - y);
-    if rx + rw > s.w {
-        rw = s.w - rx;
+    // Vùng chọn tương đối gốc màn hình, đổi sang physical, kẹp trong biên.
+    let rx = (x * scale_in_snap).max(0.0);
+    let ry = (y * scale_in_snap).max(0.0);
+    let mut rw = (w - (rx / scale_in_snap - x).max(0.0)) * scale_in_snap;
+    let mut rh = (h - (ry / scale_in_snap - y).max(0.0)) * scale_in_snap;
+
+    let snap_w = s.w * scale_in_snap;
+    let snap_h = s.h * scale_in_snap;
+    if rx + rw > snap_w {
+        rw = snap_w - rx;
     }
-    if ry + rh > s.h {
-        rh = s.h - ry;
+    if ry + rh > snap_h {
+        rh = snap_h - ry;
     }
     if rw < 1.0 || rh < 1.0 {
         windows::close_overlays(app);

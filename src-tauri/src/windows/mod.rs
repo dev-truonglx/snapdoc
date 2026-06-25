@@ -230,7 +230,16 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
         .fetch_add(1, Ordering::SeqCst)
         + 1;
     let handle = app.clone();
-    std::thread::spawn(move || input_loop(handle, gen, cursor_idx));
+
+    std::thread::spawn(move || {
+        // Windows: đợi WM_DPICHANGED xử lý xong trước khi bắt đầu poll input.
+        // Nếu spawn ngay, snapshot trong AppState có thể chưa phản ánh kích thước
+        // thực sau khi Windows rescale cửa sổ do DPI thay đổi.
+        #[cfg(not(target_os = "macos"))]
+        std::thread::sleep(Duration::from_millis(80));
+
+        input_loop(handle, gen, cursor_idx);
+    });
 
     Ok(())
 }
