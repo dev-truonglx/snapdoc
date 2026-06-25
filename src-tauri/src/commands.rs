@@ -47,13 +47,18 @@ pub fn finalize_monitor(app: AppHandle, window: WebviewWindow) -> Result<(), Str
 
 /// Liệt kê cửa sổ theo toạ độ local của overlay GỌI lệnh (mỗi màn hình một
 /// overlay) → highlight đúng trên màn hình đang trỏ tới.
+///
+/// Truyền `outer_position()` (physical px) và `scale_factor` nguyên gốc vào
+/// `list()` để nó tự convert. KHÔNG chia trước ở đây — tránh mất chính xác
+/// và lệch khi DPI != 1.
 #[tauri::command]
 pub fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, String> {
     let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
     let pos = window
         .outer_position()
         .map_err(|e| format!("Không lấy được vị trí overlay: {e}"))?;
-    capture::window::list(pos.x as f64 / scale, pos.y as f64 / scale)
+    // Truyền physical px trực tiếp; list() sẽ tự chia scale.
+    capture::window::list(pos.x as f64, pos.y as f64, scale)
 }
 
 #[tauri::command]

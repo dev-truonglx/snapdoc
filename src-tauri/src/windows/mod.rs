@@ -176,6 +176,10 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
+        // Windows: tắt DWM drop-shadow để set_position khớp chính xác pixel
+        // gốc màn hình. Shadow DWM làm nội dung lệch phải/xuống một khoảng
+        // bằng shadow margin (~8 px ở 100% DPI, tự scale theo DPI).
+        .shadow(false)
         .build()
         .map_err(|e| format!("Không tạo được overlay: {e}"))?;
 
