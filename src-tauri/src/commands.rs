@@ -76,10 +76,16 @@ pub fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, String> {
     let pos = window
         .outer_position()
         .map_err(|e| format!("Không lấy được vị trí overlay: {e}"))?;
-    // Truyền physical px trực tiếp; list() sẽ tự chia scale.
-    capture::window::list(pos.x as f64, pos.y as f64, scale)
+    // Trưyền physical px trực tiếp; list() sẽ tự chia scale.
+    // **Phải chạy trên OS thread riêng** – Window::all() của xcap gọi COM
+    // APIs cần STA context; Tokio worker không khởi tạo COM.
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<WindowInfo>, String>>();
+    std::thread::spawn(move || {
+        let result = capture::window::list(pos.x as f64, pos.y as f64, scale);
+        let _ = tx.send(result);
+    });
+    rx.recv().unwrap_or_else(|_| Err("Thread list_windows bị lỗi bất ngờ".to_string()))
 }
-
 #[tauri::command]
 pub fn cancel_overlay(app: AppHandle) {
     flow::cancel_overlay(&app);
