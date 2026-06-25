@@ -23,6 +23,12 @@ pub fn capture_now(app: AppHandle, mode: String, output: String) {
     std::thread::spawn(move || flow::run(&app, &mode, &output));
 }
 
+/// Chụp vùng chọn từ overlay.
+///
+/// **Phải chạy trên một OS thread riêng** — Tokio worker threads không khởi tạo
+/// COM STA, trong khi xcap WGC gọi CoInitializeEx/WinRT APIs yêu cầu STA.
+/// Spawn `std::thread` để đảm bảo ngữ cảnh COM đúng, rồi forward kết quả
+/// về IPC caller qua channel.
 #[tauri::command]
 pub fn finalize_region(
     app: AppHandle,
@@ -32,7 +38,12 @@ pub fn finalize_region(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
-    flow::finalize_region(&app, window, x, y, w, h)
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    std::thread::spawn(move || {
+        let result = flow::finalize_region(&app, window, x, y, w, h);
+        let _ = tx.send(result);
+    });
+    rx.recv().unwrap_or_else(|_| Err("Thread capture bị lỗi bất ngờ".to_string()))
 }
 
 #[tauri::command]
