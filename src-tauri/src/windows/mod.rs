@@ -209,6 +209,15 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
                 configure_overlay_ns_window_main_thread(&win_main, did);
             });
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Windows: áp lại SAU show. Khi set_position chuyển cửa sổ sang màn
+            // đích khác DPI, Windows gửi WM_DPICHANGED và tự rescale kích thước →
+            // lần set trước show có thể bị ghi đè/bỏ qua. Đặt position TRƯỚC (để
+            // DPI ổn định ở màn đích) rồi set_size để phủ trọn vẹn toàn màn hình.
+            let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
+            let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
+        }
 
         if i == cursor_idx {
             let _ = win.set_focus();

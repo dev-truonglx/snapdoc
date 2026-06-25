@@ -56,6 +56,11 @@ block2 = "0.6.2"
 objc2-foundation = "0.3.2"
 objc2-core-foundation = "0.3.2"
 
+# Windows: đọc trạng thái nút chuột / phím toàn cục cho overlay (GetAsyncKeyState)
+# mà không cần focus cửa sổ — tương đương vai trò CoreGraphics trên macOS.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+
 # Tối ưu DEPENDENCIES ngay cả trong bản debug (dev:mac). Code của ta vẫn build
 # nhanh + debug được, nhưng image/miniz_oxide/xcap/base64 chạy ở opt-level 3 nên
 # mã hoá PNG ảnh full-screen Retina không còn chậm hàng giây như debug thuần.

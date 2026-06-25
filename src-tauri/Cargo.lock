@@ -4320,6 +4320,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
+ "windows-sys 0.59.0",
  "xcap",
 ]
 
