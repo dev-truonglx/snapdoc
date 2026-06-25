@@ -91,6 +91,8 @@ pub fn finalize_region(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
+    // Step 1: resolve MonitorSnap WHILE the overlay window still exists.
+    // (overlay_snap() needs the window label to index into overlay_monitors)
     let s = overlay_snap(app, &win)
         .ok_or_else(|| "Không xác định được màn hình của overlay".to_string())?;
 
@@ -106,12 +108,14 @@ pub fn finalize_region(
 
     let center_x = (s.x + (x + w / 2.0) * scale_in_snap) as i32;
     let center_y = (s.y + (y + h / 2.0) * scale_in_snap) as i32;
+
+    // Step 2: resolve the xcap Monitor object while we still have snap data.
     let m = capture::monitor::at_point(center_x, center_y)?;
 
     // Convert to physical px, clamping negative origin to 0.
     let rx = (x * scale_in_snap).max(0.0);
     let ry = (y * scale_in_snap).max(0.0);
-    // Subtract any portion that was clipped from the left/top.
+    // Subtract any portion clipped from the left/top edge.
     let mut rw = (w * scale_in_snap) - (0.0_f64.max(-x) * scale_in_snap);
     let mut rh = (h * scale_in_snap) - (0.0_f64.max(-y) * scale_in_snap);
 
@@ -129,8 +133,25 @@ pub fn finalize_region(
         return Err("Vùng chọn không hợp lệ".to_string());
     }
 
-    let cap = capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)?;
+    // Step 3: close overlays BEFORE capture.
+    //
+    // The overlay windows are created with set_content_protected(true) which
+    // marks them as a DWM protected surface.  Windows Graphics Capture (WGC)
+    // skips protected surfaces in every frame, so if the overlay is still
+    // visible the captured image will contain a black rectangle where the
+    // overlay was.  Closing first, then waiting one compositor frame (≈50 ms)
+    // lets DWM unregister the protected surface before WGC takes the shot.
+    //
+    // macOS ScreenCaptureKit does not have this restriction, so we skip the
+    // sleep there to keep things snappy.
     windows::close_overlays(app);
+    #[cfg(not(target_os = "macos"))]
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Step 4: capture the region on this thread (caller must be an OS thread
+    // with COM initialized — see commands.rs where finalize_region is spawned
+    // via std::thread::spawn instead of being invoked on a Tokio worker).
+    let cap = capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)?;
     let output = get_output(app);
     finish(app, cap, &output)
 }
