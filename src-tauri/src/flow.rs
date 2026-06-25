@@ -77,7 +77,6 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
         let overlay_mode = if mode == "full" { "monitor" } else { mode };
         windows::open_overlays(app, overlay_mode)
     })();
-
     if let Err(e) = result {
         let _ = app.emit("snapdoc-error", e);
     }
@@ -92,14 +91,13 @@ pub fn finalize_region(
     h: f64,
 ) -> Result<(), String> {
     // Step 1: resolve MonitorSnap WHILE the overlay window still exists.
-    // (overlay_snap() needs the window label to index into overlay_monitors)
     let s = overlay_snap(app, &win)
-        .ok_or_else(|| "Không xác định được màn hình của overlay".to_string())?;
+        .ok_or_else(|| "Khong xac dinh duoc man hinh cua overlay".to_string())?;
 
     // On Windows, MonitorSnap stores physical pixels while the overlay
     // reports CSS logical pixels. Multiply by the DPI scale factor so that
     // the coordinates passed to capture_region are physical pixels.
-    // macOS ScreenCaptureKit works in points (≡ CSS px), so scale = 1.
+    // macOS ScreenCaptureKit works in points (= CSS px), so scale = 1.
     // Linux follows the same logical-pixel convention as macOS here.
     #[cfg(target_os = "windows")]
     let scale_in_snap: f64 = s.scale;
@@ -115,6 +113,7 @@ pub fn finalize_region(
     // Convert to physical px, clamping negative origin to 0.
     let rx = (x * scale_in_snap).max(0.0);
     let ry = (y * scale_in_snap).max(0.0);
+
     // Subtract any portion clipped from the left/top edge.
     let mut rw = (w * scale_in_snap) - (0.0_f64.max(-x) * scale_in_snap);
     let mut rh = (h * scale_in_snap) - (0.0_f64.max(-y) * scale_in_snap);
@@ -130,16 +129,16 @@ pub fn finalize_region(
     }
     if rw < 1.0 || rh < 1.0 {
         windows::close_overlays(app);
-        return Err("Vùng chọn không hợp lệ".to_string());
+        return Err("Vung chon khong hop le".to_string());
     }
 
     // Step 3: close overlays BEFORE capture.
     //
     // The overlay windows are created with set_content_protected(true) which
-    // marks them as a DWM protected surface.  Windows Graphics Capture (WGC)
+    // marks them as a DWM protected surface. Windows Graphics Capture (WGC)
     // skips protected surfaces in every frame, so if the overlay is still
     // visible the captured image will contain a black rectangle where the
-    // overlay was.  Closing first, then waiting one compositor frame (≈50 ms)
+    // overlay was. Closing first, then waiting one compositor frame (~50 ms)
     // lets DWM unregister the protected surface before WGC takes the shot.
     //
     // macOS ScreenCaptureKit does not have this restriction, so we skip the
@@ -149,7 +148,7 @@ pub fn finalize_region(
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     // Step 4: capture the region on this thread (caller must be an OS thread
-    // with COM initialized — see commands.rs where finalize_region is spawned
+    // with COM initialized -- see commands.rs where finalize_region is spawned
     // via std::thread::spawn instead of being invoked on a Tokio worker).
     let cap = capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)?;
     let output = get_output(app);
@@ -157,7 +156,24 @@ pub fn finalize_region(
 }
 
 pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
+    // Close overlays BEFORE capture so that the DWM-protected overlay surface
+    // is unregistered from the compositor before Windows Graphics Capture
+    // (WGC) takes the shot. Without the sleep, WGC may still see the overlay
+    // protected surface and return a black/corrupt frame or panic.
+    //
+    // win.close() on Windows is async (sends WM_CLOSE), so we must wait for
+    // the overlay to actually disappear. close_overlays() already polls up to
+    // 300 ms for that on Windows, so no extra sleep is strictly needed beyond
+    // what close_overlays guarantees. However, an additional short wait ensures
+    // the DWM compositor has composited one full frame without the protected
+    // surface before WGC starts capturing -- preventing black frames.
+    //
+    // macOS uses ScreenCaptureKit which does not have this restriction, so we
+    // skip the sleep there.
     windows::close_overlays(app);
+    #[cfg(not(target_os = "macos"))]
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
     let cap = capture::window::capture_by_id(id)?;
     let output = get_output(app);
     finish(app, cap, &output)
@@ -165,10 +181,9 @@ pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
 
 pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), String> {
     let s = overlay_snap(app, &win)
-        .ok_or_else(|| "Không xác định được màn hình của overlay".to_string())?;
+        .ok_or_else(|| "Khong xac dinh duoc man hinh cua overlay".to_string())?;
     let center_x = (s.x + s.w / 2.0) as i32;
     let center_y = (s.y + s.h / 2.0) as i32;
-
     let m = capture::monitor::at_point(center_x, center_y)?;
     windows::close_overlays(app);
     let cap = capture::fullscreen::capture_monitor(&m)?;
