@@ -7,3 +7,6 @@ dist-ssr
 # Rust / Tauri
 src-tauri/target
 src-tauri/gen
+
+# Claude Code local settings (personal)
+.claude/settings.local.json

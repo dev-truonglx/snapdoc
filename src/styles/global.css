@@ -57,6 +57,17 @@ select {
   padding: 6px 8px;
 }
 
+/* body đặt user-select:none (chống bôi đen UI). Nhưng trong webview Tauri
+   (WKWebView) thuộc tính này kế thừa xuống ô nhập liệu sẽ CHẶN luôn việc gõ
+   chữ và đặt con trỏ → phải bật lại cho các phần tử có thể chỉnh sửa. */
+input,
+textarea,
+select,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 .solid-bg {
   background: var(--bg);
 }

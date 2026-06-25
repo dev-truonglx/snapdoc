@@ -11,16 +11,22 @@ interface EditorState {
   tool: Tool;
   color: string;
   strokeWidth: number;
+  fontSize: number;
   selectedId: string | null;
   stepCounter: number;
+  // id của text annotation đang được gõ (null = không gõ).
+  // Dùng để phím tắt công cụ không cướp ký tự khi đang nhập chữ.
+  editingTextId: string | null;
 
   // setup
   loadDoc: (doc: Doc) => void;
 
   // tool / style
+  setEditingText: (id: string | null) => void;
   setTool: (t: Tool) => void;
   setColor: (c: string) => void;
   setStrokeWidth: (w: number) => void;
+  setFontSize: (size: number) => void;
   select: (id: string | null) => void;
 
   // mutations (đều đi qua history)
@@ -51,12 +57,15 @@ export const useEditor = create<EditorState>((set, get) => ({
   tool: "select",
   color: "#ef4444",
   strokeWidth: 4,
+  fontSize: 22,
   selectedId: null,
   stepCounter: 1,
+  editingTextId: null,
 
   loadDoc: (doc) =>
-    set({ doc, past: [], future: [], selectedId: null, stepCounter: 1, tool: "select" }),
+    set({ doc, past: [], future: [], selectedId: null, stepCounter: 1, tool: "select", editingTextId: null }),
 
+  setEditingText: (editingTextId) => set({ editingTextId }),
   setTool: (tool) => set({ tool, selectedId: tool === "select" ? get().selectedId : null }),
   setColor: (color) => {
     const { selectedId, doc } = get();
@@ -72,7 +81,24 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     set({ strokeWidth });
   },
-  select: (selectedId) => set({ selectedId }),
+  setFontSize: (fontSize) => {
+    // Ưu tiên text đang gõ, sau đó tới text đang chọn — đổi cỡ là thấy ngay.
+    const { editingTextId, selectedId, doc } = get();
+    const target = editingTextId ?? selectedId;
+    if (target && doc) {
+      const ann = doc.annotations.find((a) => a.id === target);
+      if (ann?.type === "text") {
+        get().updateAnnotation(target, { fontSize } as Partial<Annotation>);
+      }
+    }
+    set({ fontSize });
+  },
+  select: (selectedId) => {
+    // Chọn 1 text → đồng bộ cỡ chữ trên toolbar về cỡ của nó.
+    const { doc } = get();
+    const ann = selectedId && doc ? doc.annotations.find((a) => a.id === selectedId) : null;
+    set({ selectedId, ...(ann?.type === "text" ? { fontSize: ann.fontSize } : null) });
+  },
 
   addAnnotation: (a) =>
     set((s) => {

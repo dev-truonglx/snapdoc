@@ -29,6 +29,19 @@ export default function Editor() {
 
   // Lấy ảnh chờ khi mở editor + khi có ảnh mới (event refresh-capture)
   useEffect(() => {
+    // [DEV] Chạy trên trình duyệt thuần (không Tauri) → nạp ảnh test để thử UI.
+    if (!("__TAURI_INTERNALS__" in window)) {
+      const c = document.createElement("canvas");
+      c.width = 800;
+      c.height = 500;
+      const g = c.getContext("2d")!;
+      g.fillStyle = "#cbd5e1";
+      g.fillRect(0, 0, 800, 500);
+      g.fillStyle = "#475569";
+      g.fillRect(40, 40, 720, 420);
+      loadDoc({ image: c.toDataURL("image/png"), imgW: 800, imgH: 500, annotations: [] });
+      return;
+    }
     ipc.takePending().then(loadPending);
     const un = listen("refresh-capture", () => {
       ipc.takePending().then(loadPending);
@@ -65,8 +78,26 @@ export default function Editor() {
   // Phím tắt editor
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey;
+      // Đang gõ trong ô nhập (vd: textarea chú thích chữ) → không cướp phím,
+      // nếu không các ký tự v/r/o/t/n/c sẽ bị hiểu thành phím đổi công cụ.
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
       const s = useEditor.getState();
+
+      // Guard 1 (theo focus): mục tiêu sự kiện là ô nhập liệu.
+      // Guard 2 (theo state): đang có text annotation mở để gõ, kể cả khi
+      // focus chưa kịp về textarea (hay gặp trong webview Tauri).
+      if (tag === "INPUT" || tag === "TEXTAREA" || el?.isContentEditable || s.editingTextId) {
+        console.log("[text-input] keydown bỏ qua (đang nhập)", {
+          key: e.key,
+          tag,
+          editingTextId: s.editingTextId,
+          active: document.activeElement?.tagName,
+        });
+        return;
+      }
+
+      const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
         e.shiftKey ? s.redo() : s.undo();
@@ -75,6 +106,15 @@ export default function Editor() {
         doSave(e.shiftKey);
       } else if (mod && e.key.toLowerCase() === "c" && s.tool === "select") {
         doCopy();
+      } else if (mod && (e.key === "=" || e.key === "+")) {
+        e.preventDefault();
+        stageRef.current?.zoomIn();
+      } else if (mod && e.key === "-") {
+        e.preventDefault();
+        stageRef.current?.zoomOut();
+      } else if (mod && e.key === "0") {
+        e.preventDefault();
+        stageRef.current?.zoomFit();
       } else if ((e.key === "Delete" || e.key === "Backspace") && s.selectedId) {
         e.preventDefault();
         s.removeSelected();
