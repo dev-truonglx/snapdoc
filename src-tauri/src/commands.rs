@@ -48,14 +48,22 @@ pub fn finalize_region(
 
 #[tauri::command]
 pub fn finalize_window(app: AppHandle, id: u32) -> Result<(), String> {
-    flow::finalize_window(&app, id)
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    std::thread::spawn(move || {
+        let result = flow::finalize_window(&app, id);
+        let _ = tx.send(result);
+    });
+    rx.recv().unwrap_or_else(|_| Err("Thread capture bị lỗi bất ngờ".to_string()))
 }
-
 #[tauri::command]
 pub fn finalize_monitor(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
-    flow::finalize_monitor(&app, window)
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    std::thread::spawn(move || {
+        let result = flow::finalize_monitor(&app, window);
+        let _ = tx.send(result);
+    });
+    rx.recv().unwrap_or_else(|_| Err("Thread capture bị lỗi bất ngờ".to_string()))
 }
-
 /// Liệt kê cửa sổ theo toạ độ local của overlay GỌI lệnh (mỗi màn hình một
 /// overlay) → highlight đúng trên màn hình đang trỏ tới.
 ///
