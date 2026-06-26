@@ -119,6 +119,13 @@ pub fn open_capture_bar(app: AppHandle) -> Result<(), String> {
     windows::open_capture_bar(&app)
 }
 
+/// Mở capture bar với chế độ chụp gần nhất pre-selected — dùng cho nút "New" trong editor.
+#[tauri::command]
+pub fn open_capture_bar_for_new(app: AppHandle) -> Result<(), String> {
+    windows::hide_editor(&app);
+    windows::open_capture_bar_with_last_mode(&app)
+}
+
 #[tauri::command]
 pub fn open_editor(app: AppHandle) -> Result<(), String> {
     windows::open_editor(&app)
@@ -169,11 +176,13 @@ pub fn request_screen_permission() -> bool {
     permissions::request_capture()
 }
 
-/// Áp dụng phím tắt mới ngay lập tức — huỷ tất cả, đăng ký lại từ settings.
+/// Lấy chế độ chụp gần nhất (mode + output) — dùng cho nút "New" ở editor.
 #[tauri::command]
-pub fn reload_shortcuts(app: AppHandle) -> Result<(), String> {
-    crate::hotkey::reload(&app)
+pub fn get_last_capture_mode(app: AppHandle) -> (String, String) {
+    app.state::<AppState>().last_capture.get()
 }
+
+// ── Update commands ──────────────────────────────────────────────────────────
 
 /// Tạm tắt tất cả global shortcuts — dùng khi Settings đang trong chế độ
 /// ghi phím tắt (recording), tránh shortcut kích hoạt hành động thực sự.
@@ -191,7 +200,14 @@ pub fn resume_shortcuts(app: AppHandle) -> Result<(), String> {
     crate::hotkey::register_all(&app)
 }
 
-// ── Update commands ──────────────────────────────────────────────────────────
+/// Áp dụng phím tắt mới ngay lập tức — huỷ tất cả, đăng ký lại từ settings.
+/// Đồng thời rebuild tray menu để accelerator text khớp với shortcuts mới.
+#[tauri::command]
+pub fn reload_shortcuts(app: AppHandle) -> Result<(), String> {
+    crate::hotkey::reload(&app)?;
+    crate::tray::rebuild_menu(&app);
+    Ok(())
+}
 
 /// Check for update manually (called from Settings). Returns UpdateInfo.
 /// On success, caches the update in PendingUpdate state.

@@ -113,6 +113,42 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Mở capture bar và emit event `set-capture-mode` với lastMode/lastOutput
+/// từ Rust state. Dùng cho nút "New" trong editor — đảm bảo capture bar
+/// luôn hiển thị đúng chế độ chụp gần nhất, không phụ thuộc timing event.
+pub fn open_capture_bar_with_last_mode(app: &AppHandle) -> Result<(), String> {
+    use crate::state::AppState;
+
+    let (mode, output) = app.state::<AppState>().last_capture.get();
+    let is_new_window = app.get_webview_window("capture-bar").is_none();
+
+    open_capture_bar(app)?;
+
+    // Với window đã tồn tại: listener JS đã active → delay ngắn.
+    // Với window mới: cần đợi React mount + register listener → delay dài hơn.
+    // Emit 2 lần (80ms + 500ms) để cover cả hai trường hợp.
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let first_delay = if is_new_window { 400 } else { 80 };
+        std::thread::sleep(std::time::Duration::from_millis(first_delay));
+        if let Some(win) = app.get_webview_window("capture-bar") {
+            let payload = serde_json::json!({ "mode": mode, "output": output });
+            let _ = win.emit("set-capture-mode", payload.clone());
+            // Emit lần 2 cho window mới (đảm bảo listener đã mount)
+            if is_new_window {
+                let win2 = win.clone();
+                let p2 = payload.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let _ = win2.emit("set-capture-mode", p2);
+                });
+            }
+        }
+    });
+
+    Ok(())
+}
+
 /// Mở overlay trên TẤT CẢ màn hình (mỗi màn một cái). `mode` =
 /// "region" | "window" | "monitor". Input do `input_loop` xử lý qua con trỏ +
 /// nút chuột toàn cục (không cần focus) → không nháy, độ trễ chuyển màn = 0.
@@ -384,6 +420,19 @@ pub fn close_overlays(app: &AppHandle) {
         }
     }
     // KHÔNG poll ở đây — xem comment trên.
+}
+
+/// Ẩn editor và trả về Accessory policy (ẩn Dock/taskbar icon).
+/// Dùng cho nút "New" trong editor — user muốn chụp mới mà không cần đóng editor.
+pub fn hide_editor(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("editor") {
+        let _ = win.hide();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+    }
 }
 
 /// Tạo sẵn editor (ẩn) lúc khởi động để lần chụp đầu hiện ngay, không phải

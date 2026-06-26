@@ -56,6 +56,7 @@ export const ipc = {
   saveAndCopy: (path: string, data: string) =>
     invoke<string>("save_and_copy", { path, data }),
   openCaptureBar: () => invoke<void>("open_capture_bar"),
+  openCaptureBarForNew: () => invoke<void>("open_capture_bar_for_new"),
   openEditor: () => invoke<void>("open_editor"),
   openSettings: () => invoke<void>("open_settings"),
   closeSelf: () => invoke<void>("close_self"),
@@ -66,6 +67,7 @@ export const ipc = {
   reloadShortcuts: () => invoke<void>("reload_shortcuts"),
   suspendShortcuts: () => invoke<void>("suspend_shortcuts"),
   resumeShortcuts: () => invoke<void>("resume_shortcuts"),
+  getLastCaptureMode: () => invoke<[string, string]>("get_last_capture_mode"),
   // Update
   checkUpdate: () => invoke<UpdateInfo>("check_update"),
   getPendingUpdate: () => invoke<UpdateInfo | null>("get_pending_update"),

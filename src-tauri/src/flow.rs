@@ -69,6 +69,8 @@ fn overlay_snap(app: &AppHandle, win: &WebviewWindow) -> Option<MonitorSnap> {
 }
 
 pub fn run(app: &AppHandle, mode: &str, output: &str) {
+    // Lưu chế độ trước khi chụp (kể cả "full" → overlay monitor)
+    app.state::<AppState>().last_capture.set(mode, output);
     let result: Result<(), String> = (|| {
         if bar_is_visible(app) {
             hide_bar(app);
@@ -181,9 +183,9 @@ pub fn cancel_overlay(app: &AppHandle) {
 /// Chụp tất cả màn hình ghép ngang, không cần overlay.
 /// Ẩn capture bar trước khi chụp để không lọt vào ảnh.
 pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> {
+    app.state::<AppState>().last_capture.set("all", output);
     if bar_is_visible(app) {
         hide_bar(app);
-        // Đợi một chút để capture bar kịp ẩn khỏi màn hình.
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
     let cap = capture::fullscreen::capture_all_monitors()?;

@@ -120,10 +120,11 @@ interface Props {
   onCopy: () => void;
   onSaveCopy: () => void;
   onFlatten: () => void;
+  onNew: () => void;
   busy: boolean;
 }
 
-export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, busy }: Props) {
+export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, busy }: Props) {
   const {
     tool, setTool,
     color, setColor,
@@ -152,6 +153,17 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, busy }:
 
   return (
     <div style={bar}>
+      {/* New — chụp lại theo chế độ gần nhất + mở capture bar */}
+      <button onClick={onNew} style={newBtn} title="Chụp mới (chế độ gần nhất + mở thanh chụp)">
+        <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden fill="none">
+          <circle cx="7.5" cy="7.5" r="6.5" stroke="currentColor" strokeWidth="1.6"/>
+          <path d="M7.5 4v7M4 7.5h7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+        </svg>
+        <span style={{ fontSize: 12, fontWeight: 600 }}>New</span>
+      </button>
+
+      <div style={sep} />
+
       {/* Nhóm 1 */}
       <div style={group}>
         {TOOLS_GROUP1.map((t) => (
@@ -333,9 +345,29 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, busy }:
 
       {/* Output */}
       <div style={group}>
-        <button onClick={onCopy}     disabled={busy} style={outBtn(false)}>Copy</button>
-        <button onClick={onSave}     disabled={busy} style={outBtn(false)}>Lưu file</button>
-        <button onClick={onSaveCopy} disabled={busy} style={outBtn(true)}>Lưu + Copy</button>
+        <button onClick={onCopy} disabled={busy} style={outBtn(false)} title="Copy vào clipboard (Ctrl/Cmd+C)">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
+            <path d="M3 11H2.5A1.5 1.5 0 0 1 1 9.5v-7A1.5 1.5 0 0 1 2.5 1h7A1.5 1.5 0 0 1 11 2.5V3" stroke="currentColor" strokeWidth="1.5"/>
+          </svg>
+        </button>
+        <button onClick={onSave} disabled={busy} style={outBtn(false)} title="Lưu file (Ctrl/Cmd+S)">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <path d="M13 14H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L14 5.5V13a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.5"/>
+            <path d="M5 2v3.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.5"/>
+            <path d="M4 14v-4.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V14" stroke="currentColor" strokeWidth="1.5"/>
+          </svg>
+        </button>
+        <button onClick={onSaveCopy} disabled={busy} style={outBtn(true)} title="Lưu + Copy (Ctrl/Cmd+Shift+S)">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <path d="M12 13.5H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L13 5v7.5a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.4"/>
+            <path d="M4.5 2v3a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.4"/>
+            <path d="M3.5 13.5V10h9v3.5" stroke="currentColor" strokeWidth="1.4"/>
+            {/* Small clipboard badge */}
+            <rect x="9" y="8.5" width="5.5" height="5.5" rx="1" fill="var(--bg-elevated)" stroke="currentColor" strokeWidth="1.3"/>
+            <path d="M10.5 9.5h2.5M10.5 11h2.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
+          </svg>
+        </button>
       </div>
     </div>
   );
@@ -349,6 +381,20 @@ const bar: React.CSSProperties = {
   background: "var(--bg-elevated)",
   borderBottom: "1px solid var(--border)",
   flexWrap: "wrap",
+};
+const newBtn: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  height: 30,
+  padding: "0 10px",
+  borderRadius: 6,
+  border: "1px solid var(--border)",
+  background: "transparent",
+  color: "var(--text)",
+  cursor: "pointer",
+  flexShrink: 0,
+  whiteSpace: "nowrap",
 };
 const group: React.CSSProperties = { display: "flex", alignItems: "center", gap: 3 };
 const sep: React.CSSProperties = { width: 1, height: 24, background: "var(--border)", flexShrink: 0 };
@@ -373,11 +419,18 @@ function toolBtn(active: boolean): React.CSSProperties {
 }
 function outBtn(primary: boolean): React.CSSProperties {
   return {
-    height: 32, padding: "0 12px", borderRadius: 6, fontWeight: 500,
+    width: 32,
+    height: 32,
+    padding: 0,
+    borderRadius: 6,
+    fontWeight: 500,
     background: primary ? "var(--accent)" : "transparent",
     color: primary ? "#fff" : "var(--text)",
     border: primary ? "none" : "1px solid var(--border)",
-    whiteSpace: "nowrap",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
   };
 }
 

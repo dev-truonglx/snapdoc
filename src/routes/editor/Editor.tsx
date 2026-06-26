@@ -134,6 +134,11 @@ export default function Editor() {
     setShowFlattenConfirm(true);
   };
 
+  // "New" — mở capture bar với mode gần nhất pre-selected (xử lý timing ở Rust)
+  const doNew = async () => {
+    await ipc.openCaptureBarForNew().catch(() => {});
+  };
+
   const confirmFlatten = () => {
     setShowFlattenConfirm(false);
     // Export canvas thành data URL rồi loadDoc lại với annotations rỗng.
@@ -159,7 +164,7 @@ export default function Editor() {
 
   return (
     <div className="solid-bg" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <Toolbar onSave={() => doSave(false)} onCopy={doCopy} onSaveCopy={() => doSave(true)} onFlatten={doFlatten} busy={busy} />
+      <Toolbar onSave={() => doSave(false)} onCopy={doCopy} onSaveCopy={() => doSave(true)} onFlatten={doFlatten} onNew={doNew} busy={busy} />
       <div style={{ flex: 1, minHeight: 0, background: "#161619" }}>
         <AnnotationStage ref={stageRef} />
       </div>

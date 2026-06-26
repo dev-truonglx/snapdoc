@@ -11,19 +11,20 @@ pub const DEFAULT_ALL: &str = "CmdOrCtrl+Shift+4";
 pub const DEFAULT_COPY: &str = "CmdOrCtrl+Shift+C";
 
 /// Lấy map (action → combo) từ settings.
-/// Nếu một key thiếu thì dùng giá trị mặc định.
+/// Trả về empty string nếu user đã xóa phím tắt (không fall back về default).
+/// Chỉ dùng default khi key CHƯA TỒN TẠI trong settings (chưa bao giờ set).
 pub fn shortcuts_from_settings(app: &AppHandle) -> Vec<(String, String)> {
     let dir = app.path().app_config_dir().unwrap_or_default();
     let val = storage::settings::load(&dir);
     let shortcuts = val.get("shortcuts");
 
+    // Trả về Some("") nếu key tồn tại nhưng rỗng (user đã xóa),
+    // None nếu key chưa tồn tại (dùng default).
     let get = |key: &str, default: &str| -> String {
-        shortcuts
-            .and_then(|s| s.get(key))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(default)
-            .to_string()
+        match shortcuts.and_then(|s| s.get(key)).and_then(|v| v.as_str()) {
+            Some(v) => v.to_string(), // kể cả empty string — user đã xóa
+            None => default.to_string(), // key chưa có → dùng default
+        }
     };
 
     vec![
@@ -37,9 +38,13 @@ pub fn shortcuts_from_settings(app: &AppHandle) -> Vec<(String, String)> {
 }
 
 /// Đăng ký tất cả phím tắt từ settings lúc khởi động.
+/// Bỏ qua các combo rỗng (user đã xóa phím tắt đó).
 pub fn register_all(app: &AppHandle) -> Result<(), String> {
     let gs = app.global_shortcut();
     for (action, combo) in shortcuts_from_settings(app) {
+        if combo.is_empty() {
+            continue; // user đã xóa shortcut này
+        }
         gs.register(combo.as_str()).map_err(|e| {
             format!("Đăng ký phím tắt '{combo}' ({action}) thất bại: {e}")
         })?;

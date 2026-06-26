@@ -29,6 +29,28 @@ pub struct PendingCapture {
     pub output: String,
 }
 
+/// Chế độ chụp + output gần nhất — dùng cho nút "New" ở editor.
+/// Được cập nhật mỗi khi user chụp từ capture bar.
+#[derive(Default)]
+pub struct LastCaptureMode {
+    pub mode: Mutex<String>,
+    pub output: Mutex<String>,
+}
+
+impl LastCaptureMode {
+    pub fn get(&self) -> (String, String) {
+        let mode = self.mode.lock().unwrap().clone();
+        let output = self.output.lock().unwrap().clone();
+        let mode = if mode.is_empty() { "region".to_string() } else { mode };
+        let output = if output.is_empty() { "editor".to_string() } else { output };
+        (mode, output)
+    }
+    pub fn set(&self, mode: &str, output: &str) {
+        *self.mode.lock().unwrap() = mode.to_string();
+        *self.output.lock().unwrap() = output.to_string();
+    }
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub pending: Mutex<Option<PendingCapture>>,
@@ -40,4 +62,6 @@ pub struct AppState {
     /// Snapshot màn hình của phiên overlay hiện tại — chia sẻ giữa `open_overlays`
     /// và `input_loop` để chỉ số overlay luôn khớp.
     pub overlay_monitors: Mutex<Vec<MonitorSnap>>,
+    /// Chế độ chụp gần nhất — dùng cho nút "New" ở editor.
+    pub last_capture: LastCaptureMode,
 }
