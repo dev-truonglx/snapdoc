@@ -32,6 +32,12 @@ export interface Settings {
   shortcuts: Record<string, string>;
 }
 
+export interface UpdateInfo {
+  available: boolean;
+  version: string;
+  currentVersion: string;
+}
+
 export const ipc = {
   peekPending: () => invoke<Pending | null>("peek_pending"),
   takePending: () => invoke<Pending | null>("take_pending"),
@@ -58,4 +64,10 @@ export const ipc = {
   setSettings: (value: Settings) => invoke<void>("set_settings", { value }),
   checkPermission: () => invoke<boolean>("check_screen_permission"),
   reloadShortcuts: () => invoke<void>("reload_shortcuts"),
+  suspendShortcuts: () => invoke<void>("suspend_shortcuts"),
+  resumeShortcuts: () => invoke<void>("resume_shortcuts"),
+  // Update
+  checkUpdate: () => invoke<UpdateInfo>("check_update"),
+  getPendingUpdate: () => invoke<UpdateInfo | null>("get_pending_update"),
+  installUpdate: () => invoke<void>("install_update"),
 };

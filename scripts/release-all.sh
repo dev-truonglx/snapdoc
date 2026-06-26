@@ -80,7 +80,7 @@ echo "==> [2/6] Building macOS universal bundle (a few minutes)"
 export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-SnapDoc Dev}"
 bash scripts/macos-codesign.sh --ensure-only
 rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null
-npm ci
+npm install
 npm run tauri build -- --target universal-apple-darwin
 
 # Guard: refuse to ship if the updater payload is ad-hoc signed (that would

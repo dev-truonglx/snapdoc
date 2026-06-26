@@ -17,15 +17,28 @@ cd "$(dirname "$0")/.."
 
 export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-SnapDoc Dev}"
 APP="src-tauri/target/debug/bundle/macos/SnapDoc.app"
+KEYFILE="$HOME/.tauri/snapdoc-updater.key"
 
 # 1) Make the stable identity available so Tauri signs the .app during bundling.
 echo "==> [1/4] Ensuring stable signing identity"
 bash scripts/macos-codesign.sh --ensure-only
 
+# Load updater signing key nếu có — dev build cần key vì tauri.conf.json có pubkey.
+# Không có key → disable createUpdaterArtifacts để build không fail.
+if [ -f "$KEYFILE" ]; then
+  export TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEYFILE")"
+  export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+fi
+
 # 2) Debug build, app bundle only (skip the slow .dmg). Tauri picks up
 #    APPLE_SIGNING_IDENTITY and signs the bundle with it.
 echo "==> [2/4] Building debug .app bundle"
-npm run tauri build -- --debug --bundles app "$@"
+if [ -f "$KEYFILE" ]; then
+  npm run tauri build -- --debug --bundles app "$@"
+else
+  echo "    (no updater key — building without updater artifacts)"
+  npm run tauri build -- --debug --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}' "$@"
+fi
 
 # 3) Guarantee a valid deep signature regardless of how Tauri signed it, and
 #    fail loudly if it somehow ended up ad-hoc (that would break the TCC grant).

@@ -6,6 +6,7 @@ import Overlay from "./routes/overlay/Overlay";
 import Editor from "./routes/editor/Editor";
 import Thumbnail from "./routes/thumbnail/Thumbnail";
 import Settings from "./routes/settings/Settings";
+import UpdateWindow from "./routes/update/UpdateWindow";
 
 const which = new URLSearchParams(window.location.search).get("win") ?? "capture-bar";
 
@@ -15,6 +16,7 @@ const routes: Record<string, React.ComponentType> = {
   editor: Editor,
   thumbnail: Thumbnail,
   settings: Settings,
+  update: UpdateWindow,
 };
 
 const Route = routes[which] ?? CaptureBar;

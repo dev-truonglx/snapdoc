@@ -511,9 +511,29 @@ fn bring_settings_to_front(app: &AppHandle, win: tauri::WebviewWindow) {
     });
 }
 
+/// Cửa sổ thông báo có bản cập nhật mới (nhỏ, nổi, không resize).
+/// Được tạo lần đầu bởi startup update check; sau đó chỉ show/focus.
+pub fn open_update_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("update") {
+        let _ = win.show();
+        let _ = win.center();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    let win = WebviewWindowBuilder::new(app, "update", url("update"))
+        .title("SnapDoc — Cập nhật")
+        .inner_size(360.0, 260.0)
+        .resizable(false)
+        .center()
+        .always_on_top(true)
+        .build()
+        .map_err(|e| format!("Không tạo được update window: {e}"))?;
+    let _ = win.set_focus();
+    Ok(())
+}
+
 /// Settings.
-pub fn open_settings(app: &AppHandle) -> Result<(), String> {
-    // macOS: chuyển về Regular để icon hiện trên Dock và Cmd+Tab hoạt động.
+pub fn open_settings(app: &AppHandle) -> Result<(), String> {    // macOS: chuyển về Regular để icon hiện trên Dock và Cmd+Tab hoạt động.
     #[cfg(target_os = "macos")]
     {
         use tauri::ActivationPolicy;
@@ -531,7 +551,8 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "settings", url("settings"))
         .title("SnapDoc — Cài đặt")
-        .inner_size(560.0, 480.0)
+        .inner_size(560.0, 820.0)
+        .min_inner_size(520.0, 640.0)
         .resizable(false)
         .center()
         .build()

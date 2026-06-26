@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ipc, type Settings as S } from "../../lib/ipc";
+import { ipc, type Settings as S, type UpdateInfo } from "../../lib/ipc";
 
 const OUTPUTS = [
   { id: "editor",    label: "Mở editor" },
@@ -9,13 +9,13 @@ const OUTPUTS = [
   { id: "save_copy", label: "Lưu + Copy" },
 ] as const;
 
-const SHORTCUT_KEYS: { key: string; label: string }[] = [
-  { key: "captureBar",  label: "Mở thanh chụp" },
-  { key: "full",        label: "Chụp toàn màn hình" },
-  { key: "region",      label: "Chụp vùng chọn" },
-  { key: "window",      label: "Chụp cửa sổ" },
-  { key: "all",         label: "Chụp tất cả màn hình" },
-  { key: "captureCopy", label: "Chụp & copy nhanh" },
+const SHORTCUT_KEYS: { key: string; label: string; hint?: string }[] = [
+  { key: "captureBar",  label: "Mở thanh chụp",      hint: "Mở thanh công cụ chụp nổi" },
+  { key: "full",        label: "Chụp toàn màn hình",  hint: "Chụp ngay không cần chọn vùng" },
+  { key: "region",      label: "Chụp vùng chọn",      hint: "Kéo chọn vùng để chụp" },
+  { key: "window",      label: "Chụp cửa sổ",         hint: "Chọn cửa sổ ứng dụng" },
+  { key: "all",         label: "Chụp tất cả màn hình", hint: "Ghép ngang tất cả màn hình" },
+  { key: "captureCopy", label: "Chụp & copy nhanh",   hint: "Chụp vùng và copy vào clipboard" },
 ];
 
 export default function Settings() {
@@ -23,6 +23,9 @@ export default function Settings() {
   const [perm, setPerm] = useState<boolean | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "err">("idle");
   const [shortcutMsg, setShortcutMsg] = useState<"ok" | "err" | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "installing" | "err">("idle");
+  const [updateErr, setUpdateErr] = useState<string | null>(null);
 
   const pendingRef = useRef<S | null>(null);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -43,24 +46,25 @@ export default function Settings() {
       setS(loaded);
     });
     ipc.checkPermission().then(setPerm);
+    ipc.getPendingUpdate().then((info) => {
+      if (info?.available) setUpdateInfo(info);
+    });
   }, []);
 
-  if (!s) return <div className="solid-bg" style={{ height: "100%", padding: 20 }}>Đang tải…</div>;
+  if (!s) return <div className="solid-bg" style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)" }}>Đang tải…</div>;
 
-  // Lưu ngay (dùng cho select)
   const persist = async (next: S) => {
     setSaveStatus("saving");
     try {
       await ipc.setSettings(next);
       setSaveStatus("saved");
-      window.setTimeout(() => setSaveStatus("idle"), 1200);
+      window.setTimeout(() => setSaveStatus("idle"), 1500);
     } catch {
       setSaveStatus("err");
       window.setTimeout(() => setSaveStatus("idle"), 2500);
     }
   };
 
-  // Lưu debounce (dùng cho text input)
   const persistDebounced = (next: S, delay = 600) => {
     pendingRef.current = next;
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
@@ -71,7 +75,7 @@ export default function Settings() {
       try {
         await ipc.setSettings(val);
         setSaveStatus("saved");
-        window.setTimeout(() => setSaveStatus("idle"), 1200);
+        window.setTimeout(() => setSaveStatus("idle"), 1500);
       } catch {
         setSaveStatus("err");
         window.setTimeout(() => setSaveStatus("idle"), 2500);
@@ -79,7 +83,6 @@ export default function Settings() {
     }, delay);
   };
 
-  // Lưu + reload shortcuts debounce (dùng cho shortcut input)
   const persistShortcutsDebounced = (next: S) => {
     pendingRef.current = next;
     if (shortcutTimer.current) clearTimeout(shortcutTimer.current);
@@ -90,7 +93,7 @@ export default function Settings() {
       try {
         await ipc.setSettings(val);
         setSaveStatus("saved");
-        window.setTimeout(() => setSaveStatus("idle"), 1200);
+        window.setTimeout(() => setSaveStatus("idle"), 1500);
         await ipc.reloadShortcuts();
         setShortcutMsg("ok");
       } catch {
@@ -114,146 +117,613 @@ export default function Settings() {
     if (typeof dir === "string") update({ saveDir: dir });
   };
 
+  const handleCheckUpdate = async () => {
+    setUpdateStatus("checking");
+    setUpdateErr(null);
+    try {
+      const info = await ipc.checkUpdate();
+      setUpdateInfo(info);
+      setUpdateStatus("idle");
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("404") || msg.includes("No releases") || msg.includes("not found")) {
+        setUpdateInfo({ available: false, version: "", currentVersion: "" });
+        setUpdateStatus("idle");
+      } else {
+        setUpdateErr(msg);
+        setUpdateStatus("err");
+        window.setTimeout(() => setUpdateStatus("idle"), 4000);
+      }
+    }
+  };
+
+  const handleInstall = async () => {
+    setUpdateStatus("installing");
+    setUpdateErr(null);
+    try {
+      await ipc.installUpdate();
+    } catch (e) {
+      setUpdateErr(String(e));
+      setUpdateStatus("err");
+      window.setTimeout(() => setUpdateStatus("idle"), 4000);
+    }
+  };
+
   return (
     <div className="solid-bg" style={page}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <h2 style={{ fontSize: 18, fontWeight: 500, margin: 0 }}>Cài đặt</h2>
-        <SaveIndicator status={saveStatus} />
+
+      {/* ── Header ── */}
+      <div style={header}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span style={appName}>SnapDoc</span>
+          <span style={versionBadge}>v{s ? "0.1.0" : "…"}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {updateInfo?.available && (
+            <span style={updateDot} title={`v${updateInfo.version} có sẵn`}>🆕</span>
+          )}
+          <button
+            style={updateBtn}
+            disabled={updateStatus === "checking" || updateStatus === "installing"}
+            onClick={updateInfo?.available ? handleInstall : handleCheckUpdate}
+          >
+            {updateStatus === "checking"   ? "Đang kiểm tra…"      :
+             updateStatus === "installing" ? "Đang cài đặt…"       :
+             updateInfo?.available        ? `Cài v${updateInfo.version}` :
+             "Kiểm tra cập nhật"}
+          </button>
+        </div>
       </div>
 
-      {/* Thư mục lưu */}
-      <section style={section}>
-        <label style={labelStyle}>Thư mục lưu mặc định</label>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            style={{ flex: 1 }}
-            value={s.saveDir}
-            onChange={(e) => update({ saveDir: e.target.value }, { debounce: true })}
-          />
-          <button style={btn} onClick={pickDir}>Chọn…</button>
+      {/* Update status inline */}
+      {updateStatus === "err" && (
+        <div style={errBanner}>⚠ {updateErr || "Không kiểm tra được — kiểm tra kết nối mạng"}</div>
+      )}
+      {updateStatus === "idle" && updateInfo && !updateInfo.available && (
+        <div style={successBanner}>✓ Đang dùng phiên bản mới nhất</div>
+      )}
+      {updateInfo?.available && (
+        <div style={infoBanner}>
+          Có bản cập nhật: <strong>v{updateInfo.version}</strong>. Nhấn "Cài v{updateInfo.version}" để cài và khởi động lại.
         </div>
-      </section>
+      )}
 
-      {/* Hành vi sau khi chụp */}
-      <section style={section}>
-        <label style={labelStyle}>Hành vi mặc định sau khi chụp</label>
-        <select
-          value={s.defaultOutput}
-          onChange={(e) => update({ defaultOutput: e.target.value as S["defaultOutput"] })}
-        >
-          {OUTPUTS.map((o) => (
-            <option key={o.id} value={o.id}>{o.label}</option>
-          ))}
-        </select>
-      </section>
+      {/* ── Scrollable body ── */}
+      <div style={body}>
 
-      {/* Hẹn giờ */}
-      <section style={section}>
-        <label style={labelStyle}>Hẹn giờ (giây)</label>
-        <select
-          value={s.timerSeconds}
-          onChange={(e) => update({ timerSeconds: Number(e.target.value) })}
-        >
-          {[0, 3, 5].map((t) => (
-            <option key={t} value={t}>{t === 0 ? "Không" : `${t}s`}</option>
-          ))}
-        </select>
-      </section>
+        {/* LƯU FILE */}
+        <Card title="LƯU FILE">
+          <Field label="Thư mục lưu mặc định">
+            <div style={{ display: "flex", gap: 6 }}>
+              <input
+                style={{ flex: 1, minWidth: 0 }}
+                value={s.saveDir}
+                onChange={(e) => update({ saveDir: e.target.value }, { debounce: true })}
+              />
+              <button style={smallBtn} onClick={pickDir}>Chọn…</button>
+            </div>
+          </Field>
+          <Field label="Hành vi mặc định sau khi chụp">
+            <select
+              value={s.defaultOutput}
+              onChange={(e) => update({ defaultOutput: e.target.value as S["defaultOutput"] })}
+            >
+              {OUTPUTS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Hẹn giờ trước khi chụp">
+            <select
+              value={s.timerSeconds}
+              onChange={(e) => update({ timerSeconds: Number(e.target.value) })}
+            >
+              {[0, 3, 5].map((t) => <option key={t} value={t}>{t === 0 ? "Không hẹn giờ" : `${t} giây`}</option>)}
+            </select>
+          </Field>
+        </Card>
 
-      {/* Phím tắt */}
-      <section style={section}>
-        <label style={labelStyle}>Phím tắt toàn cục</label>
-        <p style={note}>
-          Định dạng: <code>CmdOrCtrl</code>, <code>Alt</code>, <code>Shift</code> + phím.
-          Ví dụ: <code>CmdOrCtrl+Shift+1</code>
-        </p>
-
-        {SHORTCUT_KEYS.map(({ key, label: lbl }) => (
-          <div key={key} style={shortcutRow}>
-            <span style={shortcutLabel}>{lbl}</span>
-            <input
-              style={shortcutInput}
+        {/* PHÍM TẮT */}
+        <Card title="PHÍM TẮT TOÀN CỤC">
+          <p style={hint}>
+            Nhấp vào ô bên phải và nhấn tổ hợp phím mong muốn. Nhấn <kbd style={kbdStyle}>Esc</kbd> để hủy, <kbd style={kbdStyle}>⌫</kbd> để xóa.
+          </p>
+          {SHORTCUT_KEYS.map(({ key, label: lbl, hint: h }) => (
+            <ShortcutRow
+              key={key}
+              label={lbl}
+              hint={h}
               value={s.shortcuts?.[key] ?? ""}
-              placeholder="Bỏ trống để tắt"
-              onChange={(e) =>
-                update({ shortcuts: { ...s.shortcuts, [key]: e.target.value } }, { shortcuts: true })
-              }
+              onChange={(v) => update({ shortcuts: { ...s.shortcuts, [key]: v } }, { shortcuts: true })}
             />
+          ))}
+          {shortcutMsg === "ok" && <div style={successInline}>✓ Phím tắt đã cập nhật</div>}
+          {shortcutMsg === "err" && <div style={errInline}>✕ Lỗi — kiểm tra xung đột phím tắt</div>}
+        </Card>
+
+        {/* QUYỀN HỆ THỐNG */}
+        <Card title="QUYỀN HỆ THỐNG">
+          <div style={permRow}>
+            <div>
+              <div style={permLabel}>Screen Recording</div>
+              <div style={permDesc}>Cần thiết để chụp màn hình</div>
+            </div>
+            <PermBadge granted={perm} />
           </div>
-        ))}
+        </Card>
 
-        {shortcutMsg === "ok" && (
-          <span style={{ fontSize: 12, color: "#22c55e", marginTop: 4 }}>✓ Phím tắt đã cập nhật</span>
-        )}
-        {shortcutMsg === "err" && (
-          <span style={{ fontSize: 12, color: "var(--danger)", marginTop: 4 }}>
-            ✕ Lỗi — kiểm tra xung đột phím tắt
-          </span>
-        )}
-      </section>
+      </div>
 
-      {/* Quyền chụp */}
-      <section style={section}>
-        <label style={labelStyle}>Quyền chụp màn hình</label>
-        <div style={{ fontSize: 13, color: perm ? "#22c55e" : "var(--danger)" }}>
-          {perm === null
-            ? "Đang kiểm tra…"
-            : perm
-            ? "✓ Có quyền chụp"
-            : "✕ Thiếu quyền (macOS: cấp Screen Recording)"}
-        </div>
-      </section>
+      {/* ── Footer ── */}
+      <div style={footer}>
+        <SaveStatus status={saveStatus} />
+      </div>
+
     </div>
   );
 }
 
-/* ── Save indicator ── */
+/* ── Sub-components ── */
 
-function SaveIndicator({ status }: { status: "idle" | "saving" | "saved" | "err" }) {
-  if (status === "idle") return null;
-  const map = {
-    saving: { text: "Đang lưu…", color: "var(--text-dim, #94a3b8)" },
-    saved:  { text: "✓ Đã lưu",  color: "#22c55e" },
-    err:    { text: "✕ Lỗi lưu", color: "var(--danger, #ef4444)" },
-  } as const;
-  const { text, color } = map[status];
-  return <span style={{ fontSize: 12, color }}>{text}</span>;
+function Card({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={card}>
+      <div style={cardTitle}>{title}</div>
+      <div style={cardBody}>{children}</div>
+    </div>
+  );
 }
 
-/* ── styles ── */
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={fieldWrap}>
+      <label style={fieldLabel}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function ShortcutRow({ label, hint, value, onChange }: {
+  label: string; hint?: string; value: string; onChange: (v: string) => void;
+}) {
+  const [recording, setRecording] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const startRecording = async () => {
+    await ipc.suspendShortcuts().catch(() => {});
+    setRecording(true);
+    // focus input ẩn để nhận keyboard events
+    setTimeout(() => inputRef.current?.focus(), 0);
+  };
+
+  const stopRecording = async () => {
+    setRecording(false);
+    inputRef.current?.blur();
+    await ipc.resumeShortcuts().catch(() => {});
+  };
+
+  const keyEventToShortcut = (e: React.KeyboardEvent): string | null => {
+    const mods: string[] = [];
+    if (e.metaKey || e.ctrlKey) mods.push("CmdOrCtrl");
+    if (e.altKey)               mods.push("Alt");
+    if (e.shiftKey)             mods.push("Shift");
+
+    const ignoredKeys = new Set([
+      "Control", "Meta", "Alt", "Shift",
+      "CapsLock", "NumLock", "ScrollLock", "Fn", "FnLock",
+    ]);
+    if (ignoredKeys.has(e.key)) return null;
+    if (mods.length === 0) return null;
+
+    let key = e.key;
+    if (key.length === 1) key = key.toUpperCase();
+    else {
+      const map: Record<string, string> = {
+        " ": "Space", "ArrowUp": "Up", "ArrowDown": "Down",
+        "ArrowLeft": "Left", "ArrowRight": "Right",
+        "Escape": "Escape", "Enter": "Return", "Tab": "Tab",
+        "Backspace": "Backspace", "Delete": "Delete",
+        "Home": "Home", "End": "End", "PageUp": "PageUp", "PageDown": "PageDown",
+        "F1":"F1","F2":"F2","F3":"F3","F4":"F4","F5":"F5","F6":"F6",
+        "F7":"F7","F8":"F8","F9":"F9","F10":"F10","F11":"F11","F12":"F12",
+      };
+      key = map[e.key] ?? e.key;
+    }
+    return [...mods, key].join("+");
+  };
+
+  const handleKeyDown = async (e: React.KeyboardEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if ((e.key === "Backspace" || e.key === "Delete") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      onChange("");
+      await stopRecording();
+      return;
+    }
+    if (e.key === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      await stopRecording();
+      return;
+    }
+
+    const combo = keyEventToShortcut(e);
+    if (combo) {
+      onChange(combo);
+      await stopRecording();
+    }
+  };
+
+  const display = (v: string) => {
+    if (!v) return null;
+    const parts = v.replace("CmdOrCtrl", "⌘/Ctrl").replace("Alt", "⌥").replace("Shift", "⇧").split("+");
+    return parts.map((p, i) => (
+      <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+        {i > 0 && <span style={{ color: "var(--text-dim)", fontSize: 10, margin: "0 1px" }}>+</span>}
+        <kbd style={kbdStyle}>{p}</kbd>
+      </span>
+    ));
+  };
+
+  return (
+    <div style={scRow}>
+      <div style={scLeft}>
+        <span style={scLabel}>{label}</span>
+        {hint && <span style={scHint}>{hint}</span>}
+      </div>
+
+      {/* Hidden input nhận keyboard events thực sự */}
+      <input
+        ref={inputRef}
+        style={scHiddenInput}
+        readOnly
+        onKeyDown={handleKeyDown}
+        onBlur={() => { if (recording) stopRecording(); }}
+      />
+
+      {/* Visual recorder */}
+      <div
+        style={{
+          ...scRecorder,
+          ...(recording ? scRecorderActive : {}),
+          ...(!value && !recording ? scRecorderEmpty : {}),
+        }}
+        onMouseDown={(e) => {
+          e.preventDefault();
+          if (!recording) startRecording();
+        }}
+      >
+        {recording ? (
+          <span style={{ color: "var(--accent)", fontSize: 11 }}>Nhấn tổ hợp phím…</span>
+        ) : value ? (
+          <span style={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap", justifyContent: "center" }}>
+            {display(value)}
+          </span>
+        ) : (
+          <span style={{ color: "var(--text-dim)", fontSize: 11 }}>Nhấp để đặt phím tắt</span>
+        )}
+      </div>
+
+      {value && !recording && (
+        <button
+          style={clearBtn}
+          title="Xóa phím tắt"
+          onMouseDown={async (e) => { e.preventDefault(); onChange(""); }}
+        >×</button>
+      )}
+    </div>
+  );
+}
+
+function PermBadge({ granted }: { granted: boolean | null }) {
+  if (granted === null) return <span style={permPending}>Đang kiểm tra…</span>;
+  return granted
+    ? <span style={permGranted}>✓ Đã cấp</span>
+    : <span style={permDenied}>✕ Chưa cấp</span>;
+}
+
+function SaveStatus({ status }: { status: "idle" | "saving" | "saved" | "err" }) {
+  if (status === "idle") return <span style={footerText}>Thay đổi được lưu tự động.</span>;
+  const map = {
+    saving: { text: "Đang lưu…",  color: "var(--text-dim)" },
+    saved:  { text: "✓ Đã lưu",   color: "#22c55e" },
+    err:    { text: "✕ Lỗi lưu",  color: "var(--danger)" },
+  } as const;
+  return <span style={{ ...footerText, color: map[status].color }}>{map[status].text}</span>;
+}
+
+/* ── Styles ── */
 
 const page: React.CSSProperties = {
   height: "100%",
-  padding: 20,
   display: "flex",
   flexDirection: "column",
-  gap: 14,
-  overflowY: "auto",
+  overflow: "hidden",  // page itself clips, body inside scrolls
 };
-const section: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 6 };
-const labelStyle: React.CSSProperties = { fontSize: 13, fontWeight: 500 };
-const note: React.CSSProperties = { fontSize: 11, color: "var(--text-dim)", marginTop: 2 };
-const btn: React.CSSProperties = {
-  padding: "8px 14px",
+
+const header: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  padding: "14px 16px 10px",
+  flexShrink: 0,
+};
+
+const appName: React.CSSProperties = {
+  fontSize: 17,
+  fontWeight: 700,
+  letterSpacing: "-0.3px",
+};
+
+const versionBadge: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-dim)",
+  fontWeight: 400,
+};
+
+const updateBtn: React.CSSProperties = {
+  padding: "5px 12px",
   borderRadius: 6,
   border: "1px solid var(--border)",
   background: "var(--bg-elevated)",
+  color: "var(--text)",
+  fontSize: 12,
+  fontWeight: 500,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
 };
-const shortcutRow: React.CSSProperties = {
+
+const updateDot: React.CSSProperties = {
+  fontSize: 16,
+};
+
+const body: React.CSSProperties = {
+  flex: 1,
+  overflowY: "auto",
+  overflowX: "hidden",
+  padding: "4px 12px 20px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+  WebkitOverflowScrolling: "touch" as React.CSSProperties["WebkitOverflowScrolling"],
+};
+
+const footer: React.CSSProperties = {
+  padding: "8px 16px",
+  borderTop: "1px solid var(--border)",
+  textAlign: "center",
+  flexShrink: 0,
+};
+
+const footerText: React.CSSProperties = {
+  fontSize: 11,
+  color: "var(--text-dim)",
+};
+
+// Cards
+const card: React.CSSProperties = {
+  border: "1px solid var(--border)",
+  borderRadius: 8,
+  overflow: "hidden",
+};
+
+const cardTitle: React.CSSProperties = {
+  fontSize: 10,
+  fontWeight: 700,
+  letterSpacing: "0.08em",
+  color: "var(--text-dim)",
+  padding: "8px 12px 6px",
+  background: "var(--bg-elevated)",
+  borderBottom: "1px solid var(--border)",
+};
+
+const cardBody: React.CSSProperties = {
+  padding: "10px 12px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+};
+
+// Fields
+const fieldWrap: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+};
+
+const fieldLabel: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-dim)",
+};
+
+const hint: React.CSSProperties = {
+  fontSize: 11,
+  color: "var(--text-dim)",
+  lineHeight: 1.5,
+  marginBottom: 2,
+};
+
+const scRow: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 8,
-  marginBottom: 4,
+  gap: 6,
+  padding: "5px 0",
+  borderBottom: "1px solid var(--border)",
+  position: "relative",
 };
-const shortcutLabel: React.CSSProperties = {
+
+const scLeft: React.CSSProperties = {
   flex: 1,
-  color: "var(--text-dim)",
-  fontSize: 13,
-  minWidth: 180,
+  minWidth: 0,
 };
-const shortcutInput: React.CSSProperties = {
-  width: 200,
-  fontFamily: "monospace",
+
+const scLabel: React.CSSProperties = {
+  fontSize: 13,
+  display: "block",
+};
+
+const scHint: React.CSSProperties = {
+  fontSize: 10,
+  color: "var(--text-dim)",
+  display: "block",
+  marginTop: 1,
+};
+
+const scRecorder: React.CSSProperties = {
+  minWidth: 150,
+  height: 30,
+  padding: "0 10px",
+  borderRadius: 6,
+  border: "1px solid var(--border)",
+  background: "var(--bg-elevated)",
+  cursor: "pointer",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  flexShrink: 0,
+  outline: "none",
+  userSelect: "none",
+  WebkitUserSelect: "none",
+};
+
+const scRecorderActive: React.CSSProperties = {
+  border: "1px solid var(--accent)",
+  boxShadow: "0 0 0 2px var(--accent)30",
+  background: "var(--bg)",
+};
+
+const scRecorderEmpty: React.CSSProperties = {
+  border: "1px dashed var(--border)",
+};
+
+const kbdStyle: React.CSSProperties = {
+  display: "inline-block",
+  padding: "1px 5px",
+  borderRadius: 4,
+  border: "1px solid var(--border)",
+  background: "var(--bg)",
+  fontSize: 11,
+  fontFamily: "ui-monospace, monospace",
+  lineHeight: 1.5,
+};
+
+const clearBtn: React.CSSProperties = {
+  width: 20,
+  height: 20,
+  borderRadius: 10,
+  border: "none",
+  background: "var(--bg-elevated)",
+  color: "var(--text-dim)",
+  fontSize: 14,
+  lineHeight: 1,
+  cursor: "pointer",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  flexShrink: 0,
+  padding: 0,
+};
+
+// Input thực để capture keyboard — ẩn hoàn toàn nhưng vẫn focusable
+const scHiddenInput: React.CSSProperties = {
+  position: "absolute",
+  width: 1,
+  height: 1,
+  opacity: 0,
+  pointerEvents: "none",
+  border: "none",
+  padding: 0,
+  margin: 0,
+  overflow: "hidden",
+};
+
+// Permissions
+const permRow: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+};
+
+const permLabel: React.CSSProperties = { fontSize: 13 };
+
+const permDesc: React.CSSProperties = {
+  fontSize: 11,
+  color: "var(--text-dim)",
+  marginTop: 2,
+};
+
+const permGranted: React.CSSProperties = {
   fontSize: 12,
+  color: "#22c55e",
+  background: "#22c55e18",
+  border: "1px solid #22c55e44",
+  borderRadius: 4,
+  padding: "3px 8px",
+  whiteSpace: "nowrap",
+};
+
+const permDenied: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--danger)",
+  background: "#ef444418",
+  border: "1px solid #ef444440",
+  borderRadius: 4,
+  padding: "3px 8px",
+  whiteSpace: "nowrap",
+};
+
+const permPending: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-dim)",
+};
+
+// Banners
+const errBanner: React.CSSProperties = {
+  margin: "0 12px",
+  padding: "7px 12px",
+  borderRadius: 6,
+  fontSize: 12,
+  color: "var(--danger)",
+  background: "#ef444415",
+  border: "1px solid #ef444430",
+};
+
+const successBanner: React.CSSProperties = {
+  margin: "0 12px",
+  padding: "7px 12px",
+  borderRadius: 6,
+  fontSize: 12,
+  color: "#22c55e",
+  background: "#22c55e15",
+  border: "1px solid #22c55e30",
+};
+
+const infoBanner: React.CSSProperties = {
+  margin: "0 12px",
+  padding: "7px 12px",
+  borderRadius: 6,
+  fontSize: 12,
+  color: "#f59e0b",
+  background: "#f59e0b15",
+  border: "1px solid #f59e0b30",
+};
+
+const successInline: React.CSSProperties = {
+  fontSize: 11,
+  color: "#22c55e",
+  marginTop: 2,
+};
+
+const errInline: React.CSSProperties = {
+  fontSize: 11,
+  color: "var(--danger)",
+  marginTop: 2,
+};
+
+const smallBtn: React.CSSProperties = {
+  padding: "6px 10px",
+  borderRadius: 6,
+  border: "1px solid var(--border)",
+  background: "var(--bg-elevated)",
+  fontSize: 12,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
 };

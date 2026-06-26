@@ -174,3 +174,46 @@ pub fn request_screen_permission() -> bool {
 pub fn reload_shortcuts(app: AppHandle) -> Result<(), String> {
     crate::hotkey::reload(&app)
 }
+
+/// Tạm tắt tất cả global shortcuts — dùng khi Settings đang trong chế độ
+/// ghi phím tắt (recording), tránh shortcut kích hoạt hành động thực sự.
+#[tauri::command]
+pub fn suspend_shortcuts(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| format!("suspend shortcuts failed: {e}"))
+}
+
+/// Đăng ký lại tất cả global shortcuts sau khi kết thúc recording.
+#[tauri::command]
+pub fn resume_shortcuts(app: AppHandle) -> Result<(), String> {
+    crate::hotkey::register_all(&app)
+}
+
+// ── Update commands ──────────────────────────────────────────────────────────
+
+/// Check for update manually (called from Settings). Returns UpdateInfo.
+/// On success, caches the update in PendingUpdate state.
+#[tauri::command]
+pub async fn check_update(app: AppHandle) -> Result<crate::update::UpdateInfo, String> {
+    let info = crate::update::check_update(app.clone(), true).await?;
+    if info.available {
+        crate::tray::set_update_badge(&app);
+    }
+    Ok(info)
+}
+
+/// Returns the cached pending update info without re-fetching. The update
+/// window can call this on load to get info immediately, without race conditions
+/// on the event bus.
+#[tauri::command]
+pub fn get_pending_update(app: AppHandle) -> Option<crate::update::UpdateInfo> {
+    crate::update::pending_info(&app)
+}
+
+/// Download + install the pending update and restart the app.
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> Result<(), String> {
+    crate::update::install_pending(app).await
+}

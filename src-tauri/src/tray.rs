@@ -61,6 +61,20 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Đổi tooltip tray để báo có update. Icon giữ nguyên (icon badge sẽ được
+/// thêm sau khi có file tray-update.png). Tooltip thay đổi đủ để user chú ý.
+pub fn set_update_badge(app: &AppHandle) {
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some("SnapDoc — 🆕 Có bản cập nhật mới!"));
+        // TODO: khi có tray-update.png, bỏ comment để đổi icon:
+        // const BADGE: &[u8] = include_bytes!("../icons/tray-update.png");
+        // if let Ok(icon) = Image::from_bytes(BADGE) {
+        //     let _ = tray.set_icon(Some(icon));
+        //     let _ = tray.set_icon_as_template(false);
+        // }
+    }
+}
+
 fn dispatch(app: &AppHandle, mode: &str) {
     let app = app.clone();
     let mode = mode.to_string();

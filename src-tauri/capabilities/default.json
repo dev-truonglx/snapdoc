@@ -23,6 +23,7 @@
     "clipboard-manager:default",
     "clipboard-manager:allow-write-image",
     "opener:default",
-    "opener:allow-reveal-item-in-dir"
+    "opener:allow-reveal-item-in-dir",
+    "updater:default"
   ]
 }

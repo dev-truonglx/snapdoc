@@ -8,6 +8,7 @@ mod permissions;
 mod state;
 mod storage;
 mod tray;
+mod update;
 mod windows;
 
 use state::AppState;
@@ -20,6 +21,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -30,6 +32,7 @@ pub fn run() {
                 .build(),
         )
         .manage(AppState::default())
+        .manage(update::PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             commands::peek_pending,
             commands::take_pending,
@@ -53,21 +56,39 @@ pub fn run() {
             commands::request_screen_permission,
             commands::capture_all_screens,
             commands::reload_shortcuts,
+            commands::suspend_shortcuts,
+            commands::resume_shortcuts,
+            commands::check_update,
+            commands::get_pending_update,
+            commands::install_update,
         ])
         .setup(|app| {
-            let handle = app.handle();
-            tray::build(handle)?;
-            if let Err(e) = hotkey::register_all(handle) {
+            let handle = app.handle().clone();
+            tray::build(&handle)?;
+            if let Err(e) = hotkey::register_all(&handle) {
                 eprintln!("[SnapDoc] {e}");
             }
 
             // Pre-warm editor (ẩn) → lần chụp đầu hiển thị tức thì.
-            let _ = windows::prewarm_editor(handle);
+            let _ = windows::prewarm_editor(&handle);
 
             // macOS: app sống ở menu bar, ẩn khỏi Dock lúc khởi động.
             // Khi editor mở sẽ chuyển sang Regular (xem windows::open_editor).
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Startup: kiểm tra update im lặng sau 3s (không chặn khởi động).
+            // Khi có update → tray icon đổi + cửa sổ update mở.
+            let app_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let result = update::check_update(app_handle.clone(), false).await;
+                if let Ok(info) = result {
+                    if info.available {
+                        tray::set_update_badge(&app_handle);
+                    }
+                }
+            });
 
             Ok(())
         })
