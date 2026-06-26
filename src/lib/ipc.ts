@@ -56,4 +56,5 @@ export const ipc = {
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (value: Settings) => invoke<void>("set_settings", { value }),
   checkPermission: () => invoke<boolean>("check_screen_permission"),
+  reloadShortcuts: () => invoke<void>("reload_shortcuts"),
 };

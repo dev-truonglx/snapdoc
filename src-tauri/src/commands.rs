@@ -159,3 +159,9 @@ pub fn check_screen_permission() -> bool {
 pub fn request_screen_permission() -> bool {
     permissions::request_capture()
 }
+
+/// Áp dụng phím tắt mới ngay lập tức — huỷ tất cả, đăng ký lại từ settings.
+#[tauri::command]
+pub fn reload_shortcuts(app: AppHandle) -> Result<(), String> {
+    crate::hotkey::reload(&app)
+}
