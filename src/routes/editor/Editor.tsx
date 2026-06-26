@@ -23,6 +23,7 @@ export default function Editor() {
       image: `data:image/png;base64,${p.base64}`,
       imgW: p.width,
       imgH: p.height,
+      scaleFactor: p.scale_factor ?? 1,
       annotations: [],
     });
   };
@@ -39,7 +40,7 @@ export default function Editor() {
       g.fillRect(0, 0, 800, 500);
       g.fillStyle = "#475569";
       g.fillRect(40, 40, 720, 420);
-      loadDoc({ image: c.toDataURL("image/png"), imgW: 800, imgH: 500, annotations: [] });
+      loadDoc({ image: c.toDataURL("image/png"), imgW: 800, imgH: 500, scaleFactor: 1, annotations: [] });
       return;
     }
     ipc.takePending().then(loadPending);
@@ -119,7 +120,7 @@ export default function Editor() {
         e.preventDefault();
         s.removeSelected();
       } else if (!mod) {
-        const map: Record<string, string> = { v: "select", r: "rect", o: "ellipse", t: "text", n: "step", a: "arrow", w: "numbered-arrow", c: "crop" };
+        const map: Record<string, string> = { v: "select", r: "rect", o: "ellipse", t: "text", n: "step", a: "arrow", l: "line", w: "numbered-arrow", h: "highlight", b: "blur", c: "crop" };
         const t = map[e.key.toLowerCase()];
         if (t) s.setTool(t as never);
       }
@@ -128,9 +129,31 @@ export default function Editor() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  const doFlatten = () => {
+    // Export canvas thành data URL rồi loadDoc lại với annotations rỗng.
+    // Blur/highlight/annotation đều được "burn" vào pixel → không thể undo bằng metadata.
+    const url = stageRef.current?.flattenPng();
+    if (!url) return;
+    const { doc } = useEditor.getState();
+    if (!doc) return;
+    // Đo kích thước ảnh đã flatten qua Image element
+    const el = new Image();
+    el.onload = () => {
+      useEditor.getState().loadDoc({
+        image: url,
+        imgW: el.naturalWidth,
+        imgH: el.naturalHeight,
+        scaleFactor: doc.scaleFactor,
+        annotations: [],
+      });
+      flash("Đã flatten — annotation đã được ghi vào ảnh");
+    };
+    el.src = url;
+  };
+
   return (
     <div className="solid-bg" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <Toolbar onSave={() => doSave(false)} onCopy={doCopy} onSaveCopy={() => doSave(true)} busy={busy} />
+      <Toolbar onSave={() => doSave(false)} onCopy={doCopy} onSaveCopy={() => doSave(true)} onFlatten={doFlatten} busy={busy} />
       <div style={{ flex: 1, minHeight: 0, background: "#161619" }}>
         <AnnotationStage ref={stageRef} />
       </div>

@@ -64,11 +64,24 @@ pub fn run() {
             // Pre-warm editor (ẩn) → lần chụp đầu hiển thị tức thì.
             let _ = windows::prewarm_editor(handle);
 
-            // macOS: app sống ở menu bar, ẩn khỏi Dock.
+            // macOS: app sống ở menu bar, ẩn khỏi Dock lúc khởi động.
+            // Khi editor mở sẽ chuyển sang Regular (xem windows::open_editor).
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // macOS: khi editor bị đóng hoàn toàn, trả về Accessory policy
+            // (ẩn Dock icon) nếu không còn cửa sổ "thật" nào khác đang mở.
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::Destroyed = event {
+                use tauri::Manager;
+                let label = window.label();
+                if label == "editor" || label == "settings" {
+                    windows::on_editor_closed(window.app_handle());
+                }
+            }
         })
         .build(tauri::generate_context!())
         .expect("Lỗi khởi tạo SnapDoc")

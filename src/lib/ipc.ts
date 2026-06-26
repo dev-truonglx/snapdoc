@@ -4,7 +4,8 @@ export interface Pending {
   base64: string;
   width: number;
   height: number;
-  temp_path: string;
+  /** DPI scale factor của màn hình nguồn (1.0 = normal, 2.0 = Retina 2×). */
+  scale_factor: number;
   output: string;
 }
 

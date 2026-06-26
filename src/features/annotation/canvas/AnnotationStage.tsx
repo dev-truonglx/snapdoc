@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { Stage, Layer, Rect, Ellipse, Text, Circle, Group, Image as KImage, Transformer, Arrow } from "react-konva";
+import { Stage, Layer, Rect, Line, Ellipse, Text, Circle, Group, Image as KImage, Transformer, Arrow } from "react-konva";
 import type Konva from "konva";
 import { useEditor } from "../store";
 import type { Annotation } from "../model";
@@ -15,6 +15,7 @@ import { uid } from "../model";
 
 export interface StageHandle {
   exportPng: () => string | null;
+  flattenPng: () => string | null;
   zoomIn: () => void;
   zoomOut: () => void;
   zoomFit: () => void;
@@ -26,16 +27,16 @@ const ZOOM_MAX = 8;
 const clampZoom = (z: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
 
 interface Draft {
-  type: "rect" | "ellipse" | "crop";
+  type: "rect" | "ellipse" | "crop" | "highlight" | "blur";
   x: number;
   y: number;
   width: number;
   height: number;
 }
 
-/** Draft cho mũi tên đang kéo. */
+/** Draft cho mũi tên / đường thẳng đang kéo. */
 interface ArrowDraft {
-  type: "arrow" | "numbered-arrow";
+  type: "arrow" | "line" | "numbered-arrow";
   x: number;
   y: number;
   x2: number;
@@ -46,8 +47,11 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   const doc = useEditor((s) => s.doc);
   const tool = useEditor((s) => s.tool);
   const color = useEditor((s) => s.color);
+  const highlightColor = useEditor((s) => s.highlightColor);
   const strokeWidth = useEditor((s) => s.strokeWidth);
   const fontSize = useEditor((s) => s.fontSize);
+  const blurRadius = useEditor((s) => s.blurRadius);
+  const blurMode   = useEditor((s) => s.blurMode);
   const selectedId = useEditor((s) => s.selectedId);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -340,6 +344,15 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       const url = stage.toDataURL({ pixelRatio: 1 / scale, mimeType: "image/png" });
       return url;
     },
+    flattenPng: () => {
+      // Export toàn bộ stage thành PNG rồi trả về data URL.
+      // Caller (Editor) sẽ dùng loadDoc để replace ảnh nền + xoá annotations
+      // → không còn layer riêng, an toàn tuyệt đối.
+      const stage = stageRef.current;
+      if (!stage || !doc) return null;
+      trRef.current?.nodes([]);
+      return stage.toDataURL({ pixelRatio: 1 / scale, mimeType: "image/png" });
+    },
     zoomIn:  doZoomIn,
     zoomOut: doZoomOut,
     zoomFit: doZoomFit,
@@ -364,11 +377,11 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       if (e.target === stage || e.target.id() === "bg") useEditor.getState().select(null);
       return;
     }
-    if (tool === "rect" || tool === "ellipse" || tool === "crop") {
+    if (tool === "rect" || tool === "ellipse" || tool === "crop" || tool === "highlight" || tool === "blur") {
       setDraft({ type: tool, x, y, width: 0, height: 0 });
       return;
     }
-    if (tool === "arrow" || tool === "numbered-arrow") {
+    if (tool === "arrow" || tool === "line" || tool === "numbered-arrow") {
       setArrowDraft({ type: tool, x, y, x2: x, y2: y });
       return;
     }
@@ -426,32 +439,29 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       const dy = arrowDraft.y2 - arrowDraft.y;
       const len = Math.sqrt(dx * dx + dy * dy);
       setArrowDraft(null);
-      if (len < 8) return; // quá ngắn, bỏ qua
-      if (arrowDraft.type === "arrow") {
+      if (len < 8) return;
+      if (arrowDraft.type === "line") {
         useEditor.getState().addAnnotation({
-          id: uid(),
-          type: "arrow",
-          x: arrowDraft.x,
-          y: arrowDraft.y,
-          x2: arrowDraft.x2,
-          y2: arrowDraft.y2,
-          color,
-          strokeWidth,
+          id: uid(), type: "line",
+          x: arrowDraft.x, y: arrowDraft.y,
+          x2: arrowDraft.x2, y2: arrowDraft.y2,
+          color, strokeWidth,
+        });
+      } else if (arrowDraft.type === "arrow") {
+        useEditor.getState().addAnnotation({
+          id: uid(), type: "arrow",
+          x: arrowDraft.x, y: arrowDraft.y,
+          x2: arrowDraft.x2, y2: arrowDraft.y2,
+          color, strokeWidth,
         });
       } else {
         const value = useEditor.getState().nextStep();
         const radius = Math.max(strokeWidth * 4, 14);
         useEditor.getState().addAnnotation({
-          id: uid(),
-          type: "numbered-arrow",
-          x: arrowDraft.x,
-          y: arrowDraft.y,
-          x2: arrowDraft.x2,
-          y2: arrowDraft.y2,
-          value,
-          radius,
-          color,
-          strokeWidth,
+          id: uid(), type: "numbered-arrow",
+          x: arrowDraft.x, y: arrowDraft.y,
+          x2: arrowDraft.x2, y2: arrowDraft.y2,
+          value, radius, color, strokeWidth,
         });
       }
       return;
@@ -468,15 +478,28 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       setCropRect({ type: "crop", x, y, width, height });
       return;
     }
+    if (draft.type === "highlight") {
+      useEditor.getState().addAnnotation({
+        id: uid(), type: "highlight",
+        x, y, width, height,
+        color: highlightColor, strokeWidth,
+      });
+      return;
+    }
+    if (draft.type === "blur") {
+      useEditor.getState().addAnnotation({
+        id: uid(), type: "blur",
+        x, y, width, height,
+        color: "#000", strokeWidth,
+        blurRadius,
+        blurMode: useEditor.getState().blurMode,
+        solidColor: useEditor.getState().blurSolidColor,
+      });
+      return;
+    }
     useEditor.getState().addAnnotation({
-      id: uid(),
-      type: draft.type,
-      x,
-      y,
-      width,
-      height,
-      color,
-      strokeWidth,
+      id: uid(), type: draft.type as "rect" | "ellipse",
+      x, y, width, height, color, strokeWidth,
     });
   };
 
@@ -489,7 +512,7 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
     const sy = node.scaleY();
     node.scaleX(1);
     node.scaleY(1);
-    if (a.type === "rect" || a.type === "ellipse") {
+    if (a.type === "rect" || a.type === "ellipse" || a.type === "highlight" || a.type === "blur") {
       useEditor.getState().updateAnnotation(a.id, {
         x: node.x(),
         y: node.y(),
@@ -564,9 +587,15 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   const atZoomMin = zoom <= ZOOM_MIN + 1e-6;
   const atZoomMax = zoom >= ZOOM_MAX - 1e-6;
 
-  // Step / numbered-arrow luôn tròn → chỉ cho kéo 4 góc + giữ tỉ lệ (vuông). Các loại khác kéo tự do.
+  // Step / numbered-arrow luôn tròn → keepRatio. Line/arrow không có bounding box resize.
   const selectedAnn = selectedId ? doc.annotations.find((a) => a.id === selectedId) : null;
   const isCircleSelected = selectedAnn?.type === "step" || selectedAnn?.type === "numbered-arrow";
+  // Line / arrow → Transformer ẩn (kéo bằng draggable, không resize bounding box)
+  const isLineSelected = selectedAnn?.type === "line" || selectedAnn?.type === "arrow";
+
+  // DPI info từ metadata ảnh chụp (1 = normal, 2 = Retina 2×, ...)
+  const scaleFactor = doc.scaleFactor ?? 1;
+  const dpiLabel = scaleFactor >= 2 ? `${scaleFactor}×` : null;
 
   return (
     // outer: bao quanh cả scroll area và zoom bar cố định
@@ -708,6 +737,32 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
                   }}
                 />
               );
+              // line
+              if (a.type === "line")
+              return (
+                <Line
+                  key={a.id}
+                  id={a.id}
+                  points={[a.x, a.y, a.x2, a.y2]}
+                  stroke={a.color}
+                  strokeWidth={a.strokeWidth}
+                  lineCap="round"
+                  lineJoin="round"
+                  draggable={draggable}
+                  onClick={() => useEditor.getState().select(a.id)}
+                  onTap={() => useEditor.getState().select(a.id)}
+                  onDragEnd={(e) => {
+                    const dx = e.target.x();
+                    const dy = e.target.y();
+                    e.target.x(0);
+                    e.target.y(0);
+                    useEditor.getState().updateAnnotation(a.id, {
+                      x: a.x + dx, y: a.y + dy,
+                      x2: a.x2 + dx, y2: a.y2 + dy,
+                    } as Partial<Annotation>);
+                  }}
+                />
+              );
               // numbered-arrow
               if (a.type === "numbered-arrow") {
                 const dx = a.x2 - a.x;
@@ -768,9 +823,46 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
                   </Group>
                 );
               }
+              // highlight
+              if (a.type === "highlight")
+              return (
+                <Rect
+                  key={a.id}
+                  id={a.id}
+                  x={a.x}
+                  y={a.y}
+                  width={a.width}
+                  height={a.height}
+                  fill={a.color}
+                  opacity={0.38}
+                  draggable={draggable}
+                  onClick={() => useEditor.getState().select(a.id)}
+                  onTap={() => useEditor.getState().select(a.id)}
+                  onDragEnd={(e) => onDragEnd(a.id, e)}
+                  onTransformEnd={(e) => onTransformEnd(a, e.target)}
+                />
+              );
+              // blur — dùng canvas 2D để process pixel
+              if (a.type === "blur")
+              return (
+                <BlurRect
+                  key={a.id}
+                  ann={a}
+                  img={img}
+                  draggable={draggable}
+                  onSelect={() => useEditor.getState().select(a.id)}
+                  onDragEnd={(newX, newY) =>
+                    useEditor.getState().updateAnnotation(a.id, {
+                      x: newX, y: newY,
+                    } as Partial<Annotation>)
+                  }
+                  onTransformEnd={(node) => onTransformEnd(a, node)}
+                />
+              );
               return null;
             })}
 
+            {/* Draft preview cho rect/ellipse/highlight/blur/crop */}
             {draft && draft.type === "ellipse" ? (
               <Ellipse
                 x={draft.x + draft.width / 2}
@@ -781,25 +873,44 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
                 strokeWidth={strokeWidth}
                 dash={[6, 4]}
               />
+            ) : draft && draft.type === "highlight" ? (
+              <Rect
+                x={draft.x} y={draft.y} width={draft.width} height={draft.height}
+                fill={highlightColor} opacity={0.38}
+              />
+            ) : draft && draft.type === "blur" ? (
+              <Rect
+                x={draft.x} y={draft.y} width={draft.width} height={draft.height}
+                fill={blurMode === "solid" ? useEditor.getState().blurSolidColor : "#334155"}
+                opacity={blurMode === "solid" ? 0.85 : 0.35}
+                stroke={blurMode === "pixelate" ? "#f59e0b" : blurMode === "solid" ? "#ef4444" : "#94a3b8"}
+                strokeWidth={1.5} dash={[6, 3]}
+              />
             ) : draft ? (
               <Rect
-                x={draft.x}
-                y={draft.y}
-                width={draft.width}
-                height={draft.height}
+                x={draft.x} y={draft.y} width={draft.width} height={draft.height}
                 stroke={draft.type === "crop" ? "#3b82f6" : color}
                 strokeWidth={draft.type === "crop" ? 2 : strokeWidth}
                 dash={[6, 4]}
               />
             ) : null}
 
-            {/* Preview mũi tên đang kéo */}
+            {/* Preview mũi tên / đường thẳng đang kéo */}
             {arrowDraft && (() => {
               const dx = arrowDraft.x2 - arrowDraft.x;
               const dy = arrowDraft.y2 - arrowDraft.y;
               const len = Math.sqrt(dx * dx + dy * dy) || 1;
               const nx = dx / len;
               const ny = dy / len;
+              if (arrowDraft.type === "line") {
+                return (
+                  <Line
+                    points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
+                    stroke={color} strokeWidth={strokeWidth}
+                    lineCap="round" opacity={0.7} dash={[8, 4]}
+                  />
+                );
+              }
               if (arrowDraft.type === "arrow") {
                 return (
                   <Arrow
@@ -855,6 +966,7 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
               rotateEnabled={false}
               ignoreStroke
               keepRatio={isCircleSelected}
+              visible={!isLineSelected}
               enabledAnchors={
                 isCircleSelected
                   ? ["top-left", "top-right", "bottom-left", "bottom-right"]
@@ -920,6 +1032,18 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
 
     {/* Zoom bar — absolute trên outer wrapper, không bị cuộn, luôn hiện */}
     <div style={zoomBar}>
+      {/* DPI badge — chỉ hiện khi HiDPI (Retina 2×, 3×, ...) */}
+      {dpiLabel && (
+        <>
+          <span
+            style={dpiBadge}
+            title={`HiDPI ${dpiLabel} — ${doc.imgW}×${doc.imgH}px vật lý (${Math.round(doc.imgW / scaleFactor)}×${Math.round(doc.imgH / scaleFactor)} pts)`}
+          >
+            {dpiLabel}
+          </span>
+          <span style={{ width: 1, height: 16, background: "rgba(255,255,255,0.12)", margin: "0 2px" }} />
+        </>
+      )}
       {/* Nút Fit */}
       <button
         onClick={doZoomFit}
@@ -1074,6 +1198,205 @@ function cropBtn(primary: boolean): React.CSSProperties {
     borderRadius: 6,
     fontSize: 13,
   };
+}
+
+/** Badge HiDPI — hiện khi ảnh là Retina 2× trở lên */
+const dpiBadge: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  height: 18,
+  padding: "0 6px",
+  borderRadius: 4,
+  background: "rgba(59,130,246,0.18)",
+  color: "#7eb8ff",
+  fontSize: 10,
+  fontWeight: 700,
+  letterSpacing: "0.04em",
+  cursor: "default",
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BlurRect — render vùng che mờ với 3 mode:
+//
+//  "blur"     — Gaussian blur qua CSS filter (mềm, không phá vỡ cấu trúc ảnh)
+//  "pixelate" — Mosaic: scale ảnh xuống nhỏ (tileSize × tileSize) rồi scale
+//               lại to → hiệu ứng pixel hoá, che chắn mạnh hơn
+//  "solid"    — Hình chữ nhật màu đặc, không thể hoàn tác bằng kỹ thuật xử lý ảnh
+//
+// Pipeline chung: cắt patch từ ảnh gốc (image-space coords) → xử lý → KImage.
+// Mọi mode đều hoạt động đúng với exportPng (toDataURL lấy pixel đã render).
+//
+// Flatten/export an toàn:
+//   BlurAnn được flatten thành pixel trước khi export bằng cách exportPng dùng
+//   pixelRatio = 1/scale → các BlurRect đã được KImage render thật trên canvas
+//   Konva. Để an toàn tối đa với solid redact, Toolbar có nút "Flatten" để
+//   merge toàn bộ annotation vào ảnh nền → không còn layer tách biệt.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface BlurRectProps {
+  ann: import("../model").BlurAnn;
+  img: HTMLImageElement | null;
+  draggable: boolean;
+  onSelect: () => void;
+  /** Truyền về tọa độ tuyệt đối mới (x, y) sau khi drag xong. */
+  onDragEnd: (newX: number, newY: number) => void;
+  onTransformEnd: (node: Konva.Node) => void;
+}
+
+/** Pixel hoá một canvas: scale xuống rồi scale lên để tạo mosaic. */
+function pixelateCanvas(src: HTMLCanvasElement, tileSize: number): HTMLCanvasElement {
+  const out = document.createElement("canvas");
+  out.width  = src.width;
+  out.height = src.height;
+  const ctx = out.getContext("2d")!;
+  ctx.imageSmoothingEnabled = false;
+  const ts = Math.max(2, tileSize);
+  const tw = Math.max(1, Math.round(src.width  / ts));
+  const th = Math.max(1, Math.round(src.height / ts));
+  // Bước 1: scale xuống nhỏ
+  ctx.drawImage(src, 0, 0, tw, th);
+  // Bước 2: scale lên to với nearest-neighbor → mosaic
+  ctx.drawImage(out, 0, 0, tw, th, 0, 0, src.width, src.height);
+  return out;
+}
+
+/**
+ * Gaussian blur thuần JS — không dùng CSS filter (không đáng tin trong WKWebView).
+ * Thuật toán: box blur 3-pass theo cả chiều ngang và dọc ≈ Gaussian.
+ * Mỗi "pass" = blur ngang rồi blur dọc → tổng 6 lần scan.
+ * radius: 1–20px.
+ */
+function gaussianBlurCanvas(src: HTMLCanvasElement, radius: number): HTMLCanvasElement {
+  const r = Math.max(1, Math.round(radius));
+  const w = src.width;
+  const h = src.height;
+  if (w === 0 || h === 0) return src;
+
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext("2d")!;
+  ctx.drawImage(src, 0, 0);
+
+  const imageData = ctx.getImageData(0, 0, w, h);
+  let buf = new Float32Array(imageData.data);   // kênh RGBA flattened
+  const tmp = new Float32Array(buf.length);
+
+  // Blur 1 hàng theo chiều ngang
+  const blurH = (s: Float32Array, d: Float32Array) => {
+    const inv = 1 / (2 * r + 1);
+    for (let y = 0; y < h; y++) {
+      for (let c = 0; c < 4; c++) {
+        // Tổng ban đầu
+        let sum = s[(y * w) * 4 + c] * (r + 1);
+        for (let x = 0; x < r; x++) sum += s[(y * w + x) * 4 + c];
+        // Slide window
+        for (let x = 0; x < w; x++) {
+          const lead  = Math.min(x + r,     w - 1);
+          const trail = Math.max(x - r - 1, 0);
+          sum += s[(y * w + lead)  * 4 + c] - s[(y * w + trail) * 4 + c];
+          d[(y * w + x) * 4 + c] = sum * inv;
+        }
+      }
+    }
+  };
+
+  // Blur 1 cột theo chiều dọc
+  const blurV = (s: Float32Array, d: Float32Array) => {
+    const inv = 1 / (2 * r + 1);
+    for (let x = 0; x < w; x++) {
+      for (let c = 0; c < 4; c++) {
+        let sum = s[x * 4 + c] * (r + 1);
+        for (let y = 0; y < r; y++) sum += s[(y * w + x) * 4 + c];
+        for (let y = 0; y < h; y++) {
+          const lead  = Math.min(y + r,     h - 1);
+          const trail = Math.max(y - r - 1, 0);
+          sum += s[(lead  * w + x) * 4 + c] - s[(trail * w + x) * 4 + c];
+          d[(y * w + x) * 4 + c] = sum * inv;
+        }
+      }
+    }
+  };
+
+  // 3 pass box blur (H + V mỗi pass) ≈ Gaussian
+  for (let pass = 0; pass < 3; pass++) {
+    blurH(buf, tmp);
+    blurV(tmp, buf);
+  }
+
+  // Ghi lại vào ImageData
+  const u8 = imageData.data;
+  for (let i = 0; i < buf.length; i++) u8[i] = buf[i] + 0.5;
+  ctx.putImageData(imageData, 0, 0);
+  return out;
+}
+
+function BlurRect({ ann, img, draggable, onSelect, onDragEnd, onTransformEnd }: BlurRectProps) {
+  const [processed, setProcessed] = useState<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    if (ann.blurMode === "solid") {
+      // Solid: không cần xử lý ảnh, render bằng Rect thường
+      setProcessed(null);
+      return;
+    }
+    if (!img || !img.complete || ann.width < 2 || ann.height < 2) return;
+
+    const { x, y, width, height, blurRadius, blurMode } = ann;
+    const outW = Math.max(1, Math.round(width));
+    const outH = Math.max(1, Math.round(height));
+    const iw   = img.naturalWidth  || img.width;
+    const ih   = img.naturalHeight || img.height;
+
+    // Cắt patch chính xác từ ảnh gốc
+    const src = document.createElement("canvas");
+    src.width  = outW;
+    src.height = outH;
+    const sc = src.getContext("2d")!;
+    sc.drawImage(img,
+      Math.max(0, x), Math.max(0, y),
+      Math.min(width,  iw - Math.max(0, x)),
+      Math.min(height, ih - Math.max(0, y)),
+      Math.max(0, -x), Math.max(0, -y),
+      Math.min(outW, iw - Math.max(0, x)),
+      Math.min(outH, ih - Math.max(0, y)),
+    );
+
+    if (blurMode === "pixelate") {
+      setProcessed(pixelateCanvas(src, Math.max(2, blurRadius)));
+      return;
+    }
+
+    // blur mode — Gaussian blur thuần JS (CSS filter không đáng tin trong WKWebView)
+    setProcessed(gaussianBlurCanvas(src, blurRadius));
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [img, ann.x, ann.y, ann.width, ann.height, ann.blurRadius, ann.blurMode, ann.solidColor]);
+
+  const sharedProps = {
+    id: ann.id,
+    x: ann.x, y: ann.y, width: ann.width, height: ann.height,
+    draggable,
+    onClick: onSelect, onTap: onSelect,
+    onDragEnd: (e: Konva.KonvaEventObject<DragEvent>) => {
+      // e.target.x()/y() = tọa độ image-space mới (layer có scaleX=scale
+      // nhưng node position luôn ở image-space — giống onDragEnd chung).
+      onDragEnd(e.target.x(), e.target.y());
+    },
+    onTransformEnd: (e: Konva.KonvaEventObject<Event>) => onTransformEnd(e.target),
+  };
+
+  // Solid mode — hình chữ nhật màu đặc, không liên quan đến dữ liệu ảnh
+  if (ann.blurMode === "solid") {
+    return <Rect {...sharedProps} fill={ann.solidColor || "#1a1a1a"} />;
+  }
+
+  // Chưa render xong → placeholder tối
+  if (!processed) {
+    return <Rect {...sharedProps} fill="rgba(15,20,30,0.5)" />;
+  }
+
+  return <KImage {...sharedProps} image={processed} />;
 }
 
 AnnotationStage.displayName = "AnnotationStage";

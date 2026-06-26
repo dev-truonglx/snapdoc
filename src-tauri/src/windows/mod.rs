@@ -406,6 +406,14 @@ pub fn prewarm_editor(app: &AppHandle) -> Result<(), String> {
 
 /// Editor chú thích.
 pub fn open_editor(app: &AppHandle) -> Result<(), String> {
+    // macOS: chuyển về Regular khi editor hiển thị → icon xuất hiện trên Dock,
+    // cmd+Tab hoạt động, app có titlebar menu chuẩn.
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+
     if let Some(win) = app.get_webview_window("editor") {
         let _ = win.show();
         let _ = win.unminimize();
@@ -422,6 +430,24 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| format!("Không tạo được editor: {e}"))?;
     Ok(())
+}
+
+/// Trả về Accessory policy (ẩn Dock) nếu không còn cửa sổ editor nào đang mở.
+/// Gọi từ on_window_event khi editor bị đóng.
+#[cfg(target_os = "macos")]
+pub fn on_editor_closed(app: &AppHandle) {
+    use tauri::ActivationPolicy;
+    // Nếu settings hoặc cửa sổ "thật" khác vẫn còn → giữ Regular.
+    let has_visible = app.webview_windows().values().any(|w| {
+        let label = w.label();
+        !label.starts_with("overlay")
+            && label != "thumbnail"
+            && label != "capture-bar"
+            && w.is_visible().unwrap_or(false)
+    });
+    if !has_visible {
+        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+    }
 }
 
 /// Thumbnail nổi góc dưới-phải sau khi chụp.
