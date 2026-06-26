@@ -28,31 +28,45 @@ const SYSTEM_OWNERS: &[&str] = &[
     "SnapDoc",
 ];
 
-/// Liệt kê cửa sổ chọn được. (ox, oy) = gốc overlay theo points để đổi toạ độ
-/// cửa sổ (points global) sang toạ độ local của overlay.
-pub fn list(ox: f64, oy: f64) -> Result<Vec<WindowInfo>, String> {
-    // Window::all() trả thứ tự từ TRÊN xuống DƯỚI (front-to-back).
+/// Liệt kê cửa sổ chọn được.
+///
+/// `ox_phys`, `oy_phys` = gốc overlay theo **PHYSICAL pixels** (hệ xcap),
+/// `scale` = DPI scale factor của màn hình chứa overlay.
+///
+/// Trả về toạ độ theo **CSS px** tương đối gốc overlay để frontend dùng
+/// trực tiếp khi vẽ highlight.
+///
+/// macOS: xcap trả points (= CSS px, scale=1) nên inv_scale=1 → không đổi.
+/// Windows/Linux: xcap trả physical px → chia scale → CSS px.
+pub fn list(ox_phys: f64, oy_phys: f64, scale: f64) -> Result<Vec<WindowInfo>, String> {
     let windows = Window::all().map_err(|e| format!("Không liệt kê được cửa sổ: {e}"))?;
+
+    #[cfg(target_os = "macos")]
+    let inv = 1.0_f64;
+    #[cfg(not(target_os = "macos"))]
+    let inv = if scale > 0.0 { 1.0 / scale } else { 1.0 };
+
     let mut out = Vec::new();
     for w in windows {
         if w.is_minimized().unwrap_or(false) {
             continue;
         }
-        let width = w.width().unwrap_or(0);
-        let height = w.height().unwrap_or(0);
-        if width < 40 || height < 40 {
+        let width_phys = w.width().unwrap_or(0);
+        let height_phys = w.height().unwrap_or(0);
+        if width_phys < 40 || height_phys < 40 {
             continue;
         }
         let app = w.app_name().unwrap_or_default();
         if SYSTEM_OWNERS.iter().any(|s| app.eq_ignore_ascii_case(s)) {
             continue;
         }
+        // Chuyển toạ độ physical→CSS rồi trừ gốc overlay (cũng ở CSS px).
         out.push(WindowInfo {
             id: w.id().unwrap_or(0),
-            x: w.x().unwrap_or(0) as f64 - ox,
-            y: w.y().unwrap_or(0) as f64 - oy,
-            width: width as f64,
-            height: height as f64,
+            x: w.x().unwrap_or(0) as f64 * inv - ox_phys * inv,
+            y: w.y().unwrap_or(0) as f64 * inv - oy_phys * inv,
+            width: width_phys as f64 * inv,
+            height: height_phys as f64 * inv,
             title: w.title().unwrap_or_default(),
             app,
         });
@@ -62,8 +76,7 @@ pub fn list(ox: f64, oy: f64) -> Result<Vec<WindowInfo>, String> {
 
 /// Chụp đúng cửa sổ theo id.
 ///
-/// - macOS: ScreenCaptureKit (`SCContentFilter` + `captureImageWithFilter`) →
-///   chụp đúng 1 cửa sổ kể cả khi bị che, giữ độ phân giải Retina.
+/// - macOS: ScreenCaptureKit → chụp đúng 1 cửa sổ kể cả khi bị che.
 /// - OS khác: xcap (Windows = WGC, Linux = pipewire/x11).
 pub fn capture_by_id(id: u32) -> Result<Capture, String> {
     #[cfg(target_os = "macos")]
@@ -78,7 +91,7 @@ pub fn capture_by_id(id: u32) -> Result<Capture, String> {
         let target = windows
             .into_iter()
             .find(|w| w.id().map(|i| i == id).unwrap_or(false))
-            .ok_or_else(|| "Không tìm thấy cửa sổ".to_string())?;
+            .ok_or_else(|| format!("Không tìm thấy cửa sổ id={id}"))?;
         let img = target
             .capture_image()
             .map_err(|e| format!("Lỗi chụp cửa sổ: {e}"))?;
