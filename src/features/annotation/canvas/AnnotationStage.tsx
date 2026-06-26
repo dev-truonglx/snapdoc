@@ -127,9 +127,11 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
     const measure = () => {
       const c = containerRef.current;
       if (!c) return;
-      const cw = c.clientWidth - 32;
-      const ch = c.clientHeight - 32;
-      const s = Math.max(0.05, Math.min(cw / doc.imgW, ch / doc.imgH, 2));
+      // Padding nhỏ (8px mỗi bên) để ảnh không dính mép cứng
+      const cw = c.clientWidth - 16;
+      const ch = c.clientHeight - 16;
+      // Không giới hạn max — ảnh nhỏ hơn window sẽ hiển thị 1:1 hoặc lớn hơn
+      const s = Math.max(0.05, Math.min(cw / doc.imgW, ch / doc.imgH));
       setFitScale(s);
     };
     setZoom(1);
@@ -918,30 +920,67 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
 
     {/* Zoom bar — absolute trên outer wrapper, không bị cuộn, luôn hiện */}
     <div style={zoomBar}>
+      {/* Nút Fit */}
+      <button
+        onClick={doZoomFit}
+        style={{ ...zoomChip, ...(zoom === 1 ? zoomChipActive : null) }}
+        title="Vừa khung — ảnh fill cửa sổ (Ctrl/Cmd 0)"
+      >
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden>
+          <path d="M1 4V1h3M9 1h3v3M12 9v3H9M4 12H1V9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+        Fit
+      </button>
+
+      {/* Nút 100% */}
+      <button
+        onClick={doZoomActual}
+        style={{ ...zoomChip, ...(Math.abs(scale - 1) < 0.005 ? zoomChipActive : null) }}
+        title="Kích thước thật — 1 pixel ảnh = 1 pixel màn hình"
+      >100%</button>
+
+      {/* Separator */}
+      <span style={{ width: 1, height: 16, background: "rgba(255,255,255,0.12)", margin: "0 2px" }} />
+
+      {/* Zoom out */}
       <button
         onClick={doZoomOut}
         disabled={atZoomMin}
-        style={{ ...zoomBtn, ...(atZoomMin ? zoomBtnDisabled : null) }}
-        title="Thu nhỏ (Ctrl/Cmd -)"
-      >−</button>
+        style={{ ...zoomIconBtn, ...(atZoomMin ? zoomBtnDisabled : null) }}
+        title="Thu nhỏ (Ctrl/Cmd −)"
+        aria-label="Thu nhỏ"
+      >
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+          <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5" fill="none"/>
+          <line x1="4" y1="6" x2="8" y2="6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          <line x1="9.5" y1="9.5" x2="12.5" y2="12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+        </svg>
+      </button>
+
+      {/* % hiển thị, click để nhập tay */}
       <button
         onClick={toggleFitActual}
-        style={{ ...zoomBtn, minWidth: 52, fontSize: 12 }}
-        title="Bấm để chuyển Fit ↔ 100% (1:1 pixel)"
+        style={zoomPctBtn}
+        title="Bấm để đổi Fit ↔ 100%"
       >
         {zoomPct}%
       </button>
+
+      {/* Zoom in */}
       <button
         onClick={doZoomIn}
         disabled={atZoomMax}
-        style={{ ...zoomBtn, ...(atZoomMax ? zoomBtnDisabled : null) }}
+        style={{ ...zoomIconBtn, ...(atZoomMax ? zoomBtnDisabled : null) }}
         title="Phóng to (Ctrl/Cmd +)"
-      >+</button>
-      <button
-        onClick={doZoomFit}
-        style={{ ...zoomBtn, minWidth: 38, fontSize: 11 }}
-        title="Vừa khung (Ctrl/Cmd 0)"
-      >Fit</button>
+        aria-label="Phóng to"
+      >
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+          <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5" fill="none"/>
+          <line x1="4" y1="6" x2="8" y2="6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          <line x1="6" y1="4" x2="6" y2="8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          <line x1="9.5" y1="9.5" x2="12.5" y2="12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+        </svg>
+      </button>
     </div>
     </div>
   );
@@ -957,35 +996,74 @@ const fill: React.CSSProperties = { width: "100%", height: "100%" };
 
 const zoomBar: React.CSSProperties = {
   position: "absolute",
-  right: 10,
-  bottom: 10,
+  right: 12,
+  bottom: 12,
   display: "flex",
   alignItems: "center",
   gap: 2,
-  background: "rgba(20,20,24,0.88)",
-  border: "1px solid rgba(255,255,255,0.12)",
-  borderRadius: 8,
-  padding: "2px 4px",
-  backdropFilter: "blur(8px)",
+  background: "rgba(18,18,22,0.90)",
+  border: "1px solid rgba(255,255,255,0.10)",
+  borderRadius: 10,
+  padding: "3px 5px",
+  backdropFilter: "blur(10px)",
+  boxShadow: "0 2px 12px rgba(0,0,0,0.4)",
   zIndex: 10,
 };
 
-const zoomBtn: React.CSSProperties = {
-  width: 28,
+/** Chip có label: Fit / 100% */
+const zoomChip: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
   height: 26,
-  borderRadius: 5,
+  padding: "0 8px",
+  borderRadius: 6,
   background: "transparent",
-  color: "#f2f2f5",
-  fontSize: 16,
-  display: "flex",
+  color: "rgba(242,242,245,0.75)",
+  fontSize: 11,
+  fontWeight: 500,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+  transition: "background 0.12s, color 0.12s",
+};
+
+const zoomChipActive: React.CSSProperties = {
+  background: "rgba(59,130,246,0.22)",
+  color: "#7eb8ff",
+};
+
+/** Nút icon tròn: zoom in / zoom out */
+const zoomIconBtn: React.CSSProperties = {
+  width: 28,
+  height: 28,
+  borderRadius: 6,
+  background: "transparent",
+  color: "rgba(242,242,245,0.75)",
+  display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
   cursor: "pointer",
+  flexShrink: 0,
+};
+
+/** Ô hiển thị % zoom — nhấn để toggle Fit / 100% */
+const zoomPctBtn: React.CSSProperties = {
+  height: 26,
+  minWidth: 46,
+  padding: "0 6px",
+  borderRadius: 6,
+  background: "transparent",
+  color: "rgba(242,242,245,0.9)",
+  fontSize: 12,
+  fontWeight: 600,
+  fontVariantNumeric: "tabular-nums",
+  cursor: "pointer",
+  textAlign: "center",
 };
 
 const zoomBtnDisabled: React.CSSProperties = {
-  opacity: 0.35,
-  cursor: "default",
+  opacity: 0.3,
+  cursor: "not-allowed",
 };
 
 function cropBtn(primary: boolean): React.CSSProperties {
