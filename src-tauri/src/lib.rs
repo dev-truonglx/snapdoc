@@ -51,6 +51,7 @@ pub fn run() {
             commands::set_settings,
             commands::check_screen_permission,
             commands::request_screen_permission,
+            commands::capture_all_screens,
         ])
         .setup(|app| {
             let handle = app.handle();

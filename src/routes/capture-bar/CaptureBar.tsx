@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { ipc, type CaptureMode, type OutputMode } from "../../lib/ipc";
 
 const MODES: { id: CaptureMode; label: string; icon: string }[] = [
-  { id: "full", label: "Full", icon: "▢" },
+  { id: "all",    label: "All",    icon: "⬛" },
+  { id: "full",   label: "Full",   icon: "▢" },
   { id: "window", label: "Window", icon: "◱" },
   { id: "region", label: "Region", icon: "⬚" },
 ];
@@ -45,11 +46,19 @@ export default function CaptureBar() {
         if (n <= 0) {
           window.clearInterval(iv);
           setCountdown(null);
-          ipc.captureNow(mode, output);
+          doCapture();
         } else {
           setCountdown(n);
         }
       }, 1000);
+    } else {
+      doCapture();
+    }
+  };
+
+  const doCapture = () => {
+    if (mode === "all") {
+      ipc.captureAllScreens(output);
     } else {
       ipc.captureNow(mode, output);
     }

@@ -177,3 +177,15 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
 pub fn cancel_overlay(app: &AppHandle) {
     windows::close_overlays(app);
 }
+
+/// Chụp tất cả màn hình ghép ngang, không cần overlay.
+/// Ẩn capture bar trước khi chụp để không lọt vào ảnh.
+pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> {
+    if bar_is_visible(app) {
+        hide_bar(app);
+        // Đợi một chút để capture bar kịp ẩn khỏi màn hình.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    let cap = capture::fullscreen::capture_all_monitors()?;
+    finish(app, cap, output)
+}

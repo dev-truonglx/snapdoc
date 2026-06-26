@@ -79,6 +79,16 @@ pub fn cancel_overlay(app: AppHandle) {
     flow::cancel_overlay(&app);
 }
 
+/// Chụp tất cả màn hình ghép ngang — không cần chọn, không cần overlay.
+#[tauri::command]
+pub async fn capture_all_screens(app: AppHandle, output: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        flow::capture_all_screens(&app, &output)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
+}
+
 #[tauri::command]
 pub fn copy_image(data: String) -> Result<(), String> {
     clipboard::copy_png(&data)
