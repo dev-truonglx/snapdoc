@@ -176,6 +176,10 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
+        // Windows: tắt DWM drop-shadow để set_position khớp chính xác pixel
+        // gốc màn hình. Shadow DWM làm nội dung lệch phải/xuống một khoảng
+        // bằng shadow margin (~8 px ở 100% DPI, tự scale theo DPI).
+        .shadow(false)
         .build()
         .map_err(|e| format!("Không tạo được overlay: {e}"))?;
 
@@ -209,6 +213,15 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
                 configure_overlay_ns_window_main_thread(&win_main, did);
             });
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Windows: áp lại SAU show. Khi set_position chuyển cửa sổ sang màn
+            // đích khác DPI, Windows gửi WM_DPICHANGED và tự rescale kích thước →
+            // lần set trước show có thể bị ghi đè/bỏ qua. Đặt position TRƯỚC (để
+            // DPI ổn định ở màn đích) rồi set_size để phủ trọn vẹn toàn màn hình.
+            let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
+            let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
+        }
 
         if i == cursor_idx {
             let _ = win.set_focus();
@@ -221,7 +234,10 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
         .fetch_add(1, Ordering::SeqCst)
         + 1;
     let handle = app.clone();
-    std::thread::spawn(move || input_loop(handle, gen, cursor_idx));
+
+    std::thread::spawn(move || {
+        input_loop(handle, gen, cursor_idx);
+    });
 
     Ok(())
 }
@@ -351,12 +367,23 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize) {
 }
 
 /// Đóng toàn bộ overlay (mọi màn hình).
+///
+/// QUAN TRỌNG: KHÔNG poll app.webview_windows() sau win.close() trên Windows.
+/// win.close() gửi WM_CLOSE async — cần main thread message pump xử lý.
+/// Nếu gọi từ std::thread đang được Tokio IPC thread chờ (rx.recv()), main
+/// thread có thể bị stall → polling không bao giờ thấy overlay biến mất →
+/// deadlock → Windows báo AppHang sau ~5 giây.
+///
+/// Giải pháp: gửi close rồi return ngay. Sleep cố định 150ms trong
+/// finalize_window/finalize_region để DWM có thời gian unregister protected
+/// surface — không cần xác nhận overlay đã đóng hẳn.
 pub fn close_overlays(app: &AppHandle) {
     for (label, win) in app.webview_windows() {
         if label.starts_with("overlay") {
             let _ = win.close();
         }
     }
+    // KHÔNG poll ở đây — xem comment trên.
 }
 
 /// Tạo sẵn editor (ẩn) lúc khởi động để lần chụp đầu hiện ngay, không phải

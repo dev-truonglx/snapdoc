@@ -23,8 +23,12 @@ pub fn capture_now(app: AppHandle, mode: String, output: String) {
     std::thread::spawn(move || flow::run(&app, &mode, &output));
 }
 
+/// Chụp vùng chọn từ overlay.
+/// Dùng async + spawn_blocking để code blocking chạy trên dedicated thread,
+/// không block Tokio event loop — WebView2 message pump tiếp tục chạy,
+/// overlay đóng được bình thường.
 #[tauri::command]
-pub fn finalize_region(
+pub async fn finalize_region(
     app: AppHandle,
     window: WebviewWindow,
     x: f64,
@@ -32,28 +36,42 @@ pub fn finalize_region(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
-    flow::finalize_region(&app, window, x, y, w, h)
+    tauri::async_runtime::spawn_blocking(move || flow::finalize_region(&app, window, x, y, w, h))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
+/// Chụp cửa sổ đã chọn.
+/// async + spawn_blocking: không block Tokio event loop → WebView2 pump chạy,
+/// win.close() (WM_CLOSE) được xử lý trong lúc capture đang chờ.
 #[tauri::command]
-pub fn finalize_window(app: AppHandle, id: u32) -> Result<(), String> {
-    flow::finalize_window(&app, id)
+pub async fn finalize_window(app: AppHandle, id: u32) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || flow::finalize_window(&app, id))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
+/// Chụp toàn màn hình.
 #[tauri::command]
-pub fn finalize_monitor(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
-    flow::finalize_monitor(&app, window)
+pub async fn finalize_monitor(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || flow::finalize_monitor(&app, window))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
-/// Liệt kê cửa sổ theo toạ độ local của overlay GỌI lệnh (mỗi màn hình một
-/// overlay) → highlight đúng trên màn hình đang trỏ tới.
+/// Liệt kê cửa sổ — async để không block Tokio event loop.
 #[tauri::command]
-pub fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, String> {
+pub async fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, String> {
     let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
     let pos = window
         .outer_position()
         .map_err(|e| format!("Không lấy được vị trí overlay: {e}"))?;
-    capture::window::list(pos.x as f64 / scale, pos.y as f64 / scale)
+
+    tauri::async_runtime::spawn_blocking(move || {
+        capture::window::list(pos.x as f64, pos.y as f64, scale)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[tauri::command]

@@ -1,4 +1,4 @@
-export type Tool = "select" | "rect" | "ellipse" | "text" | "step" | "crop";
+export type Tool = "select" | "rect" | "ellipse" | "text" | "step" | "arrow" | "numbered-arrow" | "crop";
 
 interface Base {
   id: string;
@@ -28,8 +28,22 @@ export interface StepAnn extends Base {
   value: number;
   radius: number;
 }
+/** Mũi tên đơn giản: từ (x,y) → (x2,y2). */
+export interface ArrowAnn extends Base {
+  type: "arrow";
+  x2: number;
+  y2: number;
+}
+/** Mũi tên kèm số thứ tự: số hiện tại vị trí đuôi mũi tên. */
+export interface NumberedArrowAnn extends Base {
+  type: "numbered-arrow";
+  x2: number;
+  y2: number;
+  value: number; // số thứ tự
+  radius: number; // bán kính vòng tròn số
+}
 
-export type Annotation = RectAnn | EllipseAnn | TextAnn | StepAnn;
+export type Annotation = RectAnn | EllipseAnn | TextAnn | StepAnn | ArrowAnn | NumberedArrowAnn;
 
 /** Một "tài liệu" editor: ảnh nền + danh sách annotation (object-based). */
 export interface Doc {
