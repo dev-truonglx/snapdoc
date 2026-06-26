@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { Stage, Layer, Rect, Ellipse, Text, Circle, Group, Image as KImage, Transformer } from "react-konva";
+import { Stage, Layer, Rect, Ellipse, Text, Circle, Group, Image as KImage, Transformer, Arrow } from "react-konva";
 import type Konva from "konva";
 import { useEditor } from "../store";
 import type { Annotation } from "../model";
@@ -31,6 +31,15 @@ interface Draft {
   y: number;
   width: number;
   height: number;
+}
+
+/** Draft cho mũi tên đang kéo. */
+interface ArrowDraft {
+  type: "arrow" | "numbered-arrow";
+  x: number;
+  y: number;
+  x2: number;
+  y2: number;
 }
 
 const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
@@ -70,6 +79,7 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   const panRef = useRef<{ x: number; y: number; sl: number; st: number } | null>(null);
 
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [arrowDraft, setArrowDraft] = useState<ArrowDraft | null>(null);
   const [cropRect, setCropRect] = useState<Draft | null>(null);
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
 
@@ -356,6 +366,10 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       setDraft({ type: tool, x, y, width: 0, height: 0 });
       return;
     }
+    if (tool === "arrow" || tool === "numbered-arrow") {
+      setArrowDraft({ type: tool, x, y, x2: x, y2: y });
+      return;
+    }
     if (tool === "step") {
       const value = useEditor.getState().nextStep();
       useEditor.getState().addAnnotation({
@@ -392,15 +406,54 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   };
 
   const onStageMouseMove = () => {
-    if (!draft) return;
     const stage = stageRef.current;
     const pos = stage?.getPointerPosition();
     if (!pos) return;
     const { x, y } = toImg(pos);
-    setDraft({ ...draft, width: x - draft.x, height: y - draft.y });
+    if (draft) {
+      setDraft({ ...draft, width: x - draft.x, height: y - draft.y });
+    }
+    if (arrowDraft) {
+      setArrowDraft({ ...arrowDraft, x2: x, y2: y });
+    }
   };
 
   const onStageMouseUp = () => {
+    if (arrowDraft) {
+      const dx = arrowDraft.x2 - arrowDraft.x;
+      const dy = arrowDraft.y2 - arrowDraft.y;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      setArrowDraft(null);
+      if (len < 8) return; // quá ngắn, bỏ qua
+      if (arrowDraft.type === "arrow") {
+        useEditor.getState().addAnnotation({
+          id: uid(),
+          type: "arrow",
+          x: arrowDraft.x,
+          y: arrowDraft.y,
+          x2: arrowDraft.x2,
+          y2: arrowDraft.y2,
+          color,
+          strokeWidth,
+        });
+      } else {
+        const value = useEditor.getState().nextStep();
+        const radius = Math.max(strokeWidth * 4, 14);
+        useEditor.getState().addAnnotation({
+          id: uid(),
+          type: "numbered-arrow",
+          x: arrowDraft.x,
+          y: arrowDraft.y,
+          x2: arrowDraft.x2,
+          y2: arrowDraft.y2,
+          value,
+          radius,
+          color,
+          strokeWidth,
+        });
+      }
+      return;
+    }
     if (!draft) return;
     const x = Math.min(draft.x, draft.x + draft.width);
     const y = Math.min(draft.y, draft.y + draft.height);
@@ -443,6 +496,13 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       } as Partial<Annotation>);
     } else if (a.type === "step") {
       // Step luôn tròn → dùng 1 hệ số scale đồng nhất (Transformer đã keepRatio).
+      const s = Math.max(sx, sy);
+      useEditor.getState().updateAnnotation(a.id, {
+        x: node.x(),
+        y: node.y(),
+        radius: Math.max(8, a.radius * s),
+      } as Partial<Annotation>);
+    } else if (a.type === "numbered-arrow") {
       const s = Math.max(sx, sy);
       useEditor.getState().updateAnnotation(a.id, {
         x: node.x(),
@@ -502,9 +562,9 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   const atZoomMin = zoom <= ZOOM_MIN + 1e-6;
   const atZoomMax = zoom >= ZOOM_MAX - 1e-6;
 
-  // Step luôn tròn → chỉ cho kéo 4 góc + giữ tỉ lệ (vuông). Các loại khác kéo tự do.
+  // Step / numbered-arrow luôn tròn → chỉ cho kéo 4 góc + giữ tỉ lệ (vuông). Các loại khác kéo tự do.
   const selectedAnn = selectedId ? doc.annotations.find((a) => a.id === selectedId) : null;
-  const isStepSelected = selectedAnn?.type === "step";
+  const isCircleSelected = selectedAnn?.type === "step" || selectedAnn?.type === "numbered-arrow";
 
   return (
     // outer: bao quanh cả scroll area và zoom bar cố định
@@ -589,6 +649,7 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
                   />
                 );
               // step
+              if (a.type === "step")
               return (
                 <Group
                   key={a.id}
@@ -616,6 +677,96 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
                   />
                 </Group>
               );
+              // arrow
+              if (a.type === "arrow")
+              return (
+                <Arrow
+                  key={a.id}
+                  id={a.id}
+                  points={[a.x, a.y, a.x2, a.y2]}
+                  stroke={a.color}
+                  strokeWidth={a.strokeWidth}
+                  fill={a.color}
+                  pointerLength={Math.max(10, a.strokeWidth * 3)}
+                  pointerWidth={Math.max(8, a.strokeWidth * 2.5)}
+                  lineCap="round"
+                  lineJoin="round"
+                  draggable={draggable}
+                  onClick={() => useEditor.getState().select(a.id)}
+                  onTap={() => useEditor.getState().select(a.id)}
+                  onDragEnd={(e) => {
+                    const dx = e.target.x();
+                    const dy = e.target.y();
+                    e.target.x(0);
+                    e.target.y(0);
+                    useEditor.getState().updateAnnotation(a.id, {
+                      x: a.x + dx, y: a.y + dy,
+                      x2: a.x2 + dx, y2: a.y2 + dy,
+                    } as Partial<Annotation>);
+                  }}
+                />
+              );
+              // numbered-arrow
+              if (a.type === "numbered-arrow") {
+                const dx = a.x2 - a.x;
+                const dy = a.y2 - a.y;
+                const len = Math.sqrt(dx * dx + dy * dy) || 1;
+                // Đặt vòng tròn tại đuôi mũi tên (điểm bắt đầu)
+                const nx = dx / len;
+                const ny = dy / len;
+                // Điểm bắt đầu thật sự của đường thẳng = mép vòng tròn
+                const startX = a.x + nx * a.radius;
+                const startY = a.y + ny * a.radius;
+                return (
+                  <Group
+                    key={a.id}
+                    id={a.id}
+                    draggable={draggable}
+                    onClick={() => useEditor.getState().select(a.id)}
+                    onTap={() => useEditor.getState().select(a.id)}
+                    onDragEnd={(e) => {
+                      const ddx = e.target.x();
+                      const ddy = e.target.y();
+                      e.target.x(0);
+                      e.target.y(0);
+                      useEditor.getState().updateAnnotation(a.id, {
+                        x: a.x + ddx, y: a.y + ddy,
+                        x2: a.x2 + ddx, y2: a.y2 + ddy,
+                      } as Partial<Annotation>);
+                    }}
+                    onTransformEnd={(e) => onTransformEnd(a, e.target)}
+                  >
+                    {/* Vòng tròn số thứ tự tại đuôi */}
+                    <Circle x={a.x} y={a.y} radius={a.radius} fill={a.color} />
+                    <Text
+                      x={a.x}
+                      y={a.y}
+                      text={String(a.value)}
+                      fontSize={a.radius}
+                      fontStyle="bold"
+                      fill="#ffffff"
+                      width={a.radius * 2}
+                      height={a.radius * 2}
+                      offsetX={a.radius}
+                      offsetY={a.radius}
+                      align="center"
+                      verticalAlign="middle"
+                    />
+                    {/* Mũi tên từ mép vòng tròn đến đầu mũi tên */}
+                    <Arrow
+                      points={[startX, startY, a.x2, a.y2]}
+                      stroke={a.color}
+                      strokeWidth={a.strokeWidth}
+                      fill={a.color}
+                      pointerLength={Math.max(10, a.strokeWidth * 3)}
+                      pointerWidth={Math.max(8, a.strokeWidth * 2.5)}
+                      lineCap="round"
+                      lineJoin="round"
+                    />
+                  </Group>
+                );
+              }
+              return null;
             })}
 
             {draft && draft.type === "ellipse" ? (
@@ -640,6 +791,51 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
               />
             ) : null}
 
+            {/* Preview mũi tên đang kéo */}
+            {arrowDraft && (() => {
+              const dx = arrowDraft.x2 - arrowDraft.x;
+              const dy = arrowDraft.y2 - arrowDraft.y;
+              const len = Math.sqrt(dx * dx + dy * dy) || 1;
+              const nx = dx / len;
+              const ny = dy / len;
+              if (arrowDraft.type === "arrow") {
+                return (
+                  <Arrow
+                    points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
+                    stroke={color}
+                    strokeWidth={strokeWidth}
+                    fill={color}
+                    pointerLength={Math.max(10, strokeWidth * 3)}
+                    pointerWidth={Math.max(8, strokeWidth * 2.5)}
+                    lineCap="round"
+                    lineJoin="round"
+                    opacity={0.7}
+                    dash={[8, 4]}
+                  />
+                );
+              }
+              // numbered-arrow preview
+              const radius = Math.max(strokeWidth * 4, 14);
+              const startX = arrowDraft.x + nx * radius;
+              const startY = arrowDraft.y + ny * radius;
+              return (
+                <Group opacity={0.7}>
+                  <Circle x={arrowDraft.x} y={arrowDraft.y} radius={radius} fill={color} />
+                  <Arrow
+                    points={[startX, startY, arrowDraft.x2, arrowDraft.y2]}
+                    stroke={color}
+                    strokeWidth={strokeWidth}
+                    fill={color}
+                    pointerLength={Math.max(10, strokeWidth * 3)}
+                    pointerWidth={Math.max(8, strokeWidth * 2.5)}
+                    lineCap="round"
+                    lineJoin="round"
+                    dash={[8, 4]}
+                  />
+                </Group>
+              );
+            })()}
+
             {cropRect && (
               <Rect
                 x={cropRect.x}
@@ -656,9 +852,9 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
               ref={trRef}
               rotateEnabled={false}
               ignoreStroke
-              keepRatio={isStepSelected}
+              keepRatio={isCircleSelected}
               enabledAnchors={
-                isStepSelected
+                isCircleSelected
                   ? ["top-left", "top-right", "bottom-left", "bottom-right"]
                   : ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
               }

@@ -119,7 +119,7 @@ export default function Editor() {
         e.preventDefault();
         s.removeSelected();
       } else if (!mod) {
-        const map: Record<string, string> = { v: "select", r: "rect", o: "ellipse", t: "text", n: "step", c: "crop" };
+        const map: Record<string, string> = { v: "select", r: "rect", o: "ellipse", t: "text", n: "step", a: "arrow", w: "numbered-arrow", c: "crop" };
         const t = map[e.key.toLowerCase()];
         if (t) s.setTool(t as never);
       }
