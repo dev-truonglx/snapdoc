@@ -28,12 +28,19 @@ const SYSTEM_OWNERS: &[&str] = &[
     "SnapDoc",
 ];
 
-/// Liệt kê cửa sổ chọn được. (ox, oy) = gốc overlay theo physical px,
-/// scale = DPI scale factor. Toạ độ trả về là CSS points (px / scale),
-/// đã trừ gốc overlay nên dùng thẳng trong overlay.
+/// Liệt kê cửa sổ chọn được. (ox, oy) = gốc overlay theo points (CSS px),
+/// scale = DPI scale factor (chỉ dùng cho Windows/Linux). Toạ độ trả về là
+/// CSS points đã trừ gốc overlay, dùng thẳng trong overlay.
 pub fn list(ox: f64, oy: f64, scale: f64) -> Result<Vec<WindowInfo>, String> {
     let scale = if scale <= 0.0 { 1.0 } else { scale };
     let windows = Window::all().map_err(|e| format!("Không liệt kê được cửa sổ: {e}"))?;
+
+    // Gốc overlay tính theo points (CSS px).
+    // macOS: outer_position() trả physical px → chia scale để về points.
+    // Windows/Linux: xcap trả physical px → outer_position() cũng physical → chia scale nhất quán.
+    let ox_pts = ox / scale;
+    let oy_pts = oy / scale;
+
     let mut out = Vec::new();
     for w in windows {
         if w.is_minimized().unwrap_or(false) {
@@ -48,14 +55,30 @@ pub fn list(ox: f64, oy: f64, scale: f64) -> Result<Vec<WindowInfo>, String> {
         if SYSTEM_OWNERS.iter().any(|s| app.eq_ignore_ascii_case(s)) {
             continue;
         }
-        // Toạ độ xcap trả về là physical px trên Windows, points trên macOS.
-        // Chia scale để về CSS points, rồi trừ gốc overlay (cũng đã / scale).
+
+        // macOS: xcap trả tọa độ + kích thước theo POINTS (= CSS px) — KHÔNG chia scale.
+        // Windows/Linux: xcap trả physical px → chia scale để về CSS points.
+        #[cfg(target_os = "macos")]
+        let (x_pts, y_pts, w_pts, h_pts) = (
+            w.x().unwrap_or(0) as f64,
+            w.y().unwrap_or(0) as f64,
+            width as f64,
+            height as f64,
+        );
+        #[cfg(not(target_os = "macos"))]
+        let (x_pts, y_pts, w_pts, h_pts) = (
+            w.x().unwrap_or(0) as f64 / scale,
+            w.y().unwrap_or(0) as f64 / scale,
+            width as f64 / scale,
+            height as f64 / scale,
+        );
+
         out.push(WindowInfo {
             id: w.id().unwrap_or(0),
-            x: w.x().unwrap_or(0) as f64 / scale - ox / scale,
-            y: w.y().unwrap_or(0) as f64 / scale - oy / scale,
-            width: width as f64 / scale,
-            height: height as f64 / scale,
+            x: x_pts - ox_pts,
+            y: y_pts - oy_pts,
+            width: w_pts,
+            height: h_pts,
             title: w.title().unwrap_or_default(),
             app,
         });

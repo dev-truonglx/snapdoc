@@ -432,17 +432,19 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Trả về Accessory policy (ẩn Dock) nếu không còn cửa sổ editor nào đang mở.
+/// Trả về Accessory policy (ẩn Dock) nếu không còn cửa sổ editor/settings nào đang mở.
 /// Gọi từ on_window_event khi editor bị đóng.
 #[cfg(target_os = "macos")]
 pub fn on_editor_closed(app: &AppHandle) {
     use tauri::ActivationPolicy;
-    // Nếu settings hoặc cửa sổ "thật" khác vẫn còn → giữ Regular.
+    // Chỉ giữ Regular nếu còn editor đang hiển thị (không tính settings,
+    // thumbnail, capture-bar, overlay — chúng tự quản lý policy riêng).
     let has_visible = app.webview_windows().values().any(|w| {
         let label = w.label();
         !label.starts_with("overlay")
             && label != "thumbnail"
             && label != "capture-bar"
+            && label != "settings"
             && w.is_visible().unwrap_or(false)
     });
     if !has_visible {
@@ -480,19 +482,63 @@ pub fn open_thumbnail(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// macOS: gọi makeKeyAndOrderFront + NSApp.activate trên main thread để
+/// cửa sổ settings luôn nổi lên trước mọi app khác.
+#[cfg(target_os = "macos")]
+fn bring_settings_to_front(app: &AppHandle, win: tauri::WebviewWindow) {
+    let app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        use objc2::msg_send;
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::MainThreadMarker;
+
+        // activate app trước (ignoringOtherApps: true) để macOS cho phép
+        // cửa sổ lên front ngay cả khi app đang ở background.
+        if let Some(mtm) = MainThreadMarker::new() {
+            let ns_app = NSApplication::sharedApplication(mtm);
+            let _: () = unsafe { msg_send![&*ns_app, activateIgnoringOtherApps: true] };
+        }
+
+        // makeKeyAndOrderFront: nil → bring window to front & make key window.
+        if let Ok(ptr) = win.ns_window() {
+            let ns_win = ptr as *mut objc2_app_kit::NSWindow;
+            if !ns_win.is_null() {
+                unsafe {
+                    let _: () = msg_send![&*ns_win, makeKeyAndOrderFront: Option::<&objc2::runtime::AnyObject>::None];
+                }
+            }
+        }
+    });
+}
+
 /// Settings.
 pub fn open_settings(app: &AppHandle) -> Result<(), String> {
+    // macOS: chuyển về Regular để icon hiện trên Dock và Cmd+Tab hoạt động.
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
+        let _ = win.unminimize();
+        #[cfg(target_os = "macos")]
+        bring_settings_to_front(app, win);
+        #[cfg(not(target_os = "macos"))]
         let _ = win.set_focus();
         return Ok(());
     }
-    WebviewWindowBuilder::new(app, "settings", url("settings"))
+    let win = WebviewWindowBuilder::new(app, "settings", url("settings"))
         .title("SnapDoc — Cài đặt")
         .inner_size(560.0, 480.0)
         .resizable(false)
         .center()
         .build()
         .map_err(|e| format!("Không tạo được settings: {e}"))?;
+    #[cfg(target_os = "macos")]
+    bring_settings_to_front(app, win);
+    #[cfg(not(target_os = "macos"))]
+    let _ = win.set_focus();
     Ok(())
 }

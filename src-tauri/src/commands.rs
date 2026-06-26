@@ -63,12 +63,21 @@ pub async fn finalize_monitor(app: AppHandle, window: WebviewWindow) -> Result<(
 #[tauri::command]
 pub async fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, String> {
     let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
+
+    // macOS: overlay được đặt theo NSScreen frame (points). outer_position()
+    // của Tauri trả physical px → chia scale để về points nhất quán với xcap.
+    // Windows/Linux: cả hai đều dùng physical px → truyền thẳng, list() sẽ chia.
     let pos = window
         .outer_position()
         .map_err(|e| format!("Không lấy được vị trí overlay: {e}"))?;
 
+    #[cfg(target_os = "macos")]
+    let (ox, oy) = (pos.x as f64 / scale, pos.y as f64 / scale);
+    #[cfg(not(target_os = "macos"))]
+    let (ox, oy) = (pos.x as f64, pos.y as f64);
+
     tauri::async_runtime::spawn_blocking(move || {
-        capture::window::list(pos.x as f64, pos.y as f64, scale)
+        capture::window::list(ox, oy, scale)
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))?

@@ -73,17 +73,34 @@ fn run_action(app: &AppHandle, action: &str) {
         "bar" => {
             let _ = windows::open_capture_bar(app);
         }
-        "region" => spawn(app, "region", "editor"),
-        "window" => spawn(app, "window", "editor"),
-        "all" => {
-            let app = app.clone();
-            std::thread::spawn(move || {
-                flow::capture_all_screens(&app, "editor").ok();
-            });
-        }
         "captureCopy" => spawn(app, "full", "clipboard"),
-        _ => spawn(app, "full", "editor"), // "full"
+        _ => {
+            // Lấy defaultOutput từ settings để áp dụng cho mọi phím tắt chụp.
+            let output = default_output(app);
+            match action {
+                "region" => spawn(app, "region", &output),
+                "window" => spawn(app, "window", &output),
+                "all" => {
+                    let app = app.clone();
+                    std::thread::spawn(move || {
+                        flow::capture_all_screens(&app, &output).ok();
+                    });
+                }
+                _ => spawn(app, "full", &output), // "full"
+            }
+        }
     }
+}
+
+/// Đọc defaultOutput từ settings. Trả về "editor" nếu không đọc được.
+pub fn default_output(app: &AppHandle) -> String {
+    let dir = app.path().app_config_dir().unwrap_or_default();
+    let val = storage::settings::load(&dir);
+    val.get("defaultOutput")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("editor")
+        .to_string()
 }
 
 fn spawn(app: &AppHandle, mode: &str, output: &str) {

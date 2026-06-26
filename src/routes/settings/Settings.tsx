@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ipc, type Settings as S } from "../../lib/ipc";
 
@@ -9,7 +9,6 @@ const OUTPUTS = [
   { id: "save_copy", label: "Lưu + Copy" },
 ] as const;
 
-// Thứ tự hiển thị cố định cho phím tắt.
 const SHORTCUT_KEYS: { key: string; label: string }[] = [
   { key: "captureBar",  label: "Mở thanh chụp" },
   { key: "full",        label: "Chụp toàn màn hình" },
@@ -22,12 +21,15 @@ const SHORTCUT_KEYS: { key: string; label: string }[] = [
 export default function Settings() {
   const [s, setS] = useState<S | null>(null);
   const [perm, setPerm] = useState<boolean | null>(null);
-  const [saved, setSaved] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "err">("idle");
   const [shortcutMsg, setShortcutMsg] = useState<"ok" | "err" | null>(null);
+
+  const pendingRef = useRef<S | null>(null);
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shortcutTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     ipc.getSettings().then(async (loaded) => {
-      // Đảm bảo mọi key phím tắt đều tồn tại (migrations).
       const defaults: Record<string, string> = {
         captureBar:  "CmdOrCtrl+Shift+5",
         full:        "CmdOrCtrl+Shift+1",
@@ -45,52 +47,89 @@ export default function Settings() {
 
   if (!s) return <div className="solid-bg" style={{ height: "100%", padding: 20 }}>Đang tải…</div>;
 
-  const update = (patch: Partial<S>) => setS({ ...s, ...patch });
+  // Lưu ngay (dùng cho select)
+  const persist = async (next: S) => {
+    setSaveStatus("saving");
+    try {
+      await ipc.setSettings(next);
+      setSaveStatus("saved");
+      window.setTimeout(() => setSaveStatus("idle"), 1200);
+    } catch {
+      setSaveStatus("err");
+      window.setTimeout(() => setSaveStatus("idle"), 2500);
+    }
+  };
+
+  // Lưu debounce (dùng cho text input)
+  const persistDebounced = (next: S, delay = 600) => {
+    pendingRef.current = next;
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    setSaveStatus("saving");
+    debounceTimer.current = setTimeout(async () => {
+      const val = pendingRef.current;
+      if (!val) return;
+      try {
+        await ipc.setSettings(val);
+        setSaveStatus("saved");
+        window.setTimeout(() => setSaveStatus("idle"), 1200);
+      } catch {
+        setSaveStatus("err");
+        window.setTimeout(() => setSaveStatus("idle"), 2500);
+      }
+    }, delay);
+  };
+
+  // Lưu + reload shortcuts debounce (dùng cho shortcut input)
+  const persistShortcutsDebounced = (next: S) => {
+    pendingRef.current = next;
+    if (shortcutTimer.current) clearTimeout(shortcutTimer.current);
+    setSaveStatus("saving");
+    shortcutTimer.current = setTimeout(async () => {
+      const val = pendingRef.current;
+      if (!val) return;
+      try {
+        await ipc.setSettings(val);
+        setSaveStatus("saved");
+        window.setTimeout(() => setSaveStatus("idle"), 1200);
+        await ipc.reloadShortcuts();
+        setShortcutMsg("ok");
+      } catch {
+        setSaveStatus("err");
+        setShortcutMsg("err");
+      }
+      window.setTimeout(() => setShortcutMsg(null), 2500);
+    }, 800);
+  };
+
+  const update = (patch: Partial<S>, opts?: { debounce?: boolean; shortcuts?: boolean }) => {
+    const next = { ...s, ...patch };
+    setS(next);
+    if (opts?.shortcuts) persistShortcutsDebounced(next);
+    else if (opts?.debounce) persistDebounced(next);
+    else persist(next);
+  };
 
   const pickDir = async () => {
     const dir = await open({ directory: true });
     if (typeof dir === "string") update({ saveDir: dir });
   };
 
-  // Lưu settings + áp dụng phím tắt ngay lập tức.
-  const persist = async () => {
-    await ipc.setSettings(s);
-    setSaved(true);
-    window.setTimeout(() => setSaved(false), 1500);
-    // Reload shortcuts ngay sau khi lưu.
-    try {
-      await ipc.reloadShortcuts();
-      setShortcutMsg("ok");
-    } catch {
-      setShortcutMsg("err");
-    }
-    window.setTimeout(() => setShortcutMsg(null), 2500);
-  };
-
-  // Áp dụng phím tắt mà không cần lưu lại toàn bộ settings.
-  const applyShortcuts = async () => {
-    await ipc.setSettings(s);
-    try {
-      await ipc.reloadShortcuts();
-      setShortcutMsg("ok");
-    } catch {
-      setShortcutMsg("err");
-    }
-    window.setTimeout(() => setShortcutMsg(null), 2500);
-  };
-
   return (
     <div className="solid-bg" style={page}>
-      <h2 style={{ fontSize: 18, fontWeight: 500 }}>Cài đặt</h2>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <h2 style={{ fontSize: 18, fontWeight: 500, margin: 0 }}>Cài đặt</h2>
+        <SaveIndicator status={saveStatus} />
+      </div>
 
       {/* Thư mục lưu */}
       <section style={section}>
-        <label style={label}>Thư mục lưu mặc định</label>
+        <label style={labelStyle}>Thư mục lưu mặc định</label>
         <div style={{ display: "flex", gap: 8 }}>
           <input
             style={{ flex: 1 }}
             value={s.saveDir}
-            onChange={(e) => update({ saveDir: e.target.value })}
+            onChange={(e) => update({ saveDir: e.target.value }, { debounce: true })}
           />
           <button style={btn} onClick={pickDir}>Chọn…</button>
         </div>
@@ -98,7 +137,7 @@ export default function Settings() {
 
       {/* Hành vi sau khi chụp */}
       <section style={section}>
-        <label style={label}>Hành vi mặc định sau khi chụp</label>
+        <label style={labelStyle}>Hành vi mặc định sau khi chụp</label>
         <select
           value={s.defaultOutput}
           onChange={(e) => update({ defaultOutput: e.target.value as S["defaultOutput"] })}
@@ -111,7 +150,7 @@ export default function Settings() {
 
       {/* Hẹn giờ */}
       <section style={section}>
-        <label style={label}>Hẹn giờ (giây)</label>
+        <label style={labelStyle}>Hẹn giờ (giây)</label>
         <select
           value={s.timerSeconds}
           onChange={(e) => update({ timerSeconds: Number(e.target.value) })}
@@ -124,7 +163,7 @@ export default function Settings() {
 
       {/* Phím tắt */}
       <section style={section}>
-        <label style={label}>Phím tắt toàn cục</label>
+        <label style={labelStyle}>Phím tắt toàn cục</label>
         <p style={note}>
           Định dạng: <code>CmdOrCtrl</code>, <code>Alt</code>, <code>Shift</code> + phím.
           Ví dụ: <code>CmdOrCtrl+Shift+1</code>
@@ -138,30 +177,25 @@ export default function Settings() {
               value={s.shortcuts?.[key] ?? ""}
               placeholder="Bỏ trống để tắt"
               onChange={(e) =>
-                update({ shortcuts: { ...s.shortcuts, [key]: e.target.value } })
+                update({ shortcuts: { ...s.shortcuts, [key]: e.target.value } }, { shortcuts: true })
               }
             />
           </div>
         ))}
 
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
-          <button style={{ ...btn, fontSize: 12 }} onClick={applyShortcuts}>
-            ⚡ Áp dụng ngay
-          </button>
-          {shortcutMsg === "ok" && (
-            <span style={{ fontSize: 12, color: "#22c55e" }}>✓ Phím tắt đã cập nhật</span>
-          )}
-          {shortcutMsg === "err" && (
-            <span style={{ fontSize: 12, color: "var(--danger)" }}>
-              ✕ Lỗi — kiểm tra xung đột phím tắt
-            </span>
-          )}
-        </div>
+        {shortcutMsg === "ok" && (
+          <span style={{ fontSize: 12, color: "#22c55e", marginTop: 4 }}>✓ Phím tắt đã cập nhật</span>
+        )}
+        {shortcutMsg === "err" && (
+          <span style={{ fontSize: 12, color: "var(--danger)", marginTop: 4 }}>
+            ✕ Lỗi — kiểm tra xung đột phím tắt
+          </span>
+        )}
       </section>
 
       {/* Quyền chụp */}
       <section style={section}>
-        <label style={label}>Quyền chụp màn hình</label>
+        <label style={labelStyle}>Quyền chụp màn hình</label>
         <div style={{ fontSize: 13, color: perm ? "#22c55e" : "var(--danger)" }}>
           {perm === null
             ? "Đang kiểm tra…"
@@ -170,19 +204,21 @@ export default function Settings() {
             : "✕ Thiếu quyền (macOS: cấp Screen Recording)"}
         </div>
       </section>
-
-      {/* Actions */}
-      <div style={{ display: "flex", gap: 10, marginTop: "auto" }}>
-        <button
-          style={{ ...btn, background: "var(--accent)", color: "#fff" }}
-          onClick={persist}
-        >
-          {saved ? "Đã lưu ✓" : "Lưu cài đặt"}
-        </button>
-        <button style={btn} onClick={() => ipc.closeSelf()}>Đóng</button>
-      </div>
     </div>
   );
+}
+
+/* ── Save indicator ── */
+
+function SaveIndicator({ status }: { status: "idle" | "saving" | "saved" | "err" }) {
+  if (status === "idle") return null;
+  const map = {
+    saving: { text: "Đang lưu…", color: "var(--text-dim, #94a3b8)" },
+    saved:  { text: "✓ Đã lưu",  color: "#22c55e" },
+    err:    { text: "✕ Lỗi lưu", color: "var(--danger, #ef4444)" },
+  } as const;
+  const { text, color } = map[status];
+  return <span style={{ fontSize: 12, color }}>{text}</span>;
 }
 
 /* ── styles ── */
@@ -196,7 +232,7 @@ const page: React.CSSProperties = {
   overflowY: "auto",
 };
 const section: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 6 };
-const label: React.CSSProperties = { fontSize: 13, fontWeight: 500 };
+const labelStyle: React.CSSProperties = { fontSize: 13, fontWeight: 500 };
 const note: React.CSSProperties = { fontSize: 11, color: "var(--text-dim)", marginTop: 2 };
 const btn: React.CSSProperties = {
   padding: "8px 14px",

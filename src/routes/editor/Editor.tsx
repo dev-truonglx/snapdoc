@@ -11,6 +11,7 @@ export default function Editor() {
   const loadDoc = useEditor((s) => s.loadDoc);
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [showFlattenConfirm, setShowFlattenConfirm] = useState(false);
 
   const flash = (msg: string) => {
     setToast(msg);
@@ -130,6 +131,11 @@ export default function Editor() {
   }, []);
 
   const doFlatten = () => {
+    setShowFlattenConfirm(true);
+  };
+
+  const confirmFlatten = () => {
+    setShowFlattenConfirm(false);
     // Export canvas thành data URL rồi loadDoc lại với annotations rỗng.
     // Blur/highlight/annotation đều được "burn" vào pixel → không thể undo bằng metadata.
     const url = stageRef.current?.flattenPng();
@@ -158,9 +164,118 @@ export default function Editor() {
         <AnnotationStage ref={stageRef} />
       </div>
       {toast && <div style={toastStyle}>{toast}</div>}
+      {showFlattenConfirm && (
+        <FlattenConfirmDialog
+          onConfirm={confirmFlatten}
+          onCancel={() => setShowFlattenConfirm(false)}
+        />
+      )}
     </div>
   );
 }
+
+/* ── Flatten Confirm Dialog ── */
+
+function FlattenConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
+  // Đóng khi nhấn Escape
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+      if (e.key === "Enter") onConfirm();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onConfirm, onCancel]);
+
+  return (
+    <div style={overlayStyle} onClick={onCancel}>
+      <div style={dialogStyle} onClick={(e) => e.stopPropagation()}>
+        {/* Icon + tiêu đề */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <span style={{ fontSize: 22 }}>🔒</span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: "#fca5a5" }}>Flatten ảnh?</span>
+        </div>
+
+        {/* Mô tả */}
+        <p style={descStyle}>
+          Thao tác này sẽ <strong style={{ color: "#f87171" }}>ghi tất cả annotation vào ảnh gốc</strong> và không thể hoàn tác (Undo sẽ bị xóa).
+        </p>
+
+        <ul style={listStyle}>
+          <li>Mọi lớp vẽ (blur, highlight, text, mũi tên…) sẽ được <strong>hợp nhất thành pixel</strong> trong ảnh.</li>
+          <li>Toàn bộ lịch sử Undo/Redo sẽ bị <strong>xóa sạch</strong>.</li>
+          <li>Ảnh sau khi flatten vẫn <strong>chưa được lưu</strong> — bạn cần bấm Save để lưu tiếp.</li>
+        </ul>
+
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 20 }}>
+          <button style={cancelBtnStyle} onClick={onCancel}>
+            Huỷ
+          </button>
+          <button style={confirmBtnStyle} onClick={onConfirm} autoFocus>
+            Flatten
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const overlayStyle: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(0,0,0,0.55)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  zIndex: 1000,
+};
+
+const dialogStyle: React.CSSProperties = {
+  background: "var(--bg-elevated, #1e1e24)",
+  border: "1px solid var(--border, rgba(255,255,255,0.1))",
+  borderRadius: 12,
+  padding: "22px 24px",
+  width: 380,
+  maxWidth: "90vw",
+  boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
+};
+
+const descStyle: React.CSSProperties = {
+  fontSize: 13,
+  color: "var(--text, #e2e8f0)",
+  lineHeight: 1.6,
+  margin: "0 0 12px",
+};
+
+const listStyle: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-dim, #94a3b8)",
+  lineHeight: 1.7,
+  paddingLeft: 18,
+  margin: 0,
+};
+
+const cancelBtnStyle: React.CSSProperties = {
+  padding: "7px 18px",
+  borderRadius: 7,
+  border: "1px solid var(--border, rgba(255,255,255,0.12))",
+  background: "transparent",
+  color: "var(--text-dim, #94a3b8)",
+  fontSize: 13,
+  cursor: "pointer",
+};
+
+const confirmBtnStyle: React.CSSProperties = {
+  padding: "7px 18px",
+  borderRadius: 7,
+  border: "1px solid rgba(239,68,68,0.4)",
+  background: "rgba(239,68,68,0.2)",
+  color: "#fca5a5",
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: "pointer",
+};
 
 const toastStyle: React.CSSProperties = {
   position: "absolute",

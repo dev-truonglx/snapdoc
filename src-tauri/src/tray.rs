@@ -40,7 +40,8 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "all" => {
                 let app = app.clone();
                 std::thread::spawn(move || {
-                    flow::capture_all_screens(&app, "editor").ok();
+                    let output = crate::hotkey::default_output(&app);
+                    flow::capture_all_screens(&app, &output).ok();
                 });
             }
             "full"   => dispatch(app, "full"),
@@ -63,5 +64,8 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
 fn dispatch(app: &AppHandle, mode: &str) {
     let app = app.clone();
     let mode = mode.to_string();
-    std::thread::spawn(move || flow::run(&app, &mode, "editor"));
+    std::thread::spawn(move || {
+        let output = crate::hotkey::default_output(&app);
+        flow::run(&app, &mode, &output);
+    });
 }
