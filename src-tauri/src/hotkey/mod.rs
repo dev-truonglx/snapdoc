@@ -1,38 +1,67 @@
-use crate::{flow, windows};
-use tauri::AppHandle;
+use crate::{flow, storage, windows};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
-pub const BAR: &str = "CmdOrCtrl+Shift+5";
-pub const FULL: &str = "CmdOrCtrl+Shift+1";
-pub const REGION: &str = "CmdOrCtrl+Shift+2";
-pub const WINDOW: &str = "CmdOrCtrl+Shift+3";
-pub const COPY: &str = "CmdOrCtrl+Shift+C";
+// Phím tắt mặc định — dùng khi settings chưa có giá trị.
+pub const DEFAULT_BAR: &str = "CmdOrCtrl+Shift+5";
+pub const DEFAULT_FULL: &str = "CmdOrCtrl+Shift+1";
+pub const DEFAULT_REGION: &str = "CmdOrCtrl+Shift+2";
+pub const DEFAULT_WINDOW: &str = "CmdOrCtrl+Shift+3";
+pub const DEFAULT_ALL: &str = "CmdOrCtrl+Shift+4";
+pub const DEFAULT_COPY: &str = "CmdOrCtrl+Shift+C";
 
-/// Đăng ký toàn bộ phím tắt toàn cục. Trả lỗi nếu bị xung đột.
+/// Lấy map (action → combo) từ settings.
+/// Nếu một key thiếu thì dùng giá trị mặc định.
+pub fn shortcuts_from_settings(app: &AppHandle) -> Vec<(String, String)> {
+    let dir = app.path().app_config_dir().unwrap_or_default();
+    let val = storage::settings::load(&dir);
+    let shortcuts = val.get("shortcuts");
+
+    let get = |key: &str, default: &str| -> String {
+        shortcuts
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default)
+            .to_string()
+    };
+
+    vec![
+        ("bar".into(),         get("captureBar",  DEFAULT_BAR)),
+        ("full".into(),        get("full",        DEFAULT_FULL)),
+        ("region".into(),      get("region",      DEFAULT_REGION)),
+        ("window".into(),      get("window",      DEFAULT_WINDOW)),
+        ("all".into(),         get("all",         DEFAULT_ALL)),
+        ("captureCopy".into(), get("captureCopy", DEFAULT_COPY)),
+    ]
+}
+
+/// Đăng ký tất cả phím tắt từ settings lúc khởi động.
 pub fn register_all(app: &AppHandle) -> Result<(), String> {
     let gs = app.global_shortcut();
-    for s in [BAR, FULL, REGION, WINDOW, COPY] {
-        gs.register(s)
-            .map_err(|e| format!("Đăng ký phím tắt '{s}' thất bại (có thể bị app khác chiếm): {e}"))?;
+    for (action, combo) in shortcuts_from_settings(app) {
+        gs.register(combo.as_str()).map_err(|e| {
+            format!("Đăng ký phím tắt '{combo}' ({action}) thất bại: {e}")
+        })?;
     }
     Ok(())
 }
 
+/// Huỷ tất cả phím tắt hiện tại, rồi đăng ký lại từ settings.
+/// Gọi sau khi người dùng lưu cài đặt mới.
+pub fn reload(app: &AppHandle) -> Result<(), String> {
+    let gs = app.global_shortcut();
+    gs.unregister_all()
+        .map_err(|e| format!("Huỷ phím tắt thất bại: {e}"))?;
+    register_all(app)
+}
+
 /// Điều phối khi một phím tắt được nhấn.
 pub fn handle(app: &AppHandle, fired: &Shortcut) {
-    let mappings = [
-        (BAR, "bar"),
-        (FULL, "full"),
-        (REGION, "region"),
-        (WINDOW, "window"),
-        (COPY, "copy"),
-    ];
-
-    for (combo, action) in mappings {
-        let parsed: Result<Shortcut, _> = combo.parse();
-        if let Ok(parsed) = parsed {
+    for (action, combo) in shortcuts_from_settings(app) {
+        if let Ok(parsed) = combo.parse::<Shortcut>() {
             if &parsed == fired {
-                run_action(app, action);
+                run_action(app, &action);
                 return;
             }
         }
@@ -46,8 +75,14 @@ fn run_action(app: &AppHandle, action: &str) {
         }
         "region" => spawn(app, "region", "editor"),
         "window" => spawn(app, "window", "editor"),
-        "copy" => spawn(app, "full", "clipboard"),
-        _ => spawn(app, "full", "editor"),
+        "all" => {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                flow::capture_all_screens(&app, "editor").ok();
+            });
+        }
+        "captureCopy" => spawn(app, "full", "clipboard"),
+        _ => spawn(app, "full", "editor"), // "full"
     }
 }
 

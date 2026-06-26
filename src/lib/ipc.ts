@@ -8,7 +8,7 @@ export interface Pending {
   output: string;
 }
 
-export type CaptureMode = "full" | "window" | "region";
+export type CaptureMode = "full" | "window" | "region" | "all";
 export type OutputMode = "editor" | "clipboard" | "save" | "save_copy";
 
 export interface WindowInfo {
@@ -36,6 +36,8 @@ export const ipc = {
   takePending: () => invoke<Pending | null>("take_pending"),
   captureNow: (mode: CaptureMode, output: OutputMode) =>
     invoke<void>("capture_now", { mode, output }),
+  captureAllScreens: (output: OutputMode) =>
+    invoke<void>("capture_all_screens", { output }),
   finalizeRegion: (x: number, y: number, w: number, h: number) =>
     invoke<void>("finalize_region", { x, y, w, h }),
   finalizeWindow: (id: number) => invoke<void>("finalize_window", { id }),
@@ -54,4 +56,5 @@ export const ipc = {
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (value: Settings) => invoke<void>("set_settings", { value }),
   checkPermission: () => invoke<boolean>("check_screen_permission"),
+  reloadShortcuts: () => invoke<void>("reload_shortcuts"),
 };
