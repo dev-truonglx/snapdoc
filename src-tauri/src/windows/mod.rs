@@ -367,23 +367,23 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize) {
 }
 
 /// Đóng toàn bộ overlay (mọi màn hình).
+///
+/// QUAN TRỌNG: KHÔNG poll app.webview_windows() sau win.close() trên Windows.
+/// win.close() gửi WM_CLOSE async — cần main thread message pump xử lý.
+/// Nếu gọi từ std::thread đang được Tokio IPC thread chờ (rx.recv()), main
+/// thread có thể bị stall → polling không bao giờ thấy overlay biến mất →
+/// deadlock → Windows báo AppHang sau ~5 giây.
+///
+/// Giải pháp: gửi close rồi return ngay. Sleep cố định 150ms trong
+/// finalize_window/finalize_region để DWM có thời gian unregister protected
+/// surface — không cần xác nhận overlay đã đóng hẳn.
 pub fn close_overlays(app: &AppHandle) {
     for (label, win) in app.webview_windows() {
         if label.starts_with("overlay") {
             let _ = win.close();
         }
     }
-        // Windows: win.close() là async (WM_CLOSE). Đợi overlay thực sự
-    // biến mất trước khi return để open_overlays không gặp duplicate label.
-    #[cfg(target_os = "windows")]
-    {
-        let deadline = std::time::Instant::now() + Duration::from_millis(300);
-        while std::time::Instant::now() < deadline {
-            let any = app.webview_windows().keys().any(|l| l.starts_with("overlay"));
-            if !any { break; }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
+    // KHÔNG poll ở đây — xem comment trên.
 }
 
 /// Tạo sẵn editor (ẩn) lúc khởi động để lần chụp đầu hiện ngay, không phải

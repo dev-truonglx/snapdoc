@@ -28,10 +28,11 @@ const SYSTEM_OWNERS: &[&str] = &[
     "SnapDoc",
 ];
 
-/// Liệt kê cửa sổ chọn được. (ox, oy) = gốc overlay theo points để đổi toạ độ
-/// cửa sổ (points global) sang toạ độ local của overlay.
-pub fn list(ox: f64, oy: f64) -> Result<Vec<WindowInfo>, String> {
-    // Window::all() trả thứ tự từ TRÊN xuống DƯỚI (front-to-back).
+/// Liệt kê cửa sổ chọn được. (ox, oy) = gốc overlay theo physical px,
+/// scale = DPI scale factor. Toạ độ trả về là CSS points (px / scale),
+/// đã trừ gốc overlay nên dùng thẳng trong overlay.
+pub fn list(ox: f64, oy: f64, scale: f64) -> Result<Vec<WindowInfo>, String> {
+    let scale = if scale <= 0.0 { 1.0 } else { scale };
     let windows = Window::all().map_err(|e| format!("Không liệt kê được cửa sổ: {e}"))?;
     let mut out = Vec::new();
     for w in windows {
@@ -47,12 +48,14 @@ pub fn list(ox: f64, oy: f64) -> Result<Vec<WindowInfo>, String> {
         if SYSTEM_OWNERS.iter().any(|s| app.eq_ignore_ascii_case(s)) {
             continue;
         }
+        // Toạ độ xcap trả về là physical px trên Windows, points trên macOS.
+        // Chia scale để về CSS points, rồi trừ gốc overlay (cũng đã / scale).
         out.push(WindowInfo {
             id: w.id().unwrap_or(0),
-            x: w.x().unwrap_or(0) as f64 - ox,
-            y: w.y().unwrap_or(0) as f64 - oy,
-            width: width as f64,
-            height: height as f64,
+            x: w.x().unwrap_or(0) as f64 / scale - ox / scale,
+            y: w.y().unwrap_or(0) as f64 / scale - oy / scale,
+            width: width as f64 / scale,
+            height: height as f64 / scale,
             title: w.title().unwrap_or_default(),
             app,
         });
@@ -62,12 +65,10 @@ pub fn list(ox: f64, oy: f64) -> Result<Vec<WindowInfo>, String> {
 
 /// Chụp đúng cửa sổ theo id.
 ///
-/// - macOS: ScreenCaptureKit (`SCContentFilter` + `captureImageWithFilter`) →
-///   chụp đúng 1 cửa sổ kể cả khi bị che, giữ độ phân giải Retina.
-/// - Windows: xcap với WGC. Phải chạy trên STA COM thread (WGC yêu cầu COM đã
-///   được init). Dùng `std::thread::spawn` + `CoInitializeEx(STA)` để đảm bảo
-///   điều đó, tránh crash khi gọi từ thread non-COM của Tauri.
-/// - OS khác: xcap (Linux = pipewire/x11).
+/// - macOS: ScreenCaptureKit (`SCContentFilter` + `captureImageWithFilter`).
+/// - Windows: xcap dùng GDI PrintWindow (feature "wgc" tắt) — không cần
+///   WinRT/COM, không lock static Mutex → không treo.
+/// - Linux: xcap (pipewire/x11).
 pub fn capture_by_id(id: u32) -> Result<Capture, String> {
     #[cfg(target_os = "macos")]
     {
@@ -75,92 +76,28 @@ pub fn capture_by_id(id: u32) -> Result<Capture, String> {
         return persist(&img);
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     {
-        return capture_by_id_windows(id);
-    }
+        let windows = Window::all()
+            .map_err(|e| format!("Không liệt kê được cửa sổ: {e}"))?;
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let windows = Window::all().map_err(|e| format!("Không liệt kê được cửa sổ: {e}"))?;
         let target = windows
             .into_iter()
             .find(|w| w.id().map(|i| i == id).unwrap_or(false))
-            .ok_or_else(|| "Không tìm thấy cửa sổ".to_string())?;
+            .ok_or_else(|| "Không tìm thấy cửa sổ (có thể đã đóng)".to_string())?;
+
+        if target.is_minimized().unwrap_or(false) {
+            return Err("Cửa sổ đang bị thu nhỏ, không thể chụp".to_string());
+        }
+        let width = target.width().unwrap_or(0);
+        let height = target.height().unwrap_or(0);
+        if width == 0 || height == 0 {
+            return Err("Cửa sổ có kích thước 0, không thể chụp".to_string());
+        }
+
         let img = target
             .capture_image()
             .map_err(|e| format!("Lỗi chụp cửa sổ: {e}"))?;
-        persist(&img)
+        return persist(&img);
     }
-}
-
-/// Thực thi capture window trên Windows.
-///
-/// WGC (Windows.Graphics.Capture) yêu cầu thread đang gọi đã khởi tạo COM ở
-/// chế độ STA (Single-Threaded Apartment). Thread của Tauri/Tokio không đảm bảo
-/// điều đó → gọi `capture_image()` thẳng từ đó thường dẫn đến crash
-/// (access violation hoặc RPC_E_WRONG_THREAD).
-///
-/// Giải pháp: spawn thread mới, init COM STA ngay đầu thread đó, thực hiện
-/// capture, rồi gọi CoUninitialize khi xong. Dùng channel để trả kết quả về.
-#[cfg(target_os = "windows")]
-fn capture_by_id_windows(id: u32) -> Result<Capture, String> {
-    use std::sync::mpsc;
-    use windows_sys::Win32::System::Com;
-
-    let (tx, rx) = mpsc::channel::<Result<Capture, String>>();
-
-    std::thread::spawn(move || {
-        // Khởi tạo COM trong chế độ STA cho thread này.
-        // windows-sys dùng raw *const c_void (không phải Option<>), và
-        // COINIT_APARTMENTTHREADED là hằng u32, không phải enum variant.
-        // S_OK = 0, S_FALSE = 1 (đã init trên thread này rồi) — cả hai đều OK.
-        // Nếu hr < 0 (thất bại) vẫn cố capture; WGC có thể hoạt động nếu COM
-        // đã được init trước đó bởi luồng khác của Tauri (ít xảy ra nhưng an toàn).
-        let hr_init = unsafe {
-            Com::CoInitializeEx(std::ptr::null(), Com::COINIT_APARTMENTTHREADED)
-        };
-        let com_inited = hr_init >= 0;
-
-        let result = do_capture_window(id);
-
-        if com_inited {
-            unsafe { Com::CoUninitialize() };
-        }
-
-        let _ = tx.send(result);
-    });
-
-    rx.recv()
-        .map_err(|_| "Thread chụp cửa sổ bị panic hoặc không trả kết quả".to_string())?
-}
-
-/// Phần thực sự của capture: liệt kê cửa sổ, tìm theo id, kiểm tra trạng thái,
-/// rồi chụp. Tách ra để dễ đọc và để `catch_unwind` bọc nếu cần sau này.
-#[cfg(target_os = "windows")]
-fn do_capture_window(id: u32) -> Result<Capture, String> {
-    let windows = Window::all().map_err(|e| format!("Không liệt kê được cửa sổ: {e}"))?;
-
-    let target = windows
-        .into_iter()
-        .find(|w| w.id().map(|i| i == id).unwrap_or(false))
-        .ok_or_else(|| "Không tìm thấy cửa sổ (có thể đã đóng)".to_string())?;
-
-    // Bỏ qua cửa sổ bị thu nhỏ: WGC capture window bị minimize thường trả ảnh
-    // rỗng hoặc crash vì không có swap chain hợp lệ.
-    if target.is_minimized().unwrap_or(false) {
-        return Err("Cửa sổ đang bị thu nhỏ, không thể chụp".to_string());
-    }
-
-    let width = target.width().unwrap_or(0);
-    let height = target.height().unwrap_or(0);
-    if width == 0 || height == 0 {
-        return Err("Cửa sổ có kích thước 0, không thể chụp".to_string());
-    }
-
-    let img = target
-        .capture_image()
-        .map_err(|e| format!("Lỗi chụp cửa sổ: {e}"))?;
-
-    persist(&img)
 }

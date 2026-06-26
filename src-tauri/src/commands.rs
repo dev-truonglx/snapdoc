@@ -24,13 +24,11 @@ pub fn capture_now(app: AppHandle, mode: String, output: String) {
 }
 
 /// Chụp vùng chọn từ overlay.
-///
-/// **Phải chạy trên một OS thread riêng** — Tokio worker threads không khởi tạo
-/// COM STA, trong khi xcap WGC gọi CoInitializeEx/WinRT APIs yêu cầu STA.
-/// Spawn `std::thread` để đảm bảo ngữ cảnh COM đúng, rồi forward kết quả
-/// về IPC caller qua channel.
+/// Dùng async + spawn_blocking để code blocking chạy trên dedicated thread,
+/// không block Tokio event loop — WebView2 message pump tiếp tục chạy,
+/// overlay đóng được bình thường.
 #[tauri::command]
-pub fn finalize_region(
+pub async fn finalize_region(
     app: AppHandle,
     window: WebviewWindow,
     x: f64,
@@ -38,54 +36,44 @@ pub fn finalize_region(
     w: f64,
     h: f64,
 ) -> Result<(), String> {
-    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
-    std::thread::spawn(move || {
-        let result = flow::finalize_region(&app, window, x, y, w, h);
-        let _ = tx.send(result);
-    });
-    rx.recv().unwrap_or_else(|_| Err("Thread capture bị lỗi bất ngờ".to_string()))
+    tauri::async_runtime::spawn_blocking(move || flow::finalize_region(&app, window, x, y, w, h))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
+/// Chụp cửa sổ đã chọn.
+/// async + spawn_blocking: không block Tokio event loop → WebView2 pump chạy,
+/// win.close() (WM_CLOSE) được xử lý trong lúc capture đang chờ.
 #[tauri::command]
-pub fn finalize_window(app: AppHandle, id: u32) -> Result<(), String> {
-    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
-    std::thread::spawn(move || {
-        let result = flow::finalize_window(&app, id);
-        let _ = tx.send(result);
-    });
-    rx.recv().unwrap_or_else(|_| Err("Thread capture bị lỗi bất ngờ".to_string()))
+pub async fn finalize_window(app: AppHandle, id: u32) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || flow::finalize_window(&app, id))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
+
+/// Chụp toàn màn hình.
 #[tauri::command]
-pub fn finalize_monitor(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
-    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
-    std::thread::spawn(move || {
-        let result = flow::finalize_monitor(&app, window);
-        let _ = tx.send(result);
-    });
-    rx.recv().unwrap_or_else(|_| Err("Thread capture bị lỗi bất ngờ".to_string()))
+pub async fn finalize_monitor(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || flow::finalize_monitor(&app, window))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
-/// Liệt kê cửa sổ theo toạ độ local của overlay GỌI lệnh (mỗi màn hình một
-/// overlay) → highlight đúng trên màn hình đang trỏ tới.
-///
-/// Truyền `outer_position()` (physical px) và `scale_factor` nguyên gốc vào
-/// `list()` để nó tự convert. KHÔNG chia trước ở đây — tránh mất chính xác
-/// và lệch khi DPI != 1.
+
+/// Liệt kê cửa sổ — async để không block Tokio event loop.
 #[tauri::command]
-pub fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, String> {
+pub async fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, String> {
     let scale = window.scale_factor().unwrap_or(1.0).max(1.0);
     let pos = window
         .outer_position()
         .map_err(|e| format!("Không lấy được vị trí overlay: {e}"))?;
-    // Trưyền physical px trực tiếp; list() sẽ tự chia scale.
-    // **Phải chạy trên OS thread riêng** – Window::all() của xcap gọi COM
-    // APIs cần STA context; Tokio worker không khởi tạo COM.
-    let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<WindowInfo>, String>>();
-    std::thread::spawn(move || {
-        let result = capture::window::list(pos.x as f64, pos.y as f64, scale);
-        let _ = tx.send(result);
-    });
-    rx.recv().unwrap_or_else(|_| Err("Thread list_windows bị lỗi bất ngờ".to_string()))
+
+    tauri::async_runtime::spawn_blocking(move || {
+        capture::window::list(pos.x as f64, pos.y as f64, scale)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
+
 #[tauri::command]
 pub fn cancel_overlay(app: AppHandle) {
     flow::cancel_overlay(&app);

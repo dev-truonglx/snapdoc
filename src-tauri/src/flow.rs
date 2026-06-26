@@ -133,19 +133,10 @@ pub fn finalize_region(
     }
 
     // Step 3: close overlays BEFORE capture.
-    //
-    // The overlay windows are created with set_content_protected(true) which
-    // marks them as a DWM protected surface. Windows Graphics Capture (WGC)
-    // skips protected surfaces in every frame, so if the overlay is still
-    // visible the captured image will contain a black rectangle where the
-    // overlay was. Closing first, then waiting one compositor frame (~50 ms)
-    // lets DWM unregister the protected surface before WGC takes the shot.
-    //
-    // macOS ScreenCaptureKit does not have this restriction, so we skip the
-    // sleep there to keep things snappy.
+    // KHÔNG poll sau close — deadlock risk (xem close_overlays). Sleep 200ms.
     windows::close_overlays(app);
     #[cfg(not(target_os = "macos"))]
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Step 4: capture the region on this thread (caller must be an OS thread
     // with COM initialized -- see commands.rs where finalize_region is spawned
@@ -156,23 +147,12 @@ pub fn finalize_region(
 }
 
 pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
-    // Close overlays BEFORE capture so that the DWM-protected overlay surface
-    // is unregistered from the compositor before Windows Graphics Capture
-    // (WGC) takes the shot. Without the sleep, WGC may still see the overlay
-    // protected surface and return a black/corrupt frame or panic.
-    //
-    // win.close() on Windows is async (sends WM_CLOSE), so we must wait for
-    // the overlay to actually disappear. close_overlays() already polls up to
-    // 300 ms for that on Windows, so no extra sleep is strictly needed beyond
-    // what close_overlays guarantees. However, an additional short wait ensures
-    // the DWM compositor has composited one full frame without the protected
-    // surface before WGC starts capturing -- preventing black frames.
-    //
-    // macOS uses ScreenCaptureKit which does not have this restriction, so we
-    // skip the sleep there.
     windows::close_overlays(app);
+
+    // Chờ WM_CLOSE được main thread xử lý và DWM unregister protected surface.
+    // Không poll (deadlock risk) — sleep cố định 200ms là đủ.
     #[cfg(not(target_os = "macos"))]
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(std::time::Duration::from_millis(200));
 
     let cap = capture::window::capture_by_id(id)?;
     let output = get_output(app);
@@ -185,7 +165,10 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
     let center_x = (s.x + s.w / 2.0) as i32;
     let center_y = (s.y + s.h / 2.0) as i32;
     let m = capture::monitor::at_point(center_x, center_y)?;
+    // KHÔNG poll sau close — deadlock risk (xem close_overlays). Sleep 200ms.
     windows::close_overlays(app);
+    #[cfg(not(target_os = "macos"))]
+    std::thread::sleep(std::time::Duration::from_millis(200));
     let cap = capture::fullscreen::capture_monitor(&m)?;
     let output = get_output(app);
     finish(app, cap, &output)

@@ -26,9 +26,11 @@ serde_json = "1"
 # Native screen capture (monitors + windows), cross-platform.
 # - macOS: chỉ dùng xcap để LIỆT KÊ màn hình/cửa sổ (metadata). Việc grab pixel
 #   chuyển sang ScreenCaptureKit (xem capture/mac_sck.rs).
-# - Windows: bật feature "wgc" → dùng Windows.Graphics.Capture (API hiện đại
-#   Microsoft khuyến nghị) thay cho GDI BitBlt mặc định.
-xcap = { version = "0.9", features = ["wgc"] }
+# - Windows: KHÔNG bật feature "wgc" cho window capture vì WGC lock một static
+#   Mutex trong suốt quá trình capture (3s timeout) → deadlock khi có nhiều thread.
+#   Dùng GDI PrintWindow (default) — ổn định, không treo, hỗ trợ mọi Windows 7+.
+#   Monitor/region capture vẫn dùng WGC riêng qua xcap monitor API (không lock window mutex).
+xcap = { version = "0.9" }
 # Image encode/decode + crop
 image = "0.25"
 # Robust cross-platform image clipboard (arboard handles RGBA -> native formats)
@@ -76,5 +78,6 @@ opt-level = 3
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
+# panic = "abort" đã bỏ: với "abort", catch_unwind không bắt được panic từ xcap/WGC
+# → process bị kill thay vì báo lỗi. Dùng default "unwind" để có thể recover.
 strip = true
