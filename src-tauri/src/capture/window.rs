@@ -106,26 +106,26 @@ pub fn capture_by_id(id: u32) -> Result<Capture, String> {
 #[cfg(target_os = "windows")]
 fn capture_by_id_windows(id: u32) -> Result<Capture, String> {
     use std::sync::mpsc;
+    use windows_sys::Win32::System::Com;
 
     let (tx, rx) = mpsc::channel::<Result<Capture, String>>();
 
     std::thread::spawn(move || {
         // Khởi tạo COM trong chế độ STA cho thread này.
-        // COINIT_APARTMENTTHREADED = 0x2
+        // windows-sys dùng raw *const c_void (không phải Option<>), và
+        // COINIT_APARTMENTTHREADED là hằng u32, không phải enum variant.
+        // S_OK = 0, S_FALSE = 1 (đã init trên thread này rồi) — cả hai đều OK.
+        // Nếu hr < 0 (thất bại) vẫn cố capture; WGC có thể hoạt động nếu COM
+        // đã được init trước đó bởi luồng khác của Tauri (ít xảy ra nhưng an toàn).
         let hr_init = unsafe {
-            windows_sys::Win32::System::Com::CoInitializeEx(
-                std::ptr::null(),
-                windows_sys::Win32::System::Com::COINIT_APARTMENTTHREADED,
-            )
+            Com::CoInitializeEx(std::ptr::null(), Com::COINIT_APARTMENTTHREADED)
         };
-        // S_OK (0) hoặc S_FALSE (1 = đã init rồi) đều được chấp nhận.
-        // Nếu thất bại (hr < 0) vẫn cố capture; COM có thể đã được init theo cách khác.
         let com_inited = hr_init >= 0;
 
         let result = do_capture_window(id);
 
         if com_inited {
-            unsafe { windows_sys::Win32::System::Com::CoUninitialize() };
+            unsafe { Com::CoUninitialize() };
         }
 
         let _ = tx.send(result);
