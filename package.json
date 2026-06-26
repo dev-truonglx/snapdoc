@@ -11,7 +11,13 @@
     "app:dev": "tauri dev",
     "app:build": "tauri build",
     "dev:mac": "bash scripts/dev-mac.sh",
-    "sign:mac": "bash scripts/macos-codesign.sh"
+    "build:mac": "bash scripts/build-mac.sh",
+    "sign:mac": "bash scripts/macos-codesign.sh",
+    "setup:keys": "bash scripts/setup-keys.sh",
+    "backup:keys": "bash scripts/backup-keys.sh",
+    "restore:keys": "bash scripts/restore-keys.sh",
+    "release": "bash scripts/release-all.sh",
+    "stats": "bash scripts/install-stats.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

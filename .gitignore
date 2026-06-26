@@ -10,3 +10,12 @@ src-tauri/gen
 
 # Claude Code local settings (personal)
 .claude/settings.local.json
+
+# Release artifacts (local staging, never commit)
+release_dist/
+dist-win/
+
+# Signing keys — NEVER commit raw keys, only .enc backups are safe
+secrets/*.key
+secrets/*.p12
+# (secrets/*.enc are safe and should be committed)

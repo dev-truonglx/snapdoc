@@ -23,6 +23,8 @@ KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 # lets macOS keep a Screen Recording (TCC) grant across rebuilds. If this key
 # ever changes, you must re-grant Screen Recording — so back it up, never delete.
 PERSIST_P12="${APPLE_SIGNING_P12:-$HOME/.tauri/snapdoc-codesign.p12}"
+# Note: if you have an older key at ~/.tauri/translate-codesign.p12, rename it:
+#   mv ~/.tauri/translate-codesign.p12 ~/.tauri/snapdoc-codesign.p12
 # Transport/at-rest password for the PKCS#12. Fixed so the file is reusable; this
 # is a low-value self-signed dev identity (no Apple trust), so a static pass is OK.
 P12PASS="${APPLE_SIGNING_P12_PASSWORD:-tauri-dev}"
