@@ -228,6 +228,23 @@ export default function Settings() {
           </Field>
         </Card>
 
+        {/* KHỞI ĐỘNG */}
+        <Card title="KHỞI ĐỘNG">
+          <div style={toggleRow}>
+            <div>
+              <div style={toggleLabel}>Khởi động cùng hệ thống</div>
+              <div style={toggleDesc}>SnapDoc tự chạy nền khi bật máy</div>
+            </div>
+            <Toggle
+              checked={s.launchAtLogin ?? true}
+              onChange={async (v) => {
+                update({ launchAtLogin: v });
+                await ipc.setAutostart(v).catch(() => {});
+              }}
+            />
+          </div>
+        </Card>
+
         {/* PHÍM TẮT */}
         <Card title="PHÍM TẮT TOÀN CỤC">
           <p style={hint}>
@@ -731,4 +748,54 @@ const smallBtn: React.CSSProperties = {
   fontSize: 12,
   cursor: "pointer",
   whiteSpace: "nowrap",
+};
+
+// Toggle switch component
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      style={{
+        width: 40,
+        height: 22,
+        borderRadius: 11,
+        border: "none",
+        background: checked ? "var(--accent, #6366f1)" : "var(--border, rgba(255,255,255,0.15))",
+        cursor: "pointer",
+        position: "relative",
+        flexShrink: 0,
+        transition: "background 0.2s",
+        padding: 0,
+      }}
+    >
+      <span style={{
+        position: "absolute",
+        top: 3,
+        left: checked ? 21 : 3,
+        width: 16,
+        height: 16,
+        borderRadius: 8,
+        background: "#fff",
+        transition: "left 0.2s",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+      }} />
+    </button>
+  );
+}
+
+const toggleRow: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+};
+
+const toggleLabel: React.CSSProperties = { fontSize: 13 };
+
+const toggleDesc: React.CSSProperties = {
+  fontSize: 11,
+  color: "var(--text-dim)",
+  marginTop: 2,
 };

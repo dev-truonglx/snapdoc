@@ -29,6 +29,7 @@ export interface Settings {
   openEditorAfterCapture: boolean;
   timerSeconds: number;
   rememberLastRegion: boolean;
+  launchAtLogin: boolean;
   shortcuts: Record<string, string>;
 }
 
@@ -70,6 +71,8 @@ export const ipc = {
   suspendShortcuts: () => invoke<void>("suspend_shortcuts"),
   resumeShortcuts: () => invoke<void>("resume_shortcuts"),
   getLastCaptureMode: () => invoke<[string, string]>("get_last_capture_mode"),
+  getAutostart: () => invoke<boolean>("get_autostart"),
+  setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   // Update
   checkUpdate: () => invoke<UpdateInfo>("check_update"),
   getPendingUpdate: () => invoke<UpdateInfo | null>("get_pending_update"),

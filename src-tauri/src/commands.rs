@@ -279,6 +279,26 @@ pub fn get_last_capture_mode(app: AppHandle) -> (String, String) {
     app.state::<AppState>().last_capture.get()
 }
 
+// ── Autostart commands ───────────────────────────────────────────────────────
+
+/// Trả về trạng thái "khởi động cùng hệ thống" hiện tại.
+#[tauri::command]
+pub fn get_autostart(app: AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+/// Bật / tắt "khởi động cùng hệ thống".
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    if enabled {
+        app.autolaunch().enable().map_err(|e| format!("Không bật autostart: {e}"))
+    } else {
+        app.autolaunch().disable().map_err(|e| format!("Không tắt autostart: {e}"))
+    }
+}
+
 // ── Update commands ──────────────────────────────────────────────────────────
 
 /// Tạm tắt tất cả global shortcuts — dùng khi Settings đang trong chế độ

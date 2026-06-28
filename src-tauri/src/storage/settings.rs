@@ -14,6 +14,7 @@ fn defaults() -> Value {
         "openEditorAfterCapture": true,
         "timerSeconds": 0,
         "rememberLastRegion": false,
+        "launchAtLogin": true,
         "shortcuts": {
             "captureBar": "CmdOrCtrl+Shift+5",
             "full": "CmdOrCtrl+Shift+1",

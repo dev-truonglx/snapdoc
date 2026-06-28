@@ -22,6 +22,10 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -63,6 +67,8 @@ pub fn run() {
             commands::suspend_shortcuts,
             commands::resume_shortcuts,
             commands::get_last_capture_mode,
+            commands::get_autostart,
+            commands::set_autostart,
             commands::check_update,
             commands::get_pending_update,
             commands::install_update,
@@ -83,6 +89,24 @@ pub fn run() {
             // Khi editor mở sẽ chuyển sang Regular (xem windows::open_editor).
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Lần đầu chạy sau khi cài: tự động bật "khởi động cùng hệ thống"
+            // nếu settings chưa có key "launchAtLogin" (= chưa từng user thay đổi).
+            // Sau đó user có thể tắt từ Settings bất cứ lúc nào.
+            {
+                use tauri::Manager;
+                use tauri_plugin_autostart::ManagerExt;
+                let config_dir = handle.path().app_config_dir().unwrap_or_default();
+                let settings = storage::settings::load(&config_dir);
+                let has_key = settings.get("launchAtLogin").is_some();
+                if !has_key {
+                    // Lần đầu: bật autostart và lưu preference
+                    let _ = handle.autolaunch().enable();
+                    let mut new_settings = settings;
+                    new_settings["launchAtLogin"] = serde_json::Value::Bool(true);
+                    let _ = storage::settings::save(&config_dir, &new_settings);
+                }
+            }
 
             // Windows: xử lý file truyền qua CLI args khi "Open with" / double-click.
             // macOS dùng RunEvent::Opened (Apple Event) — không qua argv.
