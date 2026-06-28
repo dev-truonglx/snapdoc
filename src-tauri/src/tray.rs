@@ -1,17 +1,26 @@
 use crate::{flow, windows};
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle, Manager,
 };
 
+/// Icon tray template (16×16 và 32×32 PNG đen/trắng cho macOS menu bar).
+const TRAY_ICON: &[u8] = include_bytes!("../icons/tray.png");
+
 /// Tạo tray icon với menu thao tác nhanh.
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let menu = build_menu(app)?;
 
+    // Dùng tray.png riêng (nhỏ, template-friendly) thay vì default_window_icon
+    // (icon app đầy màu sắc không phù hợp với menu bar macOS).
+    let icon = Image::from_bytes(TRAY_ICON)
+        .unwrap_or_else(|_| app.default_window_icon().unwrap().clone());
+
     TrayIconBuilder::with_id("main-tray")
-        .icon(app.default_window_icon().unwrap().clone())
-        .icon_as_template(true)
+        .icon(icon)
+        .icon_as_template(false)  // dùng icon màu thực, không template
         .tooltip("SnapDoc")
         .menu(&menu)
         .show_menu_on_left_click(true)
