@@ -48,8 +48,25 @@ export default function Editor() {
     const un = listen("refresh-capture", () => {
       ipc.takePending().then(loadPending);
     });
+    // "Open with" / double-click: Rust emit event này với data URL đầy đủ,
+    // không cần round-trip IPC takePending (timing an toàn hơn).
+    const unOpenFile = listen<string>("open-file", (e) => {
+      const dataUrl = e.payload;
+      const img = new Image();
+      img.onload = () => {
+        loadDoc({
+          image: dataUrl,
+          imgW: img.naturalWidth,
+          imgH: img.naturalHeight,
+          scaleFactor: 1,
+          annotations: [],
+        });
+      };
+      img.src = dataUrl;
+    });
     return () => {
       un.then((f) => f());
+      unOpenFile.then((f) => f());
     };
   }, []);
 

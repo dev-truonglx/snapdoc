@@ -52,6 +52,7 @@ pub fn run() {
             commands::close_self,
             commands::hide_thumbnail,
             commands::open_file_dialog,
+            commands::open_file_path,
             commands::default_save_dir,
             commands::get_settings,
             commands::set_settings,
@@ -83,6 +84,29 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Windows: xử lý file truyền qua CLI args khi "Open with" / double-click.
+            // macOS dùng RunEvent::Opened (Apple Event) — không qua argv.
+            #[cfg(target_os = "windows")]
+            {
+                let args: Vec<String> = std::env::args().collect();
+                if args.len() >= 2 {
+                    let path = args[1].clone();
+                    let ext = std::path::Path::new(&path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif") {
+                        let h = handle.clone();
+                        std::thread::spawn(move || {
+                            // Chờ pre-warm xong
+                            std::thread::sleep(std::time::Duration::from_millis(600));
+                            let _ = commands::open_file_path_sync(&h, path);
+                        });
+                    }
+                }
+            }
+
             // Startup: kiểm tra update im lặng sau 3s (không chặn khởi động).
             // Khi có update → tray icon đổi + cửa sổ update mở.
             let app_handle = handle.clone();
@@ -112,12 +136,40 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("Lỗi khởi tạo SnapDoc")
-        .run(|_app, event| {
-            // Giữ app chạy nền (tray) khi đóng hết cửa sổ.
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-                if code.is_none() {
-                    api.prevent_exit();
+        .run(|app, event| {
+            match event {
+                // Giữ app chạy nền (tray) khi đóng hết cửa sổ.
+                tauri::RunEvent::ExitRequested { api, code, .. } => {
+                    if code.is_none() {
+                        api.prevent_exit();
+                    }
                 }
+                // macOS: nhận file từ "Open with" / Finder / kéo vào Dock icon.
+                // Tauri v2 expose qua RunEvent::Opened (tao: application:openURLs:).
+                // Xử lý được cả cold-start (Apple Event đến ngay sau launch)
+                // lẫn runtime (app đang chạy, user chọn "Open with" lần nữa).
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Opened { urls } => {
+                    if let Some(url) = urls.first() {
+                        if url.scheme() == "file" {
+                            if let Ok(path) = url.to_file_path() {
+                                let path_str = path.to_string_lossy().to_string();
+                                let ext = path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .unwrap_or("")
+                                    .to_lowercase();
+                                if matches!(
+                                    ext.as_str(),
+                                    "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif"
+                                ) {
+                                    let _ = commands::open_file_path_sync(app, path_str);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         });
 }

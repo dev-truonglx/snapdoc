@@ -31,7 +31,16 @@
     "macOS": {
       "minimumSystemVersion": "14.0"
     },
-    "category": "Productivity"
+    "category": "Productivity",
+    "fileAssociations": [
+      {
+        "ext": ["png", "jpg", "jpeg", "webp", "bmp", "gif"],
+        "name": "Image",
+        "description": "Image file",
+        "role": "Editor",
+        "mimeType": "image/*"
+      }
+    ]
   },
   "plugins": {
     "updater": {

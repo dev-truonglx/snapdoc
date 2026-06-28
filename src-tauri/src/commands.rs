@@ -3,7 +3,7 @@ use crate::{
 };
 use crate::capture::window::WindowInfo;
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 /// Đọc (không xoá) ảnh đang chờ — dùng cho overlay & thumbnail.
 #[tauri::command]
@@ -147,6 +147,60 @@ pub fn hide_thumbnail(app: AppHandle) {
     if let Some(win) = app.get_webview_window("thumbnail") {
         let _ = win.hide();
     }
+}
+
+/// Mở ảnh từ đường dẫn tuyệt đối vào editor (dùng cho "Open with" / double-click).
+/// Đọc file, encode base64, set pending rồi mở editor.
+#[tauri::command]
+pub fn open_file_path(app: AppHandle, path: String) -> Result<(), String> {
+    open_file_path_sync(&app, path)
+}
+
+/// Hàm nội bộ — gọi được từ lib.rs (RunEvent::Opened, Windows argv).
+pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use crate::state::PendingCapture;
+
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("Không đọc được file: {e}"))?;
+
+    // Decode để lấy kích thước thực
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| format!("Không đọc được ảnh: {e}"))?;
+    let (width, height) = (img.width(), img.height());
+
+    let mime = match path.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp"         => "image/webp",
+        "bmp"          => "image/bmp",
+        "gif"          => "image/gif",
+        _              => "image/png",
+    };
+    let b64 = STANDARD.encode(&bytes);
+    let data_url = format!("data:{mime};base64,{b64}");
+
+    // Đặt vào pending state
+    {
+        let state = app.state::<AppState>();
+        let mut guard = state.pending.lock()
+            .map_err(|_| "Lock error".to_string())?;
+        *guard = Some(PendingCapture {
+            base64: b64,
+            width,
+            height,
+            output: "editor".to_string(),
+        });
+    }
+
+    // Mở editor
+    windows::open_editor(app)?;
+
+    // Emit event với data URL đầy đủ để Editor nhận ngay, không cần gọi takePending
+    if let Some(win) = app.get_webview_window("editor") {
+        let _ = win.emit("open-file", &data_url);
+    }
+
+    Ok(())
 }
 
 /// Mở file dialog để chọn ảnh PNG/JPG, đọc nội dung và trả về base64 data URL.
