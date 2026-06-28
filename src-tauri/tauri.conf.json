@@ -39,7 +39,14 @@
     "category": "Productivity",
     "fileAssociations": [
       {
-        "ext": ["png", "jpg", "jpeg", "webp", "bmp", "gif"],
+        "ext": [
+          "png",
+          "jpg",
+          "jpeg",
+          "webp",
+          "bmp",
+          "gif"
+        ],
         "name": "SnapDoc.ImageFile",
         "description": "Open with SnapDoc Editor",
         "role": "Editor",

@@ -12,7 +12,12 @@ mod update;
 mod windows;
 
 use state::AppState;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri_plugin_global_shortcut::ShortcutState;
+
+/// True khi process này được khởi chạy qua "Open with" (Windows argv có ảnh).
+/// Instance đó là editor tạm: không tray, không chạy nền — đóng cửa sổ là thoát.
+static OPEN_WITH_MODE: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -57,6 +62,7 @@ pub fn run() {
             commands::hide_thumbnail,
             commands::open_file_dialog,
             commands::open_file_path,
+            commands::take_open_file,
             commands::default_save_dir,
             commands::get_settings,
             commands::set_settings,
@@ -75,6 +81,47 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // Windows: phát hiện khởi chạy qua "Open with" (argv[1] là ảnh).
+            // macOS dùng RunEvent::Opened trên instance đang chạy → không qua đây.
+            #[cfg(target_os = "windows")]
+            let open_with_path: Option<String> = {
+                let args: Vec<String> = std::env::args().collect();
+                args.get(1).and_then(|path| {
+                    let ext = std::path::Path::new(path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif") {
+                        Some(path.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+            #[cfg(not(target_os = "windows"))]
+            let open_with_path: Option<String> = None;
+
+            // Instance "Open with": chỉ mở editor với ảnh — KHÔNG tray, KHÔNG
+            // hotkey/prewarm/autostart/update. Đóng cửa sổ editor là thoát hẳn
+            // (xem ExitRequested kiểm tra OPEN_WITH_MODE).
+            if open_with_path.is_some() {
+                OPEN_WITH_MODE.store(true, Ordering::SeqCst);
+
+                #[cfg(target_os = "macos")]
+                app.set_activation_policy(tauri::ActivationPolicy::Regular);
+
+                #[cfg(target_os = "windows")]
+                if let Some(path) = open_with_path {
+                    let h = handle.clone();
+                    std::thread::spawn(move || {
+                        let _ = commands::open_file_path_sync(&h, path);
+                    });
+                }
+                return Ok(());
+            }
+
             tray::build(&handle)?;
             if let Err(e) = hotkey::register_all(&handle) {
                 eprintln!("[SnapDoc] {e}");
@@ -108,29 +155,6 @@ pub fn run() {
                 }
             }
 
-            // Windows: xử lý file truyền qua CLI args khi "Open with" / double-click.
-            // macOS dùng RunEvent::Opened (Apple Event) — không qua argv.
-            #[cfg(target_os = "windows")]
-            {
-                let args: Vec<String> = std::env::args().collect();
-                if args.len() >= 2 {
-                    let path = args[1].clone();
-                    let ext = std::path::Path::new(&path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif") {
-                        let h = handle.clone();
-                        std::thread::spawn(move || {
-                            // Chờ pre-warm xong
-                            std::thread::sleep(std::time::Duration::from_millis(600));
-                            let _ = commands::open_file_path_sync(&h, path);
-                        });
-                    }
-                }
-            }
-
             // Startup: kiểm tra update im lặng sau 3s (không chặn khởi động).
             // Khi có update → tray icon đổi + cửa sổ update mở.
             let app_handle = handle.clone();
@@ -153,7 +177,9 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = _event {
                 use tauri::Manager;
                 let label = _window.label();
-                if label == "editor" || label == "settings" {
+                // "editor" (capture) lẫn "editor-ow-N" ("Open with") đều là cửa
+                // sổ thật → khi đóng, cân nhắc trả về Accessory policy.
+                if label.starts_with("editor") || label == "settings" {
                     windows::on_editor_closed(_window.app_handle());
                 }
             }
@@ -162,9 +188,10 @@ pub fn run() {
         .expect("Lỗi khởi tạo SnapDoc")
         .run(|_app, event| {
             match event {
-                // Giữ app chạy nền (tray) khi đóng hết cửa sổ.
+                // Giữ app chạy nền (tray) khi đóng hết cửa sổ — TRỪ instance
+                // "Open with": đóng cửa sổ editor là thoát hẳn process đó.
                 tauri::RunEvent::ExitRequested { api, code, .. } => {
-                    if code.is_none() {
+                    if code.is_none() && !OPEN_WITH_MODE.load(Ordering::SeqCst) {
                         api.prevent_exit();
                     }
                 }
@@ -174,7 +201,10 @@ pub fn run() {
                 // lẫn runtime (app đang chạy, user chọn "Open with" lần nữa).
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Opened { urls } => {
-                    if let Some(url) = urls.first() {
+                    eprintln!("[SnapDoc] RunEvent::Opened nhận {} url", urls.len());
+                    // Mở MỌI ảnh được chọn (mỗi ảnh một cửa sổ editor riêng),
+                    // không chỉ ảnh đầu tiên — hỗ trợ chọn nhiều file → Open with.
+                    for url in &urls {
                         if url.scheme() == "file" {
                             if let Ok(path) = url.to_file_path() {
                                 let path_str = path.to_string_lossy().to_string();

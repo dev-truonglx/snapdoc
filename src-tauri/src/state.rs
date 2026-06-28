@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::Mutex;
 
@@ -65,4 +66,10 @@ pub struct AppState {
     pub overlay_monitors: Mutex<Vec<MonitorSnap>>,
     /// Chế độ chụp gần nhất — dùng cho nút "New" ở editor.
     pub last_capture: LastCaptureMode,
+    /// macOS: data URL ảnh "Open with" theo label cửa sổ editor. Mỗi lần
+    /// "Open with" mở một cửa sổ editor mới; cửa sổ tự kéo ảnh của nó qua
+    /// `take_open_file` lúc mount (pull → không race timing như emit event).
+    pub open_files: Mutex<HashMap<String, String>>,
+    /// Bộ đếm tạo label cửa sổ editor "Open with" duy nhất (editor-ow-N).
+    pub editor_seq: AtomicU64,
 }

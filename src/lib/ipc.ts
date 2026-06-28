@@ -42,6 +42,8 @@ export interface UpdateInfo {
 export const ipc = {
   peekPending: () => invoke<Pending | null>("peek_pending"),
   takePending: () => invoke<Pending | null>("take_pending"),
+  /** macOS: lấy data URL ảnh "Open with" của chính cửa sổ editor này (theo label). */
+  takeOpenFile: () => invoke<string | null>("take_open_file"),
   captureNow: (mode: CaptureMode, output: OutputMode) =>
     invoke<void>("capture_now", { mode, output }),
   captureAllScreens: (output: OutputMode) =>

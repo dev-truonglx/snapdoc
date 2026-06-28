@@ -485,6 +485,49 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// macOS: mở MỘT cửa sổ editor mới cho mỗi ảnh "Open with" → xem/chỉnh nhiều
+/// ảnh cùng lúc. Mỗi cửa sổ có label `editor-ow-N` riêng; data URL ảnh được lưu
+/// trong AppState theo label và cửa sổ tự kéo qua `take_open_file` lúc mount
+/// (pull → không race timing, không lẫn ảnh giữa các cửa sổ).
+#[cfg(target_os = "macos")]
+pub fn open_editor_with_file(app: &AppHandle, data_url: String) -> Result<(), String> {
+    use tauri::ActivationPolicy;
+    // Hiện Dock + cmd+Tab cho cửa sổ editor "thật".
+    let _ = app.set_activation_policy(ActivationPolicy::Regular);
+
+    let n = app
+        .state::<AppState>()
+        .editor_seq
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
+    let label = format!("editor-ow-{n}");
+    eprintln!("[SnapDoc] Open with → tạo cửa sổ editor mới: {label}");
+
+    if let Ok(mut g) = app.state::<AppState>().open_files.lock() {
+        g.insert(label.clone(), data_url);
+    }
+
+    let win = WebviewWindowBuilder::new(app, &label, url("editor"))
+        .title("SnapDoc — Editor")
+        .inner_size(1040.0, 720.0)
+        .min_inner_size(680.0, 480.0)
+        .resizable(true)
+        .center()
+        .build()
+        .map_err(|e| format!("Không tạo được editor: {e}"))?;
+
+    // Cascade: lệch mỗi cửa sổ một chút để không chồng khít lên nhau → người
+    // dùng thấy rõ nhiều ảnh đang mở thay vì tưởng ảnh trước bị thay.
+    if n > 1 {
+        if let Ok(pos) = win.outer_position() {
+            let off = (((n - 1) % 8) as i32) * 32;
+            let _ = win.set_position(PhysicalPosition::new(pos.x + off, pos.y + off));
+        }
+    }
+    let _ = win.set_focus();
+    Ok(())
+}
+
 /// Trả về Accessory policy (ẩn Dock) nếu không còn cửa sổ editor/settings nào đang mở.
 /// Gọi từ on_window_event khi editor bị đóng.
 #[cfg(target_os = "macos")]

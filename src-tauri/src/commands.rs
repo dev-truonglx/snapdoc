@@ -3,7 +3,7 @@ use crate::{
 };
 use crate::capture::window::WindowInfo;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 /// Đọc (không xoá) ảnh đang chờ — dùng cho overlay & thumbnail.
 #[tauri::command]
@@ -156,17 +156,29 @@ pub fn open_file_path(app: AppHandle, path: String) -> Result<(), String> {
     open_file_path_sync(&app, path)
 }
 
+/// macOS: cửa sổ editor "Open with" tự kéo data URL ảnh của nó lúc mount.
+/// Dùng label cửa sổ gọi để lấy đúng ảnh (mỗi cửa sổ một ảnh riêng).
+#[tauri::command]
+pub fn take_open_file(window: tauri::WebviewWindow, app: AppHandle) -> Option<String> {
+    let label = window.label().to_string();
+    app.state::<AppState>()
+        .open_files
+        .lock()
+        .ok()?
+        .remove(&label)
+}
+
 /// Hàm nội bộ — gọi được từ lib.rs (RunEvent::Opened, Windows argv).
 pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    use crate::state::PendingCapture;
 
     let bytes = std::fs::read(&path)
         .map_err(|e| format!("Không đọc được file: {e}"))?;
 
-    // Decode để lấy kích thước thực
+    // Decode để xác thực là ảnh hợp lệ (đồng thời lấy kích thước cho Windows).
     let img = image::load_from_memory(&bytes)
         .map_err(|e| format!("Không đọc được ảnh: {e}"))?;
+    #[cfg_attr(target_os = "macos", allow(unused_variables))]
     let (width, height) = (img.width(), img.height());
 
     let mime = match path.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
@@ -179,28 +191,36 @@ pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> 
     let b64 = STANDARD.encode(&bytes);
     let data_url = format!("data:{mime};base64,{b64}");
 
-    // Đặt vào pending state
+    // macOS: một process duy nhất xử lý mọi "Open with" → mở MỖI ảnh trong một
+    // cửa sổ editor riêng để xem/chỉnh nhiều ảnh cùng lúc (như Windows mở nhiều
+    // process). Ảnh được lưu theo label; cửa sổ tự kéo qua take_open_file.
+    #[cfg(target_os = "macos")]
     {
-        let state = app.state::<AppState>();
-        let mut guard = state.pending.lock()
-            .map_err(|_| "Lock error".to_string())?;
-        *guard = Some(PendingCapture {
-            base64: b64,
-            width,
-            height,
-            output: "editor".to_string(),
-        });
+        let _ = b64;
+        windows::open_editor_with_file(app, data_url)
     }
 
-    // Mở editor
-    windows::open_editor(app)?;
-
-    // Emit event với data URL đầy đủ để Editor nhận ngay, không cần gọi takePending
-    if let Some(win) = app.get_webview_window("editor") {
-        let _ = win.emit("open-file", &data_url);
+    // Windows: mỗi "Open with" là một process riêng → một cửa sổ "editor".
+    #[cfg(not(target_os = "macos"))]
+    {
+        {
+            let state = app.state::<AppState>();
+            let mut guard = state.pending.lock()
+                .map_err(|_| "Lock error".to_string())?;
+            *guard = Some(PendingCapture {
+                base64: b64,
+                width,
+                height,
+                output: "editor".to_string(),
+            });
+        }
+        windows::open_editor(app)?;
+        if let Some(win) = app.get_webview_window("editor") {
+            use tauri::Emitter;
+            let _ = win.emit("open-file", &data_url);
+        }
+        Ok(())
     }
-
-    Ok(())
 }
 
 /// Mở file dialog để chọn ảnh PNG/JPG, đọc nội dung và trả về base64 data URL.

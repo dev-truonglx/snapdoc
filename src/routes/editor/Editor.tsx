@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Toolbar from "./Toolbar";
 import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
 import { useEditor } from "../../features/annotation/store";
@@ -29,6 +30,20 @@ export default function Editor() {
     });
   };
 
+  const loadFromUrl = (dataUrl: string) => {
+    const img = new Image();
+    img.onload = () => {
+      loadDoc({
+        image: dataUrl,
+        imgW: img.naturalWidth,
+        imgH: img.naturalHeight,
+        scaleFactor: 1,
+        annotations: [],
+      });
+    };
+    img.src = dataUrl;
+  };
+
   // Lấy ảnh chờ khi mở editor + khi có ảnh mới (event refresh-capture)
   useEffect(() => {
     // [DEV] Chạy trên trình duyệt thuần (không Tauri) → nạp ảnh test để thử UI.
@@ -44,25 +59,25 @@ export default function Editor() {
       loadDoc({ image: c.toDataURL("image/png"), imgW: 800, imgH: 500, scaleFactor: 1, annotations: [] });
       return;
     }
+
+    // macOS: cửa sổ "Open with" (editor-ow-N) chỉ hiển thị ĐÚNG ảnh của nó và
+    // KHÔNG nghe event chụp — tránh bị thay ảnh khi user chụp màn hình mới.
+    const label = getCurrentWebviewWindow().label;
+    if (label.startsWith("editor-ow")) {
+      ipc.takeOpenFile().then((url) => {
+        if (url) loadFromUrl(url);
+      });
+      return;
+    }
+
     ipc.takePending().then(loadPending);
     const un = listen("refresh-capture", () => {
       ipc.takePending().then(loadPending);
     });
-    // "Open with" / double-click: Rust emit event này với data URL đầy đủ,
+    // Windows "Open with" / double-click: Rust emit event này với data URL đầy đủ,
     // không cần round-trip IPC takePending (timing an toàn hơn).
     const unOpenFile = listen<string>("open-file", (e) => {
-      const dataUrl = e.payload;
-      const img = new Image();
-      img.onload = () => {
-        loadDoc({
-          image: dataUrl,
-          imgW: img.naturalWidth,
-          imgH: img.naturalHeight,
-          scaleFactor: 1,
-          annotations: [],
-        });
-      };
-      img.src = dataUrl;
+      loadFromUrl(e.payload);
     });
     return () => {
       un.then((f) => f());
