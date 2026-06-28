@@ -23,6 +23,7 @@ export default function Settings() {
   const [perm, setPerm] = useState<boolean | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "err">("idle");
   const [shortcutMsg, setShortcutMsg] = useState<"ok" | "err" | null>(null);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "installing" | "err">("idle");
   const [updateErr, setUpdateErr] = useState<string | null>(null);
@@ -49,6 +50,12 @@ export default function Settings() {
     ipc.getPendingUpdate().then((info) => {
       if (info?.available) setUpdateInfo(info);
     });
+    // Lấy version thực từ Tauri app metadata
+    if ("__TAURI_INTERNALS__" in window) {
+      import("@tauri-apps/api/app").then(({ getVersion }) =>
+        getVersion().then(setAppVersion).catch(() => {})
+      );
+    }
   }, []);
 
   if (!s) return <div className="solid-bg" style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)" }}>Đang tải…</div>;
@@ -156,7 +163,7 @@ export default function Settings() {
       <div style={header}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
           <span style={appName}>SnapDoc</span>
-          <span style={versionBadge}>v{s ? "0.1.0" : "…"}</span>
+          <span style={versionBadge}>{appVersion ? `v${appVersion}` : "…"}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {updateInfo?.available && (

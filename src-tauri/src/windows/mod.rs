@@ -106,6 +106,9 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
+        // Windows: tắt DWM drop-shadow trên cửa sổ transparent/borderless.
+        // macOS không bị ảnh hưởng bởi flag này.
+        .shadow(false)
         .build()
         .map_err(|e| format!("Không tạo được capture bar: {e}"))?;
     place_bottom_center(&win);
@@ -571,7 +574,7 @@ pub fn open_update_window(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "update", url("update"))
         .title("SnapDoc — Cập nhật")
-        .inner_size(360.0, 260.0)
+        .inner_size(360.0, 300.0)
         .resizable(false)
         .center()
         .always_on_top(true)
