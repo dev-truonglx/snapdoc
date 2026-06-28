@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ipc, type CaptureMode, type OutputMode } from "../../lib/ipc";
 
@@ -43,86 +43,75 @@ const MODES: { id: CaptureMode; label: string; icon: React.ReactNode }[] = [
 ];
 
 const OUTPUTS: { id: OutputMode; label: string }[] = [
-  { id: "editor",    label: "Mở editor" },
-  { id: "clipboard", label: "Clipboard" },
-  { id: "save",      label: "Lưu file" },
+  { id: "editor",    label: "Mở editor"  },
+  { id: "clipboard", label: "Clipboard"  },
+  { id: "save",      label: "Lưu file"   },
   { id: "save_copy", label: "Lưu + Copy" },
 ];
-
-const TIMERS = [0, 3, 5];
 
 export default function CaptureBar() {
   const [mode, setMode] = useState<CaptureMode>("region");
   const [output, setOutput] = useState<OutputMode>("editor");
-  const [timer, setTimer] = useState(0);
   const [showOptions, setShowOptions] = useState(false);
-  const [countdown, setCountdown] = useState<number | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Load theo thứ tự ưu tiên: lastCaptureMode > settings default
-    // lastCaptureMode được set mỗi khi user chụp → phản ánh lần chụp gần nhất
-    Promise.all([
-      ipc.getSettings().catch(() => null),
-      ipc.getLastCaptureMode().catch(() => null),
-    ]).then(([settings, last]) => {
-      // Áp settings default trước
-      if (settings) {
-        setOutput(settings.defaultOutput ?? "editor");
-        setTimer(settings.timerSeconds ?? 0);
-      }
-      // Override bằng lastCaptureMode nếu có (user đã chụp ít nhất 1 lần)
-      if (last) {
-        const [m, o] = last;
-        if (m) setMode(m as CaptureMode);
-        if (o) setOutput(o as OutputMode);
-      }
-    });
+    // Load settings — đây là default thực sự từ cấu hình người dùng
+    ipc.getSettings().then((s) => {
+      if (s?.defaultOutput) setOutput(s.defaultOutput);
+    }).catch(() => {});
 
-    // Nhận event từ Editor "New" (gửi sau khi bar đã show)
+    // lastCaptureMode chỉ lấy mode (chế độ chụp), KHÔNG override output
+    // Output luôn theo settings, trừ khi user chủ động đổi trong bar
+    ipc.getLastCaptureMode().then(([m]) => {
+      if (m) setMode(m as CaptureMode);
+    }).catch(() => {});
+
     const unlisten = listen<{ mode: string; output: string }>("set-capture-mode", (e) => {
       setMode(e.payload.mode as CaptureMode);
+      // set-capture-mode từ editor "New" thì mới sync output
       setOutput(e.payload.output as OutputMode);
     });
 
-    // Khi window được focus lại (reuse sau hide) → fetch lại lastMode
-    // Đây là fallback khi event set-capture-mode bị miss
     const onFocus = () => {
-      ipc.getLastCaptureMode().then(([m, o]) => {
+      // Khi focus lại chỉ sync mode, không override output
+      ipc.getLastCaptureMode().then(([m]) => {
         if (m) setMode(m as CaptureMode);
-        if (o) setOutput(o as OutputMode);
       }).catch(() => {});
     };
     window.addEventListener("focus", onFocus);
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") ipc.closeSelf();
-      if (e.key === "Enter") capture();
+      if (e.key === "Escape") {
+        if (showOptions) { setShowOptions(false); return; }
+        ipc.closeSelf();
+      }
+      if (e.key === "Enter") doCapture();
     };
     window.addEventListener("keydown", onKey);
+
+    const onClickOutside = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setShowOptions(false);
+      }
+    };
+    window.addEventListener("mousedown", onClickOutside);
+
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("focus", onFocus);
+      window.removeEventListener("mousedown", onClickOutside);
       unlisten.then((fn) => fn());
     };
   }, []);
 
-  const capture = () => {
-    if (timer > 0) {
-      let n = timer;
-      setCountdown(n);
-      const iv = window.setInterval(() => {
-        n -= 1;
-        if (n <= 0) {
-          window.clearInterval(iv);
-          setCountdown(null);
-          doCapture();
-        } else {
-          setCountdown(n);
-        }
-      }, 1000);
-    } else {
-      doCapture();
-    }
+  /** Chọn output: cập nhật state + lưu settings ngay */
+  const selectOutput = (o: OutputMode) => {
+    setOutput(o);
+    setShowOptions(false);
+    ipc.getSettings().then((s) => {
+      if (s) ipc.setSettings({ ...s, defaultOutput: o }).catch(() => {});
+    }).catch(() => {});
   };
 
   const doCapture = () => {
@@ -133,65 +122,66 @@ export default function CaptureBar() {
     }
   };
 
+  const currentOutput = OUTPUTS.find((o) => o.id === output);
+
   return (
+    // Wrap toàn bộ height, flex-end để bar nằm đáy — popover có không gian phía trên
     <div style={wrap} data-tauri-drag-region>
-      <div style={bar}>
-        {/* Mode buttons */}
-        <div style={modeGroup}>
-          {MODES.map((m) => (
+      <div ref={wrapRef} style={container}>
+        {/* Bar nằm đáy */}
+        <div style={bar}>
+          {/* Mode buttons */}
+          <div style={modeGroup}>
+            {MODES.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setMode(m.id)}
+                style={modeBtn(mode === m.id)}
+                title={m.label}
+              >
+                {m.icon}
+                <span style={{ fontSize: 11, lineHeight: 1 }}>{m.label}</span>
+              </button>
+            ))}
+          </div>
+
+          <div style={divider} />
+
+          {/* Output selector — popover absolute ngay trên nút */}
+          <div style={{ position: "relative" }}>
             <button
-              key={m.id}
-              onClick={() => setMode(m.id)}
-              style={modeBtn(mode === m.id)}
-              title={m.label}
+              style={optBtn}
+              onClick={(e) => { e.stopPropagation(); setShowOptions((v) => !v); }}
             >
-              {m.icon}
-              <span style={{ fontSize: 11, lineHeight: 1 }}>{m.label}</span>
+              <span>{currentOutput?.label ?? "Hành vi"}</span>
+              <span style={{ fontSize: 10, opacity: 0.5 }}>{showOptions ? "▴" : "▾"}</span>
             </button>
-          ))}
-        </div>
-
-        <div style={divider} />
-
-        {/* Options popover */}
-        <div style={{ position: "relative" }}>
-          <button style={optBtn} onClick={() => setShowOptions((v) => !v)}>
-            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
-              <circle cx="7.5" cy="7.5" r="2" stroke="currentColor" strokeWidth="1.5"/>
-              <path d="M7.5 1v2M7.5 12v2M1 7.5h2M12 7.5h2M2.93 2.93l1.41 1.41M10.66 10.66l1.41 1.41M2.93 12.07l1.41-1.41M10.66 4.34l1.41-1.41" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-            </svg>
-            {OUTPUTS.find(o => o.id === output)?.label ?? "Options"}
-            <span style={{ fontSize: 10, opacity: 0.6 }}>▾</span>
-          </button>
-          {showOptions && (
-            <div style={popover} onClick={(e) => e.stopPropagation()}>
-              <div style={popLabel}>Lưu vào</div>
-              {OUTPUTS.map((o) => (
-                <button key={o.id} style={popItem(output === o.id)} onClick={() => { setOutput(o.id); setShowOptions(false); }}>
-                  {o.label}
-                </button>
-              ))}
-              <div style={{ ...popLabel, marginTop: 8 }}>Hẹn giờ</div>
-              <div style={{ display: "flex", gap: 6 }}>
-                {TIMERS.map((t) => (
-                  <button key={t} style={popItem(timer === t)} onClick={() => setTimer(t)}>
-                    {t === 0 ? "Không" : `${t}s`}
+            {showOptions && (
+              <div style={popover} onClick={(e) => e.stopPropagation()}>
+                {OUTPUTS.map((o) => (
+                  <button
+                    key={o.id}
+                    style={popItem(output === o.id)}
+                    onClick={() => selectOutput(o.id)}
+                  >
+                    <span style={{ flex: 1 }}>{o.label}</span>
+                    {output === o.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
                   </button>
                 ))}
               </div>
-            </div>
-          )}
+            )}
+          </div>
+
+          {/* Capture button */}
+          <button style={shootBtn} onClick={doCapture}>
+            Chụp
+          </button>
+
+          {/* Close */}
+          <button aria-label="Đóng" style={closeBtn} onClick={() => ipc.closeSelf()}>
+            ✕
+          </button>
         </div>
-
-        {/* Capture button */}
-        <button style={shootBtn} onClick={capture}>
-          {countdown !== null ? `${countdown}…` : "Chụp"}
-        </button>
-
-        {/* Close */}
-        <button aria-label="Đóng" style={closeBtn} onClick={() => ipc.closeSelf()}>
-          ✕
-        </button>
       </div>
     </div>
   );
@@ -202,8 +192,17 @@ export default function CaptureBar() {
 const wrap: React.CSSProperties = {
   height: "100%",
   display: "flex",
-  alignItems: "center",
+  alignItems: "flex-end",   // bar nằm đáy, popover mở lên trên
   justifyContent: "center",
+  paddingBottom: 12,
+};
+
+// Container bao bar + popover, không có overflow hidden
+const container: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "stretch",
+  gap: 6,
 };
 
 const bar: React.CSSProperties = {
@@ -211,10 +210,8 @@ const bar: React.CSSProperties = {
   alignItems: "center",
   gap: 10,
   background: "rgba(32,32,38,0.97)",
-  border: "none",
   borderRadius: 12,
   padding: "7px 10px",
-  // Bỏ box-shadow theo yêu cầu
 };
 
 const modeGroup: React.CSSProperties = {
@@ -258,6 +255,7 @@ const optBtn: React.CSSProperties = {
   color: "var(--text)",
   background: "transparent",
   whiteSpace: "nowrap",
+  cursor: "pointer",
 };
 
 const shootBtn: React.CSSProperties = {
@@ -287,38 +285,33 @@ const closeBtn: React.CSSProperties = {
 
 const popover: React.CSSProperties = {
   position: "absolute",
-  bottom: "110%",
+  bottom: "calc(100% + 6px)",  // ngay trên nút, cách 6px
   left: 0,
-  width: 180,
-  background: "rgba(36,36,42,0.99)",
-  border: "1px solid rgba(255,255,255,0.1)",
+  background: "rgba(30,30,36,0.99)",
+  border: "1px solid rgba(255,255,255,0.12)",
   borderRadius: 10,
-  padding: 8,
+  padding: 4,
   display: "flex",
   flexDirection: "column",
-  gap: 3,
+  gap: 1,
+  boxShadow: "0 -4px 20px rgba(0,0,0,0.4)",
   zIndex: 100,
-};
-
-const popLabel: React.CSSProperties = {
-  fontSize: 10,
-  fontWeight: 600,
-  letterSpacing: "0.06em",
-  color: "var(--text-dim)",
-  padding: "2px 4px",
-  textTransform: "uppercase",
+  whiteSpace: "nowrap",
 };
 
 function popItem(active: boolean): React.CSSProperties {
   return {
-    textAlign: "left",
-    padding: "6px 8px",
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "6px 12px",
     borderRadius: 6,
     fontSize: 12,
     background: active ? "var(--accent)" : "transparent",
-    color: active ? "#fff" : "var(--text)",
-    flex: 1,
+    color: active ? "#fff" : "var(--text, #cdd6f4)",
     border: "none",
     cursor: "pointer",
+    whiteSpace: "nowrap",
+    textAlign: "left",
   };
 }

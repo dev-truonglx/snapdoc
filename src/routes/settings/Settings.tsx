@@ -182,21 +182,21 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* Update status inline */}
-      {updateStatus === "err" && (
-        <div style={errBanner}>⚠ {updateErr || "Không kiểm tra được — kiểm tra kết nối mạng"}</div>
-      )}
-      {updateStatus === "idle" && updateInfo && !updateInfo.available && (
-        <div style={successBanner}>✓ Đang dùng phiên bản mới nhất</div>
-      )}
-      {updateInfo?.available && (
-        <div style={infoBanner}>
-          Có bản cập nhật: <strong>v{updateInfo.version}</strong>. Nhấn "Cài v{updateInfo.version}" để cài và khởi động lại.
-        </div>
-      )}
-
       {/* ── Scrollable body ── */}
       <div style={body}>
+
+        {/* Update banners — nằm trong scroll area */}
+        {updateStatus === "err" && (
+          <div style={errBanner}>⚠ {updateErr || "Không kiểm tra được — kiểm tra kết nối mạng"}</div>
+        )}
+        {updateStatus === "idle" && updateInfo && !updateInfo.available && (
+          <div style={successBanner}>✓ Đang dùng phiên bản mới nhất</div>
+        )}
+        {updateInfo?.available && (
+          <div style={infoBanner}>
+            Có bản cập nhật: <strong>v{updateInfo.version}</strong>. Nhấn "Cài v{updateInfo.version}" để cài và khởi động lại.
+          </div>
+        )}
 
         {/* LƯU FILE */}
         <Card title="LƯU FILE">
@@ -482,14 +482,14 @@ const updateDot: React.CSSProperties = {
 };
 
 const body: React.CSSProperties = {
-  flex: 1,
+  flex: "1 1 0",
+  minHeight: 0,
   overflowY: "auto",
   overflowX: "hidden",
   padding: "4px 12px 20px",
   display: "flex",
   flexDirection: "column",
   gap: 10,
-  WebkitOverflowScrolling: "touch" as React.CSSProperties["WebkitOverflowScrolling"],
 };
 
 const footer: React.CSSProperties = {
@@ -509,6 +509,7 @@ const card: React.CSSProperties = {
   border: "1px solid var(--border)",
   borderRadius: 8,
   overflow: "hidden",
+  flexShrink: 0,   // không bị ép nhỏ khi body scroll
 };
 
 const cardTitle: React.CSSProperties = {
@@ -684,7 +685,6 @@ const permPending: React.CSSProperties = {
 
 // Banners
 const errBanner: React.CSSProperties = {
-  margin: "0 12px",
   padding: "7px 12px",
   borderRadius: 6,
   fontSize: 12,
@@ -694,7 +694,6 @@ const errBanner: React.CSSProperties = {
 };
 
 const successBanner: React.CSSProperties = {
-  margin: "0 12px",
   padding: "7px 12px",
   borderRadius: 6,
   fontSize: 12,
@@ -704,7 +703,6 @@ const successBanner: React.CSSProperties = {
 };
 
 const infoBanner: React.CSSProperties = {
-  margin: "0 12px",
   padding: "7px 12px",
   borderRadius: 6,
   fontSize: 12,

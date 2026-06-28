@@ -121,10 +121,11 @@ interface Props {
   onSaveCopy: () => void;
   onFlatten: () => void;
   onNew: () => void;
+  onOpen: () => void;
   busy: boolean;
 }
 
-export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, busy }: Props) {
+export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, onOpen, busy }: Props) {
   const {
     tool, setTool,
     color, setColor,
@@ -160,6 +161,14 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
           <path d="M7.5 4v7M4 7.5h7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
         </svg>
         <span style={{ fontSize: 12, fontWeight: 600 }}>New</span>
+      </button>
+
+      {/* Open — mở ảnh từ file */}
+      <button onClick={onOpen} style={newBtn} title="Mở ảnh từ file (Ctrl/Cmd+O)">
+        <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden fill="none">
+          <path d="M1.5 4.5A1 1 0 0 1 2.5 3.5h3.8l1.2 1.5H12.5a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.5"/>
+        </svg>
+        <span style={{ fontSize: 12, fontWeight: 600 }}>Open</span>
       </button>
 
       <div style={sep} />

@@ -100,7 +100,7 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
         .title("SnapDoc")
-        .inner_size(600.0, 140.0)
+        .inner_size(480.0, 280.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -640,9 +640,10 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {    // macOS: chuy�
     }
     let win = WebviewWindowBuilder::new(app, "settings", url("settings"))
         .title("SnapDoc — Cài đặt")
-        .inner_size(560.0, 820.0)
-        .min_inner_size(520.0, 640.0)
-        .resizable(false)
+        .inner_size(560.0, 700.0)
+        .min_inner_size(560.0, 400.0)
+        .max_inner_size(560.0, 10000.0)  // khóa chiều ngang = 560, chỉ resize dọc
+        .resizable(true)
         .center()
         .build()
         .map_err(|e| format!("Không tạo được settings: {e}"))?;

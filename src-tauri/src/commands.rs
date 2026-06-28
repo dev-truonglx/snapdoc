@@ -149,6 +149,41 @@ pub fn hide_thumbnail(app: AppHandle) {
     }
 }
 
+/// Mở file dialog để chọn ảnh PNG/JPG, đọc nội dung và trả về base64 data URL.
+/// Trả về None nếu user huỷ.
+#[tauri::command]
+pub async fn open_file_dialog(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("Ảnh", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
+        .blocking_pick_file();
+
+    let path = match path {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let path_str = path.to_string();
+    let bytes = std::fs::read(&path_str)
+        .map_err(|e| format!("Không đọc được file: {e}"))?;
+
+    // Xác định MIME type từ extension
+    let mime = match path_str.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp"         => "image/webp",
+        "bmp"          => "image/bmp",
+        "gif"          => "image/gif",
+        _              => "image/png",
+    };
+
+    let b64 = STANDARD.encode(&bytes);
+    Ok(Some(format!("data:{mime};base64,{b64}")))
+}
+
 #[tauri::command]
 pub fn default_save_dir(app: AppHandle) -> String {
     app.path()

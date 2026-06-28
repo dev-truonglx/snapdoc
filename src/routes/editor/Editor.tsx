@@ -106,6 +106,9 @@ export default function Editor() {
       } else if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
         doSave(e.shiftKey);
+      } else if (mod && e.key.toLowerCase() === "o") {
+        e.preventDefault();
+        doOpen();
       } else if (mod && e.key.toLowerCase() === "c" && s.tool === "select") {
         doCopy();
       } else if (mod && (e.key === "=" || e.key === "+")) {
@@ -139,6 +142,27 @@ export default function Editor() {
     await ipc.openCaptureBarForNew().catch(() => {});
   };
 
+  // "Open" — mở file dialog chọn ảnh, load vào editor
+  const doOpen = async () => {
+    try {
+      const dataUrl = await ipc.openFile();
+      if (!dataUrl) return;
+      const img = new Image();
+      img.onload = () => {
+        loadDoc({
+          image: dataUrl,
+          imgW: img.naturalWidth,
+          imgH: img.naturalHeight,
+          scaleFactor: 1,
+          annotations: [],
+        });
+      };
+      img.src = dataUrl;
+    } catch (e) {
+      flash(`Lỗi mở file: ${e}`);
+    }
+  };
+
   const confirmFlatten = () => {
     setShowFlattenConfirm(false);
     // Export canvas thành data URL rồi loadDoc lại với annotations rỗng.
@@ -164,7 +188,7 @@ export default function Editor() {
 
   return (
     <div className="solid-bg" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <Toolbar onSave={() => doSave(false)} onCopy={doCopy} onSaveCopy={() => doSave(true)} onFlatten={doFlatten} onNew={doNew} busy={busy} />
+      <Toolbar onSave={() => doSave(false)} onCopy={doCopy} onSaveCopy={() => doSave(true)} onFlatten={doFlatten} onNew={doNew} onOpen={doOpen} busy={busy} />
       <div style={{ flex: 1, minHeight: 0, background: "#161619" }}>
         <AnnotationStage ref={stageRef} />
       </div>

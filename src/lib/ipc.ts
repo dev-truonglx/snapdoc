@@ -61,6 +61,7 @@ export const ipc = {
   openSettings: () => invoke<void>("open_settings"),
   closeSelf: () => invoke<void>("close_self"),
   hideThumbnail: () => invoke<void>("hide_thumbnail"),
+  openFile: () => invoke<string | null>("open_file_dialog"),
   defaultSaveDir: () => invoke<string>("default_save_dir"),
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (value: Settings) => invoke<void>("set_settings", { value }),
