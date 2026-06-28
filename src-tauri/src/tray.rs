@@ -3,7 +3,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Manager,
+    AppHandle,
 };
 
 /// Icon tray template (16×16 và 32×32 PNG đen/trắng cho macOS menu bar).

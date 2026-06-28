@@ -51,7 +51,9 @@ export default function UpdateWindow() {
 
   return (
     <div style={container}>
-      <div style={iconWrap}>🆕</div>
+      <div style={iconWrap}>
+        <img src="/app-icon.png" width={64} height={64} style={{ borderRadius: 14 }} alt="SnapDoc" />
+      </div>
 
       <h2 style={title}>Có bản cập nhật mới</h2>
       <p style={versionText}>
@@ -101,7 +103,6 @@ const container: React.CSSProperties = {
 };
 
 const iconWrap: React.CSSProperties = {
-  fontSize: 40,
   marginBottom: 4,
 };
 

@@ -9,6 +9,7 @@ use std::sync::Mutex;
 #[derive(Clone, Copy, Debug)]
 pub struct MonitorSnap {
     /// CGDirectDisplayID — để khớp đúng NSScreen khi đặt frame overlay.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub id: u32,
     pub x: f64,
     pub y: f64,

@@ -68,6 +68,7 @@ fn configure_overlay_ns_window_main_thread(win: &tauri::WebviewWindow, display_i
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn configure_overlay_ns_window_main_thread(_win: &tauri::WebviewWindow, _display_id: u32) {}
 
 fn url(win: &str) -> WebviewUrl {
@@ -611,7 +612,7 @@ pub fn open_update_window(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "update", url("update"))
         .title("SnapDoc — Cập nhật")
-        .inner_size(360.0, 300.0)
+        .inner_size(360.0, 330.0)
         .resizable(false)
         .center()
         .always_on_top(true)

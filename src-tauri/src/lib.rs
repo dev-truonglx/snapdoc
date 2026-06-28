@@ -98,15 +98,15 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(|_window, _event| {
             // macOS: khi editor bị đóng hoàn toàn, trả về Accessory policy
             // (ẩn Dock icon) nếu không còn cửa sổ "thật" nào khác đang mở.
             #[cfg(target_os = "macos")]
-            if let tauri::WindowEvent::Destroyed = event {
+            if let tauri::WindowEvent::Destroyed = _event {
                 use tauri::Manager;
-                let label = window.label();
+                let label = _window.label();
                 if label == "editor" || label == "settings" {
-                    windows::on_editor_closed(window.app_handle());
+                    windows::on_editor_closed(_window.app_handle());
                 }
             }
         })
