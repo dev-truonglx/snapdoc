@@ -122,10 +122,11 @@ interface Props {
   onFlatten: () => void;
   onNew: () => void;
   onOpen: () => void;
+  onStitch: () => void;
   busy: boolean;
 }
 
-export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, onOpen, busy }: Props) {
+export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy }: Props) {
   const {
     tool, setTool,
     color, setColor,
@@ -169,6 +170,15 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
           <path d="M1.5 4.5A1 1 0 0 1 2.5 3.5h3.8l1.2 1.5H12.5a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.5"/>
         </svg>
         <span style={{ fontSize: 12, fontWeight: 600 }}>Open</span>
+      </button>
+
+      {/* Ghép — nối nhiều ảnh thành ảnh dài */}
+      <button onClick={onStitch} style={newBtn} title="Nối ảnh dài (ghép nhiều ảnh)">
+        <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden fill="none">
+          <rect x="2" y="1.5" width="11" height="5" rx="1" stroke="currentColor" strokeWidth="1.4"/>
+          <rect x="2" y="8.5" width="11" height="5" rx="1" stroke="currentColor" strokeWidth="1.4"/>
+        </svg>
+        <span style={{ fontSize: 12, fontWeight: 600 }}>Ghép</span>
       </button>
 
       <div style={sep} />

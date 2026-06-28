@@ -61,6 +61,7 @@ pub fn run() {
             commands::close_self,
             commands::hide_thumbnail,
             commands::open_file_dialog,
+            commands::open_files_dialog,
             commands::open_file_path,
             commands::take_open_file,
             commands::default_save_dir,

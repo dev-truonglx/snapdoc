@@ -22,7 +22,10 @@ interface EditorState {
   /** Màu dùng cho solid redact. */
   blurSolidColor: string;
   selectedId: string | null;
+  /** Bộ đếm số thứ tự cho tool "step" (số bước) — độc lập với mũi tên số. */
   stepCounter: number;
+  /** Bộ đếm số thứ tự cho tool "numbered-arrow" (mũi tên số) — độc lập với số bước. */
+  arrowCounter: number;
   editingTextId: string | null;
 
   // setup
@@ -48,6 +51,8 @@ interface EditorState {
   updateAnnotationLive: (id: string, patch: Partial<Annotation>) => void;
   removeSelected: () => void;
   applyCrop: (image: string, imgW: number, imgH: number, annotations: Annotation[]) => void;
+  /** Nối ảnh: thay ảnh nền bằng ảnh đã ghép, ĐI QUA history → Ctrl/Cmd+Z hoàn tác được. */
+  applyStitch: (image: string, imgW: number, imgH: number) => void;
 
   // history
   undo: () => void;
@@ -56,6 +61,7 @@ interface EditorState {
   canRedo: () => boolean;
 
   nextStep: () => number;
+  nextArrowStep: () => number;
 }
 
 function commit(state: EditorState, nextDoc: Doc): Partial<EditorState> {
@@ -78,10 +84,11 @@ export const useEditor = create<EditorState>((set, get) => ({
   blurSolidColor: "#1a1a1a",
   selectedId: null,
   stepCounter: 1,
+  arrowCounter: 1,
   editingTextId: null,
 
   loadDoc: (doc) =>
-    set({ doc, past: [], future: [], selectedId: null, stepCounter: 1, tool: "select", editingTextId: null }),
+    set({ doc, past: [], future: [], selectedId: null, stepCounter: 1, arrowCounter: 1, tool: "select", editingTextId: null }),
 
   setEditingText: (editingTextId) => set({ editingTextId }),
   setTool: (tool) => set({ tool, selectedId: tool === "select" ? get().selectedId : null }),
@@ -234,6 +241,17 @@ export const useEditor = create<EditorState>((set, get) => ({
       };
     }),
 
+  applyStitch: (image, imgW, imgH) =>
+    set((s) => {
+      if (!s.doc) return {};
+      // Ảnh ghép ở pixel vật lý (không gắn với DPI nguồn nào) → scaleFactor 1.
+      // commit() đẩy doc hiện tại vào past → undo khôi phục lại trạng thái trước nối.
+      return {
+        ...commit(s, { image, imgW, imgH, scaleFactor: 1, annotations: [] }),
+        selectedId: null,
+      };
+    }),
+
   undo: () =>
     set((s) => {
       if (!s.past.length || !s.doc) return {};
@@ -255,6 +273,12 @@ export const useEditor = create<EditorState>((set, get) => ({
   nextStep: () => {
     const v = get().stepCounter;
     set({ stepCounter: v + 1 });
+    return v;
+  },
+
+  nextArrowStep: () => {
+    const v = get().arrowCounter;
+    set({ arrowCounter: v + 1 });
     return v;
   },
 }));

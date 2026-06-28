@@ -6,6 +6,8 @@ import AnnotationStage, { type StageHandle } from "../../features/annotation/can
 import { useEditor } from "../../features/annotation/store";
 import { copyToClipboard, saveToFile } from "../../features/output/useOutput";
 import { ipc, type Pending } from "../../lib/ipc";
+import StitchDialog from "../../features/annotation/compose/StitchDialog";
+import type { StitchResult } from "../../features/annotation/compose/stitch";
 
 export default function Editor() {
   const stageRef = useRef<StageHandle>(null);
@@ -13,6 +15,7 @@ export default function Editor() {
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showFlattenConfirm, setShowFlattenConfirm] = useState(false);
+  const [stitchImage, setStitchImage] = useState<string | null>(null);
 
   const flash = (msg: string) => {
     setToast(msg);
@@ -195,6 +198,23 @@ export default function Editor() {
     }
   };
 
+  // "Ghép" — mở dialog nối ảnh dài; ảnh đầu = canvas hiện tại (đã flatten).
+  const doStitch = () => {
+    const current = stageRef.current?.flattenPng();
+    if (!current) {
+      flash("Chưa có ảnh để nối");
+      return;
+    }
+    setStitchImage(current);
+  };
+
+  const handleStitchApply = (result: StitchResult) => {
+    setStitchImage(null);
+    // Đi qua history (không loadDoc reset) → Ctrl/Cmd+Z hoàn tác về trước khi nối.
+    useEditor.getState().applyStitch(result.dataUrl, result.width, result.height);
+    flash("Đã nối ảnh — Ctrl/Cmd+Z để hoàn tác");
+  };
+
   const confirmFlatten = () => {
     setShowFlattenConfirm(false);
     // Export canvas thành data URL rồi loadDoc lại với annotations rỗng.
@@ -220,7 +240,7 @@ export default function Editor() {
 
   return (
     <div className="solid-bg" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <Toolbar onSave={() => doSave(false)} onCopy={doCopy} onSaveCopy={() => doSave(true)} onFlatten={doFlatten} onNew={doNew} onOpen={doOpen} busy={busy} />
+      <Toolbar onSave={() => doSave(false)} onCopy={doCopy} onSaveCopy={() => doSave(true)} onFlatten={doFlatten} onNew={doNew} onOpen={doOpen} onStitch={doStitch} busy={busy} />
       <div style={{ flex: 1, minHeight: 0, background: "#161619" }}>
         <AnnotationStage ref={stageRef} />
       </div>
@@ -229,6 +249,13 @@ export default function Editor() {
         <FlattenConfirmDialog
           onConfirm={confirmFlatten}
           onCancel={() => setShowFlattenConfirm(false)}
+        />
+      )}
+      {stitchImage && (
+        <StitchDialog
+          initialImage={stitchImage}
+          onApply={handleStitchApply}
+          onCancel={() => setStitchImage(null)}
         />
       )}
     </div>

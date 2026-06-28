@@ -258,6 +258,42 @@ pub async fn open_file_dialog(app: AppHandle) -> Result<Option<String>, String> 
     Ok(Some(format!("data:{mime};base64,{b64}")))
 }
 
+/// Mở dialog chọn NHIỀU ảnh cùng lúc → trả về danh sách data URL (theo thứ tự
+/// user chọn). Dùng cho tính năng nối ảnh (stitch). Trả về [] nếu user huỷ.
+#[tauri::command]
+pub async fn open_files_dialog(app: AppHandle) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let paths = app
+        .dialog()
+        .file()
+        .add_filter("Ảnh", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
+        .blocking_pick_files();
+
+    let paths = match paths {
+        Some(p) => p,
+        None => return Ok(vec![]),
+    };
+
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let path_str = path.to_string();
+        let bytes = std::fs::read(&path_str)
+            .map_err(|e| format!("Không đọc được file: {e}"))?;
+        let mime = match path_str.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp"         => "image/webp",
+            "bmp"          => "image/bmp",
+            "gif"          => "image/gif",
+            _              => "image/png",
+        };
+        let b64 = STANDARD.encode(&bytes);
+        out.push(format!("data:{mime};base64,{b64}"));
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 pub fn default_save_dir(app: AppHandle) -> String {
     app.path()

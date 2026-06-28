@@ -455,7 +455,7 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
           color, strokeWidth,
         });
       } else {
-        const value = useEditor.getState().nextStep();
+        const value = useEditor.getState().nextArrowStep();
         const radius = Math.max(strokeWidth * 4, 14);
         useEditor.getState().addAnnotation({
           id: uid(), type: "numbered-arrow",
