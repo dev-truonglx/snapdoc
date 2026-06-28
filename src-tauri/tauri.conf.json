@@ -31,12 +31,17 @@
     "macOS": {
       "minimumSystemVersion": "14.0"
     },
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    },
     "category": "Productivity",
     "fileAssociations": [
       {
         "ext": ["png", "jpg", "jpeg", "webp", "bmp", "gif"],
-        "name": "Image",
-        "description": "Image file",
+        "name": "SnapDoc.ImageFile",
+        "description": "Open with SnapDoc Editor",
         "role": "Editor",
         "mimeType": "image/*"
       }

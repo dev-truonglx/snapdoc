@@ -136,7 +136,7 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("Lỗi khởi tạo SnapDoc")
-        .run(|app, event| {
+        .run(|_app, event| {
             match event {
                 // Giữ app chạy nền (tray) khi đóng hết cửa sổ.
                 tauri::RunEvent::ExitRequested { api, code, .. } => {
@@ -163,7 +163,7 @@ pub fn run() {
                                     ext.as_str(),
                                     "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif"
                                 ) {
-                                    let _ = commands::open_file_path_sync(app, path_str);
+                                    let _ = commands::open_file_path_sync(_app, path_str);
                                 }
                             }
                         }
