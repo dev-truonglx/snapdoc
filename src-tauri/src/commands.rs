@@ -141,6 +141,14 @@ pub fn close_self(window: tauri::WebviewWindow) {
     let _ = window.close();
 }
 
+/// Ẩn thumbnail window (giữ pre-warmed, không destroy).
+#[tauri::command]
+pub fn hide_thumbnail(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("thumbnail") {
+        let _ = win.hide();
+    }
+}
+
 #[tauri::command]
 pub fn default_save_dir(app: AppHandle) -> String {
     app.path()

@@ -505,11 +505,36 @@ pub fn on_editor_closed(app: &AppHandle) {
 }
 
 /// Thumbnail nổi góc dưới-phải sau khi chụp.
+/// Dùng pre-warmed window: chỉ emit data + show/reposition thay vì tạo mới.
 pub fn open_thumbnail(app: &AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("thumbnail") {
-        let _ = win.close();
-    }
-    let win = WebviewWindowBuilder::new(app, "thumbnail", url("thumbnail"))
+    // Lấy data từ pending để truyền thẳng qua event (tránh IPC roundtrip từ JS).
+    let base64 = {
+        use crate::state::AppState;
+        app.state::<AppState>()
+            .pending
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|p| p.base64.clone()))
+            .unwrap_or_default()
+    };
+
+    let win = if let Some(w) = app.get_webview_window("thumbnail") {
+        w
+    } else {
+        // Fallback: pre-warm chưa chạy (không nên xảy ra khi runtime bình thường).
+        create_thumbnail_window(app)?
+    };
+
+    // Đặt vị trí góc dưới-phải trước khi show để tránh flash ở vị trí cũ.
+    place_thumbnail(&win);
+    let _ = win.emit("show-thumbnail", &base64);
+    let _ = win.show();
+    let _ = win.set_always_on_top(true);
+    Ok(())
+}
+
+fn create_thumbnail_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    WebviewWindowBuilder::new(app, "thumbnail", url("thumbnail"))
         .title("SnapDoc")
         .inner_size(300.0, 210.0)
         .resizable(false)
@@ -517,9 +542,12 @@ pub fn open_thumbnail(app: &AppHandle) -> Result<(), String> {
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
+        .visible(false)
         .build()
-        .map_err(|e| format!("Không tạo được thumbnail: {e}"))?;
+        .map_err(|e| format!("Không tạo được thumbnail: {e}"))
+}
 
+fn place_thumbnail(win: &tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = win.primary_monitor() {
         let m_size = monitor.size();
         let m_pos = monitor.position();
@@ -531,6 +559,15 @@ pub fn open_thumbnail(app: &AppHandle) -> Result<(), String> {
             let _ = win.set_position(PhysicalPosition::new(x, y));
         }
     }
+}
+
+/// Pre-warm thumbnail window ẩn lúc khởi động.
+/// Khi open_thumbnail được gọi, chỉ cần emit event + show — không tạo webview mới.
+pub fn prewarm_thumbnail(app: &AppHandle) -> Result<(), String> {
+    if app.get_webview_window("thumbnail").is_some() {
+        return Ok(());
+    }
+    create_thumbnail_window(app)?;
     Ok(())
 }
 

@@ -50,6 +50,7 @@ pub fn run() {
             commands::open_editor,
             commands::open_settings,
             commands::close_self,
+            commands::hide_thumbnail,
             commands::default_save_dir,
             commands::get_settings,
             commands::set_settings,
@@ -73,6 +74,8 @@ pub fn run() {
 
             // Pre-warm editor (ẩn) → lần chụp đầu hiển thị tức thì.
             let _ = windows::prewarm_editor(&handle);
+            // Pre-warm thumbnail (ẩn) → hiển thị tức thì sau khi chụp.
+            let _ = windows::prewarm_thumbnail(&handle);
 
             // macOS: app sống ở menu bar, ẩn khỏi Dock lúc khởi động.
             // Khi editor mở sẽ chuyển sang Regular (xem windows::open_editor).
