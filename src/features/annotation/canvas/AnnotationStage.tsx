@@ -87,6 +87,7 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   const [cropRect, setCropRect] = useState<Draft | null>(null);
   const [cropHistory, setCropHistory] = useState<Draft[]>([]); // Lưu lại crop history
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
+  const [textareaSize, setTextareaSize] = useState({ width: 120, height: 60 });
   
   // Theo dõi khi đang resize crop rect bằng handle hoặc move crop
   const [resizingCropHandle, setResizingCropHandle] = useState<string | null>(null);
@@ -127,6 +128,25 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
     return () => window.clearTimeout(id);
   }, [editing?.id]);
 
+  // Lưu lại text khi click chuột ra ngoài textarea
+  const commitTextRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!editing) return;
+
+    const handleOutsideClick = (e: PointerEvent) => {
+      const container = textareaRef.current?.parentElement;
+      if (container && !container.contains(e.target as Node)) {
+        console.log("[text-input] handleOutsideClick - committing text");
+        commitTextRef.current?.();
+      }
+    };
+
+    document.addEventListener("pointerdown", handleOutsideClick, true);
+    return () => {
+      document.removeEventListener("pointerdown", handleOutsideClick, true);
+    };
+  }, [!!editing]);
+
   // Tải ảnh nền
   useEffect(() => {
     if (!doc) return;
@@ -166,14 +186,14 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
     const tr = trRef.current;
     const layer = layerRef.current;
     if (!tr || !layer) return;
-    if (selectedId && tool === "select") {
+    if (selectedId && tool === "select" && editing?.id !== selectedId) {
       const node = layer.findOne("#" + selectedId);
       tr.nodes(node ? [node] : []);
     } else {
       tr.nodes([]);
     }
     layer.batchDraw();
-  }, [selectedId, tool, doc]);
+  }, [selectedId, tool, doc, editing?.id]);
 
   // Zoom giữ nguyên điểm (vx,vy) — toạ độ trong viewport container (px từ mép
   // trái/trên). Dùng chung cho wheel/pinch, nút bấm và phím tắt nên mọi đường
@@ -704,7 +724,14 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   // Mở ô nhập chữ và focus NGAY trong cùng cử chỉ người dùng. flushSync ép
   // textarea render đồng bộ để ref sẵn sàng — bắt buộc cho WKWebView (Tauri),
   // nơi .focus() chỉ ăn khi chạy trong stack sự kiện chuột gốc.
-  const beginEdit = (id: string, value: string) => {
+  const beginEdit = (id: string, value: string, node?: Konva.Node) => {
+    let w = 120;
+    let h = 60;
+    if (node) {
+      w = Math.max(120, node.width() * scale + 24);
+      h = Math.max(60, node.height() * scale + 16);
+    }
+    setTextareaSize({ width: w, height: h });
     flushSync(() => setEditing({ id, value }));
     const ta = textareaRef.current;
     console.log("[text-input] beginEdit focus đồng bộ", { id, hasTextarea: !!ta });
@@ -712,6 +739,39 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       ta.focus();
       ta.setSelectionRange(value.length, value.length);
     }
+  };
+
+  const handleTextareaResize = (e: React.MouseEvent, handle: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const startWidth = textareaSize.width;
+    const startHeight = textareaSize.height;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      
+      let newWidth = startWidth;
+      let newHeight = startHeight;
+      
+      if (handle.includes("right")) newWidth = Math.max(120, Math.min(600, startWidth + dx));
+      if (handle.includes("left")) newWidth = Math.max(120, Math.min(600, startWidth - dx));
+      if (handle.includes("bottom")) newHeight = Math.max(30, Math.min(400, startHeight + dy));
+      if (handle.includes("top")) newHeight = Math.max(30, Math.min(400, startHeight - dy));
+      
+      setTextareaSize({ width: newWidth, height: newHeight });
+    };
+    
+    const onMouseUp = () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+    
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
   };
 
   const commitText = () => {
@@ -726,6 +786,20 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
     }
     setEditing(null);
   };
+
+  const cancelText = () => {
+    if (!editing) return;
+    console.log("[text-input] cancel", { id: editing.id });
+    // Xóa annotation nếu là lần edit đầu tiên (text rỗng ban đầu)
+    const ann = doc?.annotations.find((a) => a.id === editing.id);
+    if (ann && ann.type === "text" && !ann.text) {
+      useEditor.getState().select(editing.id);
+      useEditor.getState().removeSelected();
+    }
+    setEditing(null);
+  };
+
+  commitTextRef.current = commitText;
 
   const draggable = tool === "select";
 
@@ -838,8 +912,9 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
                     fontStyle="bold"
                     draggable={draggable}
                     onClick={() => useEditor.getState().select(a.id)}
-                    onDblClick={() => beginEdit(a.id, a.text)}
+                    onDblClick={(e) => beginEdit(a.id, a.text, e.target)}
                     onDragEnd={(e) => onDragEnd(a.id, e)}
+                    visible={editing?.id !== a.id}
                   />
                 );
               // step
@@ -1267,43 +1342,99 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
           </Layer>
         </Stage>
 
-        {editing && (
-          <textarea
-            ref={textareaRef}
-            autoFocus
-            value={editing.value}
-            onChange={(e) => {
-              console.log("[text-input] onChange", { value: e.target.value });
-              setEditing({ ...editing, value: e.target.value });
-            }}
-            onBlur={commitText}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                commitText();
-              }
-              if (e.key === "Escape") commitText();
-            }}
-            style={{
-              position: "absolute",
-              left: textPos(editing.id).x,
-              top: textPos(editing.id).y,
-              fontSize: fontSize * scale,
-              fontWeight: "bold",
-              color,
-              background: "rgba(0,0,0,0.35)",
-              border: "1px dashed #3b82f6",
-              outline: "none",
-              resize: "none",
-              minWidth: 120,
-              padding: 2,
-              // Bù lại user-select:none kế thừa từ <body> — nếu không, WKWebView
-              // (Tauri) sẽ không cho gõ chữ vào ô này.
-              WebkitUserSelect: "text",
-              userSelect: "text",
-            }}
-          />
-        )}
+        {editing && (() => {
+          const activeAnn = doc?.annotations.find((x) => x.id === editing.id);
+          const activeFontSize = ((activeAnn?.type === "text" ? (activeAnn as any).fontSize : fontSize) ?? fontSize) * scale;
+          const activeColor = activeAnn?.color ?? color;
+          return (
+            <div 
+              style={{
+                position: "absolute",
+                left: textPos(editing.id).x,
+                top: textPos(editing.id).y,
+                width: textareaSize.width,
+                height: textareaSize.height,
+              }}
+            >
+              <textarea
+                ref={textareaRef}
+                autoFocus
+                value={editing.value}
+                onChange={(e) => {
+                  console.log("[text-input] onChange", { value: e.target.value });
+                  setEditing({ ...editing, value: e.target.value });
+                }}
+                onBlur={() => {
+                  console.log("[text-input] onBlur - committing");
+                  commitText();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    cancelText();
+                  }
+                  if (e.key === "Enter" && e.shiftKey) {
+                    e.preventDefault();
+                    commitText();
+                  }
+                }}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  fontSize: activeFontSize,
+                  fontWeight: "bold",
+                  color: activeColor,
+                  fontFamily: "Arial, sans-serif",
+                  background: "transparent",
+                  border: "1px dashed #3b82f6",
+                  outline: "none",
+                  resize: "none",
+                  padding: 0,
+                  overflow: "hidden",
+                  WebkitUserSelect: "text",
+                  userSelect: "text",
+                  boxSizing: "border-box",
+                }}
+              />
+              
+              {/* Custom resize handles */}
+              {[
+                { id: "top-left", cursor: "nwse-resize", top: -4, left: -4 },
+                { id: "top", cursor: "ns-resize", top: -4, left: "50%", transform: "translateX(-50%)" },
+                { id: "top-right", cursor: "nesw-resize", top: -4, right: -4 },
+                { id: "left", cursor: "ew-resize", top: "50%", left: -4, transform: "translateY(-50%)" },
+                { id: "right", cursor: "ew-resize", top: "50%", right: -4, transform: "translateY(-50%)" },
+                { id: "bottom-left", cursor: "nesw-resize", bottom: -4, left: -4 },
+                { id: "bottom", cursor: "ns-resize", bottom: -4, left: "50%", transform: "translateX(-50%)" },
+                { id: "bottom-right", cursor: "nwse-resize", bottom: -4, right: -4 },
+              ].map((handle) => (
+                <div
+                  key={handle.id}
+                  onMouseDown={(e) => {
+                    e.preventDefault(); // Ngăn textarea blur khi kéo resize
+                    handleTextareaResize(e, handle.id);
+                  }}
+                  style={{
+                    position: "absolute",
+                    width: 8,
+                    height: 8,
+                    background: "#3b82f6",
+                    border: "1px solid #fff",
+                    borderRadius: 2,
+                    cursor: handle.cursor,
+                    zIndex: 10,
+                    top: handle.top,
+                    left: handle.left,
+                    right: handle.right,
+                    bottom: handle.bottom,
+                    transform: handle.transform,
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+                  }}
+                />
+              ))}
+            </div>
+          );
+        })()}
 
         {cropRect && (
           <div style={{ position: "absolute", left: 8, bottom: 8, display: "flex", gap: 8 }}>

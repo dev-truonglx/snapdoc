@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
+import { useState, useEffect } from "react";
 import { useEditor } from "../../features/annotation/store";
-import { PRESET_COLORS, HIGHLIGHT_COLORS, STROKE_WIDTHS, type Tool } from "../../features/annotation/model";
+import { PRESET_COLORS, HIGHLIGHT_COLORS, STROKE_WIDTHS, SOLID_COLORS, type Tool } from "../../features/annotation/model";
 
 /** Icon 18×18, dùng currentColor để kế thừa màu nút. */
 const ICONS: Record<Tool, ReactNode> = {
@@ -95,8 +96,6 @@ const FONT_MIN = 8;
 const FONT_MAX = 200;
 const clampFont = (n: number) => Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(n || FONT_MIN)));
 
-const SOLID_COLORS = ["#1a1a1a", "#ef4444", "#111827", "#ffffff", "#0f172a"];
-
 // Tools chia thành 2 nhóm để tránh toolbar quá dài
 const TOOLS_GROUP1: { id: Tool; label: string; hint: string }[] = [
   { id: "select",         label: "Chọn",        hint: "V" },
@@ -140,6 +139,29 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
     removeSelected, selectedId,
     doc,
   } = useEditor();
+
+  const [customColor, setCustomColor] = useState("#ef4444");
+  const [customHighlight, setCustomHighlight] = useState("#fbbf24");
+  const [customSolid, setCustomSolid] = useState("#1a1a1a");
+
+  // Sync custom colors with store values
+  useEffect(() => {
+    if (color && !PRESET_COLORS.includes(color)) {
+      setCustomColor(color);
+    }
+  }, [color]);
+
+  useEffect(() => {
+    if (highlightColor && !HIGHLIGHT_COLORS.includes(highlightColor)) {
+      setCustomHighlight(highlightColor);
+    }
+  }, [highlightColor]);
+
+  useEffect(() => {
+    if (blurSolidColor && !SOLID_COLORS.includes(blurSolidColor)) {
+      setCustomSolid(blurSolidColor);
+    }
+  }, [blurSolidColor]);
 
   // Annotation đang được chọn (nếu có)
   const selectedAnn = selectedId && doc
@@ -212,16 +234,57 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
       {/* Màu stroke — ẩn khi đang dùng highlight/blur */}
       {!isHighlight && !isBlur && (
         <div style={group}>
+          <span style={dimLabel}>Màu</span>
           {PRESET_COLORS.map((c) => (
             <button key={c} onClick={() => setColor(c)} title={c}
               style={{
-                width: 22, height: 22, borderRadius: "50%",
+                width: 24, height: 24, borderRadius: "50%",
                 background: c,
-                border: color === c ? "2px solid #fff" : "2px solid transparent",
-                boxShadow: color === c ? "0 0 0 1.5px #3b82f6" : "none",
+                border: color === c ? "2.5px solid #fff" : "1px solid rgba(255,255,255,0.15)",
+                boxShadow: color === c ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.2)" : "0 1px 2px rgba(0,0,0,0.2)",
                 flexShrink: 0,
+                cursor: "pointer",
+                transition: "all 0.12s",
               }} />
           ))}
+          {/* Custom color picker */}
+          <div style={{ position: "relative" }}>
+            <input
+              type="color"
+              value={customColor}
+              onChange={(e) => {
+                setCustomColor(e.target.value);
+                setColor(e.target.value);
+              }}
+              title="Chọn màu tùy chỉnh"
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: "50%",
+                border: color === customColor && !PRESET_COLORS.includes(color) 
+                  ? "2.5px solid #fff" 
+                  : "1px solid rgba(255,255,255,0.15)",
+                boxShadow: color === customColor && !PRESET_COLORS.includes(color)
+                  ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.2)"
+                  : "0 1px 2px rgba(0,0,0,0.2)",
+                cursor: "pointer",
+                flexShrink: 0,
+                padding: 0,
+                background: customColor,
+              }}
+            />
+            <div style={{
+              position: "absolute",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              pointerEvents: "none",
+              fontSize: 10,
+              color: "#fff",
+              textShadow: "0 1px 2px rgba(0,0,0,0.5)",
+              fontWeight: "bold",
+            }}>+</div>
+          </div>
         </div>
       )}
 
@@ -232,14 +295,54 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
           {HIGHLIGHT_COLORS.map((c) => (
             <button key={c} onClick={() => setHighlightColor(c)} title={c}
               style={{
-                width: 22, height: 22, borderRadius: 4,
+                width: 24, height: 24, borderRadius: 6,
                 background: c,
-                opacity: 0.8,
-                border: highlightColor === c ? "2px solid #fff" : "2px solid transparent",
-                boxShadow: highlightColor === c ? "0 0 0 1.5px #3b82f6" : "none",
+                opacity: highlightColor === c ? 0.9 : 0.7,
+                border: highlightColor === c ? "2.5px solid #fff" : "1px solid rgba(255,255,255,0.15)",
+                boxShadow: highlightColor === c ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.2)" : "0 1px 2px rgba(0,0,0,0.2)",
                 flexShrink: 0,
+                cursor: "pointer",
+                transition: "all 0.12s",
               }} />
           ))}
+          {/* Custom highlight color picker */}
+          <div style={{ position: "relative" }}>
+            <input
+              type="color"
+              value={customHighlight}
+              onChange={(e) => {
+                setCustomHighlight(e.target.value);
+                setHighlightColor(e.target.value);
+              }}
+              title="Chọn màu tùy chỉnh"
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: 6,
+                border: highlightColor === customHighlight && !HIGHLIGHT_COLORS.includes(highlightColor)
+                  ? "2.5px solid #fff"
+                  : "1px solid rgba(255,255,255,0.15)",
+                boxShadow: highlightColor === customHighlight && !HIGHLIGHT_COLORS.includes(highlightColor)
+                  ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.2)"
+                  : "0 1px 2px rgba(0,0,0,0.2)",
+                cursor: "pointer",
+                flexShrink: 0,
+                padding: 0,
+                opacity: 0.8,
+              }}
+            />
+            <div style={{
+              position: "absolute",
+              top: "50%",
+              left: "50%",
+              transform: "translate(-50%, -50%)",
+              pointerEvents: "none",
+              fontSize: 10,
+              color: "#fff",
+              textShadow: "0 1px 2px rgba(0,0,0,0.5)",
+              fontWeight: "bold",
+            }}>+</div>
+          </div>
         </div>
       )}
 
@@ -326,14 +429,53 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
                     onClick={() => setBlurSolidColor(c)}
                     title={c}
                     style={{
-                      width: 22, height: 22, borderRadius: 4,
+                      width: 24, height: 24, borderRadius: 6,
                       background: c,
-                      border: blurSolidColor === c ? "2px solid #fff" : "2px solid transparent",
-                      boxShadow: blurSolidColor === c ? "0 0 0 1.5px #3b82f6" : "none",
+                      border: blurSolidColor === c ? "2.5px solid #fff" : "1px solid rgba(255,255,255,0.15)",
+                      boxShadow: blurSolidColor === c ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.2)" : "0 1px 2px rgba(0,0,0,0.2)",
                       flexShrink: 0,
+                      cursor: "pointer",
+                      transition: "all 0.12s",
                     }}
                   />
                 ))}
+                {/* Custom solid color picker */}
+                <div style={{ position: "relative" }}>
+                  <input
+                    type="color"
+                    value={customSolid}
+                    onChange={(e) => {
+                      setCustomSolid(e.target.value);
+                      setBlurSolidColor(e.target.value);
+                    }}
+                    title="Chọn màu tùy chỉnh"
+                    style={{
+                      width: 24,
+                      height: 24,
+                      borderRadius: 6,
+                      border: blurSolidColor === customSolid && !SOLID_COLORS.includes(blurSolidColor)
+                        ? "2.5px solid #fff"
+                        : "1px solid rgba(255,255,255,0.15)",
+                      boxShadow: blurSolidColor === customSolid && !SOLID_COLORS.includes(blurSolidColor)
+                        ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.2)"
+                        : "0 1px 2px rgba(0,0,0,0.2)",
+                      cursor: "pointer",
+                      flexShrink: 0,
+                      padding: 0,
+                    }}
+                  />
+                  <div style={{
+                    position: "absolute",
+                    top: "50%",
+                    left: "50%",
+                    transform: "translate(-50%, -50%)",
+                    pointerEvents: "none",
+                    fontSize: 10,
+                    color: "#fff",
+                    textShadow: "0 1px 2px rgba(0,0,0,0.5)",
+                    fontWeight: "bold",
+                  }}>+</div>
+                </div>
               </div>
             </>
           )}
