@@ -21,7 +21,8 @@ fn defaults() -> Value {
             "region": "CmdOrCtrl+Shift+2",
             "window": "CmdOrCtrl+Shift+3",
             "all": "CmdOrCtrl+Shift+4",
-            "captureCopy": "CmdOrCtrl+Shift+C"
+            "captureCopy": "CmdOrCtrl+Shift+C",
+            "scroll": "CmdOrCtrl+Shift+6"
         }
     })
 }

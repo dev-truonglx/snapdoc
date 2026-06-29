@@ -35,6 +35,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "full"   => dispatch(app, "full"),
             "region" => dispatch(app, "region"),
             "window" => dispatch(app, "window"),
+            "scroll" => dispatch(app, "scroll"),
             "bar" => {
                 let _ = windows::open_capture_bar(app);
             }
@@ -64,13 +65,14 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let full   = MenuItem::with_id(app, "full",   "Chụp toàn màn hình",   true, sc("full").as_deref())?;
     let region = MenuItem::with_id(app, "region", "Chụp vùng chọn",       true, sc("region").as_deref())?;
     let window = MenuItem::with_id(app, "window", "Chụp cửa sổ",          true, sc("window").as_deref())?;
+    let scroll = MenuItem::with_id(app, "scroll", "Chụp cuộn",            true, sc("scroll").as_deref())?;
     let bar    = MenuItem::with_id(app, "bar",    "Mở thanh chụp…",       true, sc("bar").as_deref())?;
     let settings = MenuItem::with_id(app, "settings", "Cài đặt…",         true, None::<&str>)?;
     let quit   = MenuItem::with_id(app, "quit",   "Thoát SnapDoc",         true, None::<&str>)?;
     let sep1   = PredefinedMenuItem::separator(app)?;
     let sep2   = PredefinedMenuItem::separator(app)?;
 
-    Menu::with_items(app, &[&all, &full, &region, &window, &sep1, &bar, &settings, &sep2, &quit])
+    Menu::with_items(app, &[&all, &full, &region, &window, &scroll, &sep1, &bar, &settings, &sep2, &quit])
 }
 
 /// Rebuild tray menu với shortcuts mới nhất — gọi sau `reload_shortcuts`.

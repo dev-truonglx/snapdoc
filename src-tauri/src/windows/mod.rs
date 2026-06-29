@@ -178,23 +178,40 @@ pub fn open_scroll_control(
 
     // Đặt click-through để chuột nhấn xuyên qua được viền
     let _ = border_win.set_ignore_cursor_events(true);
+    // Loại khung viền khỏi ảnh chụp (SCK trên macOS / WGC trên Windows bỏ qua
+    // cửa sổ content-protected) — tránh viền nét đứt lọt vào lát cắt khi nó
+    // nằm đè lên vùng đang cuộn.
+    let _ = border_win.set_content_protected(true);
 
-    // 2. Tính toán vị trí bảng điều khiển sát cạnh phải của vùng chọn
+    // 2. Tính toán vị trí bảng điều khiển. Ưu tiên đặt NGOÀI vùng chọn bên phải;
+    //    nếu không đủ chỗ thì bên trái; nếu vùng chọn chiếm hết (cả hai bên đều
+    //    không đủ) thì đặt TRONG vùng chọn, luôn SÁT MÉP PHẢI. Panel đã được
+    //    content-protect nên không lọt vào ảnh chụp dù nằm đè lên vùng cuộn.
     let ctrl_w = 260.0;
     let ctrl_h = 420.0;
+    let margin = 8.0;
 
-    let mut ctrl_x = global_x + lw + 8.0;
-    let mut ctrl_y = global_y;
-
-    // Nếu tràn lề phải màn hình -> đặt sang cạnh trái
     let m_w = m.width().map_err(|e| e.to_string())? as f64 / scale;
     let m_h = m.height().map_err(|e| e.to_string())? as f64 / scale;
-    if ctrl_x + ctrl_w > m_x + m_w {
-        ctrl_x = global_x - ctrl_w - 8.0;
-    }
-    // Giữ trong biên màn hình
-    ctrl_x = ctrl_x.max(m_x + 8.0).min(m_x + m_w - ctrl_w - 8.0);
-    ctrl_y = ctrl_y.max(m_y + 8.0).min(m_y + m_h - ctrl_h - 8.0);
+
+    let right_outside = global_x + lw + margin;
+    let left_outside = global_x - ctrl_w - margin;
+
+    let mut ctrl_x = if right_outside + ctrl_w <= m_x + m_w {
+        // Đủ chỗ bên phải, ngoài vùng chọn.
+        right_outside
+    } else if left_outside >= m_x {
+        // Đủ chỗ bên trái, ngoài vùng chọn.
+        left_outside
+    } else {
+        // Vùng chọn chiếm hết -> nằm trong vùng chọn, sát cạnh phải.
+        global_x + lw - ctrl_w - margin
+    };
+    let mut ctrl_y = global_y;
+
+    // Giữ trong biên màn hình (chốt an toàn).
+    ctrl_x = ctrl_x.max(m_x + margin).min(m_x + m_w - ctrl_w - margin);
+    ctrl_y = ctrl_y.max(m_y + margin).min(m_y + m_h - ctrl_h - margin);
 
     let url_str = format!("scroll-control&mx={mx}&my={my}&rx={rx}&ry={ry}&rw={rw}&rh={rh}");
     let control_win = WebviewWindowBuilder::new(app, "scroll-control", url(&url_str))
@@ -208,6 +225,11 @@ pub fn open_scroll_control(
         .shadow(false)
         .build()
         .map_err(|e| format!("Không tạo được bảng điều khiển chụp cuộn: {e}"))?;
+
+    // Bảng điều khiển (có khung preview) cũng phải bị loại khỏi ảnh chụp: khi
+    // vùng chọn rộng và panel buộc phải đặt đè lên vùng đang cuộn, nó sẽ không
+    // lọt vào lát cắt.
+    let _ = control_win.set_content_protected(true);
 
     let _ = control_win.set_focus();
     Ok(())
