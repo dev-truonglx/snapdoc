@@ -196,6 +196,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|_window, _event| {
+            if let tauri::WindowEvent::Focused(focused) = _event {
+                if !*focused && _window.label() == "capture-bar" {
+                    use tauri::Emitter;
+                    let _ = _window.emit("hide-popover", ());
+                }
+            }
             // macOS: khi editor bị đóng hoàn toàn, trả về Accessory policy
             // (ẩn Dock icon) nếu không còn cửa sổ "thật" nào khác đang mở.
             #[cfg(target_os = "macos")]

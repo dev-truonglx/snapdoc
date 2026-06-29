@@ -59,6 +59,14 @@ export default function CaptureBar() {
   // lại đúng giá trị đó, không gây loop).
   const userPickedRef = useRef(false);
 
+  // Lưu ref cho các state truy cập trong event listeners để tránh stale closures
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const outputRef = useRef(output);
+  outputRef.current = output;
+  const showOptionsRef = useRef(showOptions);
+  showOptionsRef.current = showOptions;
+
   useEffect(() => {
     // Load settings lần đầu
     ipc.getSettings().then((s) => {
@@ -93,12 +101,27 @@ export default function CaptureBar() {
     };
     window.addEventListener("focus", onFocus);
 
+    // Listen to native Tauri blur event to close popover when clicking outside the window
+    const unlistenBlur = listen("tauri://blur", () => {
+      setShowOptions(false);
+    });
+
+    const unlistenHidePopover = listen("hide-popover", () => {
+      setShowOptions(false);
+    });
+
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (showOptions) { setShowOptions(false); return; }
+        if (showOptionsRef.current) { setShowOptions(false); return; }
         ipc.closeSelf();
       }
-      if (e.key === "Enter") doCapture();
+      if (e.key === "Enter") {
+        if (modeRef.current === "all") {
+          ipc.captureAllScreens(outputRef.current);
+        } else {
+          ipc.captureNow(modeRef.current, outputRef.current);
+        }
+      }
     };
     window.addEventListener("keydown", onKey);
 
@@ -115,6 +138,8 @@ export default function CaptureBar() {
       window.removeEventListener("mousedown", onClickOutside);
       unlisten.then((fn) => fn());
       unlistenSettings.then((fn) => fn());
+      unlistenBlur.then((fn) => fn());
+      unlistenHidePopover.then((fn) => fn());
     };
   }, []);
 
@@ -145,8 +170,8 @@ export default function CaptureBar() {
 
   return (
     // Wrap toàn bộ height, flex-end để bar nằm đáy — popover có không gian phía trên
-    <div style={wrap} data-tauri-drag-region>
-      <div ref={wrapRef} style={container}>
+    <div style={wrap}>
+      <div style={container}>
         {/* Bar nằm đáy */}
         <div style={bar}>
           {/* Mode buttons */}
@@ -167,7 +192,7 @@ export default function CaptureBar() {
           <div style={divider} />
 
           {/* Output selector — popover absolute ngay trên nút */}
-          <div style={{ position: "relative" }}>
+          <div ref={wrapRef} style={{ position: "relative" }}>
             <button
               style={optBtn}
               onClick={(e) => { e.stopPropagation(); setShowOptions((v) => !v); }}
