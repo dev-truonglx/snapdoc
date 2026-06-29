@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ipc, type Settings as S, type UpdateInfo } from "../../lib/ipc";
 
@@ -56,6 +57,27 @@ export default function Settings() {
         getVersion().then(setAppVersion).catch(() => {})
       );
     }
+
+    // Sync lại settings khi có window khác (vd: CaptureBar) thay đổi defaultOutput.
+    // Chỉ áp dụng các field không đang được user chỉnh trong Settings để tránh
+    // ghi đè thao tác đang diễn ra (debounce). Field quan trọng nhất: defaultOutput.
+    const unlistenSettings = listen<Record<string, unknown>>("settings-changed", (e) => {
+      setS((prev) => {
+        if (!prev) return prev;
+        // Chỉ cập nhật defaultOutput từ bên ngoài nếu pending debounce không đang chạy
+        // (pendingRef.current null = không có thay đổi chưa lưu từ Settings UI).
+        if (pendingRef.current !== null) return prev;
+        const incoming = e.payload?.defaultOutput as S["defaultOutput"] | undefined;
+        if (incoming && incoming !== prev.defaultOutput) {
+          return { ...prev, defaultOutput: incoming };
+        }
+        return prev;
+      });
+    });
+
+    return () => {
+      unlistenSettings.then((fn) => fn());
+    };
   }, []);
 
   if (!s) return <div className="solid-bg" style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)" }}>Đang tải…</div>;

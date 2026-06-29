@@ -327,7 +327,12 @@ pub fn set_settings(app: AppHandle, value: Value) -> Result<(), String> {
         .path()
         .app_config_dir()
         .map_err(|e| format!("Không tìm thấy thư mục config: {e}"))?;
-    storage::settings::save(&dir, &value)
+    storage::settings::save(&dir, &value)?;
+    // Broadcast cho tất cả window đang mở để sync lại settings.
+    // CaptureBar cần biết khi Settings đổi defaultOutput, và ngược lại.
+    use tauri::Emitter;
+    let _ = app.emit("settings-changed", &value);
+    Ok(())
 }
 
 #[tauri::command]

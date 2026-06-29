@@ -130,23 +130,21 @@ pub fn open_capture_bar_with_last_mode(app: &AppHandle) -> Result<(), String> {
 
     // Với window đã tồn tại: listener JS đã active → delay ngắn.
     // Với window mới: cần đợi React mount + register listener → delay dài hơn.
-    // Emit 2 lần (80ms + 500ms) để cover cả hai trường hợp.
     // Chỉ emit mode, không emit output → capture bar tự load defaultOutput từ settings.
+    // Dùng async_runtime (Tokio) để emit an toàn từ async context.
     let app = app.clone();
-    std::thread::spawn(move || {
+    tauri::async_runtime::spawn(async move {
         let first_delay = if is_new_window { 400 } else { 80 };
-        std::thread::sleep(std::time::Duration::from_millis(first_delay));
+        tokio::time::sleep(std::time::Duration::from_millis(first_delay)).await;
         if let Some(win) = app.get_webview_window("capture-bar") {
-            let payload = serde_json::json!({ "mode": mode, "output": null });
+            let payload = serde_json::json!({ "mode": mode, "output": serde_json::Value::Null });
             let _ = win.emit("set-capture-mode", payload.clone());
             // Emit lần 2 cho window mới (đảm bảo listener đã mount)
             if is_new_window {
-                let win2 = win.clone();
-                let p2 = payload.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                    let _ = win2.emit("set-capture-mode", p2);
-                });
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                if let Some(win2) = app.get_webview_window("capture-bar") {
+                    let _ = win2.emit("set-capture-mode", payload);
+                }
             }
         }
     });
@@ -473,12 +471,14 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         let _ = win.unminimize();
         let _ = win.set_focus();
         // Trên Windows, show() là async (WM_SHOWWINDOW qua message pump).
-        // Emit refresh-capture sau một tick ngắn để đảm bảo webview đang
-        // visible và có thể xử lý event trước khi JS nhận được nó.
+        // Emit refresh-capture sau một tick để đảm bảo webview visible và
+        // JS message pump đang chạy trước khi nhận event.
+        // Dùng async_runtime::spawn (Tokio) thay vì std::thread để tránh
+        // gọi Tauri IPC từ thread không có context phù hợp.
         let win2 = win.clone();
-        std::thread::spawn(move || {
+        tauri::async_runtime::spawn(async move {
             #[cfg(target_os = "windows")]
-            std::thread::sleep(std::time::Duration::from_millis(80));
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let _ = win2.emit("refresh-capture", ());
         });
         return Ok(());
@@ -580,9 +580,23 @@ pub fn open_thumbnail(app: &AppHandle) -> Result<(), String> {
 
     // Đặt vị trí góc dưới-phải trước khi show để tránh flash ở vị trí cũ.
     place_thumbnail(&win);
-    let _ = win.emit("show-thumbnail", &base64);
+
+    // QUAN TRỌNG: show() TRƯỚC emit() trên Windows.
+    // WebView2 suspend JavaScript execution khi window hidden → event bị drop
+    // nếu emit trước show. Show window trước, đợi WebView2 resume, rồi mới emit.
     let _ = win.show();
     let _ = win.set_always_on_top(true);
+
+    // Trên Windows: đợi WebView2 resume JS sau khi window visible.
+    // Emit ngay sau show() có thể vẫn bị drop trong ~1 frame đầu.
+    let win2 = win.clone();
+    let b64 = base64;
+    std::thread::spawn(move || {
+        #[cfg(target_os = "windows")]
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = win2.emit("show-thumbnail", &b64);
+    });
+
     Ok(())
 }
 

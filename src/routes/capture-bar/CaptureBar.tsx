@@ -54,18 +54,28 @@ export default function CaptureBar() {
   const [output, setOutput] = useState<OutputMode>("editor");
   const [showOptions, setShowOptions] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // Dùng ref để tránh setOutput ghi đè khi user đang chủ động chọn output
+  // trong cùng một session (selectOutput đã lưu settings rồi → event sẽ fire
+  // lại đúng giá trị đó, không gây loop).
+  const userPickedRef = useRef(false);
 
   useEffect(() => {
-    // Load settings — đây là default thực sự từ cấu hình người dùng
+    // Load settings lần đầu
     ipc.getSettings().then((s) => {
       if (s?.defaultOutput) setOutput(s.defaultOutput);
     }).catch(() => {});
 
-    // lastCaptureMode chỉ lấy mode (chế độ chụp), KHÔNG override output
-    // Output luôn theo settings, trừ khi user chủ động đổi trong bar
     ipc.getLastCaptureMode().then(([m]) => {
       if (m) setMode(m as CaptureMode);
     }).catch(() => {});
+
+    // Sync output khi Settings thay đổi defaultOutput từ cửa sổ Settings.
+    // Chỉ áp dụng khi user KHÔNG đang chủ động chọn trong capture bar.
+    const unlistenSettings = listen<Record<string, unknown>>("settings-changed", (e) => {
+      if (!userPickedRef.current && e.payload?.defaultOutput) {
+        setOutput(e.payload.defaultOutput as OutputMode);
+      }
+    });
 
     const unlisten = listen<{ mode: string; output: string | null }>("set-capture-mode", (e) => {
       setMode(e.payload.mode as CaptureMode);
@@ -77,7 +87,6 @@ export default function CaptureBar() {
     });
 
     const onFocus = () => {
-      // Khi focus lại chỉ sync mode, không override output
       ipc.getLastCaptureMode().then(([m]) => {
         if (m) setMode(m as CaptureMode);
       }).catch(() => {});
@@ -105,16 +114,23 @@ export default function CaptureBar() {
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("mousedown", onClickOutside);
       unlisten.then((fn) => fn());
+      unlistenSettings.then((fn) => fn());
     };
   }, []);
 
-  /** Chọn output: cập nhật state + lưu settings ngay */
+  /** Chọn output: cập nhật state + lưu settings ngay.
+   * Khi lưu xong, Rust emit settings-changed → tất cả window sync lại.
+   * userPickedRef tránh CaptureBar bị overwrite lại bởi chính event nó gây ra. */
   const selectOutput = (o: OutputMode) => {
+    userPickedRef.current = true;
     setOutput(o);
     setShowOptions(false);
     ipc.getSettings().then((s) => {
       if (s) ipc.setSettings({ ...s, defaultOutput: o }).catch(() => {});
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => {
+      // Reset sau khi lưu xong — các thay đổi tiếp theo từ Settings sẽ được áp dụng
+      userPickedRef.current = false;
+    });
   };
 
   const doCapture = () => {
