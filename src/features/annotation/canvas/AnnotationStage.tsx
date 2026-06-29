@@ -85,7 +85,17 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [arrowDraft, setArrowDraft] = useState<ArrowDraft | null>(null);
   const [cropRect, setCropRect] = useState<Draft | null>(null);
+  const [cropHistory, setCropHistory] = useState<Draft[]>([]); // Lưu lại crop history
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
+  
+  // Theo dõi khi đang resize crop rect bằng handle hoặc move crop
+  const [resizingCropHandle, setResizingCropHandle] = useState<string | null>(null);
+  const [cropHoverHandle, setCropHoverHandle] = useState<string | null>(null);
+  const cropResizeStartRef = useRef<{ 
+    cropX: number; cropY: number; cropW: number; cropH: number;
+    startX: number; startY: number;
+    isMove?: boolean;
+  } | null>(null);
 
   // Focus tường minh ô nhập chữ khi bắt đầu sửa. `autoFocus` không đáng tin
   // trong webview (Tauri) khi phần tử được tạo ngay trong handler mousedown —
@@ -277,6 +287,43 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
     };
   }, []);
 
+  // Keyboard shortcuts: Delete để xóa crop, Escape để hủy, Ctrl/Cmd+Z để undo crop
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Bỏ qua nếu đang nhập text
+      const tag = (document.activeElement as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (useEditor.getState().editingTextId) return;
+
+      // Ctrl/Cmd+Z: undo crop (nếu có crop history)
+      if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey && cropRect && cropHistory.length > 0) {
+        e.preventDefault();
+        undoCrop();
+        return;
+      }
+
+      // Delete hoặc Backspace: xóa crop rect
+      if ((e.key === "Delete" || e.key === "Backspace") && cropRect) {
+        e.preventDefault();
+        setCropRect(null);
+        setCropHistory([]);
+        useEditor.getState().setTool("select");
+        return;
+      }
+
+      // Escape: hủy crop
+      if (e.key === "Escape" && cropRect) {
+        e.preventDefault();
+        setCropRect(null);
+        setCropHistory([]);
+        useEditor.getState().setTool("select");
+        return;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [cropRect, cropHistory]);
+
   // Pointer events trên scroll container cho pan.
   // Dùng setPointerCapture để tiếp tục nhận move/up kể cả khi chuột ra ngoài.
   useEffect(() => {
@@ -364,6 +411,35 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
 
   const toImg = (p: { x: number; y: number }) => ({ x: p.x / scale, y: p.y / scale });
 
+  // Helper function để lấy cursor cho crop handles
+  const getCropCursor = (handleId: string): string => {
+    if (handleId === "move") return "grab";
+    if (handleId.includes("top-left") || handleId.includes("bottom-right")) return "nwse-resize";
+    if (handleId.includes("top-right") || handleId.includes("bottom-left")) return "nesw-resize";
+    if (handleId.includes("top") || handleId.includes("bottom")) return "ns-resize";
+    if (handleId.includes("left") || handleId.includes("right")) return "ew-resize";
+    return "default";
+  };
+
+  // Helper function để lưu crop vào history
+  const saveCropToHistory = (crop: Draft) => {
+    setCropHistory(prev => [...prev.slice(-9), crop]); // Giữ tối đa 10 trạng thái
+  };
+
+  // Undo crop
+  const undoCrop = () => {
+    if (cropHistory.length === 0) return;
+    const history = [...cropHistory];
+    const prevCrop = history.pop();
+    setCropHistory(history);
+    if (prevCrop && history.length > 0) {
+      setCropRect(history[history.length - 1]);
+    } else {
+      setCropRect(null);
+      useEditor.getState().setTool("select");
+    }
+  };
+
   const onStageMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     // Pan mode (Space giữ) hoặc middle-button → nhường cho pointer handler
     if (isPanModeRef.current || e.evt.button === 1) return;
@@ -377,6 +453,12 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       if (e.target === stage || e.target.id() === "bg") useEditor.getState().select(null);
       return;
     }
+    
+    // Nếu đang ở crop mode (cropRect đã tồn tại), không tạo draft mới
+    if (tool === "crop" && cropRect) {
+      return;
+    }
+    
     if (tool === "rect" || tool === "ellipse" || tool === "crop" || tool === "highlight" || tool === "blur") {
       setDraft({ type: tool, x, y, width: 0, height: 0 });
       return;
@@ -425,6 +507,57 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
     const pos = stage?.getPointerPosition();
     if (!pos) return;
     const { x, y } = toImg(pos);
+    
+    // Resize hoặc move crop rect
+    if (resizingCropHandle && cropResizeStartRef.current && cropRect) {
+      const start = cropResizeStartRef.current;
+      const dx = x - start.startX;
+      const dy = y - start.startY;
+      
+      // Move mode: kéo toàn bộ crop rect
+      if (start.isMove) {
+        let newX = start.cropX + dx;
+        let newY = start.cropY + dy;
+        // Clamp trong bounds ảnh
+        newX = Math.max(0, Math.min(newX, doc!.imgW - cropRect.width));
+        newY = Math.max(0, Math.min(newY, doc!.imgH - cropRect.height));
+        setCropRect({ type: "crop", x: newX, y: newY, width: cropRect.width, height: cropRect.height });
+        return;
+      }
+      
+      // Resize mode
+      let newX = start.cropX;
+      let newY = start.cropY;
+      let newW = start.cropW;
+      let newH = start.cropH;
+      
+      const handle = resizingCropHandle;
+      // Resize từ các corners và edges
+      if (handle.includes("top")) {
+        newY = Math.min(start.cropY + dy, start.cropY + start.cropH - 8);
+        newH = start.cropH - dy;
+      }
+      if (handle.includes("bottom")) {
+        newH = Math.max(start.cropH + dy, 8);
+      }
+      if (handle.includes("left")) {
+        newX = Math.min(start.cropX + dx, start.cropX + start.cropW - 8);
+        newW = start.cropW - dx;
+      }
+      if (handle.includes("right")) {
+        newW = Math.max(start.cropW + dx, 8);
+      }
+      
+      // Clamp trong bounds ảnh
+      newX = Math.max(0, Math.min(newX, doc!.imgW - 8));
+      newY = Math.max(0, Math.min(newY, doc!.imgH - 8));
+      newW = Math.min(newW, doc!.imgW - newX);
+      newH = Math.min(newH, doc!.imgH - newY);
+      
+      setCropRect({ type: "crop", x: newX, y: newY, width: newW, height: newH });
+      return;
+    }
+    
     if (draft) {
       setDraft({ ...draft, width: x - draft.x, height: y - draft.y });
     }
@@ -434,6 +567,17 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   };
 
   const onStageMouseUp = () => {
+    // Kết thúc resize/move crop handle
+    if (resizingCropHandle) {
+      setResizingCropHandle(null);
+      cropResizeStartRef.current = null;
+      // Lưu vào history sau khi resize/move xong
+      if (cropRect) {
+        saveCropToHistory(cropRect);
+      }
+      return;
+    }
+    
     if (arrowDraft) {
       const dx = arrowDraft.x2 - arrowDraft.x;
       const dy = arrowDraft.y2 - arrowDraft.y;
@@ -475,7 +619,9 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
     if (width < 4 || height < 4) return;
 
     if (draft.type === "crop") {
-      setCropRect({ type: "crop", x, y, width, height });
+      const newCrop = { type: "crop" as const, x, y, width, height };
+      setCropRect(newCrop);
+      saveCropToHistory(newCrop); // Lưu crop đầu tiên vào history
       return;
     }
     if (draft.type === "highlight") {
@@ -551,6 +697,7 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       .filter((a) => a.x > -50 && a.y > -50 && a.x < width + 50 && a.y < height + 50);
     useEditor.getState().applyCrop(newImage, Math.round(width), Math.round(height), annotations);
     setCropRect(null);
+    setCropHistory([]); // Reset crop history
     useEditor.getState().setTool("select");
   };
 
@@ -615,7 +762,23 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
           onMouseDown={onStageMouseDown}
           onMouseMove={onStageMouseMove}
           onMouseUp={onStageMouseUp}
-          style={{ cursor: isPanMode ? (isPanDrag ? "grabbing" : "grab") : tool === "select" ? "default" : tool === "text" ? "text" : "crosshair" }}
+          style={{ 
+            cursor: isPanMode 
+              ? (isPanDrag ? "grabbing" : "grab") 
+              : resizingCropHandle && resizingCropHandle !== "move"
+              ? getCropCursor(resizingCropHandle)
+              : resizingCropHandle === "move"
+              ? "grabbing"
+              : cropHoverHandle && cropHoverHandle !== "move"
+              ? getCropCursor(cropHoverHandle)
+              : cropHoverHandle === "move"
+              ? "grab"
+              : tool === "select" 
+              ? "default" 
+              : tool === "text" 
+              ? "text" 
+              : "crosshair" 
+          }}
         >
           <Layer ref={layerRef} scaleX={scale} scaleY={scale}>
             {img && <KImage image={img} id="bg" width={doc.imgW} height={doc.imgH} listening={false} />}
@@ -886,11 +1049,38 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
                 stroke={blurMode === "pixelate" ? "#f59e0b" : blurMode === "solid" ? "#ef4444" : "#94a3b8"}
                 strokeWidth={1.5} dash={[6, 3]}
               />
+            ) : draft && draft.type === "crop" ? (
+              <>
+                {/* Overlay xám cho vùng ngoài crop khi đang kéo */}
+                <Rect x={Math.min(draft.x, draft.x + draft.width)} y={0} width={Math.abs(draft.width)} height={Math.min(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
+                <Rect x={0} y={Math.min(draft.y, draft.y + draft.height)} width={Math.min(draft.x, draft.x + draft.width)} height={Math.abs(draft.height)} fill="#000000" opacity={0.5} listening={false} />
+                <Rect x={Math.max(draft.x, draft.x + draft.width)} y={Math.min(draft.y, draft.y + draft.height)} width={doc.imgW - Math.max(draft.x, draft.x + draft.width)} height={Math.abs(draft.height)} fill="#000000" opacity={0.5} listening={false} />
+                <Rect x={Math.min(draft.x, draft.x + draft.width)} y={Math.max(draft.y, draft.y + draft.height)} width={Math.abs(draft.width)} height={doc.imgH - Math.max(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
+                
+                {/* Khung crop sáng */}
+                <Rect
+                  x={draft.x} y={draft.y} width={draft.width} height={draft.height}
+                  stroke="#3b82f6"
+                  strokeWidth={2}
+                  dash={[6, 4]}
+                  listening={false}
+                />
+                {/* Overlay sáng bên trong */}
+                <Rect
+                  x={Math.min(draft.x, draft.x + draft.width)} 
+                  y={Math.min(draft.y, draft.y + draft.height)} 
+                  width={Math.abs(draft.width)} 
+                  height={Math.abs(draft.height)}
+                  fill="#ffffff"
+                  opacity={0.08}
+                  listening={false}
+                />
+              </>
             ) : draft ? (
               <Rect
                 x={draft.x} y={draft.y} width={draft.width} height={draft.height}
-                stroke={draft.type === "crop" ? "#3b82f6" : color}
-                strokeWidth={draft.type === "crop" ? 2 : strokeWidth}
+                stroke={color}
+                strokeWidth={strokeWidth}
                 dash={[6, 4]}
               />
             ) : null}
@@ -950,15 +1140,115 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
             })()}
 
             {cropRect && (
-              <Rect
-                x={cropRect.x}
-                y={cropRect.y}
-                width={cropRect.width}
-                height={cropRect.height}
-                stroke="#3b82f6"
-                strokeWidth={2}
-                dash={[8, 4]}
-              />
+              <>
+                {/* Overlay xám cho các vùng ngoài crop */}
+                <Rect x={0} y={0} width={doc.imgW} height={cropRect.y} fill="#000000" opacity={0.5} listening={false} />
+                <Rect x={0} y={cropRect.y} width={cropRect.x} height={cropRect.height} fill="#000000" opacity={0.5} listening={false} />
+                <Rect x={cropRect.x + cropRect.width} y={cropRect.y} width={doc.imgW - cropRect.x - cropRect.width} height={cropRect.height} fill="#000000" opacity={0.5} listening={false} />
+                <Rect x={0} y={cropRect.y + cropRect.height} width={doc.imgW} height={doc.imgH - cropRect.y - cropRect.height} fill="#000000" opacity={0.5} listening={false} />
+                
+                {/* Khung crop chính - có thể kéo để move */}
+                <Rect
+                  x={cropRect.x}
+                  y={cropRect.y}
+                  width={cropRect.width}
+                  height={cropRect.height}
+                  stroke="#3b82f6"
+                  strokeWidth={2}
+                  dash={[8, 4]}
+                  listening={false}
+                />
+                
+                {/* Area để kéo move crop (invisible, full area của crop) */}
+                <Rect
+                  x={cropRect.x}
+                  y={cropRect.y}
+                  width={cropRect.width}
+                  height={cropRect.height}
+                  fill="transparent"
+                  onMouseDown={(e) => {
+                    e.evt.preventDefault();
+                    e.cancelBubble = true; // Ngăn event lan xuống stage
+                    const stage = stageRef.current;
+                    if (!stage) return;
+                    const pos = stage.getPointerPosition();
+                    if (!pos) return;
+                    const { x, y } = toImg(pos);
+                    cropResizeStartRef.current = {
+                      cropX: cropRect.x,
+                      cropY: cropRect.y,
+                      cropW: cropRect.width,
+                      cropH: cropRect.height,
+                      startX: x,
+                      startY: y,
+                      isMove: true,
+                    };
+                    setResizingCropHandle("move");
+                  }}
+                  onMouseEnter={() => setCropHoverHandle("move")}
+                  onMouseLeave={() => {
+                    if (cropHoverHandle === "move") setCropHoverHandle(null);
+                  }}
+                />
+                
+                {/* Overlay sáng khi đang kéo (làm rõ vùng được chọn) */}
+                {resizingCropHandle && (
+                  <Rect
+                    x={cropRect.x}
+                    y={cropRect.y}
+                    width={cropRect.width}
+                    height={cropRect.height}
+                    fill="#ffffff"
+                    opacity={0.08}
+                    listening={false}
+                  />
+                )}
+                
+                {/* 8 resize handles */}
+                {[
+                  { id: "top-left", x: cropRect.x, y: cropRect.y, cursor: "nwse-resize" },
+                  { id: "top-center", x: cropRect.x + cropRect.width / 2, y: cropRect.y, cursor: "ns-resize" },
+                  { id: "top-right", x: cropRect.x + cropRect.width, y: cropRect.y, cursor: "nesw-resize" },
+                  { id: "middle-left", x: cropRect.x, y: cropRect.y + cropRect.height / 2, cursor: "ew-resize" },
+                  { id: "middle-right", x: cropRect.x + cropRect.width, y: cropRect.y + cropRect.height / 2, cursor: "ew-resize" },
+                  { id: "bottom-left", x: cropRect.x, y: cropRect.y + cropRect.height, cursor: "nesw-resize" },
+                  { id: "bottom-center", x: cropRect.x + cropRect.width / 2, y: cropRect.y + cropRect.height, cursor: "ns-resize" },
+                  { id: "bottom-right", x: cropRect.x + cropRect.width, y: cropRect.y + cropRect.height, cursor: "nwse-resize" },
+                ].map((handle) => (
+                  <Circle
+                    key={handle.id}
+                    x={handle.x}
+                    y={handle.y}
+                    radius={6}
+                    fill={cropHoverHandle === handle.id ? "#60a5fa" : "#3b82f6"}
+                    stroke="#ffffff"
+                    strokeWidth={1.5}
+                    onMouseDown={(e) => {
+                      e.evt.preventDefault();
+                      e.cancelBubble = true; // Ngăn event lan xuống stage
+                      const stage = stageRef.current;
+                      if (!stage) return;
+                      const pos = stage.getPointerPosition();
+                      if (!pos) return;
+                      const { x, y } = toImg(pos);
+                      cropResizeStartRef.current = {
+                        cropX: cropRect.x,
+                        cropY: cropRect.y,
+                        cropW: cropRect.width,
+                        cropH: cropRect.height,
+                        startX: x,
+                        startY: y,
+                        isMove: false,
+                      };
+                      setResizingCropHandle(handle.id);
+                    }}
+                    onMouseEnter={() => setCropHoverHandle(handle.id)}
+                    onMouseLeave={() => {
+                      if (cropHoverHandle === handle.id) setCropHoverHandle(null);
+                    }}
+                  />
+                ))}
+              </>
             )}
 
             <Transformer
