@@ -229,7 +229,11 @@ pub fn run() {
                 // macOS: click dock icon / Spotlight search khi app đang chạy.
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen { has_visible_windows: _, .. } => {
-                    let _ = windows::open_capture_bar(_app);
+                    use tauri::Manager;
+                    let has_editor = _app.webview_windows().keys().any(|label| label.starts_with("editor"));
+                    if !has_editor {
+                        let _ = windows::open_capture_bar(_app);
+                    }
                 }
                 // macOS: nhận file từ "Open with" / Finder / kéo vào Dock icon.
                 // Tauri v2 expose qua RunEvent::Opened (tao: application:openURLs:).

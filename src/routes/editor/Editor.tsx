@@ -106,7 +106,9 @@ export default function Editor() {
     setBusy(true);
     try {
       const saved = await saveToFile(url, alsoCopy);
-      if (saved) flash(alsoCopy ? "Đã lưu + copy" : `Đã lưu: ${saved}`);
+      if (saved) {
+        ipc.closeSelf();
+      }
     } finally {
       setBusy(false);
     }
