@@ -28,7 +28,7 @@ fn set_output(app: &AppHandle, output: &str) {
     *guard = output.to_string();
 }
 
-fn get_output(app: &AppHandle) -> String {
+pub fn get_output(app: &AppHandle) -> String {
     let state = app.state::<AppState>();
     state
         .pending_output
@@ -51,7 +51,7 @@ fn store(app: &AppHandle, cap: &capture::Capture, output: &str) {
     });
 }
 
-fn finish(app: &AppHandle, cap: capture::Capture, output: &str) -> Result<(), String> {
+pub fn finish(app: &AppHandle, cap: capture::Capture, output: &str) -> Result<(), String> {
     store(app, &cap, output);
     match output {
         "clipboard" => {
@@ -178,6 +178,13 @@ pub fn finalize_region(
     if rw < 1.0 || rh < 1.0 {
         windows::close_overlays(app);
         return Err("Vung chon khong hop le".to_string());
+    }
+
+    let (mode, _) = app.state::<AppState>().last_capture.get();
+    if mode == "scroll" {
+        windows::close_overlays(app);
+        windows::open_scroll_control(app, center_x, center_y, rx as u32, ry as u32, rw as u32, rh as u32)?;
+        return Ok(());
     }
 
     // Step 3: close overlays BEFORE capture.

@@ -17,6 +17,7 @@ const SHORTCUT_KEYS: { key: string; label: string; hint?: string }[] = [
   { key: "window",      label: "Chụp cửa sổ",         hint: "Chọn cửa sổ ứng dụng" },
   { key: "all",         label: "Chụp tất cả màn hình", hint: "Ghép ngang tất cả màn hình" },
   { key: "captureCopy", label: "Chụp & copy nhanh",   hint: "Chụp vùng và copy vào clipboard" },
+  { key: "scroll",      label: "Chụp cuộn",          hint: "Chọn vùng rồi cuộn để ghép ảnh dài" },
 ];
 
 export default function Settings() {
@@ -42,6 +43,7 @@ export default function Settings() {
         window:      "CmdOrCtrl+Shift+3",
         all:         "CmdOrCtrl+Shift+4",
         captureCopy: "CmdOrCtrl+Shift+C",
+        scroll:      "CmdOrCtrl+Shift+6",
       };
       loaded.shortcuts = { ...defaults, ...(loaded.shortcuts ?? {}) };
       if (!loaded.saveDir) loaded.saveDir = await ipc.defaultSaveDir();

@@ -7,6 +7,8 @@ import Editor from "./routes/editor/Editor";
 import Thumbnail from "./routes/thumbnail/Thumbnail";
 import Settings from "./routes/settings/Settings";
 import UpdateWindow from "./routes/update/UpdateWindow";
+import ScrollControl from "./routes/scroll-control/ScrollControl";
+import ScrollBorder from "./routes/scroll-border/ScrollBorder";
 
 const which = new URLSearchParams(window.location.search).get("win") ?? "capture-bar";
 
@@ -17,6 +19,8 @@ const routes: Record<string, React.ComponentType> = {
   thumbnail: Thumbnail,
   settings: Settings,
   update: UpdateWindow,
+  "scroll-control": ScrollControl,
+  "scroll-border": ScrollBorder,
 };
 
 const Route = routes[which] ?? CaptureBar;

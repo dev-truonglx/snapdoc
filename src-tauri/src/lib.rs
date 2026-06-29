@@ -103,6 +103,8 @@ pub fn run() {
             commands::check_update,
             commands::get_pending_update,
             commands::install_update,
+            commands::capture_scroll_slice,
+            commands::finalize_scroll_capture,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

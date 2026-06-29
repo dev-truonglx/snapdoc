@@ -9,7 +9,7 @@ export interface Pending {
   output: string;
 }
 
-export type CaptureMode = "full" | "window" | "region" | "all";
+export type CaptureMode = "full" | "window" | "region" | "all" | "scroll";
 export type OutputMode = "editor" | "clipboard" | "save" | "save_copy";
 
 export interface WindowInfo {
@@ -81,4 +81,9 @@ export const ipc = {
   checkUpdate: () => invoke<UpdateInfo>("check_update"),
   getPendingUpdate: () => invoke<UpdateInfo | null>("get_pending_update"),
   installUpdate: () => invoke<void>("install_update"),
+  // Scroll
+  captureScrollSlice: (mx: number, my: number, rx: number, ry: number, rw: number, rh: number) =>
+    invoke<string>("capture_scroll_slice", { mx, my, rx, ry, rw, rh }),
+  finalizeScrollCapture: (base64: string, width: number, height: number) =>
+    invoke<void>("finalize_scroll_capture", { base64, width, height }),
 };

@@ -9,6 +9,7 @@ pub const DEFAULT_REGION: &str = "CmdOrCtrl+Shift+2";
 pub const DEFAULT_WINDOW: &str = "CmdOrCtrl+Shift+3";
 pub const DEFAULT_ALL: &str = "CmdOrCtrl+Shift+4";
 pub const DEFAULT_COPY: &str = "CmdOrCtrl+Shift+C";
+pub const DEFAULT_SCROLL: &str = "CmdOrCtrl+Shift+6";
 
 /// Lấy map (action → combo) từ settings.
 /// Trả về empty string nếu user đã xóa phím tắt (không fall back về default).
@@ -34,6 +35,7 @@ pub fn shortcuts_from_settings(app: &AppHandle) -> Vec<(String, String)> {
         ("window".into(),      get("window",      DEFAULT_WINDOW)),
         ("all".into(),         get("all",         DEFAULT_ALL)),
         ("captureCopy".into(), get("captureCopy", DEFAULT_COPY)),
+        ("scroll".into(),      get("scroll",      DEFAULT_SCROLL)),
     ]
 }
 
@@ -85,6 +87,7 @@ fn run_action(app: &AppHandle, action: &str) {
             match action {
                 "region" => spawn(app, "region", &output),
                 "window" => spawn(app, "window", &output),
+                "scroll" => spawn(app, "scroll", &output),
                 "all" => {
                     let app = app.clone();
                     std::thread::spawn(move || {

@@ -89,7 +89,7 @@ function RegionSelect() {
   );
 
   return (
-    <div style={{ ...root, cursor: "crosshair" }}>
+    <div style={{ ...root, cursor: CROSSHAIR_CURSOR }}>
       {sel && sel.w > 0 ? (
         <div
           style={{
@@ -99,7 +99,7 @@ function RegionSelect() {
             width: sel.w,
             height: sel.h,
             border: "2px solid #3b82f6",
-            boxShadow: "0 0 0 9999px rgba(0,0,0,0.35)",
+            boxShadow: "0 0 0 9999px rgba(0,0,0,0.6)",
           }}
         >
           <span style={sizeLabel}>
@@ -107,7 +107,7 @@ function RegionSelect() {
           </span>
         </div>
       ) : (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.2)" }}>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)" }}>
           <div style={banner}>Kéo để chọn vùng • Esc / chuột phải để huỷ</div>
         </div>
       )}
@@ -201,6 +201,19 @@ const CAMERA_SVG = `<svg xmlns='http://www.w3.org/2000/svg' width='32' height='3
 <circle cx='16' cy='18' r='3' fill='#000'/>
 </svg>`;
 const CAMERA_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(CAMERA_SVG)}") 16 16, crosshair`;
+
+// Con trỏ chữ thập cho chế độ vẽ vùng. Trắng lõi + viền đen → rõ trên mọi nền;
+// chừa khoảng hở giữa + chấm tâm để ngắm chính xác. Hotspot ở tâm (16,16).
+const CROSSHAIR_SVG = `<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'>
+<g stroke='#000' stroke-width='4' stroke-linecap='round'>
+<line x1='16' y1='2' x2='16' y2='12'/><line x1='16' y1='20' x2='16' y2='30'/>
+<line x1='2' y1='16' x2='12' y2='16'/><line x1='20' y1='16' x2='30' y2='16'/></g>
+<g stroke='#fff' stroke-width='2' stroke-linecap='round'>
+<line x1='16' y1='2' x2='16' y2='12'/><line x1='16' y1='20' x2='16' y2='30'/>
+<line x1='2' y1='16' x2='12' y2='16'/><line x1='20' y1='16' x2='30' y2='16'/></g>
+<circle cx='16' cy='16' r='2.5' fill='#fff' stroke='#000' stroke-width='1.5'/>
+</svg>`;
+const CROSSHAIR_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(CROSSHAIR_SVG)}") 16 16, crosshair`;
 
 const root: React.CSSProperties = {
   position: "fixed",
