@@ -67,10 +67,13 @@ export default function CaptureBar() {
       if (m) setMode(m as CaptureMode);
     }).catch(() => {});
 
-    const unlisten = listen<{ mode: string; output: string }>("set-capture-mode", (e) => {
+    const unlisten = listen<{ mode: string; output: string | null }>("set-capture-mode", (e) => {
       setMode(e.payload.mode as CaptureMode);
-      // set-capture-mode từ editor "New" thì mới sync output
-      setOutput(e.payload.output as OutputMode);
+      // set-capture-mode từ editor "New" truyền output=null để chỉ sync mode,
+      // giữ nguyên defaultOutput từ settings. Chỉ override output khi có giá trị thực.
+      if (e.payload.output) {
+        setOutput(e.payload.output as OutputMode);
+      }
     });
 
     const onFocus = () => {

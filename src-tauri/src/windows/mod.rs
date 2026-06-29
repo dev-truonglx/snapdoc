@@ -117,13 +117,13 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Mở capture bar và emit event `set-capture-mode` với lastMode/lastOutput
-/// từ Rust state. Dùng cho nút "New" trong editor — đảm bảo capture bar
-/// luôn hiển thị đúng chế độ chụp gần nhất, không phụ thuộc timing event.
+/// Mở capture bar và emit event `set-capture-mode` với lastMode từ Rust state.
+/// Chỉ sync chế độ chụp (mode), KHÔNG override output — capture bar tự giữ
+/// defaultOutput từ settings. Dùng cho nút "New" trong editor.
 pub fn open_capture_bar_with_last_mode(app: &AppHandle) -> Result<(), String> {
     use crate::state::AppState;
 
-    let (mode, output) = app.state::<AppState>().last_capture.get();
+    let (mode, _output) = app.state::<AppState>().last_capture.get();
     let is_new_window = app.get_webview_window("capture-bar").is_none();
 
     open_capture_bar(app)?;
@@ -131,12 +131,13 @@ pub fn open_capture_bar_with_last_mode(app: &AppHandle) -> Result<(), String> {
     // Với window đã tồn tại: listener JS đã active → delay ngắn.
     // Với window mới: cần đợi React mount + register listener → delay dài hơn.
     // Emit 2 lần (80ms + 500ms) để cover cả hai trường hợp.
+    // Chỉ emit mode, không emit output → capture bar tự load defaultOutput từ settings.
     let app = app.clone();
     std::thread::spawn(move || {
         let first_delay = if is_new_window { 400 } else { 80 };
         std::thread::sleep(std::time::Duration::from_millis(first_delay));
         if let Some(win) = app.get_webview_window("capture-bar") {
-            let payload = serde_json::json!({ "mode": mode, "output": output });
+            let payload = serde_json::json!({ "mode": mode, "output": null });
             let _ = win.emit("set-capture-mode", payload.clone());
             // Emit lần 2 cho window mới (đảm bảo listener đã mount)
             if is_new_window {
@@ -471,7 +472,15 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
-        let _ = win.emit("refresh-capture", ());
+        // Trên Windows, show() là async (WM_SHOWWINDOW qua message pump).
+        // Emit refresh-capture sau một tick ngắn để đảm bảo webview đang
+        // visible và có thể xử lý event trước khi JS nhận được nó.
+        let win2 = win.clone();
+        std::thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            let _ = win2.emit("refresh-capture", ());
+        });
         return Ok(());
     }
     WebviewWindowBuilder::new(app, "editor", url("editor"))

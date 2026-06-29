@@ -120,10 +120,23 @@ pub fn open_capture_bar(app: AppHandle) -> Result<(), String> {
 }
 
 /// Mở capture bar với chế độ chụp gần nhất pre-selected — dùng cho nút "New" trong editor.
+///
+/// Luồng trên Windows:
+/// - hide_editor() + open_capture_bar() là các lời gọi nhanh (không block).
+/// - Toàn bộ được spawn sang std::thread riêng để tránh block Tauri IPC thread,
+///   đặc biệt tránh trường hợp Win32 message pump stall khi show/hide window
+///   từ thread không có message loop.
 #[tauri::command]
 pub fn open_capture_bar_for_new(app: AppHandle) -> Result<(), String> {
-    windows::hide_editor(&app);
-    windows::open_capture_bar_with_last_mode(&app)
+    std::thread::spawn(move || {
+        windows::hide_editor(&app);
+        // Trên Windows: đợi WM_SHOWWINDOW được xử lý trước khi mở capture bar,
+        // tránh race condition giữa hai thao tác window.
+        #[cfg(target_os = "windows")]
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let _ = windows::open_capture_bar_with_last_mode(&app);
+    });
+    Ok(())
 }
 
 #[tauri::command]
