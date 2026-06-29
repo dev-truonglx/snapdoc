@@ -22,6 +22,30 @@ static OPEN_WITH_MODE: AtomicBool = AtomicBool::new(false);
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            eprintln!("[SnapDoc] Single instance launched with argv: {:?}", argv);
+            let open_with_path: Option<String> = argv.get(1).and_then(|path| {
+                let ext = std::path::Path::new(path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif") {
+                    Some(path.clone())
+                } else {
+                    None
+                }
+            });
+
+            if let Some(path) = open_with_path {
+                let h = app.clone();
+                std::thread::spawn(move || {
+                    let _ = commands::open_file_path_sync(&h, path);
+                });
+            } else {
+                let _ = windows::open_capture_bar(app);
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -195,6 +219,11 @@ pub fn run() {
                     if code.is_none() && !OPEN_WITH_MODE.load(Ordering::SeqCst) {
                         api.prevent_exit();
                     }
+                }
+                // macOS: click dock icon / Spotlight search khi app đang chạy.
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { has_visible_windows: _, .. } => {
+                    let _ = windows::open_capture_bar(_app);
                 }
                 // macOS: nhận file từ "Open with" / Finder / kéo vào Dock icon.
                 // Tauri v2 expose qua RunEvent::Opened (tao: application:openURLs:).
