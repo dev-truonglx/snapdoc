@@ -101,7 +101,7 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
         .title("SnapDoc")
-        .inner_size(480.0, 280.0)
+        .inner_size(540.0, 280.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -114,6 +114,102 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| format!("Không tạo được capture bar: {e}"))?;
     place_bottom_center(&win);
     let _ = win.set_focus();
+    Ok(())
+}
+
+
+/// Bảng điều khiển chụp cuộn (scrolling capture).
+pub fn open_scroll_control(
+    app: &AppHandle,
+    mx: i32,
+    my: i32,
+    rx: u32,
+    ry: u32,
+    rw: u32,
+    rh: u32,
+) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("scroll-control") {
+        let _ = win.close();
+    }
+    if let Some(win) = app.get_webview_window("scroll-border") {
+        let _ = win.close();
+    }
+
+    let m = crate::capture::monitor::at_point(mx, my)?;
+    let m_x = m.x().map_err(|e| e.to_string())? as f64;
+    let m_y = m.y().map_err(|e| e.to_string())? as f64;
+    let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
+
+    // Chuyển toạ độ vùng chụp sang logical points để định vị cửa sổ
+    #[cfg(target_os = "windows")]
+    let (lx, ly, lw, lh) = (
+        rx as f64 / scale,
+        ry as f64 / scale,
+        rw as f64 / scale,
+        rh as f64 / scale,
+    );
+    #[cfg(not(target_os = "windows"))]
+    let (lx, ly, lw, lh) = (
+        rx as f64,
+        ry as f64,
+        rw as f64,
+        rh as f64,
+    );
+
+    let global_x = m_x + lx;
+    let global_y = m_y + ly;
+
+    // 1. Mở cửa sổ khung viền nét đứt bao quanh vùng chọn (kích thước lớn hơn vùng chọn 12px)
+    let border_win = WebviewWindowBuilder::new(
+        app,
+        "scroll-border",
+        WebviewUrl::App("index.html?win=scroll-border".into()),
+    )
+    .title("SnapDoc — Scroll Border")
+    .inner_size(lw + 12.0, lh + 12.0)
+    .position(global_x - 6.0, global_y - 6.0)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .build()
+    .map_err(|e| format!("Không tạo được khung viền scroll: {e}"))?;
+
+    // Đặt click-through để chuột nhấn xuyên qua được viền
+    let _ = border_win.set_ignore_cursor_events(true);
+
+    // 2. Tính toán vị trí bảng điều khiển sát cạnh phải của vùng chọn
+    let ctrl_w = 260.0;
+    let ctrl_h = 420.0;
+
+    let mut ctrl_x = global_x + lw + 8.0;
+    let mut ctrl_y = global_y;
+
+    // Nếu tràn lề phải màn hình -> đặt sang cạnh trái
+    let m_w = m.width().map_err(|e| e.to_string())? as f64 / scale;
+    let m_h = m.height().map_err(|e| e.to_string())? as f64 / scale;
+    if ctrl_x + ctrl_w > m_x + m_w {
+        ctrl_x = global_x - ctrl_w - 8.0;
+    }
+    // Giữ trong biên màn hình
+    ctrl_x = ctrl_x.max(m_x + 8.0).min(m_x + m_w - ctrl_w - 8.0);
+    ctrl_y = ctrl_y.max(m_y + 8.0).min(m_y + m_h - ctrl_h - 8.0);
+
+    let url_str = format!("scroll-control&mx={mx}&my={my}&rx={rx}&ry={ry}&rw={rw}&rh={rh}");
+    let control_win = WebviewWindowBuilder::new(app, "scroll-control", url(&url_str))
+        .title("SnapDoc — Scrolling Capture")
+        .inner_size(ctrl_w, ctrl_h)
+        .position(ctrl_x, ctrl_y)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .build()
+        .map_err(|e| format!("Không tạo được bảng điều khiển chụp cuộn: {e}"))?;
+
+    let _ = control_win.set_focus();
     Ok(())
 }
 

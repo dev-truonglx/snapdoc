@@ -151,6 +151,13 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn close_self(window: tauri::WebviewWindow) {
+    let label = window.label();
+    if label == "scroll-control" {
+        use tauri::Manager;
+        if let Some(border) = window.app_handle().get_webview_window("scroll-border") {
+            let _ = border.close();
+        }
+    }
     let _ = window.close();
 }
 
@@ -423,4 +430,44 @@ pub fn get_pending_update(app: AppHandle) -> Option<crate::update::UpdateInfo> {
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
     crate::update::install_pending(app).await
+}
+
+/// Chụp một lát cắt trong tính năng chụp cuộn.
+#[tauri::command]
+pub async fn capture_scroll_slice(
+    mx: i32,
+    my: i32,
+    rx: u32,
+    ry: u32,
+    rw: u32,
+    rh: u32,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let m = crate::capture::monitor::at_point(mx, my)?;
+        let cap = crate::capture::region::capture_region(&m, rx, ry, rw, rh)?;
+        Ok(cap.base64)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Hoàn tất chụp cuộn: nhận base64 của canvas đã ghép, chuyển về flow để kết xuất.
+#[tauri::command]
+pub fn finalize_scroll_capture(
+    app: AppHandle,
+    base64: String,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(border) = app.get_webview_window("scroll-border") {
+        let _ = border.close();
+    }
+    let cap = crate::capture::Capture {
+        base64,
+        width,
+        height,
+    };
+    let output = crate::flow::get_output(&app);
+    crate::flow::finish(&app, cap, &output)
 }
