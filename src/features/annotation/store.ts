@@ -62,6 +62,15 @@ interface EditorState {
 
   nextStep: () => number;
   nextArrowStep: () => number;
+
+  /** Đặt số sẽ gán cho badge "step" kế tiếp (>= 1). */
+  setStepCounter: (n: number) => void;
+  /** Đặt số sẽ gán cho "numbered-arrow" kế tiếp (>= 1). */
+  setArrowCounter: (n: number) => void;
+  /** Đánh số lại toàn bộ badge "step" theo thứ tự tạo (1..N), dọn gap sau khi xóa. */
+  renumberSteps: () => void;
+  /** Đánh số lại toàn bộ "numbered-arrow" theo thứ tự tạo (1..N). */
+  renumberArrows: () => void;
 }
 
 function commit(state: EditorState, nextDoc: Doc): Partial<EditorState> {
@@ -225,11 +234,13 @@ export const useEditor = create<EditorState>((set, get) => ({
   removeSelected: () =>
     set((s) => {
       if (!s.doc || !s.selectedId) return {};
-      const next = {
-        ...s.doc,
-        annotations: s.doc.annotations.filter((a) => a.id !== s.selectedId),
-      };
-      return { ...commit(s, next), selectedId: null };
+      const annotations = s.doc.annotations.filter((a) => a.id !== s.selectedId);
+      const next = { ...s.doc, annotations };
+      // B1: khi không còn badge nào, tự đặt bộ đếm về 1 → lượt sau bắt đầu từ 1.
+      const reset: Partial<EditorState> = {};
+      if (!annotations.some((a) => a.type === "step")) reset.stepCounter = 1;
+      if (!annotations.some((a) => a.type === "numbered-arrow")) reset.arrowCounter = 1;
+      return { ...commit(s, next), selectedId: null, ...reset };
     }),
 
   applyCrop: (image, imgW, imgH, annotations) =>
@@ -281,4 +292,27 @@ export const useEditor = create<EditorState>((set, get) => ({
     set({ arrowCounter: v + 1 });
     return v;
   },
+
+  setStepCounter: (n) => set({ stepCounter: Math.max(1, Math.floor(n) || 1) }),
+  setArrowCounter: (n) => set({ arrowCounter: Math.max(1, Math.floor(n) || 1) }),
+
+  renumberSteps: () =>
+    set((s) => {
+      if (!s.doc || !s.doc.annotations.some((a) => a.type === "step")) return {};
+      let n = 0;
+      const annotations = s.doc.annotations.map((a) =>
+        a.type === "step" ? ({ ...a, value: ++n } as Annotation) : a,
+      );
+      return { ...commit(s, { ...s.doc, annotations }), stepCounter: n + 1 };
+    }),
+
+  renumberArrows: () =>
+    set((s) => {
+      if (!s.doc || !s.doc.annotations.some((a) => a.type === "numbered-arrow")) return {};
+      let n = 0;
+      const annotations = s.doc.annotations.map((a) =>
+        a.type === "numbered-arrow" ? ({ ...a, value: ++n } as Annotation) : a,
+      );
+      return { ...commit(s, { ...s.doc, annotations }), arrowCounter: n + 1 };
+    }),
 }));

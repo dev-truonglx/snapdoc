@@ -88,6 +88,9 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   const [cropHistory, setCropHistory] = useState<Draft[]>([]); // Lưu lại crop history
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
   const [textareaSize, setTextareaSize] = useState({ width: 120, height: 60 });
+  // Cờ đồng bộ: bật khi cú click ra ngoài vừa kết thúc 1 ô nhập, để mousedown
+  // ngay sau đó KHÔNG tạo ô nhập mới (phải click thêm lần nữa mới tạo).
+  const suppressCreateRef = useRef(false);
   
   // Theo dõi khi đang resize crop rect bằng handle hoặc move crop
   const [resizingCropHandle, setResizingCropHandle] = useState<string | null>(null);
@@ -137,6 +140,12 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       const container = textareaRef.current?.parentElement;
       if (container && !container.contains(e.target as Node)) {
         console.log("[text-input] handleOutsideClick - committing text");
+        // Cú click này CHỈ để kết thúc nhập → chặn mousedown ngay sau tạo ô mới.
+        // Reset ở tick sau để click kế tiếp vẫn tạo được ô mới bình thường.
+        suppressCreateRef.current = true;
+        window.setTimeout(() => {
+          suppressCreateRef.current = false;
+        }, 0);
         commitTextRef.current?.();
       }
     };
@@ -502,6 +511,13 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       return;
     }
     if (tool === "text") {
+      // Cú click ra ngoài vừa kết thúc 1 ô nhập (handleOutsideClick ở pointerdown
+      // capture chạy TRƯỚC mousedown này và đã commit + bật cờ). Lần này chỉ kết
+      // thúc nhập, KHÔNG tạo ô mới — phải click thêm lần nữa mới tạo.
+      if (suppressCreateRef.current) {
+        suppressCreateRef.current = false;
+        return;
+      }
       // Chặn default action của mousedown — nếu không, sau khi handler chạy
       // trình duyệt sẽ giật focus về <canvas> của Konva, làm textarea blur ngay
       // (onBlur → commitText rỗng → annotation bị xoá trước khi gõ được chữ).
@@ -725,11 +741,14 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
   // textarea render đồng bộ để ref sẵn sàng — bắt buộc cho WKWebView (Tauri),
   // nơi .focus() chỉ ăn khi chạy trong stack sự kiện chuột gốc.
   const beginEdit = (id: string, value: string, node?: Konva.Node) => {
+    // Chiều cao 1 dòng theo cỡ chữ hiển thị (fontSize × scale) + padding — vừa
+    // phải thay vì cố định 60px (quá cao cho 1 dòng).
+    const lineH = Math.max(32, Math.round(fontSize * scale * 1.35) + 12);
     let w = 120;
-    let h = 60;
+    let h = lineH;
     if (node) {
       w = Math.max(120, node.width() * scale + 24);
-      h = Math.max(60, node.height() * scale + 16);
+      h = Math.max(lineH, node.height() * scale + 12);
     }
     setTextareaSize({ width: w, height: h });
     flushSync(() => setEditing({ id, value }));
@@ -1436,16 +1455,40 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
           );
         })()}
 
-        {cropRect && (
-          <div style={{ position: "absolute", left: 8, bottom: 8, display: "flex", gap: 8 }}>
-            <button onClick={applyCrop} style={cropBtn(true)}>
-              Áp dụng crop
-            </button>
-            <button onClick={() => setCropRect(null)} style={cropBtn(false)}>
-              Huỷ
-            </button>
-          </div>
-        )}
+        {cropRect && (() => {
+          // Đặt 2 nút ở cạnh ĐÁY, canh theo GÓC PHẢI khung crop (toạ độ hiển thị
+          // = toạ độ ảnh × scale). Nếu sát đáy stage thì lật vào trong khung.
+          const BTN_H = 34;
+          const cropBottom = (cropRect.y + cropRect.height) * scale;
+          const cropRight = (cropRect.x + cropRect.width) * scale;
+          const top =
+            cropBottom + 8 + BTN_H > box.h ? cropBottom - BTN_H - 8 : cropBottom + 8;
+          // Canh mép phải hàng nút vào mép phải khung bằng thuộc tính `right`
+          // (neo theo mép phải container) để width khả dụng = box.w - right luôn
+          // đủ rộng → nút không bị bóp/xuống dòng khi khung sát mép phải. Giữ
+          // tối thiểu 200px chỗ trống để hàng nút hiển thị đủ.
+          const rightInset = Math.max(0, Math.min(box.w - cropRight, box.w - 200));
+          return (
+            <div
+              style={{
+                position: "absolute",
+                top,
+                right: rightInset,
+                display: "flex",
+                gap: 8,
+                zIndex: 10,
+                whiteSpace: "nowrap",
+              }}
+            >
+              <button onClick={applyCrop} style={cropBtn(true)}>
+                Áp dụng crop
+              </button>
+              <button onClick={() => setCropRect(null)} style={cropBtn(false)}>
+                Huỷ
+              </button>
+            </div>
+          );
+        })()}
 
       </div>
       </div> {/* end flex centering */}
@@ -1618,6 +1661,8 @@ function cropBtn(primary: boolean): React.CSSProperties {
     padding: "6px 12px",
     borderRadius: 6,
     fontSize: 13,
+    whiteSpace: "nowrap",
+    flexShrink: 0,
   };
 }
 

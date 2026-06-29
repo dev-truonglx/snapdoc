@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useEditor } from "../../features/annotation/store";
 import { PRESET_COLORS, HIGHLIGHT_COLORS, STROKE_WIDTHS, SOLID_COLORS, type Tool } from "../../features/annotation/model";
 
@@ -125,6 +125,144 @@ interface Props {
   busy: boolean;
 }
 
+/**
+ * Ô nhập số dùng draft cục bộ. Dùng type="text" + inputMode numeric để KHÔNG có
+ * nút spinner (tránh click vào input bị tăng/giảm số). Cho phép gõ/xoá tự do,
+ * kể cả để TRỐNG; commit (clamp) khi gõ số hợp lệ để xem trước trực tiếp. Khi
+ * rời focus mà để trống thì KHÔI PHỤC đúng giá trị TẠI LÚC FOCUS (trước khi sửa).
+ */
+function NumberField({
+  value,
+  min,
+  max,
+  onCommit,
+  width = 60,
+  title,
+}: {
+  value: number;
+  min: number;
+  max?: number;
+  onCommit: (n: number) => void;
+  width?: number;
+  title?: string;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const focusedRef = useRef(false);
+  const focusValueRef = useRef(value); // giá trị ngay trước khi user bắt đầu sửa
+
+  // Đồng bộ giá trị ngoài (vd nút +/- hoặc đổi tool) khi không đang gõ.
+  useEffect(() => {
+    if (!focusedRef.current) setDraft(String(value));
+  }, [value]);
+
+  const clamp = (n: number) => Math.max(min, max != null ? Math.min(max, n) : n);
+
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={draft}
+      title={title}
+      onFocus={(e) => {
+        focusedRef.current = true;
+        focusValueRef.current = value;
+        e.currentTarget.select();
+      }}
+      onChange={(e) => {
+        const raw = e.target.value.replace(/[^\d]/g, ""); // chỉ cho chữ số
+        setDraft(raw); // giữ nguyên những gì user gõ, kể cả rỗng
+        if (raw !== "") onCommit(clamp(Number(raw))); // xem trước trực tiếp
+      }}
+      onBlur={() => {
+        focusedRef.current = false;
+        if (draft === "") {
+          // Xóa hết, không nhập → khôi phục đúng giá trị trước khi sửa.
+          setDraft(String(focusValueRef.current));
+          onCommit(focusValueRef.current);
+          return;
+        }
+        const n = clamp(Number(draft));
+        setDraft(String(n));
+        onCommit(n);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+      }}
+      style={{ ...fontInput, width }}
+    />
+  );
+}
+
+/**
+ * Nút chọn màu tùy chỉnh — đồng nhất cho mọi chỗ có chọn màu. Ẩn hẳn input
+ * type=color gốc (tránh viền/inset mặc định của OS làm lệch ô màu), dùng <label>
+ * bọc làm ô màu phẳng cân đối; icon "+" trắng có viền tối để rõ trên mọi nền.
+ */
+function CustomColorButton({
+  value,
+  selected,
+  onChange,
+  round = false,
+  title = "Chọn màu tùy chỉnh",
+}: {
+  value: string;
+  selected: boolean;
+  onChange: (c: string) => void;
+  round?: boolean;
+  title?: string;
+}) {
+  return (
+    <label
+      title={title}
+      style={{
+        position: "relative",
+        width: 24,
+        height: 24,
+        borderRadius: round ? "50%" : 6,
+        flexShrink: 0,
+        cursor: "pointer",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: value,
+        border: selected ? "2.5px solid #fff" : "1px solid rgba(255,255,255,0.15)",
+        boxShadow: selected
+          ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.2)"
+          : "0 1px 2px rgba(0,0,0,0.2)",
+        boxSizing: "border-box",
+        overflow: "hidden",
+      }}
+    >
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden style={{ pointerEvents: "none" }}>
+        <g stroke="rgba(0,0,0,0.45)" strokeWidth="3" strokeLinecap="round">
+          <line x1="6" y1="2.5" x2="6" y2="9.5" />
+          <line x1="2.5" y1="6" x2="9.5" y2="6" />
+        </g>
+        <g stroke="#fff" strokeWidth="1.6" strokeLinecap="round">
+          <line x1="6" y1="2.5" x2="6" y2="9.5" />
+          <line x1="2.5" y1="6" x2="9.5" y2="6" />
+        </g>
+      </svg>
+      <input
+        type="color"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          opacity: 0,
+          border: "none",
+          padding: 0,
+          margin: 0,
+          cursor: "pointer",
+        }}
+      />
+    </label>
+  );
+}
+
 export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy }: Props) {
   const {
     tool, setTool,
@@ -137,6 +275,9 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
     blurSolidColor, setBlurSolidColor,
     undo, redo, canUndo, canRedo,
     removeSelected, selectedId,
+    stepCounter, arrowCounter,
+    setStepCounter, setArrowCounter,
+    renumberSteps, renumberArrows,
     doc,
   } = useEditor();
 
@@ -172,6 +313,8 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
   // Hiện blur controls khi: đang dùng tool blur HOẶC đang select một BlurAnn
   const isBlur      = tool === "blur" || selectedAnn?.type === "blur";
   const isText      = tool === "text";
+  const isStep      = tool === "step";
+  const isNumberedArrow = tool === "numbered-arrow";
   // Tools dùng color + strokeWidth
   const hasStroke   = !isHighlight && !isBlur && !isText && tool !== "select" && tool !== "crop";
 
@@ -248,43 +391,15 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
               }} />
           ))}
           {/* Custom color picker */}
-          <div style={{ position: "relative" }}>
-            <input
-              type="color"
-              value={customColor}
-              onChange={(e) => {
-                setCustomColor(e.target.value);
-                setColor(e.target.value);
-              }}
-              title="Chọn màu tùy chỉnh"
-              style={{
-                width: 24,
-                height: 24,
-                borderRadius: "50%",
-                border: color === customColor && !PRESET_COLORS.includes(color) 
-                  ? "2.5px solid #fff" 
-                  : "1px solid rgba(255,255,255,0.15)",
-                boxShadow: color === customColor && !PRESET_COLORS.includes(color)
-                  ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.2)"
-                  : "0 1px 2px rgba(0,0,0,0.2)",
-                cursor: "pointer",
-                flexShrink: 0,
-                padding: 0,
-                background: customColor,
-              }}
-            />
-            <div style={{
-              position: "absolute",
-              top: "50%",
-              left: "50%",
-              transform: "translate(-50%, -50%)",
-              pointerEvents: "none",
-              fontSize: 10,
-              color: "#fff",
-              textShadow: "0 1px 2px rgba(0,0,0,0.5)",
-              fontWeight: "bold",
-            }}>+</div>
-          </div>
+          <CustomColorButton
+            round
+            value={customColor}
+            selected={color === customColor && !PRESET_COLORS.includes(color)}
+            onChange={(c) => {
+              setCustomColor(c);
+              setColor(c);
+            }}
+          />
         </div>
       )}
 
@@ -306,43 +421,14 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
               }} />
           ))}
           {/* Custom highlight color picker */}
-          <div style={{ position: "relative" }}>
-            <input
-              type="color"
-              value={customHighlight}
-              onChange={(e) => {
-                setCustomHighlight(e.target.value);
-                setHighlightColor(e.target.value);
-              }}
-              title="Chọn màu tùy chỉnh"
-              style={{
-                width: 24,
-                height: 24,
-                borderRadius: 6,
-                border: highlightColor === customHighlight && !HIGHLIGHT_COLORS.includes(highlightColor)
-                  ? "2.5px solid #fff"
-                  : "1px solid rgba(255,255,255,0.15)",
-                boxShadow: highlightColor === customHighlight && !HIGHLIGHT_COLORS.includes(highlightColor)
-                  ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.2)"
-                  : "0 1px 2px rgba(0,0,0,0.2)",
-                cursor: "pointer",
-                flexShrink: 0,
-                padding: 0,
-                opacity: 0.8,
-              }}
-            />
-            <div style={{
-              position: "absolute",
-              top: "50%",
-              left: "50%",
-              transform: "translate(-50%, -50%)",
-              pointerEvents: "none",
-              fontSize: 10,
-              color: "#fff",
-              textShadow: "0 1px 2px rgba(0,0,0,0.5)",
-              fontWeight: "bold",
-            }}>+</div>
-          </div>
+          <CustomColorButton
+            value={customHighlight}
+            selected={highlightColor === customHighlight && !HIGHLIGHT_COLORS.includes(highlightColor)}
+            onChange={(c) => {
+              setCustomHighlight(c);
+              setHighlightColor(c);
+            }}
+          />
         </div>
       )}
 
@@ -368,12 +454,38 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
           <div style={group}>
             <span style={dimLabel}>Cỡ chữ</span>
             <button onClick={() => setFontSize(clampFont(fontSize - 2))} style={toolBtn(false)} title="Nhỏ hơn">−</button>
-            <input
-              type="number" min={FONT_MIN} max={FONT_MAX} value={fontSize}
-              onChange={(e) => setFontSize(clampFont(Number(e.target.value)))}
-              style={fontInput}
-            />
+            <NumberField value={fontSize} min={FONT_MIN} max={FONT_MAX} onCommit={(n) => setFontSize(clampFont(n))} title="Cỡ chữ (px)" />
             <button onClick={() => setFontSize(clampFont(fontSize + 2))} style={toolBtn(false)} title="Lớn hơn">+</button>
+          </div>
+        </>
+      )}
+
+      {/* Đếm số — khi tool = step (số bước) hoặc numbered-arrow (mũi tên số) */}
+      {(isStep || isNumberedArrow) && (
+        <>
+          <div style={sep} />
+          <div style={group}>
+            <span style={dimLabel}>Số tiếp theo</span>
+            <NumberField
+              value={isStep ? stepCounter : arrowCounter}
+              min={1}
+              onCommit={isStep ? setStepCounter : setArrowCounter}
+              title="Số sẽ gán cho mục kế tiếp"
+            />
+            <button
+              onClick={() => (isStep ? setStepCounter : setArrowCounter)(1)}
+              style={toolBtn(false)}
+              title="Đặt lại bộ đếm về 1"
+            >
+              ↺ 1
+            </button>
+            <button
+              onClick={() => (isStep ? renumberSteps : renumberArrows)()}
+              style={newBtn}
+              title="Đánh số lại toàn bộ theo thứ tự tạo (dọn khoảng trống sau khi xóa)"
+            >
+              Đánh số lại
+            </button>
           </div>
         </>
       )}
@@ -440,42 +552,14 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
                   />
                 ))}
                 {/* Custom solid color picker */}
-                <div style={{ position: "relative" }}>
-                  <input
-                    type="color"
-                    value={customSolid}
-                    onChange={(e) => {
-                      setCustomSolid(e.target.value);
-                      setBlurSolidColor(e.target.value);
-                    }}
-                    title="Chọn màu tùy chỉnh"
-                    style={{
-                      width: 24,
-                      height: 24,
-                      borderRadius: 6,
-                      border: blurSolidColor === customSolid && !SOLID_COLORS.includes(blurSolidColor)
-                        ? "2.5px solid #fff"
-                        : "1px solid rgba(255,255,255,0.15)",
-                      boxShadow: blurSolidColor === customSolid && !SOLID_COLORS.includes(blurSolidColor)
-                        ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.2)"
-                        : "0 1px 2px rgba(0,0,0,0.2)",
-                      cursor: "pointer",
-                      flexShrink: 0,
-                      padding: 0,
-                    }}
-                  />
-                  <div style={{
-                    position: "absolute",
-                    top: "50%",
-                    left: "50%",
-                    transform: "translate(-50%, -50%)",
-                    pointerEvents: "none",
-                    fontSize: 10,
-                    color: "#fff",
-                    textShadow: "0 1px 2px rgba(0,0,0,0.5)",
-                    fontWeight: "bold",
-                  }}>+</div>
-                </div>
+                <CustomColorButton
+                  value={customSolid}
+                  selected={blurSolidColor === customSolid && !SOLID_COLORS.includes(blurSolidColor)}
+                  onChange={(c) => {
+                    setCustomSolid(c);
+                    setBlurSolidColor(c);
+                  }}
+                />
               </div>
             </>
           )}
