@@ -10,7 +10,7 @@ export interface Pending {
 }
 
 export type CaptureMode = "full" | "window" | "region" | "all" | "scroll";
-export type OutputMode = "editor" | "clipboard" | "save" | "save_copy";
+export type OutputMode = "editor" | "clipboard" | "save" | "save_copy" | "copy_editor";
 
 export interface WindowInfo {
   id: number;

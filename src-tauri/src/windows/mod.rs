@@ -101,7 +101,7 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
         .title("SnapDoc")
-        .inner_size(540.0, 280.0)
+        .inner_size(580.0, 280.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)

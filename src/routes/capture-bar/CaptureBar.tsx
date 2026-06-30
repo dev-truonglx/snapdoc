@@ -56,6 +56,7 @@ const OUTPUTS: { id: OutputMode; label: string }[] = [
   { id: "clipboard", label: "Clipboard"  },
   { id: "save",      label: "Lưu file"   },
   { id: "save_copy", label: "Lưu + Copy" },
+  { id: "copy_editor", label: "Copy + Mở editor" },
 ];
 
 export default function CaptureBar() {
@@ -323,11 +324,11 @@ const shootBtn: React.CSSProperties = {
 };
 
 const closeBtn: React.CSSProperties = {
-  width: 28,
-  height: 28,
+  width: 32,
+  height: 32,
   borderRadius: "50%",
   color: "var(--text-dim)",
-  fontSize: 13,
+  fontSize: 16,
   display: "flex",
   alignItems: "center",
   justifyContent: "center",

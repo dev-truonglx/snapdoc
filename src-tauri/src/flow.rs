@@ -58,6 +58,10 @@ pub fn finish(app: &AppHandle, cap: capture::Capture, output: &str) -> Result<()
             clipboard::copy_png(&cap.base64)?;
             windows::open_thumbnail(app)
         }
+        "copy_editor" => {
+            clipboard::copy_png(&cap.base64)?;
+            windows::open_editor(app)
+        }
         "save" | "save_copy" => {
             // Lấy saveDir từ settings; fallback về Pictures/SnapDoc nếu chưa cấu hình.
             let save_dir = {

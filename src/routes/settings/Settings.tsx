@@ -8,6 +8,7 @@ const OUTPUTS = [
   { id: "clipboard", label: "Clipboard" },
   { id: "save",      label: "Lưu file" },
   { id: "save_copy", label: "Lưu + Copy" },
+  { id: "copy_editor", label: "Copy + Mở editor" },
 ] as const;
 
 const SHORTCUT_KEYS: { key: string; label: string; hint?: string }[] = [
