@@ -499,6 +499,99 @@ pub struct StitchInstruction {
     src_h: u32,
 }
 
+fn lum_u8(px: &image::Rgba<u8>) -> i32 {
+    (px[0] as i32 * 299 + px[1] as i32 * 587 + px[2] as i32 * 114) / 1000
+}
+
+/// Cột x có phải CỘT CỐ ĐỊNH (sidebar dính) không: giống nhau qua các lát cắt ở
+/// MỌI vị trí cuộn (không dịch theo cuộn) VÀ có nội dung (khác nền trang). Cột
+/// nội dung cuộn thì đổi qua các lát; lề trắng thì không có nội dung → đều loại.
+fn col_fixed_with_content(
+    refs: &[&image::RgbaImage],
+    x: u32,
+    h: u32,
+    y_step: u32,
+    bg: i32,
+) -> bool {
+    let mut content = false;
+    let mut y = 0u32;
+    while y < h {
+        let base = lum_u8(refs[0].get_pixel(x, y));
+        for r in &refs[1..] {
+            if (lum_u8(r.get_pixel(x, y)) - base).abs() > 18 {
+                return false; // đổi qua các lát → đang cuộn, không cố định
+            }
+        }
+        if (base - bg).abs() > 24 {
+            content = true; // khác nền → có nội dung (sidebar), không phải lề trắng
+        }
+        y += y_step;
+    }
+    content
+}
+
+/// Phát hiện dải cột cố định ở mép trái/phải (sidebar/panel dính) bằng cách so
+/// vài lát cắt rải đều. Trả (left, right) tính bằng px. Có chốt an toàn để không
+/// cắt nhầm nội dung.
+fn detect_fixed_columns(slices: &[image::RgbaImage], width: u32) -> (u32, u32) {
+    let n = slices.len();
+    if n < 3 {
+        return (0, 0);
+    }
+    let idxs = [0usize, n / 4, n / 2, (3 * n) / 4, n - 1];
+    let refs: Vec<&image::RgbaImage> = idxs.iter().map(|&i| &slices[i]).collect();
+    let h = refs[0].height();
+    let mut w = width;
+    for r in &refs {
+        w = w.min(r.width());
+    }
+    if w == 0 || h == 0 {
+        return (0, 0);
+    }
+    let y_step = (h / 120).max(1);
+
+    // Nền trang ≈ trung vị độ sáng của khung đầu (trang admin thường trắng).
+    let bg = {
+        let mut lums: Vec<i32> = Vec::new();
+        let xs = (w / 40).max(1);
+        let ys = (h / 60).max(1);
+        let mut yy = 0u32;
+        while yy < h {
+            let mut xx = 0u32;
+            while xx < w {
+                lums.push(lum_u8(refs[0].get_pixel(xx, yy)));
+                xx += xs;
+            }
+            yy += ys;
+        }
+        lums.sort_unstable();
+        if lums.is_empty() { 255 } else { lums[lums.len() / 2] }
+    };
+
+    let mut left = 0u32;
+    while left < w && col_fixed_with_content(&refs, left, h, y_step, bg) {
+        left += 1;
+    }
+    let mut right = 0u32;
+    while right < w && col_fixed_with_content(&refs, w - 1 - right, h, y_step, bg) {
+        right += 1;
+    }
+
+    // Chốt an toàn: 1 dải > 40% bề ngang, hoặc 2 dải phủ gần hết khung → coi như
+    // phát hiện sai (vd cuộn quá ít) và bỏ qua, tránh cắt nhầm nội dung.
+    let maxband = (width as f32 * 0.4) as u32;
+    if left > maxband {
+        left = 0;
+    }
+    if right > maxband {
+        right = 0;
+    }
+    if left + right >= w {
+        return (0, 0);
+    }
+    (left, right)
+}
+
 /// Ghép ảnh cuộn ở backend dựa trên danh sách các lát cắt đã lưu và hướng dẫn ghép.
 #[tauri::command]
 pub async fn finalize_scroll_stitch(
@@ -528,16 +621,33 @@ pub async fn finalize_scroll_stitch(
             return Err("Chiều cao ảnh ghép bằng 0".to_string());
         }
 
+        // Phát hiện sidebar/panel cố định để KHÔNG copy lặp khi nối (chỉ khi thực
+        // sự có cuộn nhiều khung).
+        let (fixed_left, fixed_right) = if instructions.len() >= 2 {
+            detect_fixed_columns(&slices, width)
+        } else {
+            (0, 0)
+        };
+        let first_h = instructions[0].src_h;
+
         let mut final_img = image::RgbaImage::new(width, total_height);
 
         let mut current_y = 0u32;
-        for inst in &instructions {
+        for (idx, inst) in instructions.iter().enumerate() {
             let slice = slices.get(inst.slice_index).ok_or_else(|| {
                 format!("Không tìm thấy lát cắt index {}", inst.slice_index)
             })?;
 
             let slice_w = slice.width();
             let slice_h = slice.height();
+
+            // Khung ĐẦU vẽ đủ bề ngang (sidebar hiện 1 lần); các dải nối SAU chỉ
+            // copy cột đang cuộn, bỏ cột cố định để sidebar không bị lặp dọc.
+            let (x_lo, x_hi) = if idx == 0 {
+                (0u32, width)
+            } else {
+                (fixed_left, width.saturating_sub(fixed_right))
+            };
 
             for y in 0..inst.src_h {
                 let src_pixel_y = inst.src_y + y;
@@ -548,7 +658,7 @@ pub async fn finalize_scroll_stitch(
                 if dest_pixel_y >= total_height {
                     continue;
                 }
-                for x in 0..width {
+                for x in x_lo..x_hi {
                     if x >= slice_w {
                         continue;
                     }
@@ -558,6 +668,23 @@ pub async fn finalize_scroll_stitch(
             }
 
             current_y += inst.src_h;
+        }
+
+        // Đóng băng sidebar (kiểu Snagit): phần cột cố định bên dưới khung đầu được
+        // ĐỔ bằng cách kéo dài hàng đáy của sidebar xuống hết chiều cao — nền sidebar
+        // (thường màu đặc) trải liền mạch, nội dung sidebar chỉ hiện 1 lần ở trên.
+        if (fixed_left > 0 || fixed_right > 0) && first_h > 0 && first_h <= total_height {
+            let anchor_y = first_h - 1;
+            for y in first_h..total_height {
+                for x in 0..fixed_left {
+                    let px = *final_img.get_pixel(x, anchor_y);
+                    final_img.put_pixel(x, y, px);
+                }
+                for x in (width - fixed_right)..width {
+                    let px = *final_img.get_pixel(x, anchor_y);
+                    final_img.put_pixel(x, y, px);
+                }
+            }
         }
 
         let cap = crate::capture::persist(&final_img)?;

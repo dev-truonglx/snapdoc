@@ -20,60 +20,214 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 
 const COLOR_TOL = 12; // sai khác màu cho phép mỗi kênh
 const SCROLLBAR_MARGIN = 25; // bỏ lề phải tránh thanh cuộn
-const SAME_RATIO = 0.92; // tỉ lệ điểm khớp để coi 2 dòng "y hệt" (vùng cố định)
-const MATCH_RATIO = 0.82; // tỉ lệ điểm khớp để coi 2 dòng là "cùng nội dung" (đã dịch)
+const SAMPLE_STEP = 4; // bước lấy mẫu pixel theo chiều ngang (dày hơn để bắt nội dung thưa)
+const BG_SAMPLE_STEP = 8; // bước lấy mẫu khi ước lượng màu nền của dòng
+const BG_DEV = 16; // độ lệch sáng so với nền để coi 1 điểm là "có nội dung"
+const SAME_RATIO = 0.9; // tỉ lệ khớp (trên điểm nội dung) để coi 2 dòng "y hệt" (vùng cố định)
+const PROFILE_STEP = 3; // bước lấy mẫu x khi tính biên dạng cạnh ngang
+const MIN_DY = 3; // bỏ qua dịch chuyển quá nhỏ (nhiễu / con trỏ nhấp nháy)
+const MIN_OVERLAP = 64; // số dòng chồng lấn tối thiểu để NCC đáng tin (chặn đỉnh giả ở dy lớn)
+const MAX_SCROLL_FRAC = 0.5; // dy tối đa = nửa vùng cuộn (1 tick không cuộn quá nửa khung)
+const NBINS = 8; // số ô ngang của biên dạng cạnh (mã hoá vị trí ngang để phân biệt mạnh)
+const NCC_ACCEPT = 0.6; // NCC tại đỉnh ≥ ngưỡng này thì TIN dy (không cần so pixel chặt)
+const CHANGE_TOL = 16; // độ lệch sáng để coi 1 điểm là "đã đổi" giữa 2 khung
+const FIXED_FG_FRAC = 0.05; // mật độ nội dung tối thiểu để 1 ô được xét là cột cố định
+const FIXED_CHANGE_MAX = 0.2; // tỉ lệ nội dung thay đổi tối đa để coi ô là CỐ ĐỊNH (sidebar dính)
+const FAST_DIFF = 0.35; // dy=-1 mà tỉ lệ dòng đổi ≥ ngưỡng này ⇒ cuộn quá nhanh (không phải tới đáy)
+const DEBUG = false; // bật true để hiện log chẩn đoán trên panel khi cần dò lỗi cuộn
 
-// Tỉ lệ điểm ảnh khớp giữa 2 dòng (so theo mẫu, bỏ lề phải tránh thanh cuộn).
-// Trả về [0..1]. Dùng tỉ lệ thay vì "tất-cả-hoặc-không" để bền với con trỏ
-// chuột, cột sidebar tĩnh, khử răng cưa hay widget động nhỏ trên dòng.
-function rowMatchRatio(
-  d1: Uint8ClampedArray,
-  off1: number,
-  d2: Uint8ClampedArray,
-  off2: number,
-  w: number,
-): number {
-  let total = 0;
-  let ok = 0;
-  for (let x = 0; x < w - SCROLLBAR_MARGIN; x += 6) {
-    const i1 = off1 + x * 4;
-    const i2 = off2 + x * 4;
-    total++;
-    if (
-      Math.abs(d1[i1] - d2[i2]) <= COLOR_TOL &&
-      Math.abs(d1[i1 + 1] - d2[i2 + 1]) <= COLOR_TOL &&
-      Math.abs(d1[i1 + 2] - d2[i2 + 2]) <= COLOR_TOL
-    ) {
-      ok++;
-    }
-  }
-  return total === 0 ? 1 : ok / total;
+// Độ sáng (luminance) gần đúng của 1 pixel — dùng phân biệt nền/nội dung.
+function lumAt(d: Uint8ClampedArray, i: number): number {
+  return (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000;
 }
 
-// Dòng có "nội dung" (chữ, viền, ảnh...) chứ không phải nền trơn — dùng làm mốc.
-function isRowInteresting(img: ImageData, y: number, w: number): boolean {
-  const d = img.data;
-  const off = y * w * 4;
-  const r0 = d[off + 4];
-  const g0 = d[off + 5];
-  const b0 = d[off + 6];
-  for (let x = 12; x < w - SCROLLBAR_MARGIN; x += 12) {
-    const i = off + x * 4;
-    if (
-      Math.abs(d[i] - r0) > 12 ||
-      Math.abs(d[i + 1] - g0) > 12 ||
-      Math.abs(d[i + 2] - b0) > 12
-    ) {
-      return true;
+// Ước lượng độ sáng NỀN của 1 dòng = trung vị các điểm mẫu. Với dòng thưa
+// (table, dashboard) phần lớn là nền nên trung vị chính là màu nền; nhờ đó ta
+// tách được pixel "nội dung" khỏi nền dù nội dung chỉ chiếm vài phần trăm.
+function rowBgLum(d: Uint8ClampedArray, off: number, w: number): number {
+  const lums: number[] = [];
+  for (let x = 0; x < w - SCROLLBAR_MARGIN; x += BG_SAMPLE_STEP) {
+    lums.push(lumAt(d, off + x * 4));
+  }
+  if (lums.length === 0) return 0;
+  lums.sort((a, b) => a - b);
+  return lums[lums.length >> 1];
+}
+
+interface RowCmp {
+  ratio: number; // tỉ lệ khớp trên TẤT CẢ điểm mẫu (dùng cho dòng nền trơn)
+  contentRatio: number; // tỉ lệ khớp chỉ trên điểm CÓ NỘI DUNG
+  content: number; // số điểm có nội dung (độ mạnh của bằng chứng)
+}
+
+// So 2 dòng theo mẫu, nhưng TÁCH RIÊNG điểm nội dung khỏi nền. Đây là chỗ then
+// chốt: bản cũ đếm mọi pixel ngang nhau nên với khung thưa (nội dung ~10%, còn
+// lại là nền) thì nền trùng làm tỉ lệ khớp luôn cao → nhận nhầm 2 dòng khác
+// nhau là "giống". Nay nền không còn lấn át: quyết định dựa trên contentRatio.
+function rowCompare(
+  d1: Uint8ClampedArray,
+  off1: number,
+  bg1: number,
+  d2: Uint8ClampedArray,
+  off2: number,
+  bg2: number,
+  w: number,
+): RowCmp {
+  let total = 0;
+  let ok = 0;
+  let content = 0;
+  let contentOk = 0;
+  for (let x = 0; x < w - SCROLLBAR_MARGIN; x += SAMPLE_STEP) {
+    const i1 = off1 + x * 4;
+    const i2 = off2 + x * 4;
+    const matched =
+      Math.abs(d1[i1] - d2[i2]) <= COLOR_TOL &&
+      Math.abs(d1[i1 + 1] - d2[i2 + 1]) <= COLOR_TOL &&
+      Math.abs(d1[i1 + 2] - d2[i2 + 2]) <= COLOR_TOL;
+    total++;
+    if (matched) ok++;
+    // Điểm "có nội dung" nếu lệch khỏi nền ở ÍT NHẤT một trong hai khung.
+    if (Math.abs(lumAt(d1, i1) - bg1) > BG_DEV || Math.abs(lumAt(d2, i2) - bg2) > BG_DEV) {
+      content++;
+      if (matched) contentOk++;
     }
   }
-  return false;
+  const ratio = total === 0 ? 1 : ok / total;
+  return {
+    ratio,
+    contentRatio: content === 0 ? ratio : contentOk / content,
+    content,
+  };
+}
+
+// Biên dạng cạnh ngang CHIA Ô (binned): với mỗi dòng y, năng lượng cạnh dọc
+// (|Δsáng| so với dòng trên) được gom vào NBINS ô theo bề ngang. Khác với phiên
+// bản 1-số/dòng (mất thông tin vị trí ngang → đỉnh nhiễu dễ trùng), vector NBINS
+// mã hoá CẠNH NẰM Ở ĐÂU theo chiều ngang nên phân biệt mạnh hơn hẳn: một dịch
+// chuyển sai sẽ không khớp được phân bố ngang. Vẫn ≈0 ở nền trơn (bền nội dung
+// thưa) và gom-tổng nên bao dung với răng cưa/subpixel khi cuộn mượt.
+function edgeProfileBinned(d: Uint8ClampedArray, w: number, h: number, stride: number): Float32Array {
+  const xEnd = w - SCROLLBAR_MARGIN;
+  const binW = Math.max(1, Math.floor(xEnd / NBINS));
+  const prof = new Float32Array(h * NBINS);
+  for (let y = 1; y < h; y++) {
+    const off = y * stride;
+    const up = off - stride;
+    const base = y * NBINS;
+    for (let x = 0; x < xEnd; x += PROFILE_STEP) {
+      const b = Math.min(NBINS - 1, Math.floor(x / binW));
+      const i = off + x * 4;
+      const j = up + x * 4;
+      prof[base + b] += Math.abs(lumAt(d, i) - lumAt(d, j));
+    }
+  }
+  return prof;
+}
+
+// Mặt nạ ô "đang cuộn": phát hiện CỘT CỐ ĐỊNH (sidebar/panel dính) để loại khỏi
+// NCC. Một ô bị coi là CỐ ĐỊNH khi có MẬT ĐỘ NỘI DUNG cao nhưng nội dung GẦN NHƯ
+// KHÔNG ĐỔI giữa 2 khung (foreground trùng tại chỗ). Khác hẳn cột nội-dung-thưa
+// đang cuộn: cột đó mật độ thấp HOẶC nội dung có thay đổi (đã dịch) — nên không
+// bị loại nhầm. Cột cố định nếu giữ lại sẽ thêm năng lượng cạnh lệch pha, kéo
+// NCC ở dy thật xuống. Trả Uint8Array(NBINS): 1 = dùng, 0 = bỏ.
+function activeBinMask(
+  p: Uint8ClampedArray,
+  c: Uint8ClampedArray,
+  bgP: Float32Array,
+  bgC: Float32Array,
+  w: number,
+  h: number,
+  stride: number,
+): Uint8Array {
+  const xEnd = w - SCROLLBAR_MARGIN;
+  const binW = Math.max(1, Math.floor(xEnd / NBINS));
+  const cnt = new Float64Array(NBINS);
+  const fg = new Float64Array(NBINS);
+  const chg = new Float64Array(NBINS);
+  for (let y = 0; y < h; y += 4) {
+    const row = y * stride;
+    const bp = bgP[y];
+    const bc = bgC[y];
+    for (let x = 0; x < xEnd; x += PROFILE_STEP) {
+      const b = Math.min(NBINS - 1, Math.floor(x / binW));
+      const i = row + x * 4;
+      const lp = lumAt(p, i);
+      const lc = lumAt(c, i);
+      cnt[b]++;
+      if (Math.abs(lp - bp) > BG_DEV || Math.abs(lc - bc) > BG_DEV) {
+        fg[b]++;
+        if (Math.abs(lp - lc) > CHANGE_TOL) chg[b]++;
+      }
+    }
+  }
+  const mask = new Uint8Array(NBINS);
+  let active = 0;
+  for (let b = 0; b < NBINS; b++) {
+    const fgFrac = cnt[b] > 0 ? fg[b] / cnt[b] : 0;
+    const chgOfContent = fg[b] > 0 ? chg[b] / fg[b] : 1;
+    const isFixed = fgFrac >= FIXED_FG_FRAC && chgOfContent <= FIXED_CHANGE_MAX;
+    mask[b] = isFixed ? 0 : 1;
+    active += mask[b];
+  }
+  // Nếu (hiếm) mọi ô đều bị coi là cố định → không loại gì, dùng hết để có tín hiệu.
+  if (active === 0) mask.fill(1);
+  return mask;
+}
+
+// Tương quan chuẩn hoá (NCC) giữa biên dạng binned của prev và cur khi nội dung
+// dịch LÊN dy px (prev[y] ≈ cur[y - dy]). Coi mỗi (dòng, ô ĐANG CUỘN) là một mẫu
+// nên NCC nắm cả MẪU HÌNH DỌC lẫn PHÂN BỐ NGANG của cạnh → đỉnh thật tách bạch
+// khỏi nhiễu. Bỏ qua các ô cố định (mask=0). Overlap toàn nền → trả 0.
+function shiftNCC(
+  profP: Float32Array,
+  profC: Float32Array,
+  scrollTop: number,
+  scrollBottom: number,
+  dy: number,
+  mask: Uint8Array,
+  activeBins: number,
+): number {
+  const y0 = scrollTop + dy;
+  const nRows = scrollBottom - y0;
+  if (nRows < MIN_OVERLAP || activeBins === 0) return -1; // overlap nhỏ / không có ô cuộn
+  const n = nRows * activeBins;
+  let sa = 0;
+  let sb = 0;
+  let saa = 0;
+  let sbb = 0;
+  let sab = 0;
+  for (let y = y0; y < scrollBottom; y++) {
+    const ip = y * NBINS;
+    const ic = (y - dy) * NBINS;
+    for (let b = 0; b < NBINS; b++) {
+      if (mask[b] === 0) continue;
+      const a = profP[ip + b];
+      const bb = profC[ic + b];
+      sa += a;
+      sb += bb;
+      saa += a * a;
+      sbb += bb * bb;
+      sab += a * bb;
+    }
+  }
+  const ma = sa / n;
+  const mb = sb / n;
+  const cov = sab / n - ma * mb;
+  const va = saa / n - ma * ma;
+  const vb = sbb / n - mb * mb;
+  const denom = Math.sqrt(va * vb);
+  return denom > 1e-6 ? cov / denom : 0;
 }
 
 interface ScrollAnalysis {
   dy: number; // số pixel nội dung mới (0 = không cuộn, -1 = không khớp được)
   topFixed: number; // chiều cao dải cố định trên (header dính)
   botFixed: number; // chiều cao dải cố định dưới (footer dính / nền trơn cuối)
+  ncc?: number; // NCC cao nhất tìm được (chẩn đoán)
+  bestDy?: number; // dy tại đỉnh NCC (chẩn đoán)
+  span?: number; // chiều cao vùng cuộn = scrollBottom - scrollTop (chẩn đoán)
+  changedFrac?: number; // tỉ lệ dòng thay đổi giữa 2 khung (chẩn đoán)
+  activeBins?: number; // số ô ngang đang cuộn (đã loại cột cố định) (chẩn đoán)
 }
 
 // Phân tích 2 khung liên tiếp: phát hiện dải cố định (header/footer dính) rồi
@@ -86,81 +240,106 @@ function analyzeScroll(prev: ImageData, cur: ImageData): ScrollAnalysis {
   const stride = w * 4;
   const p = prev.data;
   const c = cur.data;
-  const maxBand = Math.floor(h * 0.5);
+  const maxBand = Math.floor(h * 0.4);
 
-  // 1) Dải cố định trên: các dòng đầu KHỚP Ở CÙNG VỊ TRÍ giữa 2 khung.
-  let topFixed = 0;
-  while (
-    topFixed < maxBand &&
-    rowMatchRatio(p, topFixed * stride, c, topFixed * stride, w) >= SAME_RATIO
-  ) {
-    topFixed++;
+  // Ước lượng nền của từng dòng MỘT LẦN cho cả 2 khung (dùng lại trong mọi phép
+  // so sánh bên dưới) — tránh tính trung vị lặp đi lặp lại trong vòng quét dy.
+  const bgP = new Float32Array(h);
+  const bgC = new Float32Array(h);
+  for (let yy = 0; yy < h; yy++) {
+    bgP[yy] = rowBgLum(p, yy * stride, w);
+    bgC[yy] = rowBgLum(c, yy * stride, w);
   }
 
-  // 2) Dải cố định dưới.
+  // "Giống nhau ở CÙNG vị trí?" — dùng contentRatio nếu dòng có ÍT NHẤT 2 điểm
+  // nội dung (đủ để biết nội dung có đổi không); chỉ dòng gần như trắng mới xét
+  // ratio tổng. Nhờ vậy 1 dòng nội dung THƯA bị đổi vẫn bị tính là "khác" — dải
+  // cố định không còn phình nuốt sạch vùng cuộn (lỗi span≈1).
+  const sameInPlace = (y: number): boolean => {
+    const off = y * stride;
+    const cmp = rowCompare(p, off, bgP[y], c, off, bgC[y], w);
+    return cmp.content >= 2 ? cmp.contentRatio >= SAME_RATIO : cmp.ratio >= SAME_RATIO;
+  };
+
+  // Tỉ lệ dòng THAY ĐỔI giữa 2 khung (đo độc lập, ở cùng vị trí) — cho biết khung
+  // có thật sự đổi không (loại trừ khả năng capture trả về khung trùng).
+  let sampled = 0;
+  let changed = 0;
+  for (let y = 0; y < h; y += 4) {
+    sampled++;
+    if (!sameInPlace(y)) changed++;
+  }
+  const changedFrac = sampled ? changed / sampled : 0;
+
+  // 1) Dải cố định trên/dưới: DỪNG ngay ở dòng đầu tiên khác (break-on-mismatch).
+  let topFixed = 0;
+  while (topFixed < maxBand && sameInPlace(topFixed)) topFixed++;
   let botFixed = 0;
-  while (
-    botFixed < maxBand &&
-    rowMatchRatio(p, (h - 1 - botFixed) * stride, c, (h - 1 - botFixed) * stride, w) >= SAME_RATIO
-  ) {
-    botFixed++;
+  while (botFixed < maxBand && sameInPlace(h - 1 - botFixed)) botFixed++;
+
+  // An toàn: nếu dải nuốt gần hết (vùng cuộn còn < 25% chiều cao) thì KHÔNG tin
+  // vào dải — để NCC quét trên (gần) toàn khung thay vì trả "không cuộn" giả.
+  if (h - topFixed - botFixed < h * 0.25) {
+    topFixed = 0;
+    botFixed = 0;
   }
 
   const scrollTop = topFixed;
   const scrollBottom = h - botFixed;
+  const span = scrollBottom - scrollTop;
 
-  // Cả khung gần như tĩnh ở cùng vị trí → không cuộn.
-  if (scrollBottom - scrollTop < 24) {
-    return { dy: 0, topFixed, botFixed };
+  // Hai khung gần như giống hệt → không cuộn (đây là trạng thái đúng, không lỗi).
+  if (changedFrac < 0.02 || span < 24) {
+    return { dy: 0, topFixed, botFixed, span, changedFrac };
   }
 
-  // 3) Chọn dòng mốc có nội dung, gần ĐÁY vùng cuộn của prev.
-  const landmarks: number[] = [];
-  let y = scrollBottom - 4;
-  while (y > scrollTop + 4 && landmarks.length < 4) {
-    if (isRowInteresting(prev, y, w)) landmarks.push(y);
-    y -= 8;
-  }
-  if (landmarks.length < 2) {
-    landmarks.length = 0;
-    for (let k = 1; k <= 4; k++) {
-      const ly = scrollBottom - k * 6;
-      if (ly > scrollTop) landmarks.push(ly);
-    }
-  }
+  // 3) Ước lượng dy bằng TƯƠNG QUAN BIÊN DẠNG CẠNH (thay cho dò vài dòng mốc).
+  //    Mỗi khung được rút gọn thành tín hiệu 1 chiều (đỉnh ở chữ/viền, ≈0 ở nền)
+  //    rồi tìm dịch chuyển dy cho NCC cao nhất. Cách này quét được TOÀN BỘ dy với
+  //    chi phí thấp và bền với trang thưa (table, dashboard) — nơi cách so pixel
+  //    2-D cũ bị nền trắng lấn át.
+  const profP = edgeProfileBinned(p, w, h, stride);
+  const profC = edgeProfileBinned(c, w, h, stride);
 
-  // 4) Quét dy: nội dung dịch LÊN dy px nên prev[y] ≈ cur[y - dy] trong vùng cuộn.
-  const maxDy = scrollBottom - scrollTop - 4;
-  for (let dy = 2; dy <= maxDy; dy++) {
-    let matched = 0;
-    let tooFar = false;
-    for (const ly of landmarks) {
-      const ty = ly - dy;
-      if (ty < scrollTop) {
-        tooFar = true;
-        break;
-      }
-      if (rowMatchRatio(p, ly * stride, c, ty * stride, w) >= MATCH_RATIO) matched++;
-    }
-    if (tooFar) break; // dy đã vượt quá tầm của mốc
-    if (matched < landmarks.length) continue;
+  // Loại các CỘT CỐ ĐỊNH (sidebar/panel dính) khỏi NCC: chúng không cuộn nên chỉ
+  // thêm nhiễu lệch pha, kéo NCC ở dy thật xuống.
+  const mask = activeBinMask(p, c, bgP, bgC, w, h, stride);
+  let activeBins = 0;
+  for (let b = 0; b < NBINS; b++) activeBins += mask[b];
 
-    // Xác thực toàn vùng chồng lấn (đa số dòng phải khớp).
-    const startY = scrollTop + dy;
-    if (scrollBottom - startY < 8) continue;
-    const step = Math.max(1, Math.floor((scrollBottom - startY) / 12));
-    let rows = 0;
-    let okRows = 0;
-    for (let vy = startY; vy < scrollBottom; vy += step) {
-      rows++;
-      if (rowMatchRatio(p, vy * stride, c, (vy - dy) * stride, w) >= MATCH_RATIO) okRows++;
-    }
-    if (rows > 0 && okRows / rows >= 0.85) {
-      return { dy, topFixed, botFixed };
+  // Giới hạn dy để overlap không quá nhỏ: dy lớn ⇒ overlap bé ⇒ NCC nhiễu, cho
+  // đỉnh GIẢ rất cao (đây chính là lỗi bestDy≈700). Một tick cuộn tay không vượt
+  // quá nửa khung nên chặn ở span/2 và đảm bảo overlap ≥ MIN_OVERLAP dòng.
+  const maxDy = Math.min(span - MIN_OVERLAP, Math.floor(span * MAX_SCROLL_FRAC));
+  if (maxDy < MIN_DY) return { dy: 0, topFixed, botFixed, span, changedFrac };
+
+  const scores = new Float32Array(maxDy + 1);
+  let bestNcc = -1;
+  let bestDy = 0;
+  for (let dy = MIN_DY; dy <= maxDy; dy++) {
+    const ncc = shiftNCC(profP, profC, scrollTop, scrollBottom, dy, mask, activeBins);
+    scores[dy] = ncc;
+    if (ncc > bestNcc) {
+      bestNcc = ncc;
+      bestDy = dy;
     }
   }
-
-  return { dy: -1, topFixed, botFixed };
+  // 4) Chọn dy. Biên dạng binned đã đủ phân biệt nên TIN vào đỉnh NCC thay vì so
+  //    pixel chặt (vốn từ chối nhầm khi cuộn mượt/răng cưa). Trong số các dy có
+  //    NCC sát đỉnh (≤ NEAR), ưu tiên dy NHỎ NHẤT: vừa chống đỉnh nhiễu ở dy lớn,
+  //    vừa chọn chu kỳ cơ bản khi bảng có nhiều dòng cao đều nhau.
+  if (bestNcc < NCC_ACCEPT) {
+    return { dy: -1, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
+  }
+  const NEAR = 0.03;
+  let dy = bestDy;
+  for (let d2 = MIN_DY; d2 < bestDy; d2++) {
+    if (scores[d2] >= bestNcc - NEAR) {
+      dy = d2;
+      break;
+    }
+  }
+  return { dy, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
 }
 
 export default function ScrollControl() {
@@ -170,6 +349,18 @@ export default function ScrollControl() {
   const [frameCount, setFrameCount] = useState(0);
   const [stitchedHeight, setStitchedHeight] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // Cảnh báo cuộn quá nhanh: khi không khớp được (dy=-1) mà nội dung lại đổi
+  // nhiều (đang cuộn thật) → đã vượt tầm chồng lấn → có thể bỏ sót nội dung.
+  const [fastWarn, setFastWarn] = useState(false);
+  const fastWarnRef = useRef(false);
+  // Chẩn đoán hiển thị ngay trên panel (không cần devtools): cho biết vì sao
+  // 1 frame bị bỏ. Tắt bằng cách đặt DEBUG = false.
+  const [dbg, setDbg] = useState<string>("");
+  // Log tích luỹ mọi tick để người dùng copy gửi lại (giữ tối đa MAX_LOG dòng).
+  const [logText, setLogText] = useState<string>("");
+  const logRef = useRef<string[]>([]);
+  const seqRef = useRef(0);
+  const [copied, setCopied] = useState(false);
 
   // Master canvas dùng "capacity doubling": vùng nhớ (capacity) cao hơn nội
   // dung thực (usedHeight) để KHÔNG phải tạo canvas mới + copy lại toàn bộ ảnh
@@ -307,7 +498,30 @@ export default function ScrollControl() {
       }
 
       // Các frame tiếp theo: phân tích cuộn + dải cố định.
-      const { dy, botFixed } = analyzeScroll(prevImageDataRef.current, newImgData);
+      const an = analyzeScroll(prevImageDataRef.current, newImgData);
+      const { dy, botFixed } = an;
+
+      // Cảnh báo cuộn quá nhanh: dy=-1 (không khớp được) + nội dung đổi nhiều
+      // (đang cuộn thật, không phải tới đáy trang) ⇒ đã vượt tầm chồng lấn, có thể
+      // bỏ sót. Tắt cảnh báo ngay khi nối được hoặc dừng cuộn.
+      const fast = dy === -1 && (an.changedFrac ?? 0) >= FAST_DIFF;
+      if (fast !== fastWarnRef.current) {
+        fastWarnRef.current = fast;
+        setFastWarn(fast);
+      }
+
+      if (DEBUG) {
+        const ncc = an.ncc === undefined ? "—" : an.ncc.toFixed(2);
+        const diff = an.changedFrac === undefined ? "—" : `${Math.round(an.changedFrac * 100)}%`;
+        const act = dy > 0 ? "APPEND" : dy === 0 ? "skip0" : "skip-1";
+        seqRef.current++;
+        const line = `#${seqRef.current} ${act} dy=${dy} diff=${diff} ncc=${ncc} bestDy=${an.bestDy ?? "—"} bins=${an.activeBins ?? "—"} top=${an.topFixed} bot=${an.botFixed} span=${an.span ?? "—"} fh=${fh}`;
+        setDbg(line);
+        const buf = logRef.current;
+        buf.push(line);
+        if (buf.length > 400) buf.splice(0, buf.length - 400);
+        setLogText(buf.join("\n"));
+      }
 
       if (dy > 0) {
         // Có cuộn THẬT. Chỉ NỐI đúng dy dòng nội dung mới vừa lộ ra ở đáy vùng
@@ -410,7 +624,11 @@ export default function ScrollControl() {
       <div style={statusRow} data-tauri-drag-region>
         {status === "ready" && <span style={statusText}>Sẵn sàng chụp</span>}
         {status === "capturing" && (
-          <span style={statusText}>Đang ghi... Cuộn trang</span>
+          <span style={fastWarn ? statusWarn : statusText}>
+            {fastWarn
+              ? "⚠ Cuộn quá nhanh — chậm lại kẻo bỏ sót nội dung"
+              : "Đang ghi... cuộn chậm & đều tay"}
+          </span>
         )}
         {status === "processing" && <span style={statusText}>Đang kết xuất...</span>}
       </div>
@@ -421,6 +639,46 @@ export default function ScrollControl() {
           <span>Khung hình: {frameCount}</span>
           <span>·</span>
           <span>Chiều cao: {stitchedHeight}px</span>
+        </div>
+      )}
+
+      {DEBUG && status !== "ready" && dbg && (
+        <div style={debugRow}>{dbg}</div>
+      )}
+
+      {DEBUG && status !== "ready" && (
+        <div style={logBox}>
+          <div style={logHeader}>
+            <span>Log chẩn đoán ({logRef.current.length})</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                style={logBtn}
+                onClick={async () => {
+                  const text = logRef.current.join("\n");
+                  try {
+                    await navigator.clipboard.writeText(text);
+                  } catch {
+                    /* fallback: bôi đen ô bên dưới rồi Ctrl/Cmd+C */
+                  }
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1500);
+                }}
+              >
+                {copied ? "Đã copy ✓" : "Copy"}
+              </button>
+              <button
+                style={logBtn}
+                onClick={() => {
+                  logRef.current = [];
+                  seqRef.current = 0;
+                  setLogText("");
+                }}
+              >
+                Xoá
+              </button>
+            </div>
+          </div>
+          <textarea readOnly style={logArea} value={logText} />
         </div>
       )}
 
@@ -541,13 +799,72 @@ const statusRow: React.CSSProperties = {
   color: "#f1f5f9",
 };
 
-const statusText: React.CSSProperties = {};
+const statusText: React.CSSProperties = {
+  fontSize: 13,
+  lineHeight: 1.3,
+};
+
+const statusWarn: React.CSSProperties = {
+  fontSize: 13,
+  lineHeight: 1.3,
+  color: "#fbbf24",
+};
 
 const statsRow: React.CSSProperties = {
   display: "flex",
   gap: 6,
   fontSize: 11,
   color: "#94a3b8",
+};
+
+const debugRow: React.CSSProperties = {
+  fontSize: 10,
+  fontFamily: "ui-monospace, Menlo, monospace",
+  color: "#fbbf24",
+  background: "rgba(0,0,0,0.35)",
+  borderRadius: 6,
+  padding: "4px 6px",
+  wordBreak: "break-all",
+};
+
+const logBox: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+};
+
+const logHeader: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  fontSize: 10,
+  color: "#94a3b8",
+};
+
+const logBtn: React.CSSProperties = {
+  fontSize: 10,
+  padding: "2px 8px",
+  borderRadius: 6,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.08)",
+  color: "#e2e8f0",
+  cursor: "pointer",
+};
+
+const logArea: React.CSSProperties = {
+  width: "100%",
+  height: 90,
+  resize: "vertical",
+  fontSize: 10,
+  lineHeight: 1.35,
+  fontFamily: "ui-monospace, Menlo, monospace",
+  color: "#cbd5e1",
+  background: "rgba(0,0,0,0.45)",
+  border: "1px solid rgba(255,255,255,0.08)",
+  borderRadius: 6,
+  padding: 6,
+  boxSizing: "border-box",
+  whiteSpace: "pre",
 };
 
 const previewBox: React.CSSProperties = {

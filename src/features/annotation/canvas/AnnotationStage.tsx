@@ -504,7 +504,7 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
         x,
         y,
         value,
-        radius: 22,
+        radius: Math.max(strokeWidth * 4, 14),
         color,
         strokeWidth,
       });
@@ -694,7 +694,19 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
     const sy = node.scaleY();
     node.scaleX(1);
     node.scaleY(1);
-    if (a.type === "rect" || a.type === "ellipse" || a.type === "highlight" || a.type === "blur") {
+    if (a.type === "ellipse") {
+      // Ellipse được đặt theo TÂM (x = a.x + width/2). node.x()/y() trả về tâm,
+      // nên phải quy đổi ngược về góc trên-trái theo kích thước MỚI — nếu lấy
+      // thẳng node.x()/y() làm a.x/a.y thì hình bị nhảy +width/2 mỗi lần resize.
+      const newW = Math.max(4, a.width * sx);
+      const newH = Math.max(4, a.height * sy);
+      useEditor.getState().updateAnnotation(a.id, {
+        x: node.x() - newW / 2,
+        y: node.y() - newH / 2,
+        width: newW,
+        height: newH,
+      } as Partial<Annotation>);
+    } else if (a.type === "rect" || a.type === "highlight" || a.type === "blur") {
       useEditor.getState().updateAnnotation(a.id, {
         x: node.x(),
         y: node.y(),
