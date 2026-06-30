@@ -181,6 +181,8 @@ export default function ScrollControl() {
   const usedHeightRef = useRef(0);
   const frameWidthRef = useRef(0);
   const prevImageDataRef = useRef<ImageData | null>(null);
+  const instructionsRef = useRef<{ sliceIndex: number; srcY: number; srcH: number }[]>([]);
+  const totalSlicesRef = useRef(0);
 
   const isCapturingRef = useRef(false);
   const tickBusyRef = useRef(false);
@@ -272,6 +274,9 @@ export default function ScrollControl() {
       const base64 = await ipc.captureScrollSlice(mx, my, rx, ry, rw, rh);
       if (!base64 || !isCapturingRef.current) return;
 
+      const sliceIdx = totalSlicesRef.current;
+      totalSlicesRef.current++;
+
       const img = await loadImage(`data:image/png;base64,${base64}`);
       const fw = img.naturalWidth;
       const fh = img.naturalHeight;
@@ -292,6 +297,9 @@ export default function ScrollControl() {
         masterCtxRef.current?.drawImage(img, 0, 0);
         usedHeightRef.current = fh;
         prevImageDataRef.current = newImgData;
+        instructionsRef.current = [
+          { sliceIndex: sliceIdx, srcY: 0, srcH: fh }
+        ];
         setStitchedHeight(fh);
         setFrameCount(1);
         updatePreview();
@@ -311,6 +319,11 @@ export default function ScrollControl() {
         masterCtxRef.current?.drawImage(img, 0, srcY, fw, dy, 0, at, fw, dy);
         usedHeightRef.current = at + dy;
         prevImageDataRef.current = newImgData;
+        instructionsRef.current.push({
+          sliceIndex: sliceIdx,
+          srcY,
+          srcH: dy
+        });
         setStitchedHeight(usedHeightRef.current);
         setFrameCount((prev) => prev + 1);
         updatePreview();
@@ -339,6 +352,9 @@ export default function ScrollControl() {
     setStatus("capturing");
     isCapturingRef.current = true;
     setError(null);
+    instructionsRef.current = [];
+    totalSlicesRef.current = 0;
+    await ipc.startScrollSession().catch(console.error);
 
     // Chụp lát cắt đầu tiên ngay lập tức.
     await captureTick();
@@ -366,26 +382,15 @@ export default function ScrollControl() {
 
     // Dùng ref (luôn cập nhật) thay vì state frameCount — tránh stale closure
     // khi gọi từ handler bàn phím (effect bắt phím chỉ re-subscribe theo status).
-    if (!masterRef.current || usedHeightRef.current === 0) {
+    if (usedHeightRef.current === 0) {
       ipc.closeSelf();
       return;
     }
 
     setStatus("processing");
     try {
-      // Xuất đúng phần nội dung (usedHeight), bỏ phần capacity dư ở dưới.
       const w = frameWidthRef.current;
-      const h = usedHeightRef.current;
-      const out = document.createElement("canvas");
-      out.width = w;
-      out.height = h;
-      const outCtx = out.getContext("2d");
-      if (!outCtx) throw new Error("Không tạo được canvas xuất ảnh");
-      outCtx.drawImage(masterRef.current, 0, 0, w, h, 0, 0, w, h);
-
-      const dataUrl = out.toDataURL("image/png");
-      const base64Data = dataUrl.split(",")[1];
-      await ipc.finalizeScrollCapture(base64Data, w, h);
+      await ipc.finalizeScrollStitch(w, instructionsRef.current);
       ipc.closeSelf();
     } catch (err) {
       setError(String(err));

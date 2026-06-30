@@ -1,13 +1,8 @@
 use super::{persist, Capture};
 use xcap::Monitor;
 
-/// Chụp một vùng trên màn hình `m`. (x,y,w,h) theo PHYSICAL PIXELS,
-/// tương đối gốc màn hình đó. Ảnh trả về ở pixel vật lý.
-/// Overlay (content-protected) không lọt vào.
-///
-/// - macOS: ScreenCaptureKit (`captureImageInRect`) với toạ độ global points.
-/// - Windows/Linux: xcap (WGC / pipewire/x11).
-pub fn capture_region(m: &Monitor, x: u32, y: u32, w: u32, h: u32) -> Result<Capture, String> {
+/// Chụp một vùng trên màn hình `m` trả về raw RgbaImage.
+pub fn capture_region_raw(m: &Monitor, x: u32, y: u32, w: u32, h: u32) -> Result<image::RgbaImage, String> {
     if w == 0 || h == 0 {
         return Err("Vùng chọn không hợp lệ (w/h = 0)".to_string());
     }
@@ -17,7 +12,7 @@ pub fn capture_region(m: &Monitor, x: u32, y: u32, w: u32, h: u32) -> Result<Cap
         let mx = m.x().map_err(|e| format!("Lỗi đọc màn hình: {e}"))? as f64;
         let my = m.y().map_err(|e| format!("Lỗi đọc màn hình: {e}"))? as f64;
         let img = super::mac_sck::capture_rect(mx + x as f64, my + y as f64, w as f64, h as f64)?;
-        return persist(&img);
+        return Ok(img);
     }
 
     // Windows & Linux: guard against xcap/WGC panic when the rect exceeds
@@ -43,6 +38,14 @@ pub fn capture_region(m: &Monitor, x: u32, y: u32, w: u32, h: u32) -> Result<Cap
         let img = m
             .capture_region(x, y, cw, ch)
             .map_err(|e| format!("Lỗi chụp vùng: {e}"))?;
-        return persist(&img);
+        return Ok(img);
     }
+}
+
+/// Chụp một vùng trên màn hình `m`. (x,y,w,h) theo PHYSICAL PIXELS,
+/// tương đối gốc màn hình đó. Ảnh trả về ở pixel vật lý.
+/// Overlay (content-protected) không lọt vào.
+pub fn capture_region(m: &Monitor, x: u32, y: u32, w: u32, h: u32) -> Result<Capture, String> {
+    let img = capture_region_raw(m, x, y, w, h)?;
+    persist(&img)
 }

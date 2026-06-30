@@ -432,9 +432,17 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     crate::update::install_pending(app).await
 }
 
+#[tauri::command]
+pub fn start_scroll_session(state: State<'_, AppState>) {
+    if let Ok(mut slices) = state.scroll_slices.lock() {
+        slices.clear();
+    }
+}
+
 /// Chụp một lát cắt trong tính năng chụp cuộn.
 #[tauri::command]
 pub async fn capture_scroll_slice(
+    state: State<'_, AppState>,
     mx: i32,
     my: i32,
     rx: u32,
@@ -442,13 +450,22 @@ pub async fn capture_scroll_slice(
     rw: u32,
     rh: u32,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let raw_img = tauri::async_runtime::spawn_blocking(move || -> Result<image::RgbaImage, String> {
         let m = crate::capture::monitor::at_point(mx, my)?;
-        let cap = crate::capture::region::capture_region(&m, rx, ry, rw, rh)?;
-        Ok(cap.base64)
+        let img = crate::capture::region::capture_region_raw(&m, rx, ry, rw, rh)?;
+        Ok(img)
     })
     .await
-    .map_err(|e| format!("Task join error: {e}"))?
+    .map_err(|e| format!("Task join error: {e}"))??;
+
+    // Lưu vào bộ đệm slices
+    if let Ok(mut slices) = state.scroll_slices.lock() {
+        slices.push(raw_img.clone());
+    }
+
+    // Persist to base64 for frontend preview
+    let cap = crate::capture::persist(&raw_img)?;
+    Ok(cap.base64)
 }
 
 /// Hoàn tất chụp cuộn: nhận base64 của canvas đã ghép, chuyển về flow để kết xuất.
@@ -468,6 +485,91 @@ pub fn finalize_scroll_capture(
         width,
         height,
     };
+    let output = crate::flow::get_output(&app);
+    crate::flow::finish(&app, cap, &output)
+}
+
+#[derive(serde::Deserialize)]
+pub struct StitchInstruction {
+    #[serde(rename = "sliceIndex")]
+    slice_index: usize,
+    #[serde(rename = "srcY")]
+    src_y: u32,
+    #[serde(rename = "srcH")]
+    src_h: u32,
+}
+
+/// Ghép ảnh cuộn ở backend dựa trên danh sách các lát cắt đã lưu và hướng dẫn ghép.
+#[tauri::command]
+pub async fn finalize_scroll_stitch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    width: u32,
+    instructions: Vec<StitchInstruction>,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    let slices = {
+        let mut guard = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
+        std::mem::take(&mut *guard)
+    };
+
+    if slices.is_empty() || instructions.is_empty() {
+        return Err("Không có dữ liệu lát cắt hoặc hướng dẫn ghép".to_string());
+    }
+
+    let cap = tauri::async_runtime::spawn_blocking(move || -> Result<crate::capture::Capture, String> {
+        let mut total_height = 0u32;
+        for inst in &instructions {
+            total_height += inst.src_h;
+        }
+
+        if total_height == 0 {
+            return Err("Chiều cao ảnh ghép bằng 0".to_string());
+        }
+
+        let mut final_img = image::RgbaImage::new(width, total_height);
+
+        let mut current_y = 0u32;
+        for inst in &instructions {
+            let slice = slices.get(inst.slice_index).ok_or_else(|| {
+                format!("Không tìm thấy lát cắt index {}", inst.slice_index)
+            })?;
+
+            let slice_w = slice.width();
+            let slice_h = slice.height();
+
+            for y in 0..inst.src_h {
+                let src_pixel_y = inst.src_y + y;
+                if src_pixel_y >= slice_h {
+                    continue;
+                }
+                let dest_pixel_y = current_y + y;
+                if dest_pixel_y >= total_height {
+                    continue;
+                }
+                for x in 0..width {
+                    if x >= slice_w {
+                        continue;
+                    }
+                    let pixel = slice.get_pixel(x, src_pixel_y);
+                    final_img.put_pixel(x, dest_pixel_y, *pixel);
+                }
+            }
+
+            current_y += inst.src_h;
+        }
+
+        let cap = crate::capture::persist(&final_img)?;
+        Ok(cap)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
+
+    if let Some(border) = app.get_webview_window("scroll-border") {
+        let _ = border.close();
+    }
+
     let output = crate::flow::get_output(&app);
     crate::flow::finish(&app, cap, &output)
 }

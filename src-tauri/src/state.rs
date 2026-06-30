@@ -72,4 +72,6 @@ pub struct AppState {
     pub open_files: Mutex<HashMap<String, String>>,
     /// Bộ đếm tạo label cửa sổ editor "Open with" duy nhất (editor-ow-N).
     pub editor_seq: AtomicU64,
+    /// Bộ đệm lưu các lát cắt (slices) của tính năng chụp cuộn.
+    pub scroll_slices: Mutex<Vec<image::RgbaImage>>,
 }

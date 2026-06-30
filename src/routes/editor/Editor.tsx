@@ -146,7 +146,8 @@ export default function Editor() {
       } else if (mod && e.key.toLowerCase() === "o") {
         e.preventDefault();
         doOpen();
-      } else if (mod && e.key.toLowerCase() === "c" && s.tool === "select") {
+      } else if (mod && e.key.toLowerCase() === "c") {
+        e.preventDefault();
         doCopy();
       } else if (mod && (e.key === "=" || e.key === "+")) {
         e.preventDefault();
