@@ -71,6 +71,8 @@ pub struct AppState {
     /// `take_open_file` lúc mount (pull → không race timing như emit event).
     pub open_files: Mutex<HashMap<String, String>>,
     /// Bộ đếm tạo label cửa sổ editor "Open with" duy nhất (editor-ow-N).
+    /// Chỉ sử dụng trên macOS khi "Open with" được gọi.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub editor_seq: AtomicU64,
     /// Bộ đệm lưu các lát cắt (slices) của tính năng chụp cuộn.
     pub scroll_slices: Mutex<Vec<image::RgbaImage>>,
