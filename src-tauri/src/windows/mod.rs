@@ -93,9 +93,19 @@ fn place_bottom_center(win: &tauri::WebviewWindow) {
 
 /// Capture bar kiểu macOS Cmd+Shift+5 — nổi, không viền, trong suốt.
 pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
+    // macOS: hiển thị icon trên Dock khi capture bar visible
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+
     if let Some(win) = app.get_webview_window("capture-bar") {
         let _ = win.show();
         let _ = win.set_focus();
+        // Windows: hiển thị icon trên taskbar khi capture bar visible
+        #[cfg(target_os = "windows")]
+        let _ = win.set_skip_taskbar(false);
         place_bottom_center(&win);
         return Ok(());
     }
@@ -106,7 +116,7 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
-        .skip_taskbar(true)
+        .skip_taskbar(false)  // Windows: hiển thị icon trên taskbar
         // Windows: tắt DWM drop-shadow trên cửa sổ transparent/borderless.
         // macOS không bị ảnh hưởng bởi flag này.
         .shadow(false)
@@ -543,11 +553,14 @@ pub fn close_overlays(app: &AppHandle) {
     // KHÔNG poll ở đây — xem comment trên.
 }
 
-/// Ẩn editor và trả về Accessory policy (ẩn Dock/taskbar icon).
+/// Ẩn editor và trả về Accessory policy (ẩn Dock) / ẩn icon khỏi taskbar (Windows).
 /// Dùng cho nút "New" trong editor — user muốn chụp mới mà không cần đóng editor.
 pub fn hide_editor(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("editor") {
         let _ = win.hide();
+        // Windows: ẩn icon khỏi taskbar khi editor bị ẩn
+        #[cfg(target_os = "windows")]
+        let _ = win.set_skip_taskbar(true);
     }
     #[cfg(target_os = "macos")]
     {
@@ -569,6 +582,7 @@ pub fn prewarm_editor(app: &AppHandle) -> Result<(), String> {
         .resizable(true)
         .center()
         .visible(false)
+        .skip_taskbar(true)  // Ẩn icon khỏi taskbar lúc khởi động
         .build()
         .map_err(|e| format!("Không tạo được editor: {e}"))?;
     Ok(())
@@ -588,6 +602,9 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
+        // Windows: hiển thị icon trên taskbar khi editor visible
+        #[cfg(target_os = "windows")]
+        let _ = win.set_skip_taskbar(false);
         // Trên Windows, show() là async (WM_SHOWWINDOW qua message pump).
         // Emit refresh-capture sau một tick để đảm bảo webview visible và
         // JS message pump đang chạy trước khi nhận event.
@@ -601,14 +618,36 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         });
         return Ok(());
     }
-    WebviewWindowBuilder::new(app, "editor", url("editor"))
-        .title("SnapDoc — Editor")
-        .inner_size(1040.0, 720.0)
-        .min_inner_size(680.0, 480.0)
-        .resizable(true)
-        .center()
-        .build()
-        .map_err(|e| format!("Không tạo được editor: {e}"))?;
+    #[cfg(target_os = "windows")]
+    {
+        let win = WebviewWindowBuilder::new(app, "editor", url("editor"))
+            .title("SnapDoc — Editor")
+            .inner_size(1040.0, 720.0)
+            .min_inner_size(680.0, 480.0)
+            .resizable(true)
+            .center()
+            .skip_taskbar(false)  // Windows: hiển thị icon trên taskbar
+            .build()
+            .map_err(|e| format!("Không tạo được editor: {e}"))?;
+        
+        let win2 = win.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let _ = win2.emit("refresh-capture", ());
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _win = WebviewWindowBuilder::new(app, "editor", url("editor"))
+            .title("SnapDoc — Editor")
+            .inner_size(1040.0, 720.0)
+            .min_inner_size(680.0, 480.0)
+            .resizable(true)
+            .center()
+            .skip_taskbar(false)
+            .build()
+            .map_err(|e| format!("Không tạo được editor: {e}"))?;
+    }
     Ok(())
 }
 
@@ -640,6 +679,7 @@ pub fn open_editor_with_file(app: &AppHandle, data_url: String) -> Result<(), St
         .min_inner_size(680.0, 480.0)
         .resizable(true)
         .center()
+        .skip_taskbar(false)  // Windows: hiển thị icon trên taskbar
         .build()
         .map_err(|e| format!("Không tạo được editor: {e}"))?;
 
@@ -655,25 +695,39 @@ pub fn open_editor_with_file(app: &AppHandle, data_url: String) -> Result<(), St
     Ok(())
 }
 
-/// Trả về Accessory policy (ẩn Dock) nếu không còn cửa sổ editor/settings nào đang mở.
-/// Gọi từ on_window_event khi editor bị đóng.
-#[cfg(target_os = "macos")]
+/// Trả về Accessory policy (ẩn Dock) trên macOS hoặc ẩn taskbar icon trên Windows
+/// nếu không còn cửa sổ editor/settings/capture-bar nào đang mở.
+/// Gọi từ on_window_event khi editor/settings/capture-bar bị đóng.
 pub fn on_editor_closed(app: &AppHandle) {
-    use tauri::ActivationPolicy;
-    // Chỉ giữ Regular nếu còn editor đang hiển thị (không tính settings,
-    // thumbnail, capture-bar, overlay — chúng tự quản lý policy riêng).
+    // Kiểm tra còn cửa sổ "thật" nào đang mở không (editor, settings, capture-bar).
+    // Không tính overlay, thumbnail, scroll-control vì chúng tạm thời/phụ trợ.
     let has_visible = app.webview_windows().values().any(|w| {
         let label = w.label();
-        !label.starts_with("overlay")
-            && label != "thumbnail"
-            && label != "capture-bar"
-            && label != "settings"
+        (label.starts_with("editor") || label == "settings" || label == "capture-bar")
             && w.is_visible().unwrap_or(false)
     });
-    if !has_visible {
-        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        if !has_visible {
+            let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: ẩn icon trên taskbar nếu không còn cửa sổ "thật" nào mở
+        if !has_visible {
+            for (label, win) in app.webview_windows() {
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" {
+                    let _ = win.set_skip_taskbar(true);
+                }
+            }
+        }
     }
 }
+
 
 /// Thumbnail nổi góc dưới-phải sau khi chụp.
 /// Dùng pre-warmed window: chỉ emit data + show/reposition thay vì tạo mới.
@@ -817,6 +871,9 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {    // macOS: chuy�
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
         let _ = win.unminimize();
+        // Windows: hiển thị icon trên taskbar khi settings visible
+        #[cfg(target_os = "windows")]
+        let _ = win.set_skip_taskbar(false);
         #[cfg(target_os = "macos")]
         bring_settings_to_front(app, win);
         #[cfg(not(target_os = "macos"))]
@@ -830,6 +887,7 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {    // macOS: chuy�
         .max_inner_size(560.0, 10000.0)  // khóa chiều ngang = 560, chỉ resize dọc
         .resizable(true)
         .center()
+        .skip_taskbar(false)  // Windows: hiển thị icon trên taskbar
         .build()
         .map_err(|e| format!("Không tạo được settings: {e}"))?;
     #[cfg(target_os = "macos")]

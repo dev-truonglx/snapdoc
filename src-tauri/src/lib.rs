@@ -206,15 +206,16 @@ pub fn run() {
                     let _ = _window.emit("hide-popover", ());
                 }
             }
-            // macOS: khi editor bị đóng hoàn toàn, trả về Accessory policy
-            // (ẩn Dock icon) nếu không còn cửa sổ "thật" nào khác đang mở.
-            #[cfg(target_os = "macos")]
+            // macOS: khi cửa sổ "thật" bị đóng (editor, settings, capture-bar),
+            // trả về Accessory policy (ẩn Dock icon).
+            // Windows: khi cửa sổ "thật" bị đóng, ẩn icon trên taskbar.
             if let tauri::WindowEvent::Destroyed = _event {
                 use tauri::Manager;
                 let label = _window.label();
-                // "editor" (capture) lẫn "editor-ow-N" ("Open with") đều là cửa
-                // sổ thật → khi đóng, cân nhắc trả về Accessory policy.
-                if label.starts_with("editor") || label == "settings" {
+                // "editor" (capture) lẫn "editor-ow-N" ("Open with") + "settings"
+                // + "capture-bar" = cửa sổ thật → khi đóng, cân nhắc trả về Accessory policy
+                // (macOS) hoặc ẩn taskbar icon (Windows).
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" {
                     windows::on_editor_closed(_window.app_handle());
                 }
             }
@@ -233,11 +234,9 @@ pub fn run() {
                 // macOS: click dock icon / Spotlight search khi app đang chạy.
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen { has_visible_windows: _, .. } => {
-                    use tauri::Manager;
-                    let has_editor = _app.webview_windows().keys().any(|label| label.starts_with("editor"));
-                    if !has_editor {
-                        let _ = windows::open_capture_bar(_app);
-                    }
+                    // Luôn mở capture bar khi user reopen app (click Dock hoặc Spotlight).
+                    // Nếu capture bar đã mở, hàm open_capture_bar sẽ chỉ show + focus nó.
+                    let _ = windows::open_capture_bar(_app);
                 }
                 // macOS: nhận file từ "Open with" / Finder / kéo vào Dock icon.
                 // Tauri v2 expose qua RunEvent::Opened (tao: application:openURLs:).
