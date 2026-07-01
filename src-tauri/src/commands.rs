@@ -17,10 +17,51 @@ pub fn take_pending(state: State<AppState>) -> Option<PendingCapture> {
     state.pending.lock().ok().and_then(|mut g| g.take())
 }
 
+/// Ghi đè ảnh đang chờ với output="editor" — dùng cho nút "Mở Editor" ở
+/// "Chụp nhanh" (ảnh đã flatten annotation vào pixel) để bàn giao sang cửa
+/// sổ Editor đầy đủ qua đúng pipeline `take_pending` có sẵn.
+/// `data`: data URL đầy đủ (`data:image/png;base64,...`) hoặc base64 trần —
+/// tách bỏ phần prefix nếu có, giữ đúng quy ước của `PendingCapture.base64`.
+#[tauri::command]
+pub fn set_pending_image(state: State<AppState>, data: String, width: u32, height: u32) {
+    let base64 = data.split(',').next_back().unwrap_or(&data).to_string();
+    if let Ok(mut g) = state.pending.lock() {
+        *g = Some(PendingCapture {
+            base64,
+            width,
+            height,
+            output: "editor".to_string(),
+            scale_factor: 1.0,
+        });
+    }
+}
+
 /// Chụp theo mode + output (gọi từ capture bar). Chạy nền để không chặn UI.
 #[tauri::command]
 pub fn capture_now(app: AppHandle, mode: String, output: String) {
     std::thread::spawn(move || flow::run(&app, &mode, &output));
+}
+
+/// "Chụp nhanh": mở overlay trong suốt trên mọi màn hình để chọn vùng + chú thích.
+#[tauri::command]
+pub fn start_quick(app: AppHandle) {
+    std::thread::spawn(move || flow::start_quick(&app));
+}
+
+/// Chụp đúng vùng đã chọn cho "Chụp nhanh", trả base64 PNG cho React ghép chú thích.
+/// async + spawn_blocking: không block Tokio event loop (WebView2 pump chạy tiếp).
+#[tauri::command]
+pub async fn capture_quick_region(
+    app: AppHandle,
+    window: WebviewWindow,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || flow::capture_quick_region(&app, window, x, y, w, h))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// Chụp vùng chọn từ overlay.
@@ -486,7 +527,7 @@ pub fn finalize_scroll_capture(
         height,
     };
     let output = crate::flow::get_output(&app);
-    crate::flow::finish(&app, cap, &output)
+    crate::flow::finish(&app, cap, &output, 1.0)
 }
 
 #[derive(serde::Deserialize)]
@@ -698,5 +739,5 @@ pub async fn finalize_scroll_stitch(
     }
 
     let output = crate::flow::get_output(&app);
-    crate::flow::finish(&app, cap, &output)
+    crate::flow::finish(&app, cap, &output, 1.0)
 }

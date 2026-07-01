@@ -111,7 +111,7 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
         .title("SnapDoc")
-        .inner_size(580.0, 280.0)
+        .inner_size(660.0, 280.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -335,7 +335,11 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
         let win = WebviewWindowBuilder::new(
             app,
             &label,
-            WebviewUrl::App(format!("index.html?win=overlay&mode={mode}&idx={i}").into()),
+            // scale: cần cho mode "quick" (Chụp nhanh) để canvas chú thích render
+            // đúng độ phân giải vật lý; các mode khác bỏ qua tham số này.
+            WebviewUrl::App(
+                format!("index.html?win=overlay&mode={mode}&idx={i}&scale={}", snap.scale).into(),
+            ),
         )
         .title("SnapDoc")
         .decorations(false)

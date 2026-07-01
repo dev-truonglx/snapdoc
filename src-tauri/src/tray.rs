@@ -36,6 +36,10 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "region" => dispatch(app, "region"),
             "window" => dispatch(app, "window"),
             "scroll" => dispatch(app, "scroll"),
+            "quick" => {
+                let app = app.clone();
+                std::thread::spawn(move || flow::start_quick(&app));
+            }
             "bar" => {
                 let _ = windows::open_capture_bar(app);
             }
@@ -61,6 +65,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             .and_then(|(_, c)| if c.is_empty() { None } else { Some(c.clone()) })
     };
 
+    let quick  = MenuItem::with_id(app, "quick",  "Chụp nhanh",           true, sc("quick").as_deref())?;
     let all    = MenuItem::with_id(app, "all",    "Chụp tất cả màn hình", true, sc("all").as_deref())?;
     let full   = MenuItem::with_id(app, "full",   "Chụp toàn màn hình",   true, sc("full").as_deref())?;
     let region = MenuItem::with_id(app, "region", "Chụp vùng chọn",       true, sc("region").as_deref())?;
@@ -72,7 +77,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let sep1   = PredefinedMenuItem::separator(app)?;
     let sep2   = PredefinedMenuItem::separator(app)?;
 
-    Menu::with_items(app, &[&all, &full, &region, &window, &scroll, &sep1, &bar, &settings, &sep2, &quit])
+    Menu::with_items(app, &[&quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &settings, &sep2, &quit])
 }
 
 /// Rebuild tray menu với shortcuts mới nhất — gọi sau `reload_shortcuts`.

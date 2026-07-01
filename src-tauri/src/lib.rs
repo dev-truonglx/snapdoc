@@ -69,7 +69,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::peek_pending,
             commands::take_pending,
+            commands::set_pending_image,
             commands::capture_now,
+            commands::start_quick,
+            commands::capture_quick_region,
             commands::finalize_region,
             commands::finalize_window,
             commands::finalize_monitor,

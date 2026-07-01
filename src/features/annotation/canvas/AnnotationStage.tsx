@@ -43,7 +43,12 @@ interface ArrowDraft {
   y2: number;
 }
 
-const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
+interface AnnotationStageProps {
+  /** Ẩn thanh zoom (Fit/100%/±) — dùng cho "Chụp nhanh". Mặc định hiện. */
+  hideZoomBar?: boolean;
+}
+
+const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoomBar }, ref) => {
   const doc = useEditor((s) => s.doc);
   const tool = useEditor((s) => s.tool);
   const color = useEditor((s) => s.color);
@@ -1506,7 +1511,8 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
       </div> {/* end flex centering */}
     </div>  {/* end scroll container */}
 
-    {/* Zoom bar — absolute trên outer wrapper, không bị cuộn, luôn hiện */}
+    {/* Zoom bar — absolute trên outer wrapper, không bị cuộn. Ẩn ở Chụp nhanh. */}
+    {!hideZoomBar && (
     <div style={zoomBar}>
       {/* DPI badge — chỉ hiện khi HiDPI (Retina 2×, 3×, ...) */}
       {dpiLabel && (
@@ -1582,6 +1588,7 @@ const AnnotationStage = forwardRef<StageHandle>((_props, ref) => {
         </svg>
       </button>
     </div>
+    )}
     </div>
   );
 

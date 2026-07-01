@@ -37,7 +37,7 @@ pub fn get_output(app: &AppHandle) -> String {
         .unwrap_or_else(|_| "editor".to_string())
 }
 
-fn store(app: &AppHandle, cap: &capture::Capture, output: &str) {
+fn store(app: &AppHandle, cap: &capture::Capture, output: &str, scale_factor: f64) {
     let state = app.state::<AppState>();
     let mut guard = match state.pending.lock() {
         Ok(g) => g,
@@ -48,11 +48,19 @@ fn store(app: &AppHandle, cap: &capture::Capture, output: &str) {
         width: cap.width,
         height: cap.height,
         output: output.to_string(),
+        scale_factor,
     });
 }
 
-pub fn finish(app: &AppHandle, cap: capture::Capture, output: &str) -> Result<(), String> {
-    store(app, &cap, output);
+/// `scale_factor`: hệ số quy đổi pixel-vật-lý-của-bitmap → CSS/logical px,
+/// lưu vào `PendingCapture` (badge HiDPI ở Editor). Truyền 1.0 khi không rõ.
+pub fn finish(
+    app: &AppHandle,
+    cap: capture::Capture,
+    output: &str,
+    scale_factor: f64,
+) -> Result<(), String> {
+    store(app, &cap, output, scale_factor);
     match output {
         "clipboard" => {
             clipboard::copy_png(&cap.base64)?;
@@ -200,9 +208,17 @@ pub fn finalize_region(
     // Step 4: capture the region on this thread (caller must be an OS thread
     // with COM initialized -- see commands.rs where finalize_region is spawned
     // via std::thread::spawn instead of being invoked on a Tokio worker).
+    // Tỉ lệ pixel-vật-lý/CSS-px của bitmap vừa chụp — lưu vào PendingCapture để
+    // Editor hiển thị badge HiDPI đúng. Linux: xcap trả đúng số pixel yêu cầu
+    // (không nhân scale) → 1.0; macOS/Windows: bitmap ở physical px → s.scale.
+    #[cfg(target_os = "linux")]
+    let bitmap_scale: f64 = 1.0;
+    #[cfg(not(target_os = "linux"))]
+    let bitmap_scale: f64 = s.scale;
+
     let cap = capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)?;
     let output = get_output(app);
-    finish(app, cap, &output)
+    finish(app, cap, &output, bitmap_scale)
 }
 
 pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
@@ -215,7 +231,7 @@ pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
 
     let cap = capture::window::capture_by_id(id)?;
     let output = get_output(app);
-    finish(app, cap, &output)
+    finish(app, cap, &output, 1.0)
 }
 
 pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), String> {
@@ -230,7 +246,7 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
     std::thread::sleep(std::time::Duration::from_millis(200));
     let cap = capture::fullscreen::capture_monitor(&m)?;
     let output = get_output(app);
-    finish(app, cap, &output)
+    finish(app, cap, &output, s.scale)
 }
 
 pub fn cancel_overlay(app: &AppHandle) {
@@ -246,7 +262,74 @@ pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> 
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
     let cap = capture::fullscreen::capture_all_monitors()?;
-    finish(app, cap, output)
+    finish(app, cap, output, 1.0)
+}
+
+/// "Chụp nhanh" (Lightshot-style): mở overlay TRONG SUỐT trên MỌI màn hình
+/// (tái dùng hạ tầng chọn vùng đa-màn-hình sẵn có — nhanh, không đóng băng ảnh).
+/// User kéo chọn vùng, sau đó chú thích ngay trên overlay (thấy màn hình thật
+/// qua vùng trong suốt). Ảnh cuối CHỈ được chụp khi bấm Copy/Save — chỉ chụp
+/// đúng vùng nhỏ đã chọn (nhanh), rồi ghép chú thích. Đúng yêu cầu "vẽ khung
+/// xong chưa chụp, di chuyển được, tới lúc lưu/copy mới chụp".
+pub fn start_quick(app: &AppHandle) {
+    let result: Result<(), String> = (|| {
+        if bar_is_visible(app) {
+            hide_bar(app);
+        }
+        windows::open_overlays(app, "quick")
+    })();
+    if let Err(e) = result {
+        let _ = app.emit("snapdoc-error", e);
+    }
+}
+
+/// Chụp đúng vùng đã chọn cho "Chụp nhanh" và trả base64 PNG cho React (React
+/// tự ghép lớp chú thích rồi copy/save). ẨN overlay trước khi chụp để dim +
+/// annotation + khung chọn KHÔNG lọt vào ảnh (giống cách finalize_region đóng
+/// overlay trước khi chụp). Toạ độ (x,y,w,h) là CSS px trong overlay `win`.
+pub fn capture_quick_region(
+    app: &AppHandle,
+    win: WebviewWindow,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<String, String> {
+    let s = overlay_snap(app, &win)
+        .ok_or_else(|| "Khong xac dinh duoc man hinh cua overlay".to_string())?;
+
+    #[cfg(target_os = "windows")]
+    let scale_in_snap: f64 = s.scale;
+    #[cfg(not(target_os = "windows"))]
+    let scale_in_snap: f64 = 1.0;
+
+    let center_x = (s.x + (x + w / 2.0) * scale_in_snap) as i32;
+    let center_y = (s.y + (y + h / 2.0) * scale_in_snap) as i32;
+    let m = capture::monitor::at_point(center_x, center_y)?;
+
+    let rx = (x * scale_in_snap).max(0.0);
+    let ry = (y * scale_in_snap).max(0.0);
+    let mut rw = (w * scale_in_snap) - (0.0_f64.max(-x) * scale_in_snap);
+    let mut rh = (h * scale_in_snap) - (0.0_f64.max(-y) * scale_in_snap);
+    if rx + rw > s.w {
+        rw = s.w - rx;
+    }
+    if ry + rh > s.h {
+        rh = s.h - ry;
+    }
+    if rw < 1.0 || rh < 1.0 {
+        return Err("Vung chon khong hop le".to_string());
+    }
+
+    // Ẩn overlay để không dính dim/annotation vào ảnh, rồi chờ compositor cập nhật.
+    let _ = win.hide();
+    #[cfg(target_os = "macos")]
+    std::thread::sleep(std::time::Duration::from_millis(70));
+    #[cfg(not(target_os = "macos"))]
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let cap = capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)?;
+    Ok(cap.base64)
 }
 
 /// Chuyển số ngày Unix (từ 1970-01-01) sang (year, month, day) UTC.

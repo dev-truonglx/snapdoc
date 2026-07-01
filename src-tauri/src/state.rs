@@ -29,6 +29,8 @@ pub struct PendingCapture {
     pub width: u32,
     pub height: u32,
     pub output: String,
+    /// DPI scale thật của màn hình nguồn (1.0 = normal, 2.0 = Retina 2×).
+    pub scale_factor: f64,
 }
 
 /// Chế độ chụp + output gần nhất — dùng cho nút "New" ở editor.

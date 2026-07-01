@@ -42,10 +42,18 @@ export interface UpdateInfo {
 export const ipc = {
   peekPending: () => invoke<Pending | null>("peek_pending"),
   takePending: () => invoke<Pending | null>("take_pending"),
+  /** Ghi đè ảnh đang chờ (output="editor") — dùng khi "Chụp nhanh" bàn giao ảnh đã annotate sang Editor. */
+  setPendingImage: (data: string, width: number, height: number) =>
+    invoke<void>("set_pending_image", { data, width, height }),
   /** macOS: lấy data URL ảnh "Open with" của chính cửa sổ editor này (theo label). */
   takeOpenFile: () => invoke<string | null>("take_open_file"),
   captureNow: (mode: CaptureMode, output: OutputMode) =>
     invoke<void>("capture_now", { mode, output }),
+  /** Chụp nhanh: mở overlay trong suốt trên mọi màn hình để chọn vùng + chú thích. */
+  startQuick: () => invoke<void>("start_quick"),
+  /** Chụp đúng vùng đã chọn (ẩn overlay trước khi chụp) → base64 PNG. */
+  captureQuickRegion: (x: number, y: number, w: number, h: number) =>
+    invoke<string>("capture_quick_region", { x, y, w, h }),
   captureAllScreens: (output: OutputMode) =>
     invoke<void>("capture_all_screens", { output }),
   finalizeRegion: (x: number, y: number, w: number, h: number) =>

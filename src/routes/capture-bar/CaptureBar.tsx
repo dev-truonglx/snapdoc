@@ -186,6 +186,18 @@ export default function CaptureBar() {
         <div style={bar}>
           {/* Mode buttons */}
           <div style={modeGroup}>
+            {/* Chụp nhanh — hành động chạy NGAY (không phải chế độ để chọn):
+                kéo vùng rồi chú thích tại chỗ. Không đụng state mode/output. */}
+            <button
+              onClick={() => ipc.startQuick()}
+              style={quickModeBtn}
+              title="Chụp nhanh — chọn vùng rồi chú thích ngay tại chỗ"
+            >
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
+                <path d="M11 2 3 12h6l-1 6 8-10h-6l1-6Z" fill="currentColor" />
+              </svg>
+              <span style={{ fontSize: 11, lineHeight: 1 }}>Nhanh</span>
+            </button>
             {MODES.map((m) => (
               <button
                 key={m.id}
@@ -310,6 +322,21 @@ const optBtn: React.CSSProperties = {
   background: "transparent",
   whiteSpace: "nowrap",
   cursor: "pointer",
+};
+
+// Nút "Chụp nhanh" trong cụm chế độ: cùng khối với mode buttons nhưng nhấn
+// nhấn accent (vàng) để phân biệt đây là hành động chạy ngay, không phải chế độ.
+const quickModeBtn: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 3,
+  width: 56,
+  padding: "6px 4px",
+  borderRadius: 6,
+  background: "rgba(245,158,11,0.16)",
+  color: "#fbbf24",
+  transition: "background 0.12s",
 };
 
 const shootBtn: React.CSSProperties = {
