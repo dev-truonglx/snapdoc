@@ -273,6 +273,7 @@ pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> 
                 width,
                 height,
                 output: "editor".to_string(),
+                scale_factor: 1.0,
             });
         }
         windows::open_editor(app)?;
