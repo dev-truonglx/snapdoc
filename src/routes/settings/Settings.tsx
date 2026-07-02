@@ -31,6 +31,7 @@ export default function Settings() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "installing" | "err">("idle");
   const [updateErr, setUpdateErr] = useState<string | null>(null);
+  const [updateReady, setUpdateReady] = useState(false);
 
   const pendingRef = useRef<S | null>(null);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -56,6 +57,10 @@ export default function Settings() {
     ipc.getPendingUpdate().then((info) => {
       if (info?.available) setUpdateInfo(info);
     });
+    // Query ngay lúc mount — xử lý trường hợp update đã cài xong trước khi Settings mở
+    ipc.getUpdateReady().then((ready) => {
+      if (ready) setUpdateReady(true);
+    });
     // Lấy version thực từ Tauri app metadata
     if ("__TAURI_INTERNALS__" in window) {
       import("@tauri-apps/api/app").then(({ getVersion }) =>
@@ -80,8 +85,14 @@ export default function Settings() {
       });
     });
 
+    // Lắng nghe khi background update đã cài xong → hiện banner khởi động lại
+    const unlistenUpdateReady = listen<string>("update-ready-to-relaunch", () => {
+      setUpdateReady(true);
+    });
+
     return () => {
       unlistenSettings.then((fn) => fn());
+      unlistenUpdateReady.then((fn) => fn());
     };
   }, []);
 
@@ -197,13 +208,17 @@ export default function Settings() {
             <span style={updateDot} title={`v${updateInfo.version} có sẵn`}>🆕</span>
           )}
           <button
-            style={updateBtn}
+            style={{
+              ...updateBtn,
+              ...(updateReady ? restartBtnStyle : {}),
+            }}
             disabled={updateStatus === "checking" || updateStatus === "installing"}
-            onClick={updateInfo?.available ? handleInstall : handleCheckUpdate}
+            onClick={updateReady ? () => ipc.restartApp() : (updateInfo?.available ? handleInstall : handleCheckUpdate)}
           >
-            {updateStatus === "checking"   ? "Đang kiểm tra…"      :
-             updateStatus === "installing" ? "Đang cài đặt…"       :
-             updateInfo?.available        ? `Cài v${updateInfo.version}` :
+            {updateReady                           ? "↺ Khởi động lại để áp dụng" :
+             updateStatus === "checking"           ? "Đang kiểm tra…"             :
+             updateStatus === "installing"         ? "Đang cài đặt…"              :
+             updateInfo?.available                 ? `Cài v${updateInfo.version}` :
              "Kiểm tra cập nhật"}
           </button>
         </div>
@@ -216,10 +231,18 @@ export default function Settings() {
         {updateStatus === "err" && (
           <div style={errBanner}>⚠ {updateErr || "Không kiểm tra được — kiểm tra kết nối mạng"}</div>
         )}
-        {updateStatus === "idle" && updateInfo && !updateInfo.available && (
+        {updateReady && (
+          <div style={restartBanner}>
+            <span>✅ Bản cập nhật đã được cài đặt. Khởi động lại để áp dụng phiên bản mới.</span>
+            <button style={restartBannerBtn} onClick={() => ipc.restartApp()}>
+              Khởi động lại ngay
+            </button>
+          </div>
+        )}
+        {!updateReady && updateStatus === "idle" && updateInfo && !updateInfo.available && (
           <div style={successBanner}>✓ Đang dùng phiên bản mới nhất</div>
         )}
-        {updateInfo?.available && (
+        {!updateReady && updateInfo?.available && (
           <div style={infoBanner}>
             Có bản cập nhật: <strong>v{updateInfo.version}</strong>. Nhấn "Cài v{updateInfo.version}" để cài và khởi động lại.
           </div>
@@ -753,6 +776,39 @@ const infoBanner: React.CSSProperties = {
   color: "#f59e0b",
   background: "#f59e0b15",
   border: "1px solid #f59e0b30",
+};
+
+const restartBanner: React.CSSProperties = {
+  padding: "10px 12px",
+  borderRadius: 6,
+  fontSize: 12,
+  color: "#22c55e",
+  background: "#22c55e15",
+  border: "1px solid #22c55e30",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 10,
+};
+
+const restartBannerBtn: React.CSSProperties = {
+  padding: "5px 12px",
+  borderRadius: 6,
+  border: "1px solid #22c55e60",
+  background: "#22c55e25",
+  color: "#22c55e",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+  flexShrink: 0,
+};
+
+const restartBtnStyle: React.CSSProperties = {
+  background: "#22c55e25",
+  borderColor: "#22c55e60",
+  color: "#22c55e",
+  fontWeight: 600,
 };
 
 const successInline: React.CSSProperties = {

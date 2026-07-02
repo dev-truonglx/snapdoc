@@ -88,7 +88,9 @@ export const ipc = {
   // Update
   checkUpdate: () => invoke<UpdateInfo>("check_update"),
   getPendingUpdate: () => invoke<UpdateInfo | null>("get_pending_update"),
+  getUpdateReady: () => invoke<boolean>("get_update_ready"),
   installUpdate: () => invoke<void>("install_update"),
+  restartApp: () => invoke<void>("restart_app"),
   // Scroll
   captureScrollSlice: (mx: number, my: number, rx: number, ry: number, rw: number, rh: number) =>
     invoke<string>("capture_scroll_slice", { mx, my, rx, ry, rw, rh }),
