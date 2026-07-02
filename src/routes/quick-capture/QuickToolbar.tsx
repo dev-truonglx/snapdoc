@@ -7,6 +7,10 @@ const GAP = 8;
 const EST_V_H = 370; // ước lượng cao thanh dọc (9 nút × 34 + gap + padding)
 const BOTTOM_H = 44;
 const BOTTOM_W = 184; // ước lượng rộng thanh ngang (4 nút icon) để canh phải
+// Khoảng trống tối thiểu bên ngoài khung để đặt toolbar ra ngoài.
+// Nếu không đủ, toolbar sẽ được đặt BÊN TRONG khung (góc) thay vì bị clip hoặc nhảy màn hình.
+const MIN_OUTER_SIDE = TOOLBAR_W + GAP + 4;
+const MIN_OUTER_BOTTOM = BOTTOM_H + GAP + 4;
 
 interface Rect { x: number; y: number; w: number; h: number }
 
@@ -89,20 +93,53 @@ interface Props {
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
 /** Toạ độ (CSS px) của thanh dọc + thanh ngang quanh khung `sel`. Dùng CHUNG
- * cho render (QuickToolbar) và hit-test (QuickAnnotate) → luôn khớp nhau. */
+ * cho render (QuickToolbar) và hit-test (QuickAnnotate) → luôn khớp nhau.
+ *
+ * Khi khung chiếm gần hết màn hình (không đủ khoảng trống bên ngoài để đặt
+ * toolbar mà không bị clip hoặc nhảy sang màn hình khác), toolbar được đặt
+ * BÊN TRONG khung ở góc phải-dưới với độ mờ cao hơn một chút.
+ */
 export function quickToolbarLayout(sel: Rect, winW: number, winH: number) {
-  // Thanh dọc: ưu tiên bên phải khung; hết chỗ → sang trái. Bottom-align đáy khung.
-  const rightX = sel.x + sel.w + GAP;
-  const flipX = rightX + TOOLBAR_W > winW;
-  const vLeft = flipX ? sel.x - GAP - TOOLBAR_W : rightX;
-  const vTop = clamp(sel.y + sel.h - EST_V_H, GAP, Math.max(GAP, winH - EST_V_H - GAP));
-  // Thanh ngang: ưu tiên dưới khung; hết chỗ → lên trên. Right-align mép phải khung.
-  const belowY = sel.y + sel.h + GAP;
-  const flipY = belowY + BOTTOM_H > winH;
-  const hTop = flipY ? sel.y - GAP - BOTTOM_H : belowY;
-  const hLeft = clamp(sel.x + sel.w - BOTTOM_W, GAP, Math.max(GAP, winW - BOTTOM_W - GAP));
+  // Kiểm tra có đủ chỗ bên ngoài không (bên phải hoặc bên trái).
+  const spaceRight = winW - (sel.x + sel.w);
+  const spaceLeft  = sel.x;
+  const hasOuterSide = spaceRight >= MIN_OUTER_SIDE || spaceLeft >= MIN_OUTER_SIDE;
+
+  // Kiểm tra có đủ chỗ bên ngoài theo trục Y (dưới hoặc trên).
+  const spaceBelow = winH - (sel.y + sel.h);
+  const spaceAbove = sel.y;
+  const hasOuterBottom = spaceBelow >= MIN_OUTER_BOTTOM || spaceAbove >= MIN_OUTER_BOTTOM;
+
+  // Nếu không đủ chỗ ở cả hai hướng → đặt TRONG khung (góc dưới-phải).
+  const insideMode = !hasOuterSide && !hasOuterBottom;
+
+  let vLeft: number, vTop: number, flipX: boolean;
+  let hLeft: number, hTop: number;
+
+  if (insideMode) {
+    // Toolbar dọc: góc trong, cách mép phải khung một khoảng nhỏ.
+    flipX = false; // color popover bung sang trái khi inside
+    vLeft = clamp(sel.x + sel.w - TOOLBAR_W - GAP, sel.x + GAP, sel.x + sel.w - TOOLBAR_W - GAP);
+    vTop  = clamp(sel.y + sel.h - EST_V_H - BOTTOM_H - GAP * 2, sel.y + GAP, sel.y + sel.h - EST_V_H - BOTTOM_H - GAP * 2);
+    // Toolbar ngang: bên dưới toolbar dọc, sát góc phải-dưới khung.
+    hTop  = sel.y + sel.h - BOTTOM_H - GAP;
+    hLeft = clamp(sel.x + sel.w - BOTTOM_W - GAP, sel.x + GAP, sel.x + sel.w - BOTTOM_W - GAP);
+  } else {
+    // Thanh dọc: ưu tiên bên phải khung; hết chỗ → sang trái. Bottom-align đáy khung.
+    const rightX = sel.x + sel.w + GAP;
+    flipX = spaceRight < MIN_OUTER_SIDE;
+    vLeft = flipX ? sel.x - GAP - TOOLBAR_W : rightX;
+    vTop  = clamp(sel.y + sel.h - EST_V_H, GAP, Math.max(GAP, winH - EST_V_H - GAP));
+    // Thanh ngang: ưu tiên dưới khung; hết chỗ → lên trên. Right-align mép phải khung.
+    const belowY = sel.y + sel.h + GAP;
+    const flipY  = spaceBelow < MIN_OUTER_BOTTOM;
+    hTop  = flipY ? sel.y - GAP - BOTTOM_H : belowY;
+    hLeft = clamp(sel.x + sel.w - BOTTOM_W, GAP, Math.max(GAP, winW - BOTTOM_W - GAP));
+  }
+
   return {
     flipX,
+    insideMode,
     vRect: { x: vLeft, y: vTop, w: TOOLBAR_W, h: EST_V_H },
     hRect: { x: hLeft, y: hTop, w: BOTTOM_W, h: BOTTOM_H },
   };
@@ -122,15 +159,20 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
   const swatch = isHighlight ? highlightColor : color;
   const palette = isHighlight ? HIGHLIGHT_COLORS : PRESET_COLORS;
 
-  const { flipX, vRect, hRect } = quickToolbarLayout(sel, winW, winH);
+  const { flipX, insideMode, vRect, hRect } = quickToolbarLayout(sel, winW, winH);
   const vLeft = vRect.x, vTop = vRect.y;
   const hLeft = hRect.x, hTop = hRect.y;
 
   const stop = (e: React.PointerEvent) => e.stopPropagation();
 
+  // Khi inside: tăng z-index để phủ lên canvas chú thích, giảm opacity nền một chút.
+  const insideStyle: React.CSSProperties = insideMode
+    ? { zIndex: 10, background: "rgba(28,28,32,0.88)" }
+    : {};
+
   return (
     <>
-      <div style={{ ...sideBar, left: vLeft, top: vTop }} onPointerDown={stop}>
+      <div style={{ ...sideBar, left: vLeft, top: vTop, ...insideStyle }} onPointerDown={stop}>
         {TOOLS.map((t) => (
           <button key={t.id} title={t.label} onClick={() => onPickTool(t.id)} style={toolBtn(annotating && tool === t.id)}>
             {t.icon}
@@ -154,7 +196,7 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
         </button>
       </div>
 
-      <div style={{ ...bottomBar, left: hLeft, top: hTop }} onPointerDown={stop}>
+      <div style={{ ...bottomBar, left: hLeft, top: hTop, ...insideStyle }} onPointerDown={stop}>
         <button title="Copy (Ctrl/Cmd+C)" style={actionBtn()} disabled={busy} onClick={onCopy}>{CopyIcon}</button>
         <button title="Lưu (Ctrl/Cmd+S)" style={actionBtn()} disabled={busy} onClick={onSave}>{SaveIcon}</button>
         <button title="Mở Editor" style={actionBtn()} disabled={busy} onClick={onOpenEditor}>{EditorIcon}</button>

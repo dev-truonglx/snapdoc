@@ -45,6 +45,14 @@ fn configure_overlay_ns_window_main_thread(win: &tauri::WebviewWindow, display_i
         let behavior: usize = 1 | (1 << 4) | (1 << 8);
         let _: () = msg_send![ns_win, setCollectionBehavior: behavior];
 
+        // Đặt window level CAO HƠN menu bar của macOS để overlay phủ kín toàn
+        // màn hình, bao gồm cả thanh menu (NSMenuBarWindowLevel ≈ 24).
+        // NSScreenSaverWindowLevel = 1000 — đảm bảo phủ mọi thứ kể cả
+        // Spotlight, Notification Center và menu bar.
+        // CGWindowLevel của NSScreenSaverWindowLevel là 1000.
+        let screen_saver_level: i64 = 1000;
+        let _: () = msg_send![ns_win, setLevel: screen_saver_level];
+
         // Tìm NSScreen có NSScreenNumber == display_id rồi setFrame theo đúng
         // frame (points, hệ AppKit) của nó.
         if let Some(mtm) = MainThreadMarker::new() {
@@ -57,6 +65,10 @@ fn configure_overlay_ns_window_main_thread(win: &tauri::WebviewWindow, display_i
                     // num: NSNumber → unsignedIntValue.
                     let sid: u32 = msg_send![&*num, unsignedIntValue];
                     if sid == display_id {
+                        // Dùng screen.visibleFrame() để lấy toàn bộ frame màn
+                        // hình bao gồm cả vùng menu bar (frame() của NSScreen
+                        // bao gồm menu bar, visibleFrame() loại trừ nó — ta
+                        // cần frame() để overlay phủ kín cả menu bar).
                         let frame = screen.frame();
                         let _: () = msg_send![ns_win, setFrame: frame, display: true];
                         break;
