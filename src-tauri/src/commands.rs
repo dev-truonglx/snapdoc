@@ -468,10 +468,25 @@ pub fn get_pending_update(app: AppHandle) -> Option<crate::update::UpdateInfo> {
     crate::update::pending_info(&app)
 }
 
+/// Returns true if a silent background update has been installed and the app
+/// needs to restart to apply it. Settings calls this on mount so the restart
+/// banner is shown even when the window was opened after the event fired.
+#[tauri::command]
+pub fn get_update_ready() -> bool {
+    crate::update::UPDATE_READY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Download + install the pending update and restart the app.
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
     crate::update::install_pending(app).await
+}
+
+/// Restart the app immediately — used after a silent background update has been
+/// installed and the user confirms via Settings or tray.
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    app.restart();
 }
 
 #[tauri::command]

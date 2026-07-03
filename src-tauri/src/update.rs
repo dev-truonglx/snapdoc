@@ -1,12 +1,18 @@
 // Self-update flow built on tauri-plugin-updater. Fetch/install logic lives in
 // Rust; the UI lives in the webview. `check_update` returns structured data
-// (no native dialogs), and the silent startup check emits an event + shows the
-// "update" window so the user is notified even when Settings isn't open.
+// (no native dialogs).
+//
+// Startup behavior: silently check → download → install in background.
+// The new version is applied on the NEXT app launch (no restart, no popup).
+// Manual update via Settings is preserved.
 
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// Caches the most recently fetched update so `install_pending` can install it
@@ -14,6 +20,11 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 /// handed to the frontend directly — only the `UpdateInfo` summary is.
 #[derive(Default)]
 pub struct PendingUpdate(pub Mutex<Option<Update>>);
+
+/// Persists across the session: true once a silent background install succeeds.
+/// Settings queries this on mount so it shows the restart banner even if the
+/// window was opened after the event was emitted.
+pub static UPDATE_READY: AtomicBool = AtomicBool::new(false);
 
 /// Update summary sent to the frontend.
 #[derive(Serialize, Clone)]
@@ -26,11 +37,12 @@ pub struct UpdateInfo {
 
 /// Check for an update and return the outcome.
 ///
-/// When an update is available it is cached in `PendingUpdate`. `manual = false`
-/// (startup check) additionally emits `update-available` and shows the update
-/// window, so a new build is surfaced even with no Settings window open. Errors
-/// are returned to the caller; on the silent path they are just logged.
+/// When an update is available it is cached in `PendingUpdate`.
+/// `manual = true` (called from Settings): returns info to UI so user can install manually.
+/// `manual = false` (startup): caller handles silent download+install — no popup shown.
+/// Errors are returned to the caller; on the silent path they are just logged.
 pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, String> {
+    let _ = manual; // kept for API compatibility with commands.rs
     match fetch(&app).await {
         Ok(Some(update)) => {
             let info = UpdateInfo {
@@ -39,9 +51,6 @@ pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, St
                 current_version: update.current_version.clone(),
             };
             *app.state::<PendingUpdate>().0.lock().unwrap() = Some(update);
-            if !manual {
-                notify_update_window(&app, &info);
-            }
             Ok(info)
         }
         Ok(None) => Ok(UpdateInfo {
@@ -70,6 +79,40 @@ pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, St
     }
 }
 
+/// Silently download and install the update in the background WITHOUT restarting.
+/// The new version will be applied the next time the user launches the app.
+/// Called automatically on startup when an update is found.
+pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
+    // Take the update out of state so the lock isn't held across .await.
+    let update = app.state::<PendingUpdate>().0.lock().unwrap().take();
+    let Some(update) = update else {
+        return Err("No update is pending.".to_string());
+    };
+    let version = update.version.clone();
+    log::info!("[UPDATE] silent download+install started for v{version}");
+    update
+        .download_and_install(
+            |_chunk, _total| {},
+            || { log::info!("[UPDATE] download finished, installing…"); },
+        )
+        .await
+        .map_err(|e| {
+            log::error!("[UPDATE] silent install failed: {e}");
+            e.to_string()
+        })?;
+    log::info!("[UPDATE] silent install complete — new version will apply on next launch");
+
+    // Đánh dấu trạng thái toàn cục để Settings có thể query bất cứ lúc nào.
+    UPDATE_READY.store(true, Ordering::Relaxed);
+
+    // Thông báo cho tray và frontend: update đã sẵn sàng, cần restart để áp dụng.
+    crate::tray::set_restart_badge(&app);
+    use tauri::Emitter;
+    let _ = app.emit("update-ready-to-relaunch", &version);
+
+    Ok(())
+}
+
 async fn fetch(app: &AppHandle) -> tauri_plugin_updater::Result<Option<Update>> {
     app.updater()?.check().await
 }
@@ -89,8 +132,8 @@ pub fn pending_info(app: &AppHandle) -> Option<UpdateInfo> {
         })
 }
 
-/// Download + install the cached pending update, then relaunch. No native
-/// dialogs: errors bubble up to the webview as a `String`.
+/// Download + install the cached pending update, then relaunch.
+/// Used by the manual install flow in Settings. Errors bubble up to the webview.
 pub async fn install_pending(app: AppHandle) -> Result<(), String> {
     // Take the update out of state first so the lock isn't held across `.await`.
     let update = app.state::<PendingUpdate>().0.lock().unwrap().take();
@@ -105,22 +148,4 @@ pub async fn install_pending(app: AppHandle) -> Result<(), String> {
             e.to_string()
         })?;
     app.restart();
-}
-
-/// Show the update window and push the latest info to it.
-/// Creates the window if it doesn't exist yet (startup check path),
-/// or re-shows and re-emits if already open (rare).
-fn notify_update_window(app: &AppHandle, info: &UpdateInfo) {
-    // Tạo/show cửa sổ trước
-    let _ = crate::windows::open_update_window(app);
-
-    // Emit event sau 300ms để frontend kịp mount và đăng ký listener.
-    let app = app.clone();
-    let info = info.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        if let Some(win) = app.get_webview_window("update") {
-            let _ = win.emit("update-available", info);
-        }
-    });
 }

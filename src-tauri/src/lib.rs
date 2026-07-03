@@ -105,7 +105,9 @@ pub fn run() {
             commands::set_autostart,
             commands::check_update,
             commands::get_pending_update,
+            commands::get_update_ready,
             commands::install_update,
+            commands::restart_app,
             commands::capture_scroll_slice,
             commands::finalize_scroll_capture,
             commands::start_scroll_session,
@@ -188,7 +190,8 @@ pub fn run() {
             }
 
             // Startup: kiểm tra update im lặng sau 3s (không chặn khởi động).
-            // Khi có update → tray icon đổi + cửa sổ update mở.
+            // Khi có update → tự động tải về và cài đặt ở nền, KHÔNG hiện popup.
+            // Phiên bản mới sẽ được áp dụng khi app khởi động lại lần tiếp theo.
             let app_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -196,6 +199,10 @@ pub fn run() {
                 if let Ok(info) = result {
                     if info.available {
                         tray::set_update_badge(&app_handle);
+                        // Tự động tải và cài — không restart, không hiện cửa sổ.
+                        if let Err(e) = update::silent_download_and_install(app_handle.clone()).await {
+                            log::warn!("[UPDATE] background install failed: {e}");
+                        }
                     }
                 }
             });

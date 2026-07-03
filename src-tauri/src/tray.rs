@@ -1,10 +1,14 @@
 use crate::{flow, windows};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle,
 };
+
+/// Track whether the "restart to update" item should be shown in tray menu.
+static RESTART_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Icon tray template (16×16 và 32×32 PNG đen/trắng cho macOS menu bar).
 const TRAY_ICON: &[u8] = include_bytes!("../icons/tray.png");
@@ -25,6 +29,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id.as_ref() {
+            "restart_update" => app.restart(),
             "all" => {
                 let app = app.clone();
                 std::thread::spawn(move || {
@@ -56,6 +61,10 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
 
 /// Xây dựng menu mới từ shortcuts hiện tại trong settings.
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    build_menu_inner(app, false)
+}
+
+fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<tauri::Wry>> {
     let shortcuts = crate::hotkey::shortcuts_from_settings(app);
     // Chỉ hiển thị accelerator nếu combo không rỗng
     let sc = |action: &str| -> Option<String> {
@@ -77,7 +86,13 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let sep1   = PredefinedMenuItem::separator(app)?;
     let sep2   = PredefinedMenuItem::separator(app)?;
 
-    Menu::with_items(app, &[&quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &settings, &sep2, &quit])
+    if show_restart {
+        let restart = MenuItem::with_id(app, "restart_update", "↺ Khởi động lại để cập nhật", true, None::<&str>)?;
+        let sep3    = PredefinedMenuItem::separator(app)?;
+        Menu::with_items(app, &[&restart, &sep3, &quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &settings, &sep2, &quit])
+    } else {
+        Menu::with_items(app, &[&quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &settings, &sep2, &quit])
+    }
 }
 
 /// Rebuild tray menu với shortcuts mới nhất — gọi sau `reload_shortcuts`.
@@ -85,22 +100,28 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 /// kể cả khi user đã xóa một phím tắt (sẽ không còn accelerator đó).
 pub fn rebuild_menu(app: &AppHandle) {
     if let Some(tray) = app.tray_by_id("main-tray") {
-        if let Ok(menu) = build_menu(app) {
+        let show_restart = RESTART_PENDING.load(Ordering::Relaxed);
+        if let Ok(menu) = build_menu_inner(app, show_restart) {
             let _ = tray.set_menu(Some(menu));
         }
     }
 }
 
-/// Đổi tooltip tray để báo có update.
+/// Đổi tooltip tray để báo có update đang tải/cài.
 pub fn set_update_badge(app: &AppHandle) {
     if let Some(tray) = app.tray_by_id("main-tray") {
-        let _ = tray.set_tooltip(Some("SnapDoc — 🆕 Có bản cập nhật mới!"));
-        // TODO: khi có tray-update.png, bỏ comment để đổi icon:
-        // const BADGE: &[u8] = include_bytes!("../icons/tray-update.png");
-        // if let Ok(icon) = Image::from_bytes(BADGE) {
-        //     let _ = tray.set_icon(Some(icon));
-        //     let _ = tray.set_icon_as_template(false);
-        // }
+        let _ = tray.set_tooltip(Some("SnapDoc — 🔄 Đang tải bản cập nhật…"));
+    }
+}
+
+/// Đổi tooltip + menu tray sau khi update đã cài xong, chờ restart.
+pub fn set_restart_badge(app: &AppHandle) {
+    RESTART_PENDING.store(true, Ordering::Relaxed);
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some("SnapDoc — ✅ Đã cập nhật! Khởi động lại để áp dụng"));
+        if let Ok(menu) = build_menu_inner(app, true) {
+            let _ = tray.set_menu(Some(menu));
+        }
     }
 }
 
