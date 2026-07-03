@@ -6,6 +6,7 @@ import AnnotationStage, { type StageHandle } from "../../features/annotation/can
 import { useEditor } from "../../features/annotation/store";
 import { copyToClipboard, saveToFile } from "../../features/output/useOutput";
 import { ipc, type Pending } from "../../lib/ipc";
+import { editorToolFromKey } from "../../lib/toolShortcuts";
 import StitchDialog from "../../features/annotation/compose/StitchDialog";
 import type { StitchResult } from "../../features/annotation/compose/stitch";
 
@@ -162,9 +163,11 @@ export default function Editor() {
         e.preventDefault();
         s.removeSelected();
       } else if (!mod) {
-        const map: Record<string, string> = { v: "select", r: "rect", o: "ellipse", t: "text", n: "step", a: "arrow", l: "line", w: "numbered-arrow", h: "highlight", b: "blur", c: "crop" };
-        const t = map[e.key.toLowerCase()];
-        if (t) s.setTool(t as never);
+        const t = editorToolFromKey(e);
+        if (t) {
+          e.preventDefault();
+          s.setTool(t);
+        }
       }
     };
     window.addEventListener("keydown", onKey);

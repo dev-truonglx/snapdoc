@@ -526,6 +526,11 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize) {
                         (x, y)
                     };
                     let _ = app.emit("overlay-release", (release_idx, rx, ry));
+                    // Focus overlay vừa thả chuột để phím tắt công cụ hoạt động ngay.
+                    if let Some(win) = app.get_webview_window(&format!("overlay-{release_idx}")) {
+                        let _ = win.set_focus();
+                    }
+                    focused_idx = Some(release_idx);
                 }
             } else if !left && prev_left {
                 if let Some(src_idx) = drag_idx.take() {

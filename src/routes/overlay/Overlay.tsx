@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { ipc, type WindowInfo } from "../../lib/ipc";
 import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
 import { useEditor } from "../../features/annotation/store";
 import { copyToClipboard, saveToFileAuto } from "../../features/output/useOutput";
 import { PRESET_COLORS, type Tool } from "../../features/annotation/model";
+import { quickToolFromKey } from "../../lib/toolShortcuts";
 import QuickToolbar, { quickToolbarLayout } from "../quick-capture/QuickToolbar";
 
 const params = new URLSearchParams(window.location.search);
@@ -211,6 +213,8 @@ function QuickAnnotate() {
         setPhase("adjusting");
         // khung mới → xoá chú thích cũ (annCount về 0 → hiện lại handle resize)
         loadDoc({ image: transparentPng(1, 1), imgW: 1, imgH: 1, scaleFactor: SCALE, annotations: [] });
+        // Đảm bảo overlay nhận phím tắt ngay sau khi thả chuột (không cần click toolbar).
+        getCurrentWindow().setFocus().catch(() => {});
       } else {
         // kéo quá nhỏ → khôi phục khung + pha trước (nếu có), tránh mất chú thích
         setSel(prevSelRef.current);
@@ -291,6 +295,8 @@ function QuickAnnotate() {
     setPhase("annotating");
     setTool(t);
   }, [phase, sel, setTool, loadTransparent]);
+  const pickToolRef = useRef(pickTool);
+  pickToolRef.current = pickTool;
 
   // ── Xuất ảnh: chụp đúng vùng (ẩn overlay) rồi ghép lớp chú thích ──
   const doExport = useCallback(async (): Promise<{ url: string; w: number; h: number } | null> => {
@@ -328,7 +334,8 @@ function QuickAnnotate() {
   // Đóng TẤT CẢ overlay (mọi màn hình) — không chỉ overlay hiện tại.
   const doClose = () => ipc.cancelOverlay();
 
-  // ── Phím tắt (native) — loop đã dừng sau khi vào pha adjusting ──
+  // ── Phím tắt: công cụ hoạt động ngay sau khi kéo khung (pha adjusting),
+  // không cần click toolbar trước — pickTool tự chuyển sang annotating. ──
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
@@ -339,15 +346,23 @@ function QuickAnnotate() {
       if (e.key === "Escape") { e.preventDefault(); doClose(); return; }
       if (mod && e.key.toLowerCase() === "c") { e.preventDefault(); doCopy(); return; }
       if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); doSave(); return; }
+      if (phase === "selecting" || !sel) return;
+
+      if (!mod) {
+        const t = quickToolFromKey(e);
+        if (t) {
+          e.preventDefault();
+          pickToolRef.current(t);
+          return;
+        }
+      }
+
       if (phase !== "annotating") return;
       if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); s.undo(); return; }
       if ((e.key === "Delete" || e.key === "Backspace") && s.selectedId) { e.preventDefault(); s.removeSelected(); return; }
       if (!mod) {
         const cmap: Record<string, number> = { "1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5 };
         if (e.key in cmap) { const c = PRESET_COLORS[cmap[e.key]]; if (c) s.setColor(c); return; }
-        const tmap: Record<string, Tool> = { r: "rect", n: "step", t: "text", a: e.shiftKey ? "numbered-arrow" : "arrow", h: "highlight" };
-        const t = tmap[e.key.toLowerCase()];
-        if (t) s.setTool(t);
       }
     };
     window.addEventListener("keydown", onKey);
