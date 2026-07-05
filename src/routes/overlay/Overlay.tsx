@@ -3,7 +3,6 @@ import { listen } from "@tauri-apps/api/event";
 import { ipc, type WindowInfo } from "../../lib/ipc";
 import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
 import { useEditor } from "../../features/annotation/store";
-import { copyToClipboard, saveToFileAuto } from "../../features/output/useOutput";
 import { PRESET_COLORS, type Tool } from "../../features/annotation/model";
 import QuickToolbar, { quickToolbarLayout } from "../quick-capture/QuickToolbar";
 
@@ -312,12 +311,12 @@ function QuickAnnotate() {
 
   const doCopy = async () => {
     setBusy(true);
-    try { const r = await doExport(); if (r) await copyToClipboard(r.url); }
+    try { const r = await doExport(); if (r) await ipc.finishQuickCapture(r.url, r.w, r.h, "clipboard"); }
     finally { ipc.cancelOverlay(); }
   };
   const doSave = async () => {
     setBusy(true);
-    try { const r = await doExport(); if (r) await saveToFileAuto(r.url, false); }
+    try { const r = await doExport(); if (r) await ipc.finishQuickCapture(r.url, r.w, r.h, "save"); }
     finally { ipc.cancelOverlay(); }
   };
   const doOpenEditor = async () => {
@@ -457,7 +456,7 @@ function WindowPicker() {
     (active, x, y) => setHover(active ? pick(x, y) : null),
     (x, y) => {
       const w = pick(x, y);
-      if (w) ipc.finalizeWindow(w.id);
+      if (w) ipc.finalizeWindow(w.id).catch((e) => alert(String(e)));
     },
     () => {},
   );

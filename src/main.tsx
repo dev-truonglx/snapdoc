@@ -9,6 +9,7 @@ import Settings from "./routes/settings/Settings";
 import UpdateWindow from "./routes/update/UpdateWindow";
 import ScrollControl from "./routes/scroll-control/ScrollControl";
 import ScrollBorder from "./routes/scroll-border/ScrollBorder";
+import HistoryWindow from "./routes/history/HistoryWindow";
 
 const which = new URLSearchParams(window.location.search).get("win") ?? "capture-bar";
 
@@ -21,6 +22,7 @@ const routes: Record<string, React.ComponentType> = {
   update: UpdateWindow,
   "scroll-control": ScrollControl,
   "scroll-border": ScrollBorder,
+  history: HistoryWindow,
 };
 
 const Route = routes[which] ?? CaptureBar;

@@ -2,6 +2,7 @@ mod capture;
 mod clipboard;
 mod commands;
 mod flow;
+mod history;
 mod hotkey;
 mod input;
 mod permissions;
@@ -112,6 +113,19 @@ pub fn run() {
             commands::finalize_scroll_capture,
             commands::start_scroll_session,
             commands::finalize_scroll_stitch,
+            history::commands::list_history,
+            history::commands::get_history_item,
+            history::commands::delete_history_item,
+            history::commands::restore_history_item,
+            history::commands::permanently_delete_history_item,
+            history::commands::empty_trash,
+            history::commands::rename_history_item,
+            history::commands::open_history_item_in_editor,
+            history::commands::update_history_asset,
+            history::commands::copy_history_item,
+            history::commands::reveal_history_item,
+            history::commands::open_history,
+            history::commands::finish_quick_capture,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -154,6 +168,20 @@ pub fn run() {
                     });
                 }
                 return Ok(());
+            }
+
+            // History DB — trước tray/hotkey vì global shortcut có thể trigger
+            // capture ngay sau đó (ingest cần HistoryState đã sẵn sàng).
+            // Lỗi init KHÔNG chặn khởi động app — chỉ tắt tính năng Library
+            // (mọi command History sẽ trả lỗi rõ ràng qua `try_state`).
+            match history::assets::db_path(&handle).and_then(|p| history::db::open(&p)) {
+                Ok(conn) => {
+                    use tauri::Manager;
+                    app.manage(history::db::HistoryState::new(conn));
+                }
+                Err(e) => {
+                    eprintln!("[SnapDoc][history] init thất bại, tính năng Library sẽ tắt: {e}");
+                }
             }
 
             tray::build(&handle)?;
@@ -225,7 +253,7 @@ pub fn run() {
                 // "editor" (capture) lẫn "editor-ow-N" ("Open with") + "settings"
                 // + "capture-bar" = cửa sổ thật → khi đóng, cân nhắc trả về Accessory policy
                 // (macOS) hoặc ẩn taskbar icon (Windows).
-                if label.starts_with("editor") || label == "settings" || label == "capture-bar" {
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" {
                     windows::on_editor_closed(_window.app_handle());
                 }
             }

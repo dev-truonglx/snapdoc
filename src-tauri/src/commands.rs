@@ -23,8 +23,21 @@ pub fn take_pending(state: State<AppState>) -> Option<PendingCapture> {
 /// `data`: data URL đầy đủ (`data:image/png;base64,...`) hoặc base64 trần —
 /// tách bỏ phần prefix nếu có, giữ đúng quy ước của `PendingCapture.base64`.
 #[tauri::command]
-pub fn set_pending_image(state: State<AppState>, data: String, width: u32, height: u32) {
+pub fn set_pending_image(app: AppHandle, state: State<AppState>, data: String, width: u32, height: u32) {
     let base64 = data.split(',').next_back().unwrap_or(&data).to_string();
+
+    // "Mở Editor" từ Quick Capture cũng là một capture hoàn chỉnh (đối xứng với
+    // nhánh `_ => open_editor` của `flow::finish`) — ingest ngay để History
+    // ghi nhận mọi đường ra editor, không chỉ Copy/Save.
+    let cap = crate::capture::Capture { base64: base64.clone(), width, height };
+    let history_id = match crate::history::ingest(&app, &cap, "quick", 1.0) {
+        Ok(rec) => Some(rec.id),
+        Err(e) => {
+            eprintln!("[SnapDoc][history] ingest (set_pending_image) thất bại: {e}");
+            None
+        }
+    };
+
     if let Ok(mut g) = state.pending.lock() {
         *g = Some(PendingCapture {
             base64,
@@ -32,6 +45,7 @@ pub fn set_pending_image(state: State<AppState>, data: String, width: u32, heigh
             height,
             output: "editor".to_string(),
             scale_factor: 1.0,
+            history_id,
         });
     }
 }
@@ -274,6 +288,9 @@ pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> 
                 height,
                 output: "editor".to_string(),
                 scale_factor: 1.0,
+                // "Open with"/file ngoài KHÔNG vào History (chỉ ghi nhận ảnh do
+                // app tự chụp) — history_id luôn None cho luồng này.
+                history_id: None,
             });
         }
         windows::open_editor(app)?;

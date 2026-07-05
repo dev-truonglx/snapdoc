@@ -31,6 +31,10 @@ pub struct PendingCapture {
     pub output: String,
     /// DPI scale thật của màn hình nguồn (1.0 = normal, 2.0 = Retina 2×).
     pub scale_factor: f64,
+    /// Id bản ghi History tương ứng (nếu đã ingest thành công) — Editor dùng
+    /// để Save ghi đè tại chỗ đúng record thay vì chỉ save-as thông thường.
+    #[serde(default)]
+    pub history_id: Option<String>,
 }
 
 /// Chế độ chụp + output gần nhất — dùng cho nút "New" ở editor.

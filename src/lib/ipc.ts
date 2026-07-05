@@ -7,6 +7,44 @@ export interface Pending {
   /** DPI scale factor của màn hình nguồn (1.0 = normal, 2.0 = Retina 2×). */
   scale_factor: number;
   output: string;
+  /** Id bản ghi History tương ứng (nếu đã ingest) — dùng để Save ghi đè tại chỗ. */
+  history_id: string | null;
+}
+
+// ── History / Library ────────────────────────────────────────────────────────
+
+export interface HistoryItem {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  captureMode: "region" | "window" | "monitor" | "all" | "scroll" | "quick";
+  mediaType: "image" | "video" | "gif";
+  width: number;
+  height: number;
+  scaleFactor: number;
+  durationMs: number | null;
+  assetPath: string;
+  thumbPath: string;
+  fileSize: number | null;
+  sourceApp: string | null;
+  title: string | null;
+  isEdited: boolean;
+  deletedAt: number | null;
+}
+
+export interface HistoryFilter {
+  from?: number;
+  to?: number;
+  captureMode?: string;
+  search?: string;
+  trashOnly?: boolean;
+  limit: number;
+  offset: number;
+}
+
+export interface HistoryPage {
+  items: HistoryItem[];
+  total: number;
 }
 
 export type CaptureMode = "full" | "window" | "region" | "all" | "scroll";
@@ -100,4 +138,19 @@ export const ipc = {
     invoke<void>("start_scroll_session"),
   finalizeScrollStitch: (width: number, instructions: { sliceIndex: number; srcY: number; srcH: number }[]) =>
     invoke<void>("finalize_scroll_stitch", { width, instructions }),
+  // History / Library
+  listHistory: (filter: HistoryFilter) => invoke<HistoryPage>("list_history", { filter }),
+  getHistoryItem: (id: string) => invoke<HistoryItem>("get_history_item", { id }),
+  deleteHistoryItem: (id: string) => invoke<void>("delete_history_item", { id }),
+  restoreHistoryItem: (id: string) => invoke<void>("restore_history_item", { id }),
+  permanentlyDeleteHistoryItem: (id: string) => invoke<void>("permanently_delete_history_item", { id }),
+  emptyTrash: () => invoke<number>("empty_trash"),
+  renameHistoryItem: (id: string, title: string) => invoke<void>("rename_history_item", { id, title }),
+  openHistoryItemInEditor: (id: string) => invoke<void>("open_history_item_in_editor", { id }),
+  updateHistoryAsset: (id: string, data: string) => invoke<HistoryItem>("update_history_asset", { id, data }),
+  copyHistoryItem: (id: string) => invoke<void>("copy_history_item", { id }),
+  revealHistoryItem: (id: string) => invoke<void>("reveal_history_item", { id }),
+  openHistory: () => invoke<void>("open_history"),
+  finishQuickCapture: (data: string, width: number, height: number, output: string) =>
+    invoke<string | null>("finish_quick_capture", { data, width, height, output }),
 };

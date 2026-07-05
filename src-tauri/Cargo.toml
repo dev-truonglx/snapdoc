@@ -1,6 +1,6 @@
 [package]
 name = "snapdoc"
-version = "0.1.3"
+version = "0.2.4"
 description = "SnapDoc — fast screenshot + annotation app"
 authors = ["SnapDoc"]
 edition = "2021"
@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api", "protocol-asset"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
@@ -42,6 +42,11 @@ image = "0.25"
 arboard = "3"
 
 base64 = "0.22"
+
+# History/Library: metadata SQLite (bundled — không cần sqlite3 hệ thống trên
+# Windows/macOS) + UUID cho id bản ghi.
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
 
 # macOS: đọc trạng thái nút chuột / phím toàn cục để xử lý input cho overlay
 # mà không cần focus cửa sổ.

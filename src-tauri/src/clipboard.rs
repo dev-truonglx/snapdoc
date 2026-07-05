@@ -10,8 +10,13 @@ fn decode(data: &str) -> Result<Vec<u8>, String> {
 
 /// Copy ảnh PNG (base64) vào clipboard hệ thống dưới dạng bitmap.
 pub fn copy_png(data: &str) -> Result<(), String> {
-    let bytes = decode(data)?;
-    let img = image::load_from_memory(&bytes)
+    copy_png_bytes(&decode(data)?)
+}
+
+/// Copy ảnh PNG (raw bytes) vào clipboard — dùng khi ảnh đã có sẵn dạng bytes
+/// (vd đọc thẳng từ file asset History), tránh vòng encode/decode base64 thừa.
+pub fn copy_png_bytes(bytes: &[u8]) -> Result<(), String> {
+    let img = image::load_from_memory(bytes)
         .map_err(|e| format!("Không đọc được ảnh: {e}"))?
         .to_rgba8();
     let (w, h) = (img.width() as usize, img.height() as usize);
