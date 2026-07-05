@@ -22,7 +22,6 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"
-log = "0.4"
 tokio = { version = "1", features = ["time"] }
 
 serde = { version = "1", features = ["derive"] }

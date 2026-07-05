@@ -90,7 +90,7 @@ function RegionSelect() {
       setSel(null);
       if (!s) return;
       const r = rectFrom(s[0], s[1], x, y);
-      if (r.w >= 3 && r.h >= 3) ipc.finalizeRegion(r.x, r.y, r.w, r.h);
+      if (r.w >= 3 && r.h >= 3) ipc.finalizeRegion(r.x, r.y, r.w, r.h).catch((e) => alert(String(e)));
     },
   );
 
@@ -492,7 +492,7 @@ function MonitorPick() {
 
   useInput(
     (a) => setActive(a),
-    () => ipc.finalizeMonitor(),
+    () => ipc.finalizeMonitor().catch((e) => alert(String(e))),
     () => {},
   );
 

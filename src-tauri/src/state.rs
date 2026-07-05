@@ -82,4 +82,7 @@ pub struct AppState {
     pub editor_seq: AtomicU64,
     /// Bộ đệm lưu các lát cắt (slices) của tính năng chụp cuộn.
     pub scroll_slices: Mutex<Vec<image::RgbaImage>>,
+    /// Lỗi đăng ký global shortcut lúc khởi động (nếu có) — Settings query lúc
+    /// mount để hiện banner cảnh báo, thay vì chỉ `eprintln!` không ai thấy.
+    pub hotkey_warning: Mutex<Option<String>>,
 }

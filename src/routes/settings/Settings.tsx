@@ -27,6 +27,7 @@ export default function Settings() {
   const [perm, setPerm] = useState<boolean | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "err">("idle");
   const [shortcutMsg, setShortcutMsg] = useState<"ok" | "err" | null>(null);
+  const [hotkeyWarning, setHotkeyWarning] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateStatus, setUpdateStatus] = useState<"idle" | "checking" | "installing" | "err">("idle");
@@ -54,6 +55,7 @@ export default function Settings() {
       setS(loaded);
     });
     ipc.checkPermission().then(setPerm);
+    ipc.getHotkeyWarning().then(setHotkeyWarning).catch(() => {});
     ipc.getPendingUpdate().then((info) => {
       if (info?.available) setUpdateInfo(info);
     });
@@ -141,6 +143,7 @@ export default function Settings() {
         window.setTimeout(() => setSaveStatus("idle"), 1500);
         await ipc.reloadShortcuts();
         setShortcutMsg("ok");
+        setHotkeyWarning(null); // user vừa đăng ký lại thành công — cảnh báo lúc khởi động hết hiệu lực
       } catch {
         setSaveStatus("err");
         setShortcutMsg("err");
@@ -297,6 +300,11 @@ export default function Settings() {
 
         {/* PHÍM TẮT */}
         <Card title="PHÍM TẮT TOÀN CỤC">
+          {hotkeyWarning && (
+            <div style={hotkeyWarningBox}>
+              ⚠ {hotkeyWarning} — hãy đổi sang tổ hợp khác bên dưới rồi lưu lại.
+            </div>
+          )}
           <p style={hint}>
             Nhấp vào ô bên phải và nhấn tổ hợp phím mong muốn. Nhấn <kbd style={kbdStyle}>Esc</kbd> để hủy, <kbd style={kbdStyle}>⌫</kbd> để xóa.
           </p>
@@ -821,6 +829,17 @@ const errInline: React.CSSProperties = {
   fontSize: 11,
   color: "var(--danger)",
   marginTop: 2,
+};
+
+const hotkeyWarningBox: React.CSSProperties = {
+  fontSize: 12,
+  color: "#fca5a5",
+  background: "rgba(239,68,68,0.12)",
+  border: "1px solid rgba(239,68,68,0.35)",
+  borderRadius: 8,
+  padding: "8px 10px",
+  marginBottom: 10,
+  lineHeight: 1.5,
 };
 
 const smallBtn: React.CSSProperties = {

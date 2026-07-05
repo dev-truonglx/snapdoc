@@ -12,6 +12,31 @@ use model::HistoryRecord;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+/// 1 job ghi asset+thumbnail nền cho `ingest()`. Gửi qua channel tới
+/// `spawn_ingest_worker` thay vì `std::thread::spawn` mỗi lần chụp — tránh
+/// tạo hàng chục thread cùng lúc khi user spam phím tắt chụp liên tục (tất cả
+/// đều phải tranh cùng 1 Mutex<Connection> nên spawn nhiều thread không giúp
+/// nhanh hơn, chỉ tốn RAM/context-switch).
+pub struct IngestJob {
+    id: String,
+    asset_path: PathBuf,
+    thumb_path: PathBuf,
+    base64: String,
+}
+
+/// Spawn DUY NHẤT 1 worker thread xử lý tuần tự mọi job ghi nền — gọi 1 lần
+/// lúc khởi động app (cạnh `HistoryState::new`). Worker tự thoát khi mọi
+/// `Sender` bị drop (app thoát).
+pub fn spawn_ingest_worker(app: AppHandle) -> std::sync::mpsc::Sender<IngestJob> {
+    let (tx, rx) = std::sync::mpsc::channel::<IngestJob>();
+    std::thread::spawn(move || {
+        for job in rx {
+            ingest_finish_bg(&app, job.id, job.asset_path, job.thumb_path, &job.base64);
+        }
+    });
+    tx
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -89,9 +114,13 @@ pub fn ingest(
         deleted_at: None,
     };
 
-    let app2 = app.clone();
-    let base64 = cap.base64.clone();
-    std::thread::spawn(move || ingest_finish_bg(&app2, id, asset_path, thumb_path, &base64));
+    // Đẩy việc ghi file nặng (I/O) qua worker cố định thay vì spawn thread mới
+    // — nếu queue gửi lỗi (worker đã thoát, không nên xảy ra khi app còn chạy),
+    // record vẫn tồn tại trong DB nhưng file_size sẽ mãi NULL; chấp nhận được
+    // vì đây là tình huống app đang shutdown.
+    if let Ok(tx) = state.ingest_tx.lock() {
+        let _ = tx.send(IngestJob { id, asset_path, thumb_path, base64: cap.base64.clone() });
+    }
 
     Ok(record)
 }

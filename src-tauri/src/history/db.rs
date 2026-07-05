@@ -12,11 +12,16 @@ pub const CURRENT_VERSION: i32 = 1;
 /// thay vì panic ở `app.state::<HistoryState>()`.
 pub struct HistoryState {
     pub conn: Mutex<rusqlite::Connection>,
+    /// Kênh gửi job ghi asset/thumbnail nền tới worker cố định (xem
+    /// `history::spawn_ingest_worker`) — thay cho spawn 1 thread mới mỗi lần
+    /// chụp. Bọc `Mutex` vì `mpsc::Sender` không `Sync`; khoá chỉ giữ trong
+    /// lúc `.send()` (rẻ hơn nhiều so với tạo thread mới).
+    pub ingest_tx: Mutex<std::sync::mpsc::Sender<super::IngestJob>>,
 }
 
 impl HistoryState {
-    pub fn new(conn: rusqlite::Connection) -> Self {
-        Self { conn: Mutex::new(conn) }
+    pub fn new(conn: rusqlite::Connection, ingest_tx: std::sync::mpsc::Sender<super::IngestJob>) -> Self {
+        Self { conn: Mutex::new(conn), ingest_tx: Mutex::new(ingest_tx) }
     }
 }
 

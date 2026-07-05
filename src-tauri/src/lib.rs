@@ -102,6 +102,7 @@ pub fn run() {
             commands::suspend_shortcuts,
             commands::resume_shortcuts,
             commands::get_last_capture_mode,
+            commands::get_hotkey_warning,
             commands::get_autostart,
             commands::set_autostart,
             commands::check_update,
@@ -177,7 +178,8 @@ pub fn run() {
             match history::assets::db_path(&handle).and_then(|p| history::db::open(&p)) {
                 Ok(conn) => {
                     use tauri::Manager;
-                    app.manage(history::db::HistoryState::new(conn));
+                    let ingest_tx = history::spawn_ingest_worker(handle.clone());
+                    app.manage(history::db::HistoryState::new(conn, ingest_tx));
                 }
                 Err(e) => {
                     eprintln!("[SnapDoc][history] init thất bại, tính năng Library sẽ tắt: {e}");
@@ -187,6 +189,10 @@ pub fn run() {
             tray::build(&handle)?;
             if let Err(e) = hotkey::register_all(&handle) {
                 eprintln!("[SnapDoc] {e}");
+                use tauri::Manager;
+                if let Ok(mut g) = handle.state::<AppState>().hotkey_warning.lock() {
+                    *g = Some(e);
+                }
             }
 
             // Pre-warm editor (ẩn) → lần chụp đầu hiển thị tức thì.
@@ -229,7 +235,7 @@ pub fn run() {
                         tray::set_update_badge(&app_handle);
                         // Tự động tải và cài — không restart, không hiện cửa sổ.
                         if let Err(e) = update::silent_download_and_install(app_handle.clone()).await {
-                            log::warn!("[UPDATE] background install failed: {e}");
+                            eprintln!("[SnapDoc][update] background install failed: {e}");
                         }
                     }
                 }

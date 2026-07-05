@@ -419,6 +419,13 @@ pub fn get_last_capture_mode(app: AppHandle) -> (String, String) {
     app.state::<AppState>().last_capture.get()
 }
 
+/// Lỗi đăng ký global shortcut lúc khởi động (nếu có) — Settings gọi lúc mount
+/// để hiện banner cảnh báo phím tắt bị trùng/không đăng ký được.
+#[tauri::command]
+pub fn get_hotkey_warning(app: AppHandle) -> Option<String> {
+    app.state::<AppState>().hotkey_warning.lock().ok().and_then(|g| g.clone())
+}
+
 // ── Autostart commands ───────────────────────────────────────────────────────
 
 /// Trả về trạng thái "khởi động cùng hệ thống" hiện tại.
@@ -513,6 +520,13 @@ pub fn start_scroll_session(state: State<'_, AppState>) {
     }
 }
 
+/// Giới hạn số lát cắt tối đa cho 1 phiên chụp cuộn — mỗi lát là 1
+/// `RgbaImage` full-res giữ nguyên trong RAM tới lúc ghép (không nén), ảnh
+/// ~1920×1440 đã ~11MB/lát. Không giới hạn thì trang cuộn quá dài có thể đẩy
+/// RAM lên hàng GB. 300 lát tương ứng ~3.3GB ở độ phân giải trên — đủ rộng
+/// cho hầu hết trang dài, vẫn có trần để tránh OOM.
+const MAX_SCROLL_SLICES: usize = 300;
+
 /// Chụp một lát cắt trong tính năng chụp cuộn.
 #[tauri::command]
 pub async fn capture_scroll_slice(
@@ -524,6 +538,15 @@ pub async fn capture_scroll_slice(
     rw: u32,
     rh: u32,
 ) -> Result<String, String> {
+    {
+        let slices = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
+        if slices.len() >= MAX_SCROLL_SLICES {
+            return Err(format!(
+                "Đã đạt giới hạn {MAX_SCROLL_SLICES} lát cắt cho 1 lần chụp cuộn — hãy dừng lại và ghép ảnh."
+            ));
+        }
+    }
+
     let raw_img = tauri::async_runtime::spawn_blocking(move || -> Result<image::RgbaImage, String> {
         let m = crate::capture::monitor::at_point(mx, my)?;
         let img = crate::capture::region::capture_region_raw(&m, rx, ry, rw, rh)?;
