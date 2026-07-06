@@ -43,17 +43,31 @@ pub fn shortcuts_from_settings(app: &AppHandle) -> Vec<(String, String)> {
 
 /// Đăng ký tất cả phím tắt từ settings lúc khởi động.
 /// Bỏ qua các combo rỗng (user đã xóa phím tắt đó).
+///
+/// Thử đăng ký HẾT mọi phím tắt thay vì dừng ở combo lỗi đầu tiên (như trước
+/// đây `?` sẽ return ngay giữa vòng lặp) — 1 combo bị OS/app khác chiếm không
+/// còn kéo theo mọi phím tắt SAU nó trong danh sách bị bỏ lỡ luôn. Trả về lỗi
+/// gộp nếu có combo nào thất bại, để gọi nơi báo cho user (xem `lib.rs` setup
+/// lưu vào `AppState.hotkey_warning` cho Settings hiển thị).
 pub fn register_all(app: &AppHandle) -> Result<(), String> {
     let gs = app.global_shortcut();
+    let mut errors = Vec::new();
     for (action, combo) in shortcuts_from_settings(app) {
         if combo.is_empty() {
             continue; // user đã xóa shortcut này
         }
-        gs.register(combo.as_str()).map_err(|e| {
-            format!("Đăng ký phím tắt '{combo}' ({action}) thất bại: {e}")
-        })?;
+        if let Err(e) = gs.register(combo.as_str()) {
+            errors.push(format!("'{combo}' ({action}): {e}"));
+        }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Một số phím tắt không đăng ký được (có thể đã bị hệ điều hành/app khác chiếm): {}",
+            errors.join("; ")
+        ))
+    }
 }
 
 /// Huỷ tất cả phím tắt hiện tại, rồi đăng ký lại từ settings.

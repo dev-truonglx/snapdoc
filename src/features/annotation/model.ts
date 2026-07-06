@@ -104,6 +104,9 @@ export interface Doc {
   /** DPI scale factor của màn hình nguồn (1.0 = normal, 2.0 = Retina 2×). */
   scaleFactor: number;
   annotations: Annotation[];
+  /** Id bản ghi History tương ứng, nếu có — Save sẽ ghi đè tại chỗ record này
+   * thay vì save-as ra vị trí khác. `null`/`undefined` cho ảnh mở từ file ngoài. */
+  historyId?: string | null;
 }
 
 export const uid = (): string =>

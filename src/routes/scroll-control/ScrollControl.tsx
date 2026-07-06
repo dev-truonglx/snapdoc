@@ -549,6 +549,10 @@ export default function ScrollControl() {
       }
     } catch (err) {
       console.error("Lỗi chụp cuộn slice:", err);
+      // Lỗi thật (vd chạm giới hạn số lát) phải dừng vòng lặp + hiện cho user
+      // thấy — trước đây chỉ log console, user thấy "đang ghi..." mãi không rõ vì sao.
+      isCapturingRef.current = false;
+      setError(String(err));
     } finally {
       tickBusyRef.current = false;
     }

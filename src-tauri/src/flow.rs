@@ -49,7 +49,25 @@ fn store(app: &AppHandle, cap: &capture::Capture, output: &str, scale_factor: f6
         height: cap.height,
         output: output.to_string(),
         scale_factor,
+        history_id: None,
     });
+}
+
+/// Tên file theo template `Screenshot_YYYY-MM-DD_HHMMSS` (UTC) — dùng chung
+/// cho capture thường (output "save"/"save_copy") và Quick Capture
+/// (`history::save_quick_auto`) để cùng một quy ước đặt tên.
+pub(crate) fn stamp_filename() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let secs = now % 86400;
+    let days = now / 86400;
+    let (y, mo, d) = days_to_ymd(days);
+    let hh = secs / 3600;
+    let mm = (secs % 3600) / 60;
+    let ss = secs % 60;
+    format!("Screenshot_{y:04}-{mo:02}-{d:02}_{hh:02}{mm:02}{ss:02}")
 }
 
 /// `scale_factor`: hệ số quy đổi pixel-vật-lý-của-bitmap → CSS/logical px,
@@ -61,6 +79,15 @@ pub fn finish(
     scale_factor: f64,
 ) -> Result<(), String> {
     store(app, &cap, output, scale_factor);
+
+    // Ingest vào History Library — LUÔN chạy bất kể output, KHÔNG BAO GIỜ làm
+    // gián đoạn clipboard/save/editor phía dưới nếu lỗi (đĩa đầy, DB lỗi...).
+    let (mode, _) = app.state::<AppState>().last_capture.get();
+    match crate::history::ingest(app, &cap, &mode, scale_factor) {
+        Ok(rec) => crate::history::attach_pending_id(app, &rec.id),
+        Err(e) => eprintln!("[SnapDoc][history] ingest thất bại, luồng capture vẫn tiếp tục: {e}"),
+    }
+
     match output {
         "clipboard" => {
             clipboard::copy_png(&cap.base64)?;
@@ -85,22 +112,7 @@ pub fn finish(
                     dir
                 }
             };
-            let stamp = {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                // Format YYYY-MM-DD_HHMMSS từ Unix timestamp (UTC)
-                let secs = now % 86400;
-                let days = now / 86400;
-                // Tính năm/tháng/ngày đơn giản (UTC)
-                let (y, mo, d) = days_to_ymd(days);
-                let hh = secs / 3600;
-                let mm = (secs % 3600) / 60;
-                let ss = secs % 60;
-                format!("Screenshot_{y:04}-{mo:02}-{d:02}_{hh:02}{mm:02}{ss:02}")
-            };
-            let path = format!("{save_dir}/{stamp}.png");
+            let path = format!("{save_dir}/{}.png", stamp_filename());
             let data = format!("data:image/png;base64,{}", cap.base64);
             let saved = storage::save::write_png(&path, &data)?;
             if output == "save_copy" {

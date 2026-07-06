@@ -66,14 +66,14 @@ pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, St
                 || msg.contains("status code 404")
                 || msg.contains("No releases found")
             {
-                log::info!("[UPDATE] no releases published yet (404)");
+                eprintln!("[SnapDoc][update] chưa có release nào được publish (404)");
                 return Ok(UpdateInfo {
                     available: false,
                     version: String::new(),
                     current_version: app.package_info().version.to_string(),
                 });
             }
-            log::warn!("[UPDATE] check failed: {e}");
+            eprintln!("[SnapDoc][update] check failed: {e}");
             Err(msg)
         }
     }
@@ -89,18 +89,18 @@ pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
         return Err("No update is pending.".to_string());
     };
     let version = update.version.clone();
-    log::info!("[UPDATE] silent download+install started for v{version}");
+    eprintln!("[SnapDoc][update] silent download+install started for v{version}");
     update
         .download_and_install(
             |_chunk, _total| {},
-            || { log::info!("[UPDATE] download finished, installing…"); },
+            || { eprintln!("[SnapDoc][update] download finished, installing…"); },
         )
         .await
         .map_err(|e| {
-            log::error!("[UPDATE] silent install failed: {e}");
+            eprintln!("[SnapDoc][update] silent install failed: {e}");
             e.to_string()
         })?;
-    log::info!("[UPDATE] silent install complete — new version will apply on next launch");
+    eprintln!("[SnapDoc][update] silent install complete — new version will apply on next launch");
 
     // Đánh dấu trạng thái toàn cục để Settings có thể query bất cứ lúc nào.
     UPDATE_READY.store(true, Ordering::Relaxed);
@@ -144,7 +144,7 @@ pub async fn install_pending(app: AppHandle) -> Result<(), String> {
         .download_and_install(|_chunk, _total| {}, || {})
         .await
         .map_err(|e| {
-            log::error!("[UPDATE] install failed: {e}");
+            eprintln!("[SnapDoc][update] install failed: {e}");
             e.to_string()
         })?;
     app.restart();
