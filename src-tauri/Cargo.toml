@@ -42,6 +42,12 @@ arboard = "3"
 
 base64 = "0.22"
 
+# Ghi âm microphone khi quay màn hình (record/audio_mic.rs) — trước đây chỉ
+# khai dưới khối macOS nên KHÔNG build trên Windows; chuyển lên đây (dùng
+# chung cho mọi nền tảng) để record/audio_wasapi.rs (Windows, audio hệ thống —
+# xem plan Phase 5) cũng dùng được cùng crate.
+cpal = "0.18"
+
 # History/Library: metadata SQLite (bundled — không cần sqlite3 hệ thống trên
 # Windows/macOS) + UUID cho id bản ghi.
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -82,7 +88,7 @@ dispatch2 = "0.3.1"
 # captureMicrophone từ macOS 15, còn app hỗ trợ tối thiểu macOS 14 (xem
 # tauri.conf.json bundle.macOS.minimumSystemVersion), nên dùng cpal (CoreAudio
 # HAL trực tiếp) độc lập với ScreenCaptureKit thay vì phụ thuộc API mới.
-cpal = "0.18"
+# (cpal giờ khai ở khối [dependencies] chung phía trên, dùng chung cho Windows.)
 
 # Windows: đọc trạng thái nút chuột / phím toàn cục cho overlay (GetAsyncKeyState)
 # mà không cần focus cửa sổ — tương đương vai trò CoreGraphics trên macOS.
@@ -93,6 +99,13 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Com",
 ] }
+# Quay video liên tục qua Windows.Graphics.Capture (capture/windows_stream.rs)
+# — crate cấp cao ẩn phần COM/WinRT, tương đương vai trò
+# objc2-screen-capture-kit bên macOS. Phiên bản "1" viết theo API đã biết lúc
+# lên plan (xem .claude/plans) — CHƯA build/test được trên Windows thật trong
+# môi trường phát triển này, kiểm tra lại theo lỗi biên dịch `cargo check` nếu
+# API lệch so với bản cài đặt thực tế.
+windows-capture = "1"
 
 # Tối ưu DEPENDENCIES ngay cả trong bản debug (dev:mac). Code của ta vẫn build
 # nhanh + debug được, nhưng image/miniz_oxide/xcap/base64 chạy ở opt-level 3 nên

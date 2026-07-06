@@ -80,6 +80,8 @@ struct ActiveAudio {
 pub struct ActiveRecording {
     #[cfg(target_os = "macos")]
     stream: crate::capture::mac_stream::RecordingHandle,
+    #[cfg(target_os = "windows")]
+    stream: crate::capture::windows_stream::RecordingHandle,
     writer: std::thread::JoinHandle<Result<(), String>>,
     audio: Option<ActiveAudio>,
     /// Nơi `Encoder` ghi video lúc quay — TRÙNG `output_path` nếu không bật
@@ -237,8 +239,11 @@ pub fn start_recording_window(app: &AppHandle, window_id: u32) -> Result<(), Str
     start_with_target(app, crate::capture::mac_stream::RecordTarget::Window(window_id))
 }
 
-#[cfg(target_os = "macos")]
-fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::RecordTarget) -> Result<(), String> {
+/// Chặn bắt đầu quay mới khi đã có 1 phiên đang chạy, hoặc còn 1 bản quay
+/// trước chưa xác nhận lưu/xoá (`PendingRecordingState` chỉ giữ được 1 slot,
+/// quay tiếp sẽ GHI ĐÈ và làm mất hẳn đường dẫn tới bản trước). Dùng chung
+/// cho cả 2 nền tảng.
+fn guard_can_start_recording(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<RecordingState>();
     {
         let guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
@@ -246,16 +251,18 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
             return Err("Đã có phiên quay đang chạy".to_string());
         }
     }
-    {
-        // Chặn quay đè lên khi còn 1 bản quay trước chưa xác nhận lưu/xoá —
-        // `PendingRecordingState` chỉ giữ được 1 slot, quay tiếp sẽ GHI ĐÈ và
-        // làm mất hẳn đường dẫn tới bản trước (không xoá được, không vào History).
-        let pending = app.state::<PendingRecordingState>();
-        let guard = pending.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
-        if guard.is_some() {
-            return Err("Còn 1 bản quay chưa xác nhận lưu/xoá — hãy xử lý cửa sổ xem lại trước".to_string());
-        }
+    let pending = app.state::<PendingRecordingState>();
+    let guard = pending.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
+    if guard.is_some() {
+        return Err("Còn 1 bản quay chưa xác nhận lưu/xoá — hãy xử lý cửa sổ xem lại trước".to_string());
     }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::RecordTarget) -> Result<(), String> {
+    guard_can_start_recording(app)?;
+    let state = app.state::<RecordingState>();
 
     let capture_mode: &'static str = match &target {
         crate::capture::mac_stream::RecordTarget::Display(_) => "full",
@@ -424,17 +431,144 @@ fn stopped_externally(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Quay toàn màn hình CHÍNH trên Windows (giai đoạn 1 của plan Phase 5 —
+/// xem `capture::windows_stream` doc-comment: chưa hỗ trợ audio/window/region).
+#[cfg(target_os = "windows")]
+pub fn start_recording(app: &AppHandle) -> Result<(), String> {
+    let monitor = crate::capture::monitor::primary()?;
+    let display_id = monitor
+        .id()
+        .map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
+    start_with_target(app, crate::capture::windows_stream::RecordTarget::Display(display_id))
+}
+
+#[cfg(target_os = "windows")]
+pub fn start_recording_monitor(app: &AppHandle, display_id: u32) -> Result<(), String> {
+    start_with_target(app, crate::capture::windows_stream::RecordTarget::Display(display_id))
+}
+
+#[cfg(target_os = "windows")]
+pub fn start_recording_region(
+    app: &AppHandle,
+    display_id: u32,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    start_with_target(
+        app,
+        crate::capture::windows_stream::RecordTarget::Region { display_id, x, y, w, h },
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub fn start_recording_window(app: &AppHandle, window_id: u32) -> Result<(), String> {
+    start_with_target(app, crate::capture::windows_stream::RecordTarget::Window(window_id))
+}
+
+#[cfg(target_os = "windows")]
+fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::RecordTarget) -> Result<(), String> {
+    guard_can_start_recording(app)?;
+    let state = app.state::<RecordingState>();
+
+    let capture_mode: &'static str = match &target {
+        crate::capture::windows_stream::RecordTarget::Display(_) => "full",
+        crate::capture::windows_stream::RecordTarget::Region { .. } => "region",
+        crate::capture::windows_stream::RecordTarget::Window(_) => "window",
+    };
+
+    // Giai đoạn 1 (plan Phase 5): chưa hỗ trợ audio trên Windows — luôn quay
+    // không tiếng, bỏ qua setting `recordAudioSource`. Sẽ nối vào
+    // `audio_mic`/`audio_wasapi` ở giai đoạn 5/6.
+    let (stream, frame_rx, _system_audio_rx) =
+        crate::capture::windows_stream::start(target, FPS, false)?;
+    let (width, height) = (stream.width, stream.height);
+
+    let output_path = new_output_path(app)?;
+    let mut encoder = encoder::Encoder::start(&output_path, width, height, FPS)?;
+
+    let writer = std::thread::spawn(move || -> Result<(), String> {
+        while let Ok(frame) = frame_rx.recv() {
+            if frame.width != width || frame.height != height {
+                eprintln!(
+                    "[SnapDoc][record] Bỏ qua frame sai kích thước ({}x{}, cần {width}x{height})",
+                    frame.width, frame.height
+                );
+                continue;
+            }
+            encoder.write_frame(&frame.bgra)?;
+        }
+        encoder.finish()
+    });
+
+    {
+        let mut guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
+        *guard = Some(ActiveRecording {
+            stream,
+            writer,
+            audio: None,
+            video_path: output_path.clone(),
+            output_path,
+            started_at: Instant::now(),
+            width,
+            height,
+            capture_mode,
+        });
+    }
+
+    crate::tray::show_recording_tray(app);
+    spawn_tray_ticker(app.clone());
+    Ok(())
+}
+
+/// Cập nhật đồng hồ đếm cạnh icon "đang quay" mỗi giây — tự dừng khi
+/// `status()` trả `None`. Đồng thời poll `is_stopped_externally()` để phát
+/// hiện WGC tự dừng ngoài ý muốn, cùng vai trò với bản macOS (xem đó để hiểu
+/// đầy đủ lý do).
+#[cfg(target_os = "windows")]
+fn spawn_tray_ticker(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        if stopped_externally(&app) {
+            if let Err(e) = stop_recording(&app) {
+                eprintln!("[SnapDoc][record] Dừng quay (WGC tự dừng bên ngoài) thất bại: {e}");
+            }
+            break;
+        }
+        match status(&app) {
+            Some(ms) => {
+                crate::tray::update_recording_time(ms);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            None => break,
+        }
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn stopped_externally(app: &AppHandle) -> bool {
+    let state = app.state::<RecordingState>();
+    let guard = match state.0.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    guard
+        .as_ref()
+        .map(|r| r.stream.is_stopped_externally())
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn start_recording(_app: &AppHandle) -> Result<(), String> {
-    Err("Quay màn hình hiện chỉ hỗ trợ macOS".to_string())
+    Err("Quay màn hình hiện chỉ hỗ trợ macOS/Windows".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn start_recording_monitor(_app: &AppHandle, _display_id: u32) -> Result<(), String> {
-    Err("Quay màn hình hiện chỉ hỗ trợ macOS".to_string())
+    Err("Quay màn hình hiện chỉ hỗ trợ macOS/Windows".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn start_recording_region(
     _app: &AppHandle,
     _display_id: u32,
@@ -443,12 +577,12 @@ pub fn start_recording_region(
     _w: f64,
     _h: f64,
 ) -> Result<(), String> {
-    Err("Quay màn hình hiện chỉ hỗ trợ macOS".to_string())
+    Err("Quay màn hình hiện chỉ hỗ trợ macOS/Windows".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn start_recording_window(_app: &AppHandle, _window_id: u32) -> Result<(), String> {
-    Err("Quay màn hình hiện chỉ hỗ trợ macOS".to_string())
+    Err("Quay màn hình hiện chỉ hỗ trợ macOS/Windows".to_string())
 }
 
 /// Dừng phiên quay hiện tại, đợi ffmpeg mux xong (+ ghép audio nếu có — xem
@@ -484,6 +618,8 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
     let audio = active.audio;
 
     #[cfg(target_os = "macos")]
+    active.stream.stop()?;
+    #[cfg(target_os = "windows")]
     active.stream.stop()?;
 
     // Ghi file audio KHÔNG qua ffmpeg lúc quay (chỉ `File::write_all`) nên
