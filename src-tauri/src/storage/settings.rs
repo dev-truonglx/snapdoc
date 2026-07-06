@@ -22,7 +22,8 @@ fn defaults() -> Value {
             "window": "CmdOrCtrl+Shift+3",
             "all": "CmdOrCtrl+Shift+4",
             "captureCopy": "CmdOrCtrl+Shift+C",
-            "scroll": "CmdOrCtrl+Shift+6"
+            "scroll": "CmdOrCtrl+Shift+6",
+            "record": "CmdOrCtrl+Shift+7"
         }
     })
 }

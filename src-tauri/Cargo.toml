@@ -1,6 +1,6 @@
 [package]
 name = "snapdoc"
-version = "0.2.4"
+version = "0.2.6"
 description = "SnapDoc — fast screenshot + annotation app"
 authors = ["SnapDoc"]
 edition = "2021"
@@ -66,6 +66,15 @@ objc2-screen-capture-kit = { version = "0.3.2", default-features = false, featur
 block2 = "0.6.2"
 objc2-foundation = "0.3.2"
 objc2-core-foundation = "0.3.2"
+# Quay video liên tục (capture/mac_stream.rs): SCStream trả frame qua
+# CMSampleBuffer (objc2-core-media) bọc CVPixelBuffer (objc2-core-video) —
+# cần 2 crate này làm dependency trực tiếp để gọi hàm đọc pixel + tạo CMTime
+# cho minimumFrameInterval (fps).
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+# Dispatch queue riêng cho SCStream callback (không dùng main queue để callback
+# nhận frame liên tục 30fps không bị chặn bởi UI thread).
+dispatch2 = "0.3.1"
 
 # Windows: đọc trạng thái nút chuột / phím toàn cục cho overlay (GetAsyncKeyState)
 # mà không cần focus cửa sổ — tương đương vai trò CoreGraphics trên macOS.

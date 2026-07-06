@@ -5,6 +5,8 @@ pub mod window;
 
 #[cfg(target_os = "macos")]
 pub mod mac_sck;
+#[cfg(target_os = "macos")]
+pub mod mac_stream;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};

@@ -13,6 +13,7 @@ const OUTPUTS = [
 
 const SHORTCUT_KEYS: { key: string; label: string; hint?: string }[] = [
   { key: "quick",       label: "Chụp nhanh",          hint: "Chọn vùng rồi chú thích ngay tại chỗ" },
+  { key: "record",      label: "Quay màn hình",       hint: "Bắt đầu/dừng quay toàn màn hình chính" },
   { key: "captureBar",  label: "Mở thanh chụp",      hint: "Mở thanh công cụ chụp nổi" },
   { key: "full",        label: "Chụp toàn màn hình",  hint: "Chụp ngay không cần chọn vùng" },
   { key: "region",      label: "Chụp vùng chọn",      hint: "Kéo chọn vùng để chụp" },
@@ -42,6 +43,7 @@ export default function Settings() {
     ipc.getSettings().then(async (loaded) => {
       const defaults: Record<string, string> = {
         quick:       "CmdOrCtrl+Shift+Q",
+        record:      "CmdOrCtrl+Shift+7",
         captureBar:  "CmdOrCtrl+Shift+5",
         full:        "CmdOrCtrl+Shift+1",
         region:      "CmdOrCtrl+Shift+2",

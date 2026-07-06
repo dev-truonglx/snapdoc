@@ -198,6 +198,23 @@ export default function CaptureBar() {
               </svg>
               <span style={{ fontSize: 11, lineHeight: 1 }}>Nhanh</span>
             </button>
+            {/* Quay màn hình — hành động chạy NGAY (giống "Chụp nhanh"): bắt đầu
+                quay toàn màn hình chính rồi đóng capture bar, không đụng state
+                mode/output. Chỉ báo đang quay hiện trên tray icon (menu bar). */}
+            <button
+              onClick={() => {
+                ipc.startRecording()
+                  .then(() => ipc.closeSelf())
+                  .catch((e) => alert(String(e)));
+              }}
+              style={recordModeBtn}
+              title="Quay màn hình chính"
+            >
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
+                <circle cx="10" cy="10" r="6" fill="currentColor" />
+              </svg>
+              <span style={{ fontSize: 11, lineHeight: 1 }}>Quay</span>
+            </button>
             {MODES.map((m) => (
               <button
                 key={m.id}
@@ -336,6 +353,21 @@ const quickModeBtn: React.CSSProperties = {
   borderRadius: 6,
   background: "rgba(245,158,11,0.16)",
   color: "#fbbf24",
+  transition: "background 0.12s",
+};
+
+// Nút "Quay" trong cụm chế độ: cùng khối với "Nhanh" nhưng nhấn màu đỏ để gợi
+// ý hành động quay video, chạy ngay khi bấm (không phải chế độ để chọn).
+const recordModeBtn: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 3,
+  width: 56,
+  padding: "6px 4px",
+  borderRadius: 6,
+  background: "rgba(239,68,68,0.16)",
+  color: "var(--danger)",
   transition: "background 0.12s",
 };
 

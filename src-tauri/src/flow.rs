@@ -53,10 +53,11 @@ fn store(app: &AppHandle, cap: &capture::Capture, output: &str, scale_factor: f6
     });
 }
 
-/// Tên file theo template `Screenshot_YYYY-MM-DD_HHMMSS` (UTC) — dùng chung
-/// cho capture thường (output "save"/"save_copy") và Quick Capture
-/// (`history::save_quick_auto`) để cùng một quy ước đặt tên.
-pub(crate) fn stamp_filename() -> String {
+/// Tên file theo template `{prefix}_YYYY-MM-DD_HHMMSS` (UTC) — dùng chung cho
+/// capture thường (output "save"/"save_copy", prefix "Screenshot"), Quick
+/// Capture (`history::save_quick_auto`) và quay màn hình (`record::mod`,
+/// prefix "Recording") để cùng một quy ước đặt tên.
+pub(crate) fn stamp_filename(prefix: &str) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -67,7 +68,7 @@ pub(crate) fn stamp_filename() -> String {
     let hh = secs / 3600;
     let mm = (secs % 3600) / 60;
     let ss = secs % 60;
-    format!("Screenshot_{y:04}-{mo:02}-{d:02}_{hh:02}{mm:02}{ss:02}")
+    format!("{prefix}_{y:04}-{mo:02}-{d:02}_{hh:02}{mm:02}{ss:02}")
 }
 
 /// `scale_factor`: hệ số quy đổi pixel-vật-lý-của-bitmap → CSS/logical px,
@@ -112,7 +113,7 @@ pub fn finish(
                     dir
                 }
             };
-            let path = format!("{save_dir}/{}.png", stamp_filename());
+            let path = format!("{save_dir}/{}.png", stamp_filename("Screenshot"));
             let data = format!("data:image/png;base64,{}", cap.base64);
             let saved = storage::save::write_png(&path, &data)?;
             if output == "save_copy" {

@@ -586,6 +586,20 @@ pub fn finalize_scroll_capture(
     crate::flow::finish(&app, cap, &output, 1.0)
 }
 
+// ── Quay màn hình ────────────────────────────────────────────────────────────
+// Chỉ "start" cần lộ ra IPC (nút "Quay" trong CaptureBar) — dừng quay và đọc
+// trạng thái giờ chạy hoàn toàn phía Rust (tray icon + menu, xem tray.rs),
+// không qua JS nữa.
+
+/// Bắt đầu quay toàn màn hình chính (macOS). `spawn_blocking` vì phần khởi
+/// tạo `SCStream`/ffmpeg chờ đồng bộ qua completion handler (blocking recv).
+#[tauri::command]
+pub async fn start_recording(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::start_recording(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
 #[derive(serde::Deserialize)]
 pub struct StitchInstruction {
     #[serde(rename = "sliceIndex")]

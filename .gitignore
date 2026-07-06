@@ -8,6 +8,11 @@ dist-ssr
 src-tauri/target
 src-tauri/gen
 
+# ffmpeg sidecar (record/encoder.rs) — binary lớn, tải qua script riêng
+# (scripts/fetch-ffmpeg.sh, chưa viết), không commit vào git. Bản trong máy
+# dev hiện tại chỉ là copy tạm từ Homebrew để test, không dùng để phân phối.
+src-tauri/binaries/
+
 # Claude Code local settings (personal)
 .claude/settings.local.json
 

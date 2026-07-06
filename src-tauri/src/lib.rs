@@ -6,6 +6,7 @@ mod history;
 mod hotkey;
 mod input;
 mod permissions;
+mod record;
 mod state;
 mod storage;
 mod tray;
@@ -67,6 +68,7 @@ pub fn run() {
         )
         .manage(AppState::default())
         .manage(update::PendingUpdate::default())
+        .manage(record::RecordingState::default())
         .invoke_handler(tauri::generate_handler![
             commands::peek_pending,
             commands::take_pending,
@@ -114,6 +116,7 @@ pub fn run() {
             commands::finalize_scroll_capture,
             commands::start_scroll_session,
             commands::finalize_scroll_stitch,
+            commands::start_recording,
             history::commands::list_history,
             history::commands::get_history_item,
             history::commands::delete_history_item,

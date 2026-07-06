@@ -227,7 +227,7 @@ fn save_quick_auto(app: &AppHandle, data: &str) -> Result<(), String> {
     } else {
         dir
     };
-    let path = format!("{dir}/{}.png", crate::flow::stamp_filename());
+    let path = format!("{dir}/{}.png", crate::flow::stamp_filename("Screenshot"));
     crate::storage::save::write_png(&path, data)?;
     Ok(())
 }

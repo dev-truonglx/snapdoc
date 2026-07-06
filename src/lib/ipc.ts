@@ -154,4 +154,8 @@ export const ipc = {
   openHistory: () => invoke<void>("open_history"),
   finishQuickCapture: (data: string, width: number, height: number, output: string) =>
     invoke<string | null>("finish_quick_capture", { data, width, height, output }),
+  // Quay màn hình — dừng quay/xem trạng thái giờ qua tray icon (menu bar),
+  // không qua IPC từ JS nữa (xem src-tauri/src/tray.rs).
+  /** Bắt đầu quay toàn màn hình chính. */
+  startRecording: () => invoke<void>("start_recording"),
 };

@@ -4661,16 +4661,19 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "snapdoc"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "arboard",
  "base64 0.22.1",
  "block2",
+ "dispatch2",
  "image",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-media",
+ "objc2-core-video",
  "objc2-foundation",
  "objc2-screen-capture-kit",
  "rusqlite",

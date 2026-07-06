@@ -1,9 +1,10 @@
 use crate::{flow, windows};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle,
 };
 
@@ -97,6 +98,135 @@ fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<t
     } else {
         Menu::with_items(app, &[&quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &history, &settings, &sep2, &quit])
     }
+}
+
+// ── Icon "đang quay" — TÁCH RIÊNG khỏi tray icon chính của app ─────────────
+//
+// Một `TrayIcon` bị Tauri gỡ khỏi menu bar ngay khi instance cuối cùng bị
+// drop, nên giữ nó ở static: `Some` = đang hiện trên menu bar, `.take()` =
+// ẩn ngay lập tức. Icon này KHÔNG gắn menu — click trái vào nó DỪNG QUAY
+// NGAY LẬP TỨC, không qua bước chọn trong menu nào cả.
+static RECORDING_TRAY: Mutex<Option<TrayIcon<tauri::Wry>>> = Mutex::new(None);
+
+/// Kích thước (px) của icon chấm đỏ tự vẽ — 32 để nét trên màn Retina,
+/// NSStatusItem tự co về đúng kích thước chuẩn của menu bar khi hiển thị.
+const DOT_SIZE: u32 = 32;
+
+/// Vẽ trực tiếp 1 chấm đỏ tròn (RGBA8, có alpha + khử răng cưa viền ngoài)
+/// làm icon tray "đang quay" — sinh runtime, không cần thêm file asset.
+fn recording_dot_rgba() -> Vec<u8> {
+    let size = DOT_SIZE as f32;
+    let center = size / 2.0;
+    let radius = size / 2.0 - 3.0;
+    let mut buf = vec![0u8; (DOT_SIZE * DOT_SIZE * 4) as usize];
+    for y in 0..DOT_SIZE {
+        for x in 0..DOT_SIZE {
+            let dx = x as f32 + 0.5 - center;
+            let dy = y as f32 + 0.5 - center;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let alpha = if dist <= radius {
+                255.0
+            } else if dist <= radius + 1.0 {
+                (radius + 1.0 - dist) * 255.0 // viền mềm 1px
+            } else {
+                0.0
+            };
+            let i = ((y * DOT_SIZE + x) * 4) as usize;
+            buf[i] = 239; // #ef4444
+            buf[i + 1] = 68;
+            buf[i + 2] = 68;
+            buf[i + 3] = alpha.clamp(0.0, 255.0) as u8;
+        }
+    }
+    buf
+}
+
+/// Thời lượng đã quay (ms) → chuỗi `mm:ss`.
+fn format_elapsed(ms: u64) -> String {
+    let total_secs = ms / 1000;
+    format!("{:02}:{:02}", total_secs / 60, total_secs % 60)
+}
+
+/// Hiện icon "đang quay" riêng biệt trên menu bar — gọi từ
+/// `record::start_recording` ngay sau khi phiên quay khởi động thành công.
+/// Không set menu (`show_menu_on_left_click(false)`): click trái là hành
+/// động DỪNG NGAY, không phải mở danh sách lựa chọn.
+pub fn show_recording_tray(app: &AppHandle) {
+    let mut guard = match RECORDING_TRAY.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if guard.is_some() {
+        return; // đã hiện rồi (phòng gọi start 2 lần)
+    }
+    let rgba = recording_dot_rgba();
+    let icon = Image::new(&rgba, DOT_SIZE, DOT_SIZE);
+    let result = TrayIconBuilder::with_id("recording-tray")
+        .icon(icon)
+        .icon_as_template(false)
+        .tooltip("Đang quay màn hình — bấm để dừng")
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                let app = tray.app_handle().clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = crate::record::stop_recording(&app) {
+                        eprintln!("[SnapDoc][record] Dừng quay từ tray icon thất bại: {e}");
+                    }
+                });
+            }
+        })
+        .build(app);
+    match result {
+        Ok(tray) => *guard = Some(tray),
+        Err(e) => eprintln!("[SnapDoc][record] Không tạo được tray icon quay: {e}"),
+    }
+}
+
+/// Cập nhật đồng hồ đếm cạnh icon "đang quay" — gọi mỗi giây từ ticker trong
+/// `record::start_recording`. No-op nếu icon chưa/không còn hiện.
+pub fn update_recording_time(elapsed_ms: u64) {
+    if let Ok(guard) = RECORDING_TRAY.lock() {
+        if let Some(tray) = guard.as_ref() {
+            let _ = tray.set_title(Some(format_elapsed(elapsed_ms)));
+        }
+    }
+}
+
+/// Ẩn icon "đang quay" NGAY LẬP TỨC — gọi từ `record::stop_recording`.
+///
+/// GỐC RỄ thật sự (2 lớp, phải xử lý cả 2):
+///
+/// 1) `tray_icon::TrayIcon` bên trong chỉ là 1 handle đếm tham chiếu
+///    (`Rc<RefCell<..>>`) — icon chỉ thật sự bị gỡ khỏi menu bar khi CLONE
+///    CUỐI CÙNG bị drop. Nhưng `TrayIconBuilder::build()` của Tauri tự giữ
+///    thêm 1 bản clone trong `resources_table` nội bộ (để `app.tray_by_id()`
+///    tra cứu được sau này) — bản clone đó KHÔNG do ta nắm giữ. Vì vậy chỉ
+///    `.take()` bản trong `RECORDING_TRAY` static (bản clone của TA) không
+///    bao giờ đưa refcount về 0 → `Drop` (và do đó
+///    `NSStatusBar.removeStatusItem`) không bao giờ chạy → icon kẹt vĩnh
+///    viễn trên menu bar bất kể gọi từ thread nào. Phải gọi
+///    `app.remove_tray_by_id(...)` để Tauri tự rút bản clone của NÓ ra khỏi
+///    resources_table trước, thì tổng refcount mới có thể về 0.
+///
+/// 2) Trên macOS, `Drop` của `TrayIcon` gọi thẳng
+///    `NSStatusBar.removeStatusItem` KHÔNG qua main-thread dispatch (khác
+///    với các method khác như `set_title`/`set_icon` — Tauri tự marshal qua
+///    `run_on_main_thread` nội bộ cho các method đó). `stop_recording` luôn
+///    chạy trên 1 thread nền (tray click handler / hotkey đều
+///    `std::thread::spawn`), nên vẫn phải ép toàn bộ việc gỡ (cả bước 1 lẫn
+///    việc drop clone cuối) chạy trên main thread.
+pub fn hide_recording_tray(app: &AppHandle) {
+    let app_for_closure = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let app = app_for_closure;
+        // Rút bản clone Tauri tự giữ trong resources_table ra trước (và drop
+        // luôn — không gán biến) — thiếu bước này thì bước bên dưới vô nghĩa.
+        app.remove_tray_by_id("recording-tray");
+        if let Ok(mut guard) = RECORDING_TRAY.lock() {
+            guard.take();
+        }
+    });
 }
 
 /// Rebuild tray menu với shortcuts mới nhất — gọi sau `reload_shortcuts`.
