@@ -9,23 +9,30 @@
 //! `Window`/`Region` trả lỗi rõ ràng — sẽ triển khai ở giai đoạn 2/4 của plan
 //! (cần thêm bước map id `xcap` → `HWND`/crop theo vùng).
 //!
-//! LƯU Ý QUAN TRỌNG: phần gọi vào crate `windows-capture` dưới đây viết theo
-//! API công khai đã biết của crate lúc lên plan — môi trường phát triển hiện
-//! tại là macOS nên KHÔNG build/test được trên Windows thật. Nếu tên hàm/kiểu
-//! (`Settings::new`, `Monitor::enumerate`, `FrameBuffer::as_raw_nopadding_buffer`,
-//! `CaptureControl`, ...) lệch so với phiên bản `windows-capture` cài đặt
-//! thực tế, sửa lại theo lỗi biên dịch của `cargo check` trên máy Windows.
+//! LƯU Ý: `Settings::new` (8 tham số) đã đối chiếu đúng với source thật của
+//! crate `windows-capture` cài trên máy Windows dùng để build. Các phần còn
+//! lại (`Monitor::enumerate`, `CaptureControl<Capturer, ...>`,
+//! `FrameBuffer::as_raw_buffer`, `Capturer::start_free_threaded`) vẫn viết
+//! theo API đã biết lúc lên plan, CHƯA đối chiếu source thật — môi trường
+//! phát triển hiện tại là macOS nên không build/test được trên Windows. Nếu
+//! lệch, sửa theo lỗi biên dịch của `cargo check` trên máy Windows (tương tự
+//! cách đã sửa `Settings::new`: dán nội dung file source liên quan trong
+//! `%USERPROFILE%\.cargo\registry\src\*\windows-capture-*\src\` để đối chiếu
+//! chính xác thay vì đoán tiếp).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame as WgcFrame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 use windows_capture::monitor::Monitor as WgcMonitor;
-use windows_capture::settings::{ColorFormat, CursorCaptureSettings, DrawBorderSettings, Settings};
+use windows_capture::settings::{
+    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+    MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+};
 
 /// Phạm vi quay — cùng hình dạng với `mac_stream::RecordTarget` để
 /// `record/mod.rs` dùng chung 1 kiểu dispatch cho cả 2 nền tảng. Xem doc-
@@ -56,20 +63,12 @@ struct CapturerFlags {
     frame_tx: mpsc::SyncSender<Frame>,
     dropped: Arc<AtomicBool>,
     stopped_externally: Arc<AtomicBool>,
-    /// Khoảng cách tối thiểu giữa 2 frame được GỬI ĐI (không phải giữa 2 lần
-    /// WGC gọi callback — WGC không có tham số fps như
-    /// `SCStreamConfiguration.minimumFrameInterval` bên macOS, nên tự lọc bớt
-    /// ở đây để không nạp cho ffmpeg nhanh/chậm hơn `-r fps` đã khai lúc mở
-    /// encoder, tránh video bị tua nhanh/chậm so với thời lượng thật).
-    frame_interval: Duration,
 }
 
 struct Capturer {
     frame_tx: mpsc::SyncSender<Frame>,
     dropped: Arc<AtomicBool>,
     stopped_externally: Arc<AtomicBool>,
-    frame_interval: Duration,
-    last_sent: Instant,
 }
 
 impl GraphicsCaptureApiHandler for Capturer {
@@ -81,8 +80,6 @@ impl GraphicsCaptureApiHandler for Capturer {
             frame_tx: ctx.flags.frame_tx,
             dropped: ctx.flags.dropped,
             stopped_externally: ctx.flags.stopped_externally,
-            last_sent: Instant::now() - ctx.flags.frame_interval,
-            frame_interval: ctx.flags.frame_interval,
         })
     }
 
@@ -91,27 +88,28 @@ impl GraphicsCaptureApiHandler for Capturer {
         frame: &mut WgcFrame,
         _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        let now = Instant::now();
-        if now.duration_since(self.last_sent) < self.frame_interval {
-            return Ok(());
-        }
-        self.last_sent = now;
-
         let width = frame.width();
         let height = frame.height();
         let mut buffer = frame.buffer()?;
-        // Đã bỏ padding cuối hàng (row pitch) sẵn — tương đương bước copy
-        // đúng `row_len` mỗi hàng mà `mac_stream.rs` tự làm thủ công cho
-        // IOSurface, ở đây crate lo hộ.
-        let bgra = buffer.as_raw_nopadding_buffer()?;
+        // `as_raw_buffer()` trả buffer thô CÓ THỂ pad cuối mỗi hàng (row
+        // pitch của staging texture D3D11 không nhất thiết bằng width*4) —
+        // tự copy đúng row_len mỗi hàng, bỏ phần đệm, giống hệt cách
+        // `mac_stream.rs` xử lý cho IOSurface. Suy ra row_pitch từ
+        // `raw.len() / height` vì buffer luôn có đúng `height * row_pitch`
+        // byte (không có API đọc row_pitch trực tiếp).
+        let raw = buffer.as_raw_buffer();
+        let row_len = (width as usize) * 4;
+        let row_pitch = if height == 0 { row_len } else { raw.len() / height as usize };
+        let mut bgra = vec![0u8; row_len * height as usize];
+        for y in 0..height as usize {
+            let src_off = y * row_pitch;
+            let dst_off = y * row_len;
+            bgra[dst_off..dst_off + row_len].copy_from_slice(&raw[src_off..src_off + row_len]);
+        }
 
         // try_send: nếu channel đầy (encoder chậm hơn tốc độ quay), DROP frame
         // này thay vì chặn callback của WGC — giống hệt lý do ở mac_stream.rs.
-        if self
-            .frame_tx
-            .try_send(Frame { bgra: bgra.to_vec(), width, height })
-            .is_err()
-        {
+        if self.frame_tx.try_send(Frame { bgra, width, height }).is_err() {
             self.dropped.store(true, Ordering::Relaxed);
         }
         Ok(())
@@ -218,12 +216,18 @@ pub fn start(
         monitor,
         CursorCaptureSettings::Default,
         DrawBorderSettings::Default,
+        SecondaryWindowSettings::Default,
+        // Giới hạn tốc độ nhận frame ngay ở tầng WGC — tương đương
+        // `SCStreamConfiguration.setMinimumFrameInterval` bên macOS, để
+        // không nạp cho ffmpeg nhanh/chậm hơn `-r fps` đã khai lúc mở
+        // encoder (tránh video bị tua nhanh/chậm so với thời lượng thật).
+        MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / fps.max(1) as f64)),
+        DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
         CapturerFlags {
             frame_tx,
             dropped: dropped.clone(),
             stopped_externally: stopped_externally.clone(),
-            frame_interval: Duration::from_secs_f64(1.0 / fps.max(1) as f64),
         },
     );
 
