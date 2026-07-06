@@ -15,6 +15,7 @@ fn defaults() -> Value {
         "timerSeconds": 0,
         "rememberLastRegion": false,
         "launchAtLogin": true,
+        "recordAudioSource": "off",
         "shortcuts": {
             "captureBar": "CmdOrCtrl+Shift+5",
             "full": "CmdOrCtrl+Shift+1",

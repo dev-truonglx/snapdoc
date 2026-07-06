@@ -123,12 +123,12 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
         .title("SnapDoc")
-        // 710px (thay vì 660px cũ) — đủ chỗ cho nút "Quay" đứng cạnh "Chụp"
-        // (Phase 3): bar rộng ~690px khi "Quay" hiện (mode Full/Window/Region),
-        // ~601px khi ẩn (All/Scroll). Cửa sổ resizable(false) + body
-        // overflow:hidden nên rộng hơn nội dung thật 1 chút để không bao giờ
-        // bị cắt, kể cả khi font render rộng hơn 1 chút trên Windows.
-        .inner_size(710.0, 280.0)
+        // 830px — bar chia 2 khu vực (chụp ảnh + quay màn hình, mỗi khu 1
+        // modeGroup riêng) rộng ~798px đo qua getBoundingClientRect trong
+        // preview. Cửa sổ resizable(false) + body overflow:hidden nên rộng
+        // hơn nội dung thật 1 chút để không bao giờ bị cắt, kể cả khi font
+        // render rộng hơn 1 chút trên Windows.
+        .inner_size(850.0, 280.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -858,6 +858,77 @@ pub fn prewarm_thumbnail(app: &AppHandle) -> Result<(), String> {
     create_thumbnail_window(app)?;
     Ok(())
 }
+
+/// Cửa sổ "xem lại bản quay" — mở NGAY sau khi `record::stop_recording`
+/// ghi xong mp4, bắt người dùng xác nhận Lưu/Xoá trước khi ingest vào
+/// History (xem `record::confirm_recording_save/discard`). KHÔNG pre-warm
+/// như thumbnail: sự kiện này hiếm hơn nhiều (1 lần/phiên quay) nên tạo mới
+/// mỗi lần không đáng lo hiệu năng, và tạo mới mỗi lần tránh phải tự
+/// reset state cũ còn sót lại trong webview.
+pub fn open_record_review(app: &AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("record-review") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        bring_record_review_to_front(app, win);
+        return Ok(());
+    }
+
+    let win = WebviewWindowBuilder::new(app, "record-review", url("record-review"))
+        .title("SnapDoc — Xem lại bản quay")
+        .inner_size(480.0, 420.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .center()
+        .skip_taskbar(true)
+        .build()
+        .map_err(|e| format!("Không tạo được cửa sổ xem lại bản quay: {e}"))?;
+
+    let _ = win.set_focus();
+    bring_record_review_to_front(app, win);
+    Ok(())
+}
+
+/// Đóng (huỷ hẳn, không ẩn) cửa sổ xem lại — gọi sau khi
+/// `confirm_recording_save`/`confirm_recording_discard` xử lý xong.
+pub fn close_record_review(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("record-review") {
+        let _ = win.close();
+    }
+}
+
+/// macOS: kích hoạt app + đưa cửa sổ lên trước — quay thường được dừng từ
+/// tray icon/hotkey lúc app đang ở chế độ Accessory (không có cửa sổ nào
+/// hiện, không nằm trong Cmd+Tab), nên `always_on_top` không đủ để đảm bảo
+/// cửa sổ nhận focus bàn phím/chuột ngay. Cùng kỹ thuật với
+/// `bring_settings_to_front`.
+#[cfg(target_os = "macos")]
+fn bring_record_review_to_front(app: &AppHandle, win: tauri::WebviewWindow) {
+    let app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        use objc2::msg_send;
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::MainThreadMarker;
+
+        if let Some(mtm) = MainThreadMarker::new() {
+            let ns_app = NSApplication::sharedApplication(mtm);
+            let _: () = unsafe { msg_send![&*ns_app, activateIgnoringOtherApps: true] };
+        }
+
+        if let Ok(ptr) = win.ns_window() {
+            let ns_win = ptr as *mut objc2_app_kit::NSWindow;
+            if !ns_win.is_null() {
+                unsafe {
+                    let _: () = msg_send![&*ns_win, makeKeyAndOrderFront: Option::<&objc2::runtime::AnyObject>::None];
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bring_record_review_to_front(_app: &AppHandle, _win: tauri::WebviewWindow) {}
 
 /// macOS: gọi makeKeyAndOrderFront + NSApp.activate trên main thread để
 /// cửa sổ settings luôn nổi lên trước mọi app khác.

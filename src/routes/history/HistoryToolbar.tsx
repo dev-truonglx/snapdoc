@@ -6,7 +6,7 @@ const MODES = [
   { id: "", label: "Tất cả loại" },
   { id: "region", label: "Vùng chọn" },
   { id: "window", label: "Cửa sổ" },
-  { id: "monitor", label: "Toàn màn hình" },
+  { id: "full", label: "Toàn màn hình" },
   { id: "all", label: "Mọi màn hình" },
   { id: "scroll", label: "Cuộn dài" },
   { id: "quick", label: "Chụp nhanh" },

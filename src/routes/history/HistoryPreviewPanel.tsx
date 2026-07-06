@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ipc } from "../../lib/ipc";
 import { useHistory } from "./useHistoryStore";
+import { MODE_LABEL } from "./HistoryItemCard";
 
 interface Props {
   onOpenEditor: (id: string) => void;
@@ -18,6 +19,14 @@ function fmtSize(bytes: number | null): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** `93500` → `"1:34"` — mm:ss. */
+function fmtDuration(ms: number): string {
+  const totalSec = Math.round(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
@@ -42,6 +51,7 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
   }
 
   const isTrashed = item.deletedAt != null;
+  const isVideo = item.mediaType === "video";
 
   const doRename = async () => {
     setBusy(true);
@@ -92,7 +102,13 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
   return (
     <div style={panel}>
       <div style={previewWrap}>
-        <img src={convertFileSrc(item.assetPath)} alt="" style={previewImg} />
+        {isVideo ? (
+          // key=id: buộc React tạo lại <video> khi đổi item chọn — tránh giữ
+          // nguyên vị trí phát/nguồn cũ của item trước đó.
+          <video key={item.id} src={convertFileSrc(item.assetPath)} style={previewImg} controls />
+        ) : (
+          <img src={convertFileSrc(item.assetPath)} alt="" style={previewImg} />
+        )}
       </div>
 
       <div style={metaSection}>
@@ -116,8 +132,9 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
 
         <Row label="Chụp lúc" value={fmtDateTime(item.createdAt)} />
         <Row label="Kích thước ảnh" value={`${item.width} × ${item.height}px${item.scaleFactor > 1 ? ` (${item.scaleFactor}×)` : ""}`} />
+        {isVideo && item.durationMs != null && <Row label="Thời lượng" value={fmtDuration(item.durationMs)} />}
         <Row label="Dung lượng" value={fmtSize(item.fileSize)} />
-        <Row label="Loại capture" value={item.captureMode} />
+        <Row label="Loại capture" value={MODE_LABEL[item.captureMode] ?? item.captureMode} />
         {item.isEdited && <Row label="Trạng thái" value="Đã chỉnh sửa" />}
         {isTrashed && <Row label="Trạng thái" value="Trong Trash" />}
       </div>
@@ -125,7 +142,10 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
       <div style={actions}>
         {!isTrashed ? (
           <>
-            <button style={primaryBtn} disabled={busy} onClick={() => onOpenEditor(item.id)}>Mở Editor</button>
+            {/* Video chưa hỗ trợ Editor (xem history/commands.rs) — chỉ ảnh mới có nút này. */}
+            {!isVideo && (
+              <button style={primaryBtn} disabled={busy} onClick={() => onOpenEditor(item.id)}>Mở Editor</button>
+            )}
             <button style={secondaryBtn} disabled={busy} onClick={doReveal}>Hiện trong Finder/Explorer</button>
             <button style={dangerBtn} disabled={busy} onClick={doDelete}>Xoá (chuyển vào Trash)</button>
           </>

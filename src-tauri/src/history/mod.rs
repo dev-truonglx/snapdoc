@@ -3,13 +3,14 @@ pub mod commands;
 pub mod db;
 pub mod model;
 pub mod thumbnail;
+pub mod video_thumbnail;
 
 use crate::capture;
 use crate::state::AppState;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use db::HistoryState;
 use model::HistoryRecord;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 /// 1 job ghi asset+thumbnail nền cho `ingest()`. Gửi qua channel tới
@@ -156,6 +157,76 @@ fn ingest_finish_bg(app: &AppHandle, id: String, asset_path: PathBuf, thumb_path
             }
         }
     }
+}
+
+/// Ghi 1 phiên QUAY MÀN HÌNH đã hoàn tất vào Library — gọi từ
+/// `record::stop_recording` SAU khi ffmpeg mux xong. Khác `ingest()` (ảnh):
+///
+/// - mp4 đã tồn tại sẵn trên đĩa (tại `saveDir`/Pictures — do
+///   `record::new_output_path` quyết định) nên KHÔNG copy/move vào
+///   `library/assets` như ảnh — `asset_path` trỏ THẲNG tới file đó. Video có
+///   thể nặng hàng chục/hàng trăm MB, nhân đôi không đáng (khác ảnh PNG vài
+///   trăm KB). Hệ quả: xoá vĩnh viễn record video trong History = xoá luôn
+///   file gốc — đúng kỳ vọng người dùng vì chỉ có 1 bản duy nhất.
+/// - Không chia 2 pha nền như ảnh: mp4 đã ghi xong hoàn toàn khi hàm này được
+///   gọi, không cần decode base64/ghi file lớn ở đây. Việc còn lại (trích
+///   frame làm thumbnail) chạy đồng bộ nhưng nhẹ (ffmpeg trích 1 frame vốn
+///   rất nhanh, không đáng tách thread nền).
+/// - Lỗi sinh thumbnail KHÔNG làm hỏng cả record — chỉ log, record vẫn được
+///   lưu (thumbnail trống sẽ hiện fallback "Không tải được ảnh" ở UI, không
+///   soft-delete như ảnh vì video vẫn hoàn toàn xem/phát được).
+///
+/// KHÔNG BAO GIỜ được gọi bằng `?` từ `record::stop_recording` — lỗi ở đây
+/// chỉ nên log, không được làm mất đường dẫn mp4 đã trả về cho caller.
+pub fn ingest_video(
+    app: &AppHandle,
+    mp4_path: &Path,
+    width: u32,
+    height: u32,
+    duration_ms: i64,
+    capture_mode: &str,
+) -> Result<HistoryRecord, String> {
+    let state = app
+        .try_state::<HistoryState>()
+        .ok_or_else(|| "History chưa sẵn sàng (DB init thất bại lúc khởi động)".to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = now_ms();
+    let thumb_path = assets::thumb_path_for(app, &id)?;
+    let asset_path_str = mp4_path.to_string_lossy().to_string();
+    let thumb_path_str = thumb_path.to_string_lossy().to_string();
+    let file_size = std::fs::metadata(mp4_path).ok().map(|m| m.len() as i64);
+
+    if let Err(e) = video_thumbnail::generate(mp4_path, &thumb_path) {
+        eprintln!("[SnapDoc][history] Sinh thumbnail video thất bại (record vẫn được lưu): {e}");
+    }
+
+    {
+        let conn = state.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+        conn.execute(
+            "INSERT INTO history (id, created_at, updated_at, capture_mode, media_type, width, height, scale_factor, duration_ms, asset_path, thumb_path, file_size) VALUES (?1,?2,?3,?4,'video',?5,?6,1.0,?7,?8,?9,?10)",
+            rusqlite::params![id, now, now, capture_mode, width, height, duration_ms, asset_path_str, thumb_path_str, file_size],
+        )
+        .map_err(|e| format!("Insert history thất bại: {e}"))?;
+    }
+
+    Ok(HistoryRecord {
+        id,
+        created_at: now,
+        updated_at: now,
+        capture_mode: capture_mode.to_string(),
+        media_type: "video".to_string(),
+        width,
+        height,
+        scale_factor: 1.0,
+        duration_ms: Some(duration_ms),
+        asset_path: asset_path_str,
+        thumb_path: thumb_path_str,
+        file_size,
+        source_app: None,
+        title: None,
+        is_edited: false,
+        deleted_at: None,
+    })
 }
 
 /// Gắn `history_id` vào `PendingCapture` hiện tại (nếu còn tồn tại) — gọi

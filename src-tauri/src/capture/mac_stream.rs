@@ -21,6 +21,7 @@
 // khớp đúng selector Objective-C nên không thể đổi sang snake_case.
 #![allow(non_snake_case)]
 
+use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -31,8 +32,13 @@ use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeFlags};
+use objc2_core_audio_types::{kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, AudioBufferList};
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_media::{
+    kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+    CMAudioFormatDescriptionGetStreamBasicDescription, CMBlockBuffer, CMSampleBuffer, CMTime,
+    CMTimeFlags,
+};
 use objc2_core_video::{
     kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
@@ -43,6 +49,14 @@ use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
     SCStreamDelegate, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
+
+/// Âm thanh HỆ THỐNG (loa) do SCStream trả về khi bật `capturesAudio` —
+/// LUÔN cấu hình cứng 48kHz/stereo (`AUDIO_SAMPLE_RATE`/`AUDIO_CHANNELS`) qua
+/// `SCStreamConfiguration`, nên caller (encoder ffmpeg) biết trước format mà
+/// không cần đọc lại từ mỗi lần callback. Khác mic (`audio_mic.rs`) — thiết bị
+/// mic trả về sample rate/channel tuỳ phần cứng, không cố định được.
+pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
+pub const AUDIO_CHANNELS: u16 = 2;
 
 /// Phạm vi quay — v1 chỉ toàn màn hình (`Display`); Phase 3 thêm `Region`
 /// (crop 1 vùng trong 1 màn hình cụ thể qua `SCStreamConfiguration.sourceRect`)
@@ -73,10 +87,22 @@ pub struct Frame {
     pub height: u32,
 }
 
+// Audio hệ thống truyền qua channel dạng `Vec<u8>` (PCM signed 16-bit
+// little-endian, ĐÃ xen kẽ kênh đúng `AUDIO_CHANNELS`) thẳng, không bọc
+// struct riêng — writer thread (`record/mod.rs::spawn_fifo_writer`) ghi
+// thẳng byte này vào fifo nạp cho ffmpeg, dùng chung hàm với mic
+// (`audio_mic.rs` cũng gửi `Vec<u8>` cùng dạng PCM s16le).
+
 /// Ivars của delegate object — Objective-C giữ instance này nên không thể
 /// dùng lifetime tham chiếu ra ngoài, phải sở hữu `Sender` trực tiếp.
 pub struct StreamOutputIvars {
     frame_tx: mpsc::SyncSender<Frame>,
+    /// `Some` khi bật quay âm thanh hệ thống (`capturesAudio=true` lúc
+    /// `start()`) — callback nhận `SCStreamOutputType::Audio` sẽ gửi vào đây
+    /// thay vì `frame_tx`. `None` thì callback bỏ qua hẳn sample buffer audio
+    /// (SCK không gửi loại này nếu config không bật `capturesAudio`, nhưng
+    /// vẫn kiểm tra cho chắc).
+    audio_tx: Option<mpsc::SyncSender<Vec<u8>>>,
     /// Đếm số frame đã DROP vì consumer chậm hơn tốc độ quay — log khi stop.
     dropped: Arc<AtomicBool>,
     /// Set bởi `stream:didStopWithError:` khi SCStream tự dừng NGOÀI Ý MUỐN —
@@ -106,19 +132,26 @@ define_class!(
             sample_buffer: &CMSampleBuffer,
             r#type: SCStreamOutputType,
         ) {
-            if r#type != SCStreamOutputType::Screen {
-                return;
-            }
-            match unsafe { sample_buffer_to_frame(sample_buffer) } {
-                Some(frame) => {
-                    // try_send: nếu channel đầy (consumer/encoder chậm), DROP
-                    // frame này thay vì block callback queue của SCK — chặn ở
-                    // đây sẽ làm SCK dồn ứ và cuối cùng crash/treo stream.
-                    if self.ivars().frame_tx.try_send(frame).is_err() {
-                        self.ivars().dropped.store(true, Ordering::Relaxed);
+            match r#type {
+                SCStreamOutputType::Screen => {
+                    if let Some(frame) = unsafe { sample_buffer_to_frame(sample_buffer) } {
+                        // try_send: nếu channel đầy (consumer/encoder chậm), DROP
+                        // frame này thay vì block callback queue của SCK — chặn ở
+                        // đây sẽ làm SCK dồn ứ và cuối cùng crash/treo stream.
+                        if self.ivars().frame_tx.try_send(frame).is_err() {
+                            self.ivars().dropped.store(true, Ordering::Relaxed);
+                        }
                     }
                 }
-                None => {}
+                SCStreamOutputType::Audio => {
+                    let Some(audio_tx) = self.ivars().audio_tx.as_ref() else { return };
+                    if let Some(frame) = unsafe { sample_buffer_to_audio(sample_buffer) } {
+                        if audio_tx.try_send(frame).is_err() {
+                            self.ivars().dropped.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -142,11 +175,13 @@ define_class!(
 impl StreamOutputHandler {
     fn new(
         frame_tx: mpsc::SyncSender<Frame>,
+        audio_tx: Option<mpsc::SyncSender<Vec<u8>>>,
         dropped: Arc<AtomicBool>,
         stopped_externally: Arc<AtomicBool>,
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(StreamOutputIvars {
             frame_tx,
+            audio_tx,
             dropped,
             stopped_externally,
         });
@@ -191,6 +226,148 @@ unsafe fn sample_buffer_to_frame(sample_buffer: &CMSampleBuffer) -> Option<Frame
 
     unsafe { CVPixelBufferUnlockBaseAddress(&pixel_buffer, LOCK_READONLY) };
     frame
+}
+
+/// Trần an toàn để không đọc tràn bộ nhớ nếu `mNumberBuffers` trả về bất
+/// thường — KHÔNG dùng để tính kích thước cấp phát nữa (xem lý do ở
+/// `sample_buffer_to_audio`: từng đoán cứng 8 buffer/136 byte và vẫn bị
+/// CoreMedia trả lỗi `kCMSampleBufferError_ArrayTooSmall` — API này không
+/// cho đoán, phải HỎI kích thước thật rồi mới cấp đúng).
+const MAX_AUDIO_BUFFERS: usize = 64;
+
+/// `CMSampleBuffer` (audio, wrap 1 `AudioBufferList`) → PCM i16 interleaved
+/// (`Vec<u8>`). SCStream không cam kết format cụ thể (theo doc chỉ nói
+/// "dựa trên sampleRate/channelCount đã set"), nên đọc thẳng
+/// `AudioStreamBasicDescription` của sample buffer để biết chắc: float hay
+/// int, interleaved hay planar (non-interleaved — mỗi kênh 1 buffer riêng,
+/// phải tự xen kẽ lại).
+///
+/// `AudioBufferList` là kiểu C "flexible array member"
+/// (`{ mNumberBuffers: u32, mBuffers: [AudioBuffer; 1] }` nhưng thực chứa
+/// `mNumberBuffers` phần tử) — phải tự cấp phát đủ chỗ rồi truy cập qua con
+/// trỏ thô, không dùng `list.mBuffers[i]` (mảng Rust khai báo cứng độ dài 1,
+/// index > 0 sẽ panic). Kích thước cần cấp phát KHÔNG được đoán cứng theo số
+/// kênh — gọi 2 lần theo đúng mẫu Apple tài liệu: lần 1 với
+/// `buffer_list_out=NULL` chỉ để HỎI `buffer_list_size_needed_out`, lần 2
+/// mới cấp đúng số byte đó rồi lấy dữ liệu thật. Đoán cứng (8 buffer/136
+/// byte) từng bị CoreMedia trả `kCMSampleBufferError_ArrayTooSmall`
+/// (-12737) dù nhìn tưởng dư dả — API này không cho đoán.
+unsafe fn sample_buffer_to_audio(sample_buffer: &CMSampleBuffer) -> Option<Vec<u8>> {
+    let format_desc = unsafe { sample_buffer.format_description() }?;
+    let asbd_ptr = unsafe { CMAudioFormatDescriptionGetStreamBasicDescription(&format_desc) };
+    if asbd_ptr.is_null() {
+        return None;
+    }
+    let asbd = unsafe { *asbd_ptr };
+
+    const FLAGS: u32 = kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment;
+
+    // Lần 1: hỏi kích thước THẬT cần cấp — `buffer_list_out=NULL` nghĩa là
+    // "chỉ tính size, chưa lấy dữ liệu" (đúng mẫu dùng API này của Apple).
+    let mut needed_size: usize = 0;
+    let _query_status = unsafe {
+        sample_buffer.audio_buffer_list_with_retained_block_buffer(
+            &mut needed_size,
+            std::ptr::null_mut(),
+            0,
+            None,
+            None,
+            FLAGS,
+            std::ptr::null_mut(),
+        )
+    };
+    if needed_size == 0 {
+        return None;
+    }
+
+    let layout = Layout::from_size_align(needed_size, std::mem::align_of::<AudioBufferList>()).ok()?;
+    let raw = unsafe { alloc_zeroed(layout) };
+    if raw.is_null() {
+        return None;
+    }
+    let list_ptr = raw as *mut AudioBufferList;
+
+    // Lần 2: cấp ĐÚNG `needed_size` vừa hỏi được — lấy dữ liệu thật.
+    let mut block_buffer_raw: *mut CMBlockBuffer = std::ptr::null_mut();
+    let status = unsafe {
+        sample_buffer.audio_buffer_list_with_retained_block_buffer(
+            std::ptr::null_mut(),
+            list_ptr,
+            needed_size,
+            None,
+            None,
+            FLAGS,
+            &mut block_buffer_raw,
+        )
+    };
+    // "WithRetainedBlockBuffer" trả block buffer đã +1 refcount — bọc vào
+    // CFRetained để tự CFRelease khi ra khỏi scope (giữ sống bộ nhớ mà
+    // AudioBufferList trỏ tới cho tới khi ta copy xong PCM ở dưới).
+    let _block_buffer_guard = (!block_buffer_raw.is_null())
+        .then(|| unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(block_buffer_raw)) });
+
+    let pcm = if status != 0 || block_buffer_raw.is_null() {
+        None
+    } else {
+        let list: &AudioBufferList = unsafe { &*list_ptr };
+        let n = (list.mNumberBuffers as usize).min(MAX_AUDIO_BUFFERS);
+        let non_interleaved = asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0;
+        let is_float = asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0;
+        let buffers_ptr = list.mBuffers.as_ptr();
+
+        if n == 0 {
+            None
+        } else if non_interleaved {
+            // Planar: buffer[i] chứa riêng kênh i (float32) — tự interleave
+            // lại thành i16 xen kẽ cho đúng định dạng `-f s16le` phía ffmpeg.
+            let first = unsafe { &*buffers_ptr };
+            let frames = first.mDataByteSize as usize / 4;
+            let mut out = vec![0u8; frames * n * 2];
+            for ch in 0..n {
+                let buf = unsafe { &*buffers_ptr.add(ch) };
+                if buf.mData.is_null() {
+                    continue;
+                }
+                let count = (buf.mDataByteSize as usize / 4).min(frames);
+                let src = unsafe { std::slice::from_raw_parts(buf.mData as *const f32, count) };
+                for (i, &s) in src.iter().enumerate() {
+                    let off = (i * n + ch) * 2;
+                    out[off..off + 2].copy_from_slice(&f32_to_i16_le(s));
+                }
+            }
+            Some(out)
+        } else {
+            // Interleaved: 1 buffer duy nhất, các kênh đã xen kẽ sẵn.
+            let buf = unsafe { &*buffers_ptr };
+            if buf.mData.is_null() {
+                None
+            } else if is_float {
+                let count = buf.mDataByteSize as usize / 4;
+                let src = unsafe { std::slice::from_raw_parts(buf.mData as *const f32, count) };
+                let mut out = vec![0u8; count * 2];
+                for (i, &s) in src.iter().enumerate() {
+                    out[i * 2..i * 2 + 2].copy_from_slice(&f32_to_i16_le(s));
+                }
+                Some(out)
+            } else {
+                // Coi như đã là PCM 16-bit signed interleaved — copy thẳng.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(buf.mData as *const u8, buf.mDataByteSize as usize)
+                };
+                Some(bytes.to_vec())
+            }
+        }
+    };
+
+    unsafe { dealloc(raw, layout) };
+    pcm
+}
+
+#[inline]
+fn f32_to_i16_le(sample: f32) -> [u8; 2] {
+    let clamped = sample.clamp(-1.0, 1.0);
+    let v = (clamped * i16::MAX as f32) as i16;
+    v.to_le_bytes()
 }
 
 /// Tìm `SCDisplay` khớp `CGDirectDisplayID` bằng cách liệt kê
@@ -315,9 +492,18 @@ impl RecordingHandle {
 
 /// Bắt đầu quay theo `RecordTarget` (toàn màn hình / 1 vùng / 1 cửa sổ).
 ///
-/// `fps`: tốc độ khung hình mong muốn (khuyến nghị 30). Trả về `RecordingHandle`
-/// (giữ để gọi `stop()`) + `Receiver<Frame>` để đọc frame BGRA liên tục.
-pub fn start(target: RecordTarget, fps: u32) -> Result<(RecordingHandle, mpsc::Receiver<Frame>), String> {
+/// `fps`: tốc độ khung hình mong muốn (khuyến nghị 30). `capture_system_audio`:
+/// bật `SCStreamConfiguration.capturesAudio` (macOS 13+, an toàn với
+/// `minimumSystemVersion` 14.0 của app) — audio HỆ THỐNG (loa), KHÔNG phải
+/// mic (mic dùng `record::audio_mic` riêng, xem module đó để hiểu vì sao).
+/// Trả về `RecordingHandle` (giữ để gọi `stop()`) + `Receiver<Frame>` video +
+/// `Receiver<Vec<u8>>` audio hệ thống (`Some` chỉ khi
+/// `capture_system_audio=true`).
+pub fn start(
+    target: RecordTarget,
+    fps: u32,
+    capture_system_audio: bool,
+) -> Result<(RecordingHandle, mpsc::Receiver<Frame>, Option<mpsc::Receiver<Vec<u8>>>), String> {
     // `source_rect`: Some khi quay 1 VÙNG (crop qua `SCStreamConfiguration`),
     // None khi quay trọn nội dung của filter (toàn màn hình hoặc cả cửa sổ).
     let (filter, source_rect): (Retained<SCContentFilter>, Option<CGRect>) = match &target {
@@ -382,6 +568,15 @@ pub fn start(target: RecordTarget, fps: u32) -> Result<(RecordingHandle, mpsc::R
         if let Some(rect) = source_rect {
             config.setSourceRect(rect);
         }
+        if capture_system_audio {
+            config.setCapturesAudio(true);
+            config.setSampleRate(AUDIO_SAMPLE_RATE as isize);
+            config.setChannelCount(AUDIO_CHANNELS as isize);
+            // KHÔNG bật excludesCurrentProcessAudio: về lý thuyết chỉ loại
+            // tiếng của chính SnapDoc, nhưng đây là biến số không cần thiết
+            // cho tính năng (SnapDoc không tự phát âm thanh gì đáng kể) — bỏ
+            // để loại trừ khả năng nó là nguyên nhân audio hệ thống bị câm.
+        }
     }
 
     // Channel có giới hạn dung lượng — nếu encoder xử lý chậm hơn tốc độ quay,
@@ -389,9 +584,18 @@ pub fn start(target: RecordTarget, fps: u32) -> Result<(RecordingHandle, mpsc::R
     // luồng SCK. Bound = 2 giây buffer ở fps yêu cầu.
     let bound = (fps.max(1) as usize) * 2;
     let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(bound);
+    // Audio đến theo packet nhỏ (~10-20ms/lần) chứ không theo fps — bound rời
+    // rạc hơn (packet/giây, không phải sample/giây) vẫn đủ ~2s đệm.
+    let (audio_tx, audio_rx) = if capture_system_audio {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(200);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
     let dropped = Arc::new(AtomicBool::new(false));
     let stopped_externally = Arc::new(AtomicBool::new(false));
-    let handler_obj = StreamOutputHandler::new(frame_tx, dropped.clone(), stopped_externally.clone());
+    let handler_obj =
+        StreamOutputHandler::new(frame_tx, audio_tx, dropped.clone(), stopped_externally.clone());
 
     let delegate_proto = ProtocolObject::from_ref(&*handler_obj);
     let stream = unsafe {
@@ -413,6 +617,22 @@ pub fn start(target: RecordTarget, fps: u32) -> Result<(RecordingHandle, mpsc::R
                 Some(&queue),
             )
             .map_err(|e| format!("Không thêm được stream output: {}", e.localizedDescription()))?;
+    }
+    if capture_system_audio {
+        // Queue RIÊNG cho callback audio — tách khỏi queue video để 1 lượt
+        // callback video (copy cả khung hình, có thể vài ms) không làm trễ
+        // audio (nhạy độ trễ hơn nhiều, chỉ vài chục byte mỗi lần).
+        let audio_queue = DispatchQueue::new("com.snapdoc.record.audio", None);
+        let audio_output_proto = ProtocolObject::from_ref(&*handler_obj);
+        unsafe {
+            stream
+                .addStreamOutput_type_sampleHandlerQueue_error(
+                    audio_output_proto,
+                    SCStreamOutputType::Audio,
+                    Some(&audio_queue),
+                )
+                .map_err(|e| format!("Không thêm được stream output audio: {}", e.localizedDescription()))?;
+        }
     }
 
     let (start_tx, start_rx) = mpsc::channel::<Result<(), String>>();
@@ -441,6 +661,7 @@ pub fn start(target: RecordTarget, fps: u32) -> Result<(RecordingHandle, mpsc::R
             height: px_h as u32,
         },
         frame_rx,
+        audio_rx,
     ))
 }
 
@@ -461,7 +682,8 @@ mod tests {
         let display_id = monitor.id().unwrap();
         let fps = 30;
 
-        let (handle, rx) = start(RecordTarget::Display(display_id), fps).expect("start() thất bại");
+        let (handle, rx, _audio_rx) =
+            start(RecordTarget::Display(display_id), fps, false).expect("start() thất bại");
 
         let mut count = 0u32;
         let mut last: Option<Frame> = None;

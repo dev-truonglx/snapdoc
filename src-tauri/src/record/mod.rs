@@ -6,16 +6,73 @@
 //! (màn hình cụ thể / vùng chọn / cửa sổ) qua overlay chọn vùng có sẵn của
 //! tính năng chụp ảnh (xem `flow::run_record_picker` +
 //! `flow::finalize_region/finalize_window/finalize_monitor`).
+//!
+//! Phase 4 thêm âm thanh — CHỈ 1 nguồn tại 1 thời điểm (mic HOẶC audio hệ
+//! thống, xem `AudioSource`, cấu hình ở Settings/CaptureBar qua khoá
+//! `recordAudioSource`). Trong lúc quay, audio KHÔNG đi qua ffmpeg cùng lúc
+//! với video — chỉ ghi PCM thô ra 1 file thường (`spawn_pcm_file_writer`),
+//! rồi GHÉP vào video sau khi dừng quay bằng 1 lần chạy ffmpeg tĩnh
+//! (`encoder::mux_audio`). Bản đầu tiên thử nạp cả video (qua stdin) lẫn
+//! audio (qua fifo) SỐNG vào cùng 1 tiến trình ffmpeg — gặp bug: ffmpeg
+//! (scheduler đa luồng bản mới) đồng bộ nhiều input sống với nhau, hễ audio
+//! khựng lại vì bất kỳ lý do gì thì ffmpeg tạm dừng đọc luôn video để tránh
+//! 2 stream lệch xa nhau, kéo theo kênh buffer riêng của app đầy sau đúng
+//! vài giây rồi âm thầm drop frame — video luôn bị cắt cụt bất kể quay bao
+//! lâu. Ghép audio SAU (2 file tĩnh, không còn "sống") loại bỏ hẳn lớp bug
+//! này.
 
 pub mod encoder;
+#[cfg(target_os = "macos")]
+mod audio_mic;
 
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 use std::time::Instant;
 use tauri::{AppHandle, Manager};
 
 /// fps cố định cho v1 — đủ mượt cho demo/hướng dẫn, giữ CPU/dung lượng thấp.
 pub const FPS: u32 = 30;
+
+/// Nguồn audio ghi kèm khi quay — CHỈ được chọn 1 trong 3, không trộn (xem
+/// doc-comment đầu file để hiểu vì sao). Đọc từ setting `recordAudioSource`
+/// (`"off" | "mic" | "system"`, mặc định `"off"` — xem `storage::settings`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AudioSource {
+    Off,
+    Mic,
+    System,
+}
+
+fn audio_source_setting(app: &AppHandle) -> AudioSource {
+    let config_dir = app.path().app_config_dir().unwrap_or_default();
+    let settings = crate::storage::settings::load(&config_dir);
+    match settings.get("recordAudioSource").and_then(|v| v.as_str()) {
+        Some("mic") => AudioSource::Mic,
+        Some("system") => AudioSource::System,
+        _ => AudioSource::Off,
+    }
+}
+
+/// 1 phiên ghi audio đang chạy song song với video — `writer` ghi PCM thô
+/// nhận từ `mac_stream`/`audio_mic` ra `raw_path` (file thường, KHÔNG phải
+/// fifo — xem doc-comment đầu file).
+struct ActiveAudio {
+    /// `Some` khi nguồn là mic — cần dừng TRƯỚC `stream.stop()` ở
+    /// `stop_recording` để đóng kênh PCM, cho `writer` thấy channel đóng mà
+    /// tự kết thúc (đóng file). Audio hệ thống dùng chung sender với video
+    /// (`RecordingHandle`) nên tự đóng theo `stream.stop()`, không cần field
+    /// riêng ở đây.
+    #[cfg(target_os = "macos")]
+    mic: Option<audio_mic::MicCapture>,
+    writer: std::thread::JoinHandle<()>,
+    raw_path: PathBuf,
+    sample_rate: u32,
+    channels: u16,
+    /// Thư mục tạm chứa `raw_path` + video tạm (`ActiveRecording::video_path`
+    /// khi có audio) — dọn ở `stop_recording` sau khi ghép xong.
+    tmp_dir: PathBuf,
+}
 
 /// 1 phiên quay đang chạy. Field `stream` chỉ tồn tại trên macOS (nguồn frame
 /// duy nhất hiện có); `writer` sở hữu cả `Receiver<Frame>` lẫn `Encoder`, tự
@@ -24,16 +81,48 @@ pub struct ActiveRecording {
     #[cfg(target_os = "macos")]
     stream: crate::capture::mac_stream::RecordingHandle,
     writer: std::thread::JoinHandle<Result<(), String>>,
+    audio: Option<ActiveAudio>,
+    /// Nơi `Encoder` ghi video lúc quay — TRÙNG `output_path` nếu không bật
+    /// audio; là 1 file TẠM (trong `audio.tmp_dir`) nếu có audio, vì còn phải
+    /// ghép audio vào rồi mới ra `output_path` thật (xem `stop_recording`).
+    video_path: PathBuf,
     pub output_path: PathBuf,
     pub started_at: Instant,
+    /// Kích thước pixel thật của video (khớp `RecordingHandle::width/height`
+    /// lúc `start()`) — cần lại ở `stop_recording` để ingest vào History,
+    /// nhưng `stream` đã bị tiêu thụ (move) bởi `stream.stop()` lúc đó nên
+    /// phải lưu riêng ở đây từ trước.
+    width: u32,
+    height: u32,
+    /// "full" | "window" | "region" — khớp đúng `CaptureMode` phía chụp ảnh
+    /// (xem `flow::run_record_picker`), để History coi quay và chụp cùng 1
+    /// khái niệm "phạm vi" thay vì tạo thêm 1 tập giá trị capture_mode riêng.
+    capture_mode: &'static str,
 }
 
 #[derive(Default)]
 pub struct RecordingState(pub Mutex<Option<ActiveRecording>>);
 
-/// Đường dẫn file mp4 mới: `{saveDir hoặc Pictures/SnapDoc}/Recording_<timestamp>.mp4`
-/// — cùng thư mục lưu với ảnh chụp (tôn trọng `saveDir` đã cấu hình trong Settings).
-fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
+/// 1 bản quay đã ghi xong (mp4 hợp lệ trên đĩa) nhưng CHƯA được người dùng
+/// xác nhận lưu hay xoá — chờ `record-review` (xem `windows::open_record_review`)
+/// gọi `confirm_save`/`confirm_discard`. Serialize được để cửa sổ review đọc
+/// qua `peek_pending_recording`.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRecording {
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: i64,
+    pub capture_mode: String,
+}
+
+#[derive(Default)]
+pub struct PendingRecordingState(pub Mutex<Option<PendingRecording>>);
+
+/// Thư mục lưu video: `saveDir` đã cấu hình trong Settings, hoặc
+/// `Pictures/SnapDoc` mặc định — cùng quy tắc với ảnh chụp.
+fn resolve_save_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let config_dir = app.path().app_config_dir().unwrap_or_default();
     let settings = crate::storage::settings::load(&config_dir);
     let custom_dir = settings
@@ -41,16 +130,71 @@ fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let dir = if custom_dir.is_empty() {
+    if custom_dir.is_empty() {
         app.path()
             .picture_dir()
             .map(|p| p.join("SnapDoc"))
-            .map_err(|e| format!("Không tìm thấy thư mục Pictures: {e}"))?
+            .map_err(|e| format!("Không tìm thấy thư mục Pictures: {e}"))
     } else {
-        PathBuf::from(custom_dir)
-    };
+        Ok(PathBuf::from(custom_dir))
+    }
+}
+
+/// Đường dẫn file mp4 mới: `{saveDir hoặc Pictures/SnapDoc}/Recording_<timestamp>.mp4`
+/// — cùng thư mục lưu với ảnh chụp (tôn trọng `saveDir` đã cấu hình trong Settings).
+fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = resolve_save_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Không tạo được thư mục lưu: {e}"))?;
+    // mp4 nằm NGOÀI `$APPDATA/SnapDoc/library` (scope tĩnh khai trong
+    // tauri.conf.json chỉ cho phép thư mục đó) — khác ảnh chụp, video không
+    // copy vào Library nội bộ (xem `history::ingest_video`), nên phải tự mở
+    // thêm scope asset-protocol cho ĐÚNG thư mục này thì `convertFileSrc`
+    // (record-review + History video player) mới đọc được, nếu không trình
+    // duyệt sẽ chặn request và video không tài phát được (404/blocked).
+    allow_asset_scope(app, &dir);
     Ok(dir.join(format!("{}.mp4", crate::flow::stamp_filename("Recording"))))
+}
+
+/// Mở scope asset-protocol cho 1 thư mục lưu video — gọi lúc quay (phòng
+/// `saveDir` vừa đổi trong Settings) VÀ lúc khởi động app (phòng người dùng
+/// mở lại History để xem video đã quay ở phiên trước, khi scope runtime của
+/// phiên cũ không còn — xem `allow_asset_scope_at_startup`).
+fn allow_asset_scope(app: &AppHandle, dir: &std::path::Path) {
+    if let Err(e) = app.asset_protocol_scope().allow_directory(dir, true) {
+        eprintln!("[SnapDoc][record] Không mở được asset scope cho {}: {e}", dir.display());
+    }
+}
+
+/// Gọi 1 lần lúc khởi động app — xem `allow_asset_scope`.
+pub fn allow_asset_scope_at_startup(app: &AppHandle) {
+    if let Ok(dir) = resolve_save_dir(app) {
+        allow_asset_scope(app, &dir);
+    }
+}
+
+/// Ghi liên tục PCM thô (mic hoặc audio hệ thống — cùng dạng `Vec<u8>` s16le)
+/// ra 1 FILE THƯỜNG trong lúc quay. KHÔNG phải fifo — không có gì đọc trực
+/// tiếp trong lúc quay nên `file.write_all` không bao giờ bị chặn bởi ffmpeg
+/// hay bất kỳ ai khác (khác hẳn hướng fifo cũ). Ghép vào video xảy ra SAU
+/// khi dừng quay (xem `encoder::mux_audio`, `stop_recording`).
+#[cfg(target_os = "macos")]
+fn spawn_pcm_file_writer(path: PathBuf, rx: Receiver<Vec<u8>>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        use std::io::Write;
+        let mut file = match std::fs::File::create(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[SnapDoc][record] Không tạo được file audio tạm {}: {e}", path.display());
+                return;
+            }
+        };
+        while let Ok(chunk) = rx.recv() {
+            if let Err(e) = file.write_all(&chunk) {
+                eprintln!("[SnapDoc][record] Lỗi ghi file audio tạm {}: {e}", path.display());
+                break;
+            }
+        }
+    })
 }
 
 /// Quay toàn màn hình CHÍNH (hành vi v1, dùng cho nút "Quay" mặc định + hotkey).
@@ -102,12 +246,101 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
             return Err("Đã có phiên quay đang chạy".to_string());
         }
     }
+    {
+        // Chặn quay đè lên khi còn 1 bản quay trước chưa xác nhận lưu/xoá —
+        // `PendingRecordingState` chỉ giữ được 1 slot, quay tiếp sẽ GHI ĐÈ và
+        // làm mất hẳn đường dẫn tới bản trước (không xoá được, không vào History).
+        let pending = app.state::<PendingRecordingState>();
+        let guard = pending.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
+        if guard.is_some() {
+            return Err("Còn 1 bản quay chưa xác nhận lưu/xoá — hãy xử lý cửa sổ xem lại trước".to_string());
+        }
+    }
 
-    let (stream, frame_rx) = crate::capture::mac_stream::start(target, FPS)?;
+    let capture_mode: &'static str = match &target {
+        crate::capture::mac_stream::RecordTarget::Display(_) => "full",
+        crate::capture::mac_stream::RecordTarget::Region { .. } => "region",
+        crate::capture::mac_stream::RecordTarget::Window(_) => "window",
+    };
+
+    let audio_source = audio_source_setting(app);
+    let want_system_audio = audio_source == AudioSource::System;
+
+    let (stream, frame_rx, system_audio_rx) =
+        crate::capture::mac_stream::start(target, FPS, want_system_audio)?;
     let (width, height) = (stream.width, stream.height);
 
-    let output_path = new_output_path(app)?;
-    let mut encoder = encoder::Encoder::start(&output_path, width, height, FPS)?;
+    // Mic là nguồn ĐỘC LẬP với SCStream (xem `audio_mic.rs`) — lỗi ở đây
+    // (vd không có quyền micro) không nên làm hỏng cả phiên quay: log rồi
+    // tiếp tục quay KHÔNG audio, còn hơn để người dùng mất trắng bản quay.
+    let mic_result = if audio_source == AudioSource::Mic {
+        match audio_mic::start() {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("[SnapDoc][record] Không ghi được mic (vẫn tiếp tục quay không audio): {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Chuẩn hoá về ĐÚNG 1 nguồn PCM (bất kể mic hay audio hệ thống) — chỉ 1
+    // trong 2 có thể khác `None` vì `audio_source` đã loại trừ lẫn nhau.
+    struct AudioProducer {
+        rx: Receiver<Vec<u8>>,
+        sample_rate: u32,
+        channels: u16,
+        mic: Option<audio_mic::MicCapture>,
+    }
+    let audio_producer = if let Some(rx) = system_audio_rx {
+        Some(AudioProducer {
+            rx,
+            sample_rate: crate::capture::mac_stream::AUDIO_SAMPLE_RATE,
+            channels: crate::capture::mac_stream::AUDIO_CHANNELS,
+            mic: None,
+        })
+    } else {
+        mic_result.map(|(mic, rx, sample_rate, channels)| AudioProducer {
+            rx,
+            sample_rate,
+            channels: channels as u16,
+            mic: Some(mic),
+        })
+    };
+
+    // Có audio: video quay ra 1 file TẠM trong `tmp_dir` (ghép audio vào sau
+    // mới ra `output_path` thật, xem `stop_recording`). Không audio: video
+    // quay THẲNG ra `output_path` — giữ nguyên đường đi ngắn nhất của v1.
+    let (video_path, output_path, audio) = match audio_producer {
+        Some(producer) => {
+            let tmp_dir = std::env::temp_dir().join(format!("snapdoc-rec-audio-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&tmp_dir)
+                .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
+            let raw_path = tmp_dir.join("audio.pcm");
+            let video_tmp_path = tmp_dir.join("video.mp4");
+            let writer = spawn_pcm_file_writer(raw_path.clone(), producer.rx);
+            let final_path = new_output_path(app)?;
+            (
+                video_tmp_path,
+                final_path,
+                Some(ActiveAudio {
+                    mic: producer.mic,
+                    writer,
+                    raw_path,
+                    sample_rate: producer.sample_rate,
+                    channels: producer.channels,
+                    tmp_dir,
+                }),
+            )
+        }
+        None => {
+            let final_path = new_output_path(app)?;
+            (final_path.clone(), final_path, None)
+        }
+    };
+
+    let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
 
     // Luồng riêng: kéo frame liên tục cho tới khi channel đóng (xảy ra khi
     // `stop_recording` gọi `stream.stop()` → drop sender bên trong
@@ -135,8 +368,13 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
         *guard = Some(ActiveRecording {
             stream,
             writer,
+            audio,
+            video_path,
             output_path,
             started_at: Instant::now(),
+            width,
+            height,
+            capture_mode,
         });
     }
 
@@ -213,7 +451,12 @@ pub fn start_recording_window(_app: &AppHandle, _window_id: u32) -> Result<(), S
     Err("Quay màn hình hiện chỉ hỗ trợ macOS".to_string())
 }
 
-/// Dừng phiên quay hiện tại, đợi ffmpeg mux xong, trả về đường dẫn file mp4.
+/// Dừng phiên quay hiện tại, đợi ffmpeg mux xong (+ ghép audio nếu có — xem
+/// `encoder::mux_audio`). KHÔNG ingest vào History ngay — chuyển bản quay
+/// vào `PendingRecordingState` và mở cửa sổ xem lại (`record-review`) để
+/// người dùng chọn "Lưu" hay "Xoá" trước (`confirm_recording_save`/
+/// `confirm_recording_discard` mới thực sự ingest/xoá file). Trả về đường
+/// dẫn file mp4 cuối cùng (vẫn hữu ích cho log/test).
 pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
     let state = app.state::<RecordingState>();
     let active = state
@@ -223,8 +466,32 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
         .take()
         .ok_or_else(|| "Không có phiên quay nào đang chạy".to_string())?;
 
+    // Thời lượng thật của video = đúng khoảng thời gian SCStream đã chạy —
+    // tính TRƯỚC khi `stream.stop()` tiêu thụ field `stream` (partial move).
+    let duration_ms = active.started_at.elapsed().as_millis() as i64;
+
+    // Dừng mic (nếu nguồn là mic) TRƯỚC `stream.stop()` — đóng kênh PCM để
+    // `spawn_pcm_file_writer` thấy channel đóng mà tự kết thúc (đóng file).
+    // Audio hệ thống tự đóng theo `stream.stop()` bên dưới (chung sender).
+    #[cfg(target_os = "macos")]
+    let audio = active.audio.map(|mut a| {
+        if let Some(mic) = a.mic.take() {
+            mic.stop();
+        }
+        a
+    });
+    #[cfg(not(target_os = "macos"))]
+    let audio = active.audio;
+
     #[cfg(target_os = "macos")]
     active.stream.stop()?;
+
+    // Ghi file audio KHÔNG qua ffmpeg lúc quay (chỉ `File::write_all`) nên
+    // join ở đây luôn nhanh — không có rủi ro treo như hướng fifo cũ.
+    let audio_meta = audio.map(|a| {
+        let _ = a.writer.join();
+        (a.raw_path, a.sample_rate, a.channels, a.tmp_dir)
+    });
 
     let write_result = active
         .writer
@@ -234,7 +501,95 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
     crate::tray::hide_recording_tray(app);
 
     write_result?;
-    Ok(active.output_path.to_string_lossy().to_string())
+
+    // Có audio: ghép vào `output_path` thật bằng 1 lần chạy ffmpeg TĨNH (2
+    // file đã hoàn tất, không còn "sống" — không có rủi ro deadlock như
+    // hướng live-mux cũ, xem doc-comment đầu file). Lỗi ghép KHÔNG làm mất
+    // bản quay: dùng thẳng video tạm (không tiếng) làm kết quả cuối, không
+    // xoá `tmp_dir` trong trường hợp này vì video tạm đang nằm trong đó.
+    let output_path = match audio_meta {
+        Some((raw_path, sample_rate, channels, tmp_dir)) => {
+            match encoder::mux_audio(&active.video_path, &raw_path, sample_rate, channels, &active.output_path) {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    active.output_path
+                }
+                Err(e) => {
+                    eprintln!("[SnapDoc][record] Ghép audio thất bại, dùng video không tiếng: {e}");
+                    active.video_path
+                }
+            }
+        }
+        None => active.output_path,
+    };
+
+    let path = output_path.to_string_lossy().to_string();
+    {
+        let pending = app.state::<PendingRecordingState>();
+        let mut guard = pending.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
+        *guard = Some(PendingRecording {
+            path: path.clone(),
+            width: active.width,
+            height: active.height,
+            duration_ms,
+            capture_mode: active.capture_mode.to_string(),
+        });
+    }
+
+    if let Err(e) = crate::windows::open_record_review(app) {
+        eprintln!("[SnapDoc][record] Không mở được cửa sổ xem lại bản quay: {e}");
+    }
+
+    Ok(path)
+}
+
+/// Đọc (không xoá) bản quay đang chờ xác nhận — `record-review` gọi lúc mount
+/// để biết đường dẫn/kích thước/thời lượng cần hiển thị.
+pub fn peek_pending_recording(app: &AppHandle) -> Option<PendingRecording> {
+    app.state::<PendingRecordingState>().0.lock().ok()?.clone()
+}
+
+/// Người dùng chọn "Lưu" ở `record-review`: ingest bản quay đang chờ vào
+/// History rồi đóng cửa sổ. Lỗi ingest (thumbnail/DB) vẫn coi là thành công
+/// đối với người dùng — file mp4 đã tồn tại sẵn trên đĩa từ trước, không mất.
+pub fn confirm_recording_save(app: &AppHandle) -> Result<(), String> {
+    let pending = app
+        .state::<PendingRecordingState>()
+        .0
+        .lock()
+        .map_err(|_| "Lock PendingRecordingState lỗi".to_string())?
+        .take()
+        .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
+
+    if let Err(e) = crate::history::ingest_video(
+        app,
+        std::path::Path::new(&pending.path),
+        pending.width,
+        pending.height,
+        pending.duration_ms,
+        &pending.capture_mode,
+    ) {
+        eprintln!("[SnapDoc][record] Ingest video vào History thất bại (file mp4 vẫn còn nguyên): {e}");
+    }
+
+    crate::windows::close_record_review(app);
+    Ok(())
+}
+
+/// Người dùng chọn "Xoá" ở `record-review`: xoá hẳn file mp4 (chưa từng vào
+/// History nên không cần dọn DB) rồi đóng cửa sổ.
+pub fn confirm_recording_discard(app: &AppHandle) -> Result<(), String> {
+    let pending = app
+        .state::<PendingRecordingState>()
+        .0
+        .lock()
+        .map_err(|_| "Lock PendingRecordingState lỗi".to_string())?
+        .take()
+        .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
+
+    let result = std::fs::remove_file(&pending.path).map_err(|e| format!("Không xoá được file: {e}"));
+    crate::windows::close_record_review(app);
+    result
 }
 
 /// Bật/tắt quay — dùng cho global hotkey (không cần biết trạng thái trước).

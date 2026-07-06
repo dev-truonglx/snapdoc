@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Tauri tự động gộp file này vào Info.plist sinh ra khi build (đặt tại
+       src-tauri/Info.plist). Cần NSMicrophoneUsageDescription vì Phase 4
+       (quay màn hình có âm thanh) dùng cpal/CoreAudio để ghi mic — thiếu key
+       này macOS sẽ crash thẳng tay app khi vừa chạm vào API microphone, thay
+       vì hiện hộp thoại xin quyền. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>SnapDoc cần quyền micro để ghi âm giọng nói khi quay màn hình.</string>
+</dict>
+</plist>

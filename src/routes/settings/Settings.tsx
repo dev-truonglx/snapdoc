@@ -283,6 +283,24 @@ export default function Settings() {
           </Field>
         </Card>
 
+        {/* QUAY MÀN HÌNH */}
+        <Card title="QUAY MÀN HÌNH">
+          <Field label="Ghi âm khi quay">
+            <select
+              value={s.recordAudioSource ?? "off"}
+              onChange={(e) => update({ recordAudioSource: e.target.value as S["recordAudioSource"] })}
+            >
+              <option value="off">Tắt (chỉ hình, không tiếng)</option>
+              <option value="mic">Microphone</option>
+              <option value="system">Âm thanh hệ thống</option>
+            </select>
+          </Field>
+          <p style={hint}>
+            Chỉ chọn được 1 nguồn tại 1 thời điểm — mic cần cấp quyền Microphone,
+            âm thanh hệ thống dùng chung quyền Screen Recording đã cấp.
+          </p>
+        </Card>
+
         {/* KHỞI ĐỘNG */}
         <Card title="KHỞI ĐỘNG">
           <div style={toggleRow}>

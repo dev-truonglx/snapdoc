@@ -140,6 +140,9 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
     if rec.deleted_at.is_some() {
         return Err("Không thể mở item đang ở Trash — hãy Restore trước".to_string());
     }
+    if rec.media_type == "video" {
+        return Err("Video chưa hỗ trợ mở trong Editor".to_string());
+    }
     let bytes = std::fs::read(&rec.asset_path).map_err(|e| format!("Không đọc được asset: {e}"))?;
     let base64 = STANDARD.encode(&bytes);
     {
@@ -159,6 +162,9 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
 
 fn update_history_asset_sync(app: &AppHandle, id: &str, data: &str) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
+    if rec.media_type == "video" {
+        return Err("Video chưa hỗ trợ chỉnh sửa".to_string());
+    }
     let bytes = decode_image_data(data)?;
     std::fs::write(&rec.asset_path, &bytes).map_err(|e| format!("Ghi asset thất bại: {e}"))?;
     let thumb_bytes = super::thumbnail::generate(&bytes)?;
@@ -181,6 +187,9 @@ fn update_history_asset_sync(app: &AppHandle, id: &str, data: &str) -> Result<Hi
 
 fn copy_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let rec = get_history_item_sync(app, id)?;
+    if rec.media_type == "video" {
+        return Err("Video chưa hỗ trợ copy vào clipboard".to_string());
+    }
     let bytes = std::fs::read(&rec.asset_path).map_err(|e| format!("Không đọc được asset: {e}"))?;
     crate::clipboard::copy_png_bytes(&bytes)
 }

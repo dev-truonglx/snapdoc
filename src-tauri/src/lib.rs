@@ -69,6 +69,7 @@ pub fn run() {
         .manage(AppState::default())
         .manage(update::PendingUpdate::default())
         .manage(record::RecordingState::default())
+        .manage(record::PendingRecordingState::default())
         .invoke_handler(tauri::generate_handler![
             commands::peek_pending,
             commands::take_pending,
@@ -118,6 +119,9 @@ pub fn run() {
             commands::finalize_scroll_stitch,
             commands::start_recording,
             commands::start_record_picker,
+            commands::peek_pending_recording,
+            commands::confirm_recording_save,
+            commands::confirm_recording_discard,
             history::commands::list_history,
             history::commands::get_history_item,
             history::commands::delete_history_item,
@@ -189,6 +193,12 @@ pub fn run() {
                     eprintln!("[SnapDoc][history] init thất bại, tính năng Library sẽ tắt: {e}");
                 }
             }
+
+            // Mở scope asset-protocol cho thư mục lưu video hiện tại — nếu
+            // không, `convertFileSrc` trong record-review/History sẽ bị chặn
+            // đọc video đã quay ở phiên trước (scope tĩnh trong tauri.conf.json
+            // chỉ cho phép $APPDATA/SnapDoc/library, không phải saveDir).
+            record::allow_asset_scope_at_startup(&handle);
 
             tray::build(&handle)?;
             if let Err(e) = hotkey::register_all(&handle) {

@@ -613,6 +613,29 @@ pub fn start_record_picker(app: AppHandle, mode: String) {
     std::thread::spawn(move || flow::run_record_picker(&app, &mode));
 }
 
+/// Đọc bản quay đang chờ xác nhận (không xoá) — cửa sổ "record-review" gọi
+/// lúc mount để biết đường dẫn/kích thước/thời lượng cần hiển thị.
+#[tauri::command]
+pub fn peek_pending_recording(app: AppHandle) -> Option<crate::record::PendingRecording> {
+    crate::record::peek_pending_recording(&app)
+}
+
+/// Người dùng bấm "Lưu" ở cửa sổ xem lại — ingest vào History rồi đóng cửa sổ.
+#[tauri::command]
+pub async fn confirm_recording_save(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::confirm_recording_save(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Người dùng bấm "Xoá" ở cửa sổ xem lại — xoá file mp4 rồi đóng cửa sổ.
+#[tauri::command]
+pub async fn confirm_recording_discard(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::confirm_recording_discard(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
 #[derive(serde::Deserialize)]
 pub struct StitchInstruction {
     #[serde(rename = "sliceIndex")]

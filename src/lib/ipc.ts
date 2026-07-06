@@ -17,7 +17,7 @@ export interface HistoryItem {
   id: string;
   createdAt: number;
   updatedAt: number;
-  captureMode: "region" | "window" | "monitor" | "all" | "scroll" | "quick";
+  captureMode: "region" | "window" | "full" | "all" | "scroll" | "quick";
   mediaType: "image" | "video" | "gif";
   width: number;
   height: number;
@@ -60,6 +60,11 @@ export interface WindowInfo {
   app: string;
 }
 
+/** Nguồn audio ghi kèm khi quay màn hình — chỉ chọn 1, không trộn (xem lý do
+ * ở record/mod.rs: ghép audio+video "sống" qua ffmpeg từng gây bug video bị
+ * cắt cụt sau vài giây). */
+export type AudioSource = "off" | "mic" | "system";
+
 export interface Settings {
   saveDir: string;
   format: string;
@@ -68,6 +73,8 @@ export interface Settings {
   timerSeconds: number;
   rememberLastRegion: boolean;
   launchAtLogin: boolean;
+  /** Nguồn audio ghi kèm khi quay màn hình — chỉ 1 trong 3, mặc định "off". */
+  recordAudioSource: AudioSource;
   shortcuts: Record<string, string>;
 }
 
@@ -161,4 +168,16 @@ export const ipc = {
   /** Mở overlay chọn phạm vi quay — dùng chung CaptureMode với nút "Chụp" ("full" | "window" | "region"). */
   startRecordPicker: (mode: "full" | "window" | "region") =>
     invoke<void>("start_record_picker", { mode }),
+  // Xem lại bản quay trước khi lưu vào History (record-review window).
+  peekPendingRecording: () => invoke<PendingRecording | null>("peek_pending_recording"),
+  confirmRecordingSave: () => invoke<void>("confirm_recording_save"),
+  confirmRecordingDiscard: () => invoke<void>("confirm_recording_discard"),
 };
+
+export interface PendingRecording {
+  path: string;
+  width: number;
+  height: number;
+  durationMs: number;
+  captureMode: string;
+}
