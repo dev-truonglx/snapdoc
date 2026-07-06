@@ -31,7 +31,7 @@ use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_media::{CMSampleBuffer, CMTime, CMTimeFlags};
 use objc2_core_video::{
     kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
@@ -41,8 +41,23 @@ use objc2_core_video::{
 use objc2_foundation::{NSArray, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
+    SCStreamDelegate, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
+
+/// Phạm vi quay — v1 chỉ toàn màn hình (`Display`); Phase 3 thêm `Region`
+/// (crop 1 vùng trong 1 màn hình cụ thể qua `SCStreamConfiguration.sourceRect`)
+/// và `Window` (quay đúng 1 cửa sổ qua `SCContentFilter`
+/// `initWithDesktopIndependentWindow`).
+pub enum RecordTarget {
+    /// Toàn bộ 1 màn hình theo `CGDirectDisplayID`.
+    Display(u32),
+    /// 1 vùng trong 1 màn hình. `x,y,w,h` là POINTS, LOCAL theo gốc màn hình
+    /// đó (giống hệ toạ độ `capture::region::capture_region` dùng cho chụp
+    /// vùng ảnh tĩnh) — KHÔNG phải toạ độ global desktop.
+    Region { display_id: u32, x: f64, y: f64, w: f64, h: f64 },
+    /// 1 cửa sổ theo `CGWindowID`.
+    Window(u32),
+}
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// readonly lock — ta chỉ đọc, không sửa buffer của SCK.
@@ -204,6 +219,32 @@ fn find_display(display_id: u32) -> Result<Retained<SCDisplay>, String> {
         .map_err(|_| "Hết thời gian chờ ScreenCaptureKit liệt kê màn hình".to_string())?
 }
 
+/// Tìm `SCWindow` khớp `CGWindowID` — cùng cách với `find_display` nhưng
+/// liệt kê `content.windows()`. Dùng cho `RecordTarget::Window`.
+fn find_window(window_id: u32) -> Result<Retained<SCWindow>, String> {
+    let (tx, rx) = mpsc::channel::<Result<Retained<SCWindow>, String>>();
+    let handler = RcBlock::new(move |content: *mut SCShareableContent, err: *mut objc2_foundation::NSError| {
+        if content.is_null() {
+            let msg = if err.is_null() {
+                "không rõ".to_string()
+            } else {
+                unsafe { (*err).localizedDescription().to_string() }
+            };
+            let _ = tx.send(Err(format!("Không lấy được danh sách cửa sổ: {msg}")));
+            return;
+        }
+        let content: &SCShareableContent = unsafe { &*content };
+        let windows = unsafe { content.windows() };
+        let found = windows
+            .iter()
+            .find(|w| unsafe { w.windowID() } == window_id);
+        let _ = tx.send(found.ok_or_else(|| "Không tìm thấy cửa sổ để quay (có thể đã đóng)".to_string()));
+    });
+    unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
+    rx.recv_timeout(TIMEOUT)
+        .map_err(|_| "Hết thời gian chờ ScreenCaptureKit liệt kê cửa sổ".to_string())?
+}
+
 /// Stream đang chạy — giữ sống `SCStream` + delegate (ARC) cho tới khi
 /// `stop()`. Drop mà chưa gọi `stop()` sẽ để stream chạy "mồ côi" (không ai
 /// đọc frame nữa) nên luôn phải gọi `stop()` tường minh.
@@ -272,22 +313,58 @@ impl RecordingHandle {
     }
 }
 
-/// Bắt đầu quay toàn bộ 1 màn hình (theo `CGDirectDisplayID`).
+/// Bắt đầu quay theo `RecordTarget` (toàn màn hình / 1 vùng / 1 cửa sổ).
 ///
 /// `fps`: tốc độ khung hình mong muốn (khuyến nghị 30). Trả về `RecordingHandle`
 /// (giữ để gọi `stop()`) + `Receiver<Frame>` để đọc frame BGRA liên tục.
-pub fn start(display_id: u32, fps: u32) -> Result<(RecordingHandle, mpsc::Receiver<Frame>), String> {
-    let display = find_display(display_id)?;
-
-    let excluded = NSArray::from_slice(&[]);
-    let filter = unsafe {
-        SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &excluded)
+pub fn start(target: RecordTarget, fps: u32) -> Result<(RecordingHandle, mpsc::Receiver<Frame>), String> {
+    // `source_rect`: Some khi quay 1 VÙNG (crop qua `SCStreamConfiguration`),
+    // None khi quay trọn nội dung của filter (toàn màn hình hoặc cả cửa sổ).
+    let (filter, source_rect): (Retained<SCContentFilter>, Option<CGRect>) = match &target {
+        RecordTarget::Display(display_id) => {
+            let display = find_display(*display_id)?;
+            let excluded = NSArray::from_slice(&[]);
+            let filter = unsafe {
+                SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &excluded)
+            };
+            (filter, None)
+        }
+        RecordTarget::Region { display_id, x, y, w, h } => {
+            let display = find_display(*display_id)?;
+            let excluded = NSArray::from_slice(&[]);
+            let filter = unsafe {
+                SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &excluded)
+            };
+            let rect = CGRect {
+                origin: CGPoint { x: *x, y: *y },
+                size: CGSize { width: *w, height: *h },
+            };
+            (filter, Some(rect))
+        }
+        RecordTarget::Window(window_id) => {
+            let window = find_window(*window_id)?;
+            let filter = unsafe {
+                SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window)
+            };
+            (filter, None)
+        }
     };
 
     let scale = unsafe { filter.pointPixelScale() } as f64;
-    let content_rect: CGRect = unsafe { filter.contentRect() };
-    let px_w = ((content_rect.size.width * scale).round() as usize).max(1);
-    let px_h = ((content_rect.size.height * scale).round() as usize).max(1);
+    // Kích thước pixel đầu ra: bằng đúng vùng crop nếu có `source_rect`, nếu
+    // không thì bằng toàn bộ nội dung của filter (`contentRect`).
+    let (px_w, px_h) = if let Some(rect) = source_rect {
+        (
+            ((rect.size.width * scale).round() as usize).max(1),
+            ((rect.size.height * scale).round() as usize).max(1),
+        )
+    } else {
+        let content_rect: CGRect = unsafe { filter.contentRect() };
+        (
+            ((content_rect.size.width * scale).round() as usize).max(1),
+            ((content_rect.size.height * scale).round() as usize).max(1),
+        )
+    };
 
     let config = unsafe { SCStreamConfiguration::new() };
     unsafe {
@@ -302,6 +379,9 @@ pub fn start(display_id: u32, fps: u32) -> Result<(RecordingHandle, mpsc::Receiv
             flags: CMTimeFlags::Valid,
             epoch: 0,
         });
+        if let Some(rect) = source_rect {
+            config.setSourceRect(rect);
+        }
     }
 
     // Channel có giới hạn dung lượng — nếu encoder xử lý chậm hơn tốc độ quay,
@@ -381,7 +461,7 @@ mod tests {
         let display_id = monitor.id().unwrap();
         let fps = 30;
 
-        let (handle, rx) = start(display_id, fps).expect("start() thất bại");
+        let (handle, rx) = start(RecordTarget::Display(display_id), fps).expect("start() thất bại");
 
         let mut count = 0u32;
         let mut last: Option<Frame> = None;

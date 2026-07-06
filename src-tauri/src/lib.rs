@@ -117,6 +117,7 @@ pub fn run() {
             commands::start_scroll_session,
             commands::finalize_scroll_stitch,
             commands::start_recording,
+            commands::start_record_picker,
             history::commands::list_history,
             history::commands::get_history_item,
             history::commands::delete_history_item,

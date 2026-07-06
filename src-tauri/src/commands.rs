@@ -587,17 +587,30 @@ pub fn finalize_scroll_capture(
 }
 
 // ── Quay màn hình ────────────────────────────────────────────────────────────
-// Chỉ "start" cần lộ ra IPC (nút "Quay" trong CaptureBar) — dừng quay và đọc
-// trạng thái giờ chạy hoàn toàn phía Rust (tray icon + menu, xem tray.rs),
+// "start" (hotkey — quay ngay màn hình chính, không qua overlay) + 1 lệnh mở
+// picker dùng CHUNG mode với nút "Chụp" (full/window/region — Phase 3, tái
+// dùng overlay chọn vùng có sẵn của tính năng chụp ảnh, xem
+// `flow::run_record_picker`) là những thứ duy nhất cần lộ ra IPC. Dừng quay
+// và đọc trạng thái chạy hoàn toàn phía Rust (tray icon + menu, xem tray.rs),
 // không qua JS nữa.
 
-/// Bắt đầu quay toàn màn hình chính (macOS). `spawn_blocking` vì phần khởi
-/// tạo `SCStream`/ffmpeg chờ đồng bộ qua completion handler (blocking recv).
+/// Bắt đầu quay toàn màn hình chính (macOS), KHÔNG qua overlay — dùng cho
+/// hotkey (lối tắt tức thời, không có UI để chọn phạm vi). `spawn_blocking`
+/// vì phần khởi tạo `SCStream`/ffmpeg chờ đồng bộ qua completion handler
+/// (blocking recv).
 #[tauri::command]
 pub async fn start_recording(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || crate::record::start_recording(&app))
         .await
         .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Mở overlay chọn phạm vi quay — dùng nút "Quay" trong CaptureBar, `mode`
+/// là đúng CaptureMode đang chọn ("full" | "window" | "region") giống hệt
+/// input của nút "Chụp".
+#[tauri::command]
+pub fn start_record_picker(app: AppHandle, mode: String) {
+    std::thread::spawn(move || flow::run_record_picker(&app, &mode));
 }
 
 #[derive(serde::Deserialize)]

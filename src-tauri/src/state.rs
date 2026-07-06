@@ -85,4 +85,11 @@ pub struct AppState {
     /// Lỗi đăng ký global shortcut lúc khởi động (nếu có) — Settings query lúc
     /// mount để hiện banner cảnh báo, thay vì chỉ `eprintln!` không ai thấy.
     pub hotkey_warning: Mutex<Option<String>>,
+    /// `true` khi overlay đang mở là để CHỌN PHẠM VI QUAY (không phải chụp
+    /// ảnh) — set bởi `flow::run_record_picker`, đọc + xoá (`take`) trong
+    /// `finalize_region`/`finalize_window`/`finalize_monitor` để biết nên bắt
+    /// đầu quay thay vì chụp ảnh tĩnh. Cờ dùng chung cho cả 3 scope (region/
+    /// window/monitor) vì bản thân hàm finalize nào được gọi đã tự xác định
+    /// đúng loại phạm vi rồi.
+    pub pending_record: Mutex<bool>,
 }

@@ -123,7 +123,12 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
         .title("SnapDoc")
-        .inner_size(660.0, 280.0)
+        // 710px (thay vì 660px cũ) — đủ chỗ cho nút "Quay" đứng cạnh "Chụp"
+        // (Phase 3): bar rộng ~690px khi "Quay" hiện (mode Full/Window/Region),
+        // ~601px khi ẩn (All/Scroll). Cửa sổ resizable(false) + body
+        // overflow:hidden nên rộng hơn nội dung thật 1 chút để không bao giờ
+        // bị cắt, kể cả khi font render rộng hơn 1 chút trên Windows.
+        .inner_size(710.0, 280.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)

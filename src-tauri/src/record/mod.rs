@@ -1,9 +1,11 @@
 //! Điều phối 1 phiên quay màn hình: nối `capture::mac_stream` (frame BGRA
 //! thật từ ScreenCaptureKit) với `encoder` (ffmpeg) + quản lý vòng đời qua
-//! `RecordingState` (managed trong Tauri) và cửa sổ chỉ báo đang quay
-//! (`windows::open_recording_indicator`).
+//! `RecordingState` (managed trong Tauri) và tray icon "đang quay" (`tray.rs`).
 //!
-//! v1: chỉ macOS, chỉ quay TOÀN màn hình chính, không audio, fps cố định.
+//! v1: chỉ macOS, không audio, fps cố định. Phase 3 thêm chọn PHẠM VI quay
+//! (màn hình cụ thể / vùng chọn / cửa sổ) qua overlay chọn vùng có sẵn của
+//! tính năng chụp ảnh (xem `flow::run_record_picker` +
+//! `flow::finalize_region/finalize_window/finalize_monitor`).
 
 pub mod encoder;
 
@@ -51,8 +53,48 @@ fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{}.mp4", crate::flow::stamp_filename("Recording"))))
 }
 
+/// Quay toàn màn hình CHÍNH (hành vi v1, dùng cho nút "Quay" mặc định + hotkey).
 #[cfg(target_os = "macos")]
 pub fn start_recording(app: &AppHandle) -> Result<(), String> {
+    let monitor = crate::capture::monitor::primary()?;
+    let display_id = monitor
+        .id()
+        .map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
+    start_with_target(app, crate::capture::mac_stream::RecordTarget::Display(display_id))
+}
+
+/// Quay toàn bộ 1 màn hình CỤ THỂ (người dùng chọn qua overlay — Phase 3).
+#[cfg(target_os = "macos")]
+pub fn start_recording_monitor(app: &AppHandle, display_id: u32) -> Result<(), String> {
+    start_with_target(app, crate::capture::mac_stream::RecordTarget::Display(display_id))
+}
+
+/// Quay 1 VÙNG đã chọn qua overlay. `x,y,w,h` là points, LOCAL theo gốc màn
+/// hình `display_id` (cùng hệ toạ độ `flow::finalize_region` đã tính sẵn cho
+/// chụp ảnh vùng — xem đó để hiểu vì sao không cần cộng thêm gốc màn hình).
+#[cfg(target_os = "macos")]
+pub fn start_recording_region(
+    app: &AppHandle,
+    display_id: u32,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    start_with_target(
+        app,
+        crate::capture::mac_stream::RecordTarget::Region { display_id, x, y, w, h },
+    )
+}
+
+/// Quay 1 cửa sổ đã chọn qua overlay.
+#[cfg(target_os = "macos")]
+pub fn start_recording_window(app: &AppHandle, window_id: u32) -> Result<(), String> {
+    start_with_target(app, crate::capture::mac_stream::RecordTarget::Window(window_id))
+}
+
+#[cfg(target_os = "macos")]
+fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::RecordTarget) -> Result<(), String> {
     let state = app.state::<RecordingState>();
     {
         let guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
@@ -61,12 +103,7 @@ pub fn start_recording(app: &AppHandle) -> Result<(), String> {
         }
     }
 
-    let monitor = crate::capture::monitor::primary()?;
-    let display_id = monitor
-        .id()
-        .map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
-
-    let (stream, frame_rx) = crate::capture::mac_stream::start(display_id, FPS)?;
+    let (stream, frame_rx) = crate::capture::mac_stream::start(target, FPS)?;
     let (width, height) = (stream.width, stream.height);
 
     let output_path = new_output_path(app)?;
@@ -151,6 +188,28 @@ fn stopped_externally(app: &AppHandle) -> bool {
 
 #[cfg(not(target_os = "macos"))]
 pub fn start_recording(_app: &AppHandle) -> Result<(), String> {
+    Err("Quay màn hình hiện chỉ hỗ trợ macOS".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn start_recording_monitor(_app: &AppHandle, _display_id: u32) -> Result<(), String> {
+    Err("Quay màn hình hiện chỉ hỗ trợ macOS".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn start_recording_region(
+    _app: &AppHandle,
+    _display_id: u32,
+    _x: f64,
+    _y: f64,
+    _w: f64,
+    _h: f64,
+) -> Result<(), String> {
+    Err("Quay màn hình hiện chỉ hỗ trợ macOS".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn start_recording_window(_app: &AppHandle, _window_id: u32) -> Result<(), String> {
     Err("Quay màn hình hiện chỉ hỗ trợ macOS".to_string())
 }
 

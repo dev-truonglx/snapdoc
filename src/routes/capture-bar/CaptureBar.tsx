@@ -176,6 +176,15 @@ export default function CaptureBar() {
     }
   };
 
+  // Quay video dùng CHUNG mode đang chọn với "Chụp" — Full/Window/Region đều
+  // mở đúng overlay chọn phạm vi (Full cũng qua overlay chọn màn hình, giống
+  // hệt hành vi chụp ảnh Full). All/Scroll không có khái niệm video tương ứng
+  // (ghép nhiều màn hình / cuộn trang) nên ẩn hẳn nút "Quay" ở 2 mode này.
+  const canRecord = mode === "full" || mode === "window" || mode === "region";
+  const doRecord = () => {
+    ipc.startRecordPicker(mode as "full" | "window" | "region").catch((e) => alert(String(e)));
+  };
+
   const currentOutput = OUTPUTS.find((o) => o.id === output);
 
   return (
@@ -197,23 +206,6 @@ export default function CaptureBar() {
                 <path d="M11 2 3 12h6l-1 6 8-10h-6l1-6Z" fill="currentColor" />
               </svg>
               <span style={{ fontSize: 11, lineHeight: 1 }}>Nhanh</span>
-            </button>
-            {/* Quay màn hình — hành động chạy NGAY (giống "Chụp nhanh"): bắt đầu
-                quay toàn màn hình chính rồi đóng capture bar, không đụng state
-                mode/output. Chỉ báo đang quay hiện trên tray icon (menu bar). */}
-            <button
-              onClick={() => {
-                ipc.startRecording()
-                  .then(() => ipc.closeSelf())
-                  .catch((e) => alert(String(e)));
-              }}
-              style={recordModeBtn}
-              title="Quay màn hình chính"
-            >
-              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
-                <circle cx="10" cy="10" r="6" fill="currentColor" />
-              </svg>
-              <span style={{ fontSize: 11, lineHeight: 1 }}>Quay</span>
             </button>
             {MODES.map((m) => (
               <button
@@ -259,6 +251,16 @@ export default function CaptureBar() {
           <button style={shootBtn} onClick={doCapture}>
             Chụp
           </button>
+
+          {/* Quay video — dùng chung mode với "Chụp" (xem doRecord). Ẩn khi
+              mode = All/Scroll (video không hỗ trợ 2 kiểu này). Chỉ báo đang
+              quay hiện trên tray icon riêng (menu bar), không phải ở đây. */}
+          {canRecord && (
+            <button style={recordBtn} onClick={doRecord} title="Quay video đúng phạm vi đang chọn">
+              <span style={recordDot} aria-hidden />
+              Quay
+            </button>
+          )}
 
           {/* Close */}
           <button aria-label="Đóng" style={closeBtn} onClick={() => ipc.closeSelf()}>
@@ -356,19 +358,30 @@ const quickModeBtn: React.CSSProperties = {
   transition: "background 0.12s",
 };
 
-// Nút "Quay" trong cụm chế độ: cùng khối với "Nhanh" nhưng nhấn màu đỏ để gợi
-// ý hành động quay video, chạy ngay khi bấm (không phải chế độ để chọn).
-const recordModeBtn: React.CSSProperties = {
+// Nút "Quay" đứng cạnh "Chụp" — cùng hình dạng (pill) nhưng tông đỏ để phân
+// biệt hành động quay video khỏi chụp ảnh. Dùng chung `mode` đang chọn với
+// "Chụp" (xem `doRecord`), không còn popover chọn phạm vi riêng.
+const recordBtn: React.CSSProperties = {
   display: "flex",
-  flexDirection: "column",
   alignItems: "center",
-  gap: 3,
-  width: 56,
-  padding: "6px 4px",
-  borderRadius: 6,
+  gap: 6,
+  padding: "7px 16px",
+  borderRadius: 8,
   background: "rgba(239,68,68,0.16)",
   color: "var(--danger)",
-  transition: "background 0.12s",
+  fontWeight: 600,
+  fontSize: 13,
+  border: "none",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+};
+
+const recordDot: React.CSSProperties = {
+  width: 8,
+  height: 8,
+  borderRadius: "50%",
+  background: "var(--danger)",
+  display: "inline-block",
 };
 
 const shootBtn: React.CSSProperties = {

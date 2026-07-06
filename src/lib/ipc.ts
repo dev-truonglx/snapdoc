@@ -156,6 +156,9 @@ export const ipc = {
     invoke<string | null>("finish_quick_capture", { data, width, height, output }),
   // Quay màn hình — dừng quay/xem trạng thái giờ qua tray icon (menu bar),
   // không qua IPC từ JS nữa (xem src-tauri/src/tray.rs).
-  /** Bắt đầu quay toàn màn hình chính. */
+  /** Bắt đầu quay toàn màn hình chính NGAY, không qua overlay (dùng cho hotkey). */
   startRecording: () => invoke<void>("start_recording"),
+  /** Mở overlay chọn phạm vi quay — dùng chung CaptureMode với nút "Chụp" ("full" | "window" | "region"). */
+  startRecordPicker: (mode: "full" | "window" | "region") =>
+    invoke<void>("start_record_picker", { mode }),
 };
