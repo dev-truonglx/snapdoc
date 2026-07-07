@@ -642,10 +642,17 @@ pub async fn confirm_recording_discard(app: AppHandle) -> Result<(), String> {
 /// Dừng quay từ popup "đang quay" trên Windows (xem
 /// `windows::open_recording_indicator`) — trên macOS việc dừng vẫn chủ yếu đi
 /// qua tray icon (`tray.rs`), lệnh này chỉ thêm 1 đường dừng nữa, không thay
-/// thế đường cũ.
+/// thế đường cũ. `spawn_blocking` BẮT BUỘC (giống `confirm_recording_save/discard`
+/// phía trên): `record::stop_recording` join các thread ghi video/audio và
+/// chạy `ffmpeg` đồng bộ để ghép audio (có thể mất vài giây) — nếu để hàm này
+/// là `fn` thường (không `async`), Tauri chạy nó THẲNG trên main thread của
+/// webview (execution context "sync", không qua thread pool), nghẽn toàn bộ
+/// message pump và Windows báo "Not Responding" ở màn xác nhận lưu/xoá.
 #[tauri::command]
-pub fn stop_recording(app: AppHandle) -> Result<String, String> {
-    crate::record::stop_recording(&app)
+pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::stop_recording(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// Thời lượng đã quay (ms) — popup "đang quay" trên Windows poll lệnh này mỗi
