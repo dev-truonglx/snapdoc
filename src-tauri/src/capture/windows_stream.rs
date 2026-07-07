@@ -4,10 +4,9 @@
 //! (`.claude/plans/sprightly-yawning-ritchie.md`) để hiểu lý do chọn WGC thay
 //! vì DXGI Desktop Duplication.
 //!
-//! GIAI ĐOẠN 1 (hiện tại): chỉ hỗ trợ `RecordTarget::Display` (toàn màn
-//! hình), CHƯA có audio hệ thống (tham số `capture_system_audio` bị bỏ qua).
-//! `Window`/`Region` trả lỗi rõ ràng — sẽ triển khai ở giai đoạn 2/4 của plan
-//! (cần thêm bước map id `xcap` → `HWND`/crop theo vùng).
+//! GIAI ĐOẠN 1+2 (hiện tại): hỗ trợ `RecordTarget::Display` VÀ `Window`, CHƯA
+//! có audio hệ thống (tham số `capture_system_audio` bị bỏ qua) và CHƯA có
+//! `Region` (giai đoạn 4 của plan — quay nguyên `display_id` rồi crop).
 //!
 //! LƯU Ý: `Settings::new` (8 tham số) đã đối chiếu đúng với source thật của
 //! crate `windows-capture` cài trên máy Windows dùng để build. Các phần còn
@@ -33,10 +32,12 @@ use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
+use windows_capture::window::Window as WgcWindow;
+use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 
 /// Phạm vi quay — cùng hình dạng với `mac_stream::RecordTarget` để
 /// `record/mod.rs` dùng chung 1 kiểu dispatch cho cả 2 nền tảng. Xem doc-
-/// comment đầu file: `Region`/`Window` chưa triển khai ở giai đoạn 1.
+/// comment đầu file: `Region` chưa triển khai.
 pub enum RecordTarget {
     /// Toàn bộ 1 màn hình, `display_id` là id từ `xcap::Monitor::id()` (cùng
     /// id dùng cho overlay chọn màn hình + chụp ảnh).
@@ -45,8 +46,8 @@ pub enum RecordTarget {
     /// màn hình (cùng hệ toạ độ `flow::finalize_region` đã tính cho chụp ảnh
     /// vùng). Giai đoạn 4 của plan: quay nguyên `display_id`, crop trong Rust.
     Region { display_id: u32, x: f64, y: f64, w: f64, h: f64 },
-    /// 1 cửa sổ theo id từ `xcap::Window::id()`. Giai đoạn 2 của plan: cần
-    /// map id này sang `HWND` cho WGC.
+    /// 1 cửa sổ theo id từ `xcap::Window::id()`, map sang `HWND` trong
+    /// `resolve_window`.
     Window(u32),
 }
 
@@ -148,6 +149,50 @@ fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
     WgcMonitor::primary().map_err(|e| format!("Không tìm thấy màn hình để quay: {e}"))
 }
 
+/// Tìm `windows_capture::window::Window` khớp `window_id` (id từ
+/// `xcap::Window::id()`, dùng chung cho overlay chọn cửa sổ). Ép kiểu TRỰC
+/// TIẾP `window_id` (u32) ngược lại thành `HWND` — giả định `xcap::Window::id()`
+/// trên Windows chính là giá trị `HWND` (CẦN xác minh trên máy thật, xem mục
+/// "Xác định monitor/window" trong plan Phase 5). Nếu quay NHẦM cửa sổ, đổi
+/// sang đối chiếu qua `WgcWindow::enumerate()` + `title()`/`process_id()`
+/// thay vì ép kiểu thẳng.
+fn resolve_window(window_id: u32) -> Result<WgcWindow, String> {
+    let hwnd = window_id as isize as *mut std::ffi::c_void;
+    let window = WgcWindow::from_raw_hwnd(hwnd);
+    if !window.is_valid() {
+        return Err("Cửa sổ không còn hợp lệ để quay (có thể đã đóng hoặc bị thu nhỏ)".to_string());
+    }
+    Ok(window)
+}
+
+/// Kích thước THẬT của 1 cửa sổ để khởi tạo encoder TRƯỚC khi frame đầu tiên
+/// từ WGC tới — dùng `DWMWA_EXTENDED_FRAME_BOUNDS` (không dùng
+/// `Window::rect()`/`GetWindowRect`, vì hàm đó tính CẢ viền bóng đổ vô hình do
+/// DWM vẽ thêm, thường lệch vài pixel so với nội dung WGC thực sự quay —
+/// crate `windows-capture` cũng tự dùng đúng API này nội bộ cho
+/// `title_bar_height()`, xem window.rs).
+fn window_capture_size(hwnd: *mut std::ffi::c_void) -> Result<(u32, u32), String> {
+    use windows_sys::Win32::Foundation::RECT;
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd as isize,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut RECT as *mut std::ffi::c_void,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    if hr != 0 {
+        return Err(format!("Không đọc được kích thước cửa sổ (DwmGetWindowAttribute lỗi, HRESULT={hr:#x})"));
+    }
+    let width = (rect.right - rect.left).max(0) as u32;
+    let height = (rect.bottom - rect.top).max(0) as u32;
+    if width == 0 || height == 0 {
+        return Err("Cửa sổ có kích thước 0, không thể quay".to_string());
+    }
+    Ok((width, height))
+}
+
 /// Phiên quay đang chạy — giữ `CaptureControl` (thread nền của WGC, xem
 /// `start_free_threaded`) cho tới khi `stop()`. Vai trò tương đương
 /// `mac_stream::RecordingHandle`.
@@ -183,27 +228,15 @@ impl RecordingHandle {
     }
 }
 
-/// Bắt đầu quay theo `RecordTarget`. Xem doc-comment đầu file: giai đoạn 1
-/// chỉ hỗ trợ `Display`; `capture_system_audio` hiện bị bỏ qua (luôn quay
-/// không tiếng trên Windows — audio hệ thống là giai đoạn 6 của plan).
+/// Bắt đầu quay theo `RecordTarget`. Xem doc-comment đầu file: hỗ trợ
+/// `Display`/`Window`, chưa hỗ trợ `Region`; `capture_system_audio` hiện bị
+/// bỏ qua (luôn quay không tiếng trên Windows — audio hệ thống là giai đoạn 6
+/// của plan).
 pub fn start(
     target: RecordTarget,
     fps: u32,
     _capture_system_audio: bool,
 ) -> Result<(RecordingHandle, mpsc::Receiver<Frame>, Option<mpsc::Receiver<Vec<u8>>>), String> {
-    let monitor = match target {
-        RecordTarget::Display(display_id) => resolve_monitor(display_id)?,
-        RecordTarget::Window(_) => {
-            return Err("Quay theo cửa sổ trên Windows chưa được hỗ trợ ở bản này".to_string())
-        }
-        RecordTarget::Region { .. } => {
-            return Err("Quay theo vùng trên Windows chưa được hỗ trợ ở bản này".to_string())
-        }
-    };
-
-    let width = monitor.width().map_err(|e| format!("Không đọc được kích thước màn hình: {e}"))?;
-    let height = monitor.height().map_err(|e| format!("Không đọc được kích thước màn hình: {e}"))?;
-
     // Channel có giới hạn dung lượng — nếu encoder xử lý chậm hơn tốc độ quay,
     // try_send() trong callback sẽ thất bại (drop) thay vì chặn thread capture
     // của WGC. Bound = 2 giây buffer ở fps yêu cầu (giống mac_stream.rs).
@@ -211,28 +244,61 @@ pub fn start(
     let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(bound);
     let dropped = Arc::new(AtomicBool::new(false));
     let stopped_externally = Arc::new(AtomicBool::new(false));
+    // Giới hạn tốc độ nhận frame ngay ở tầng WGC — tương đương
+    // `SCStreamConfiguration.setMinimumFrameInterval` bên macOS, để không nạp
+    // cho ffmpeg nhanh/chậm hơn `-r fps` đã khai lúc mở encoder (tránh video
+    // bị tua nhanh/chậm so với thời lượng thật).
+    let min_interval = MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / fps.max(1) as f64));
+    let flags = CapturerFlags {
+        frame_tx,
+        dropped: dropped.clone(),
+        stopped_externally: stopped_externally.clone(),
+    };
 
-    let settings = Settings::new(
-        monitor,
-        CursorCaptureSettings::Default,
-        DrawBorderSettings::Default,
-        SecondaryWindowSettings::Default,
-        // Giới hạn tốc độ nhận frame ngay ở tầng WGC — tương đương
-        // `SCStreamConfiguration.setMinimumFrameInterval` bên macOS, để
-        // không nạp cho ffmpeg nhanh/chậm hơn `-r fps` đã khai lúc mở
-        // encoder (tránh video bị tua nhanh/chậm so với thời lượng thật).
-        MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / fps.max(1) as f64)),
-        DirtyRegionSettings::Default,
-        ColorFormat::Bgra8,
-        CapturerFlags {
-            frame_tx,
-            dropped: dropped.clone(),
-            stopped_externally: stopped_externally.clone(),
-        },
-    );
-
-    let control = Capturer::start_free_threaded(settings)
-        .map_err(|e| format!("Không bắt đầu quay (Windows.Graphics.Capture): {e}"))?;
+    // `Settings<Flags, T>` khác kiểu cụ thể giữa `Monitor` và `Window` (T khác
+    // nhau) nên không thể dùng chung 1 biến `settings` — mỗi nhánh tự dựng
+    // settings + gọi `start_free_threaded` + trả `RecordingHandle` riêng,
+    // `CaptureControl<Capturer, _>` trả về có cùng kiểu bất kể T là gì.
+    let (control, width, height) = match target {
+        RecordTarget::Display(display_id) => {
+            let monitor = resolve_monitor(display_id)?;
+            let width = monitor.width().map_err(|e| format!("Không đọc được kích thước màn hình: {e}"))?;
+            let height = monitor.height().map_err(|e| format!("Không đọc được kích thước màn hình: {e}"))?;
+            let settings = Settings::new(
+                monitor,
+                CursorCaptureSettings::Default,
+                DrawBorderSettings::Default,
+                SecondaryWindowSettings::Default,
+                min_interval,
+                DirtyRegionSettings::Default,
+                ColorFormat::Bgra8,
+                flags,
+            );
+            let control = Capturer::start_free_threaded(settings)
+                .map_err(|e| format!("Không bắt đầu quay (Windows.Graphics.Capture): {e}"))?;
+            (control, width, height)
+        }
+        RecordTarget::Window(window_id) => {
+            let window = resolve_window(window_id)?;
+            let (width, height) = window_capture_size(window.as_raw_hwnd())?;
+            let settings = Settings::new(
+                window,
+                CursorCaptureSettings::Default,
+                DrawBorderSettings::Default,
+                SecondaryWindowSettings::Default,
+                min_interval,
+                DirtyRegionSettings::Default,
+                ColorFormat::Bgra8,
+                flags,
+            );
+            let control = Capturer::start_free_threaded(settings)
+                .map_err(|e| format!("Không bắt đầu quay (Windows.Graphics.Capture): {e}"))?;
+            (control, width, height)
+        }
+        RecordTarget::Region { .. } => {
+            return Err("Quay theo vùng trên Windows chưa được hỗ trợ ở bản này".to_string())
+        }
+    };
 
     Ok((
         RecordingHandle {

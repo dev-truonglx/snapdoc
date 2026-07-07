@@ -98,6 +98,12 @@ dispatch2 = "0.3.1"
 windows-sys = { version = "0.59", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Com",
+    # DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) — đọc kích thước THẬT
+    # của 1 cửa sổ (không tính viền bóng đổ vô hình mà GetWindowRect trả về),
+    # dùng trong capture/windows_stream.rs để khởi tạo encoder đúng kích thước
+    # trước khi frame đầu tiên từ WGC tới.
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
 ] }
 # Quay video liên tục qua Windows.Graphics.Capture (capture/windows_stream.rs)
 # — crate cấp cao ẩn phần COM/WinRT, tương đương vai trò
