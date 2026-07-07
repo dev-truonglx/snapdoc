@@ -601,6 +601,9 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
     }
 
     crate::tray::show_recording_tray(app);
+    if let Err(e) = crate::windows::open_recording_indicator(app) {
+        eprintln!("[SnapDoc][record] Không hiện được popup đang quay: {e}");
+    }
     spawn_tray_ticker(app.clone());
     Ok(())
 }
@@ -721,6 +724,8 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
 
     crate::tray::hide_recording_tray(app);
     crate::windows::close_region_border(app);
+    #[cfg(target_os = "windows")]
+    crate::windows::close_recording_indicator(app);
 
     write_result?;
 

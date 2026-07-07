@@ -323,6 +323,63 @@ pub fn close_region_border(app: &AppHandle) {
     }
 }
 
+/// Popup nổi "đang quay" trên Windows — chấm đỏ + đồng hồ đếm mm:ss, bấm vào
+/// để dừng quay ngay (`commands::stop_recording`). Thay cho vai trò của
+/// `NSStatusItem.title` bên macOS (hiện text cạnh icon tray) — tray icon Win32
+/// (`NOTIFYICONDATA`) không có API tương đương, chỉ có tooltip khi hover, nên
+/// cần 1 cửa sổ riêng để hiện đồng hồ đếm luôn hiển thị. Nổi trên mọi cửa sổ
+/// khác + loại khỏi chính video đang quay qua `set_content_protected(true)`
+/// (WGC bỏ qua cửa sổ content-protected, cùng kỹ thuật `open_region_border`).
+#[cfg(target_os = "windows")]
+pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("recording-indicator") {
+        let _ = win.show();
+        return Ok(());
+    }
+
+    let win = WebviewWindowBuilder::new(app, "recording-indicator", url("recording-indicator"))
+        .title("SnapDoc — Đang quay")
+        .inner_size(148.0, 44.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .build()
+        .map_err(|e| format!("Không tạo được popup đang quay: {e}"))?;
+
+    place_top_center(&win);
+    let _ = win.set_content_protected(true);
+    let _ = win.show();
+    Ok(())
+}
+
+/// Đóng popup "đang quay" (nếu có) — gọi khi dừng quay. An toàn khi gọi dù
+/// chưa từng mở.
+#[cfg(target_os = "windows")]
+pub fn close_recording_indicator(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("recording-indicator") {
+        let _ = win.close();
+    }
+}
+
+/// Đặt cửa sổ ở giữa-đỉnh màn hình chính, cách mép trên 1 khoảng nhỏ (cho
+/// popup "đang quay") — cùng kỹ thuật `place_bottom_center` phía trên.
+#[cfg(target_os = "windows")]
+fn place_top_center(win: &tauri::WebviewWindow) {
+    if let Ok(Some(monitor)) = win.primary_monitor() {
+        let m_size = monitor.size();
+        let m_pos = monitor.position();
+        let scale = monitor.scale_factor();
+        if let Ok(win_size) = win.outer_size() {
+            let x = m_pos.x + ((m_size.width as i32 - win_size.width as i32) / 2);
+            let y = m_pos.y + (16.0 * scale) as i32;
+            let _ = win.set_position(PhysicalPosition::new(x, y));
+        }
+    }
+}
+
 /// Mở capture bar và emit event `set-capture-mode` với lastMode từ Rust state.
 /// Chỉ sync chế độ chụp (mode), KHÔNG override output — capture bar tự giữ
 /// defaultOutput từ settings. Dùng cho nút "New" trong editor.

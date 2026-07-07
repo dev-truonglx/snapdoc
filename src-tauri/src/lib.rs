@@ -122,6 +122,8 @@ pub fn run() {
             commands::peek_pending_recording,
             commands::confirm_recording_save,
             commands::confirm_recording_discard,
+            commands::stop_recording,
+            commands::recording_status,
             history::commands::list_history,
             history::commands::get_history_item,
             history::commands::delete_history_item,

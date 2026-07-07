@@ -590,9 +590,12 @@ pub fn finalize_scroll_capture(
 // "start" (hotkey — quay ngay màn hình chính, không qua overlay) + 1 lệnh mở
 // picker dùng CHUNG mode với nút "Chụp" (full/window/region — Phase 3, tái
 // dùng overlay chọn vùng có sẵn của tính năng chụp ảnh, xem
-// `flow::run_record_picker`) là những thứ duy nhất cần lộ ra IPC. Dừng quay
-// và đọc trạng thái chạy hoàn toàn phía Rust (tray icon + menu, xem tray.rs),
-// không qua JS nữa.
+// `flow::run_record_picker`) là những thứ duy nhất cần lộ ra IPC lúc BẮT ĐẦU
+// quay. Dừng quay/đọc trạng thái chủ yếu vẫn đi qua Rust thuần (tray icon +
+// ticker, xem tray.rs) — `stop_recording`/`recording_status` bên dưới chỉ
+// thêm 1 đường dừng/đọc trạng thái nữa cho popup "đang quay" trên Windows
+// (`windows::open_recording_indicator`), vì Win32 tray icon không có API
+// tương đương `NSStatusItem.title` để tự vẽ đồng hồ đếm cạnh icon.
 
 /// Bắt đầu quay toàn màn hình chính (macOS), KHÔNG qua overlay — dùng cho
 /// hotkey (lối tắt tức thời, không có UI để chọn phạm vi). `spawn_blocking`
@@ -634,6 +637,22 @@ pub async fn confirm_recording_discard(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || crate::record::confirm_recording_discard(&app))
         .await
         .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Dừng quay từ popup "đang quay" trên Windows (xem
+/// `windows::open_recording_indicator`) — trên macOS việc dừng vẫn chủ yếu đi
+/// qua tray icon (`tray.rs`), lệnh này chỉ thêm 1 đường dừng nữa, không thay
+/// thế đường cũ.
+#[tauri::command]
+pub fn stop_recording(app: AppHandle) -> Result<String, String> {
+    crate::record::stop_recording(&app)
+}
+
+/// Thời lượng đã quay (ms) — popup "đang quay" trên Windows poll lệnh này mỗi
+/// giây để hiện đồng hồ đếm (`None` nếu không có phiên quay nào).
+#[tauri::command]
+pub fn recording_status(app: AppHandle) -> Option<u64> {
+    crate::record::status(&app)
 }
 
 #[derive(serde::Deserialize)]

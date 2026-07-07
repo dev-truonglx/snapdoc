@@ -161,8 +161,9 @@ export const ipc = {
   openHistory: () => invoke<void>("open_history"),
   finishQuickCapture: (data: string, width: number, height: number, output: string) =>
     invoke<string | null>("finish_quick_capture", { data, width, height, output }),
-  // Quay màn hình — dừng quay/xem trạng thái giờ qua tray icon (menu bar),
-  // không qua IPC từ JS nữa (xem src-tauri/src/tray.rs).
+  // Quay màn hình — dừng quay/xem trạng thái chủ yếu vẫn qua tray icon (menu
+  // bar, xem src-tauri/src/tray.rs); `stopRecording`/`recordingStatus` bên
+  // dưới chỉ thêm 1 đường nữa cho popup "đang quay" trên Windows.
   /** Bắt đầu quay toàn màn hình chính NGAY, không qua overlay (dùng cho hotkey). */
   startRecording: () => invoke<void>("start_recording"),
   /** Mở overlay chọn phạm vi quay — dùng chung CaptureMode với nút "Chụp" ("full" | "window" | "region"). */
@@ -172,6 +173,10 @@ export const ipc = {
   peekPendingRecording: () => invoke<PendingRecording | null>("peek_pending_recording"),
   confirmRecordingSave: () => invoke<void>("confirm_recording_save"),
   confirmRecordingDiscard: () => invoke<void>("confirm_recording_discard"),
+  /** Dừng quay — dùng cho popup "đang quay" trên Windows (bấm vào để dừng). */
+  stopRecording: () => invoke<string>("stop_recording"),
+  /** Thời lượng đã quay (ms), `null` nếu không có phiên quay — popup "đang quay" poll mỗi giây. */
+  recordingStatus: () => invoke<number | null>("recording_status"),
 };
 
 export interface PendingRecording {
