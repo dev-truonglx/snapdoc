@@ -662,6 +662,21 @@ pub fn recording_status(app: AppHandle) -> Option<u64> {
     crate::record::status(&app)
 }
 
+/// Cắt bản quay đang chờ xác nhận ở `record-review` — xem
+/// `record::trim_pending_recording`. `spawn_blocking` bắt buộc: chạy ffmpeg
+/// re-encode + concat, có thể mất vài giây, không được chặn Tokio event loop
+/// / WebView2 message pump (cùng lý do đã sửa bug "Not Responding" ở
+/// `stop_recording` phía trên).
+#[tauri::command]
+pub async fn trim_pending_recording(
+    app: AppHandle,
+    ranges: Vec<(i64, i64)>,
+) -> Result<crate::record::PendingRecording, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::trim_pending_recording(&app, &ranges))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
 #[derive(serde::Deserialize)]
 pub struct StitchInstruction {
     #[serde(rename = "sliceIndex")]

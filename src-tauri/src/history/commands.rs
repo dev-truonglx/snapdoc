@@ -185,6 +185,46 @@ fn update_history_asset_sync(app: &AppHandle, id: &str, data: &str) -> Result<Hi
     get_history_item_sync(app, id)
 }
 
+/// Cắt 1 video đã lưu trong Library — sửa TẠI CHỖ (ghi đè `asset_path`, path
+/// không đổi), sinh lại thumbnail (frame ở giây thứ 0.5 cũ có thể đã nằm
+/// trong đoạn vừa xoá) và cập nhật `duration_ms`/`file_size`/`is_edited`.
+/// Theo đúng khung `update_history_asset_sync` (ảnh) nhưng thao tác trên file
+/// path thay vì base64 trong bộ nhớ — video có thể nặng hàng chục/trăm MB,
+/// không hợp để round-trip qua IPC dạng base64.
+fn trim_history_video_sync(app: &AppHandle, id: &str, keep_ranges_ms: &[(i64, i64)]) -> Result<HistoryRecord, String> {
+    let rec = get_history_item_sync(app, id)?;
+    if rec.media_type != "video" {
+        return Err("Chỉ video mới cắt được".to_string());
+    }
+
+    let asset_path = std::path::Path::new(&rec.asset_path);
+    let tmp_output = asset_path.with_extension("trimtmp.mp4");
+    crate::record::encoder::trim(asset_path, keep_ranges_ms, &tmp_output)?;
+    std::fs::rename(&tmp_output, asset_path)
+        .map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
+
+    // Lỗi sinh thumbnail KHÔNG chặn kết quả cắt — file video đã cắt xong và
+    // hợp lệ, chỉ ảnh thu nhỏ hiển thị tạm thời là ảnh cũ (giống cách
+    // `ingest_video` xử lý lỗi thumbnail).
+    if let Err(e) = super::video_thumbnail::generate(asset_path, std::path::Path::new(&rec.thumb_path)) {
+        eprintln!("[SnapDoc][history] Sinh lại thumbnail sau khi cắt thất bại: {e}");
+    }
+
+    let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
+    let file_size = std::fs::metadata(asset_path).ok().map(|m| m.len() as i64);
+
+    let st = state(app)?;
+    {
+        let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+        conn.execute(
+            "UPDATE history SET updated_at = ?1, duration_ms = ?2, file_size = ?3, is_edited = 1 WHERE id = ?4",
+            rusqlite::params![now_ms(), new_duration_ms, file_size, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    get_history_item_sync(app, id)
+}
+
 fn copy_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type == "video" {
@@ -271,6 +311,20 @@ pub async fn open_history_item_in_editor(app: AppHandle, id: String) -> Result<(
 #[tauri::command]
 pub async fn update_history_asset(app: AppHandle, id: String, data: String) -> Result<HistoryRecord, String> {
     tauri::async_runtime::spawn_blocking(move || update_history_asset_sync(&app, &id, &data))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Cắt 1 video đã lưu trong Library — xem `trim_history_video_sync`.
+/// `spawn_blocking` bắt buộc: chạy ffmpeg re-encode + concat, có thể mất vài
+/// giây (cùng lý do `commands::trim_pending_recording`/`stop_recording`).
+#[tauri::command]
+pub async fn trim_history_video(
+    app: AppHandle,
+    id: String,
+    ranges: Vec<(i64, i64)>,
+) -> Result<HistoryRecord, String> {
+    tauri::async_runtime::spawn_blocking(move || trim_history_video_sync(&app, &id, &ranges))
         .await
         .map_err(|e| format!("Task join error: {e}"))?
 }

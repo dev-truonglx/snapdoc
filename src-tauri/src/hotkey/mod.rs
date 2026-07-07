@@ -105,7 +105,24 @@ fn run_action(app: &AppHandle, action: &str) {
         }
         "record" => {
             let app = app.clone();
-            std::thread::spawn(move || crate::record::toggle(&app));
+            std::thread::spawn(move || {
+                if crate::record::status(&app).is_some() {
+                    if let Err(e) = crate::record::stop_recording(&app) {
+                        eprintln!("[SnapDoc] Dừng quay (phím tắt) thất bại: {e}");
+                    }
+                    return;
+                }
+                // Nhiều màn hình: mở overlay chọn quay màn hình nào (đúng
+                // hành vi mode "full" của nút "Quay" trong CaptureBar, xem
+                // `flow::run_record_picker`) — 1 màn hình thì quay thẳng
+                // luôn, không có gì để chọn nên bỏ qua overlay cho nhanh.
+                let monitor_count = xcap::Monitor::all().map(|m| m.len()).unwrap_or(1);
+                if monitor_count > 1 {
+                    flow::run_record_picker(&app, "full");
+                } else if let Err(e) = crate::record::start_recording(&app) {
+                    eprintln!("[SnapDoc] Bắt đầu quay (phím tắt) thất bại: {e}");
+                }
+            });
         }
         _ => {
             // Lấy defaultOutput từ settings để áp dụng cho mọi phím tắt chụp.

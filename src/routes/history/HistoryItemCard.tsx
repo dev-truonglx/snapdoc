@@ -47,7 +47,9 @@ export default function HistoryItemCard({ item, selected, onSelect, onOpenEditor
       <div style={thumbWrap}>
         {!broken ? (
           <img
-            src={convertFileSrc(item.thumbPath)}
+            // `?v=updatedAt`: thumbPath không đổi khi cắt video (ghi đè tại
+            // chỗ) — bust cache để hiện đúng thumbnail mới sau khi cắt.
+            src={`${convertFileSrc(item.thumbPath)}?v=${item.updatedAt}`}
             alt=""
             style={thumbImg}
             onError={() => setBroken(true)}

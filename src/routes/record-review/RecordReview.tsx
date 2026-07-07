@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ipc, type PendingRecording } from "../../lib/ipc";
+import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 
 /** `93500` → `"1:34"` — mm:ss. */
 function fmtDuration(ms: number): string {
@@ -19,12 +20,30 @@ export default function RecordReview() {
   const [pending, setPending] = useState<PendingRecording | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [trimming, setTrimming] = useState(false);
+  // `pending.path` KHÔNG đổi sau khi cắt (ghi đè tại chỗ) — bump nonce này để
+  // đổi `key` của VideoTrimmer/video, buộc webview tải lại nội dung mới thay
+  // vì dùng bản đã cache theo URL cũ.
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   useEffect(() => {
     ipc.peekPendingRecording()
       .then((p) => (p ? setPending(p) : setNotFound(true)))
       .catch(() => setNotFound(true));
   }, []);
+
+  const doTrim = async (ranges: [number, number][]) => {
+    setTrimming(true);
+    try {
+      const updated = await ipc.trimPendingRecording(ranges);
+      setPending(updated);
+      setReloadNonce((n) => n + 1);
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setTrimming(false);
+    }
+  };
 
   const doSave = async () => {
     setBusy(true);
@@ -51,7 +70,13 @@ export default function RecordReview() {
     <div style={card}>
       <div style={previewWrap}>
         {pending ? (
-          <video key={pending.path} src={convertFileSrc(pending.path)} style={video} controls autoPlay />
+          <VideoTrimmer
+            key={`${pending.path}-${reloadNonce}`}
+            src={`${convertFileSrc(pending.path)}?v=${reloadNonce}`}
+            durationMs={pending.durationMs}
+            busy={trimming}
+            onApply={doTrim}
+          />
         ) : (
           <div style={placeholder}>{notFound ? "Không tìm thấy bản quay để xem lại" : "Đang tải…"}</div>
         )}
@@ -88,13 +113,12 @@ const previewWrap: React.CSSProperties = {
   minHeight: 0,
   background: "#000",
   display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
+  padding: 10,
+  boxSizing: "border-box",
 };
 
-const video: React.CSSProperties = { width: "100%", height: "100%", objectFit: "contain" };
-
 const placeholder: React.CSSProperties = {
+  margin: "auto",
   color: "var(--text-dim)",
   fontSize: 13,
 };

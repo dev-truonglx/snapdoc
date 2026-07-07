@@ -993,8 +993,13 @@ pub fn open_record_review(app: &AppHandle) -> Result<(), String> {
 
     let win = WebviewWindowBuilder::new(app, "record-review", url("record-review"))
         .title("SnapDoc — Xem lại bản quay")
-        .inner_size(480.0, 420.0)
-        .resizable(false)
+        // 640×620 (thay vì 480×420 cũ) — đủ chỗ ngang cho timeline cắt video
+        // (VideoTrimmer, xem RecordReview.tsx) bên dưới phần preview.
+        // resizable + min_inner_size để người dùng có thể kéo rộng ra thao
+        // tác cắt dễ hơn với video dài (cùng khuôn `open_editor`/`open_history`).
+        .inner_size(640.0, 620.0)
+        .min_inner_size(560.0, 480.0)
+        .resizable(true)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)

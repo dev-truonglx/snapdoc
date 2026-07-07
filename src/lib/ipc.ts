@@ -177,7 +177,20 @@ export const ipc = {
   stopRecording: () => invoke<string>("stop_recording"),
   /** Thời lượng đã quay (ms), `null` nếu không có phiên quay — popup "đang quay" poll mỗi giây. */
   recordingStatus: () => invoke<number | null>("recording_status"),
+  /** Cắt bản quay đang chờ xác nhận (trước khi Lưu) — `ranges` là các đoạn GIỮ LẠI (ms). */
+  trimPendingRecording: (ranges: [number, number][]) =>
+    invoke<PendingRecording>("trim_pending_recording", { ranges: roundRanges(ranges) }),
+  /** Cắt 1 video đã lưu trong History — xem `trimPendingRecording`. */
+  trimHistoryVideo: (id: string, ranges: [number, number][]) =>
+    invoke<HistoryItem>("trim_history_video", { id, ranges: roundRanges(ranges) }),
 };
+
+/** Rust nhận `Vec<(i64, i64)>` — `ranges` tính từ tỉ lệ pixel kéo-thả
+ * (`VideoTrimmer.tsx`) luôn ra số thập phân (JS không phân biệt int/float),
+ * làm tròn ở biên IPC để tránh lỗi deserialize "expected i64". */
+function roundRanges(ranges: [number, number][]): [number, number][] {
+  return ranges.map(([s, e]) => [Math.round(s), Math.round(e)]);
+}
 
 export interface PendingRecording {
   path: string;

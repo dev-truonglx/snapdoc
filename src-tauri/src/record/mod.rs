@@ -776,6 +776,41 @@ pub fn peek_pending_recording(app: &AppHandle) -> Option<PendingRecording> {
     app.state::<PendingRecordingState>().0.lock().ok()?.clone()
 }
 
+/// Cắt bản quay đang chờ xác nhận (trước khi Lưu/Xoá ở `record-review`) —
+/// ghi đè TẠI CHỖ (`path` giữ nguyên, chỉ thay nội dung file) rồi cập nhật
+/// `duration_ms` trong `PendingRecordingState`. `confirm_recording_save`/
+/// `confirm_recording_discard` không cần biết gì về việc này — chúng luôn
+/// thao tác trên `pending.path` hiện tại nên tự động thấy nội dung đã cắt.
+/// `keep_ranges_ms`: danh sách đoạn GIỮ LẠI (ms), xem `encoder::trim`.
+pub fn trim_pending_recording(app: &AppHandle, keep_ranges_ms: &[(i64, i64)]) -> Result<PendingRecording, String> {
+    let pending_state = app.state::<PendingRecordingState>();
+    let path = {
+        let guard = pending_state.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
+        guard
+            .as_ref()
+            .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?
+            .path
+            .clone()
+    };
+
+    // Không giữ lock trong lúc chạy ffmpeg (có thể mất vài giây) — chỉ khoá
+    // lại ở bước đọc path (trên) và bước ghi duration_ms (dưới).
+    let input_path = PathBuf::from(&path);
+    let tmp_output = input_path.with_extension("trimtmp.mp4");
+    encoder::trim(&input_path, keep_ranges_ms, &tmp_output)?;
+    std::fs::rename(&tmp_output, &input_path)
+        .map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
+
+    let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
+
+    let mut guard = pending_state.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
+    let pending = guard
+        .as_mut()
+        .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
+    pending.duration_ms = new_duration_ms;
+    Ok(pending.clone())
+}
+
 /// Người dùng chọn "Lưu" ở `record-review`: ingest bản quay đang chờ vào
 /// History rồi đóng cửa sổ. Lỗi ingest (thumbnail/DB) vẫn coi là thành công
 /// đối với người dùng — file mp4 đã tồn tại sẵn trên đĩa từ trước, không mất.
@@ -817,24 +852,6 @@ pub fn confirm_recording_discard(app: &AppHandle) -> Result<(), String> {
     let result = std::fs::remove_file(&pending.path).map_err(|e| format!("Không xoá được file: {e}"));
     crate::windows::close_record_review(app);
     result
-}
-
-/// Bật/tắt quay — dùng cho global hotkey (không cần biết trạng thái trước).
-pub fn toggle(app: &AppHandle) {
-    let is_active = app
-        .state::<RecordingState>()
-        .0
-        .lock()
-        .map(|g| g.is_some())
-        .unwrap_or(false);
-
-    if is_active {
-        if let Err(e) = stop_recording(app) {
-            eprintln!("[SnapDoc][record] Dừng quay thất bại: {e}");
-        }
-    } else if let Err(e) = start_recording(app) {
-        eprintln!("[SnapDoc][record] Bắt đầu quay thất bại: {e}");
-    }
 }
 
 /// Thời gian đã quay (ms) nếu đang có phiên quay — cửa sổ chỉ báo poll hàm

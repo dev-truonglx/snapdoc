@@ -3,6 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { ipc } from "../../lib/ipc";
 import { useHistory } from "./useHistoryStore";
 import { MODE_LABEL } from "./HistoryItemCard";
+import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 
 interface Props {
   onOpenEditor: (id: string) => void;
@@ -40,10 +41,13 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [trimOpen, setTrimOpen] = useState(false);
+  const [trimming, setTrimming] = useState(false);
 
   useEffect(() => {
     setRenaming(false);
     setTitleDraft(item?.title ?? "");
+    setTrimOpen(false);
   }, [item?.id]);
 
   if (!item) {
@@ -99,13 +103,33 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
 
   const doReveal = () => ipc.revealHistoryItem(item.id).catch(() => {});
 
+  const doTrimApply = async (ranges: [number, number][]) => {
+    setTrimming(true);
+    try {
+      const updated = await ipc.trimHistoryVideo(item.id, ranges);
+      patchItem(item.id, updated);
+      setTrimOpen(false);
+    } catch (e) {
+      alert(String(e));
+    } finally {
+      setTrimming(false);
+    }
+  };
+
   return (
     <div style={panel}>
       <div style={previewWrap}>
         {isVideo ? (
-          // key=id: buộc React tạo lại <video> khi đổi item chọn — tránh giữ
-          // nguyên vị trí phát/nguồn cũ của item trước đó.
-          <video key={item.id} src={convertFileSrc(item.assetPath)} style={previewImg} controls />
+          // key gồm cả `updatedAt`: buộc React tạo lại <video> khi đổi item
+          // chọn LẪN khi asset bị ghi đè tại chỗ (cắt video — path không đổi,
+          // xem `?v=` bust cache bên dưới) — tránh giữ nguyên vị trí phát
+          // hoặc nội dung cache cũ.
+          <video
+            key={`${item.id}-${item.updatedAt}`}
+            src={`${convertFileSrc(item.assetPath)}?v=${item.updatedAt}`}
+            style={previewImg}
+            controls
+          />
         ) : (
           <img src={convertFileSrc(item.assetPath)} alt="" style={previewImg} />
         )}
@@ -146,6 +170,9 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
             {!isVideo && (
               <button style={primaryBtn} disabled={busy} onClick={() => onOpenEditor(item.id)}>Mở Editor</button>
             )}
+            {isVideo && (
+              <button style={primaryBtn} disabled={busy} onClick={() => setTrimOpen(true)}>Cắt video</button>
+            )}
             <button style={secondaryBtn} disabled={busy} onClick={doReveal}>Hiện trong Finder/Explorer</button>
             <button style={dangerBtn} disabled={busy} onClick={doDelete}>Xoá (chuyển vào Trash)</button>
           </>
@@ -156,6 +183,22 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
           </>
         )}
       </div>
+
+      {trimOpen && isVideo && (
+        <div style={modalBackdrop} onClick={() => !trimming && setTrimOpen(false)}>
+          <div style={modalCard} onClick={(e) => e.stopPropagation()}>
+            <div style={modalTitle}>Cắt video</div>
+            <VideoTrimmer
+              key={`${item.id}-${item.updatedAt}`}
+              src={`${convertFileSrc(item.assetPath)}?v=${item.updatedAt}`}
+              durationMs={item.durationMs ?? 0}
+              busy={trimming}
+              onApply={doTrimApply}
+            />
+            <button style={secondaryBtn} disabled={trimming} onClick={() => setTrimOpen(false)}>Đóng</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -234,3 +277,29 @@ const dangerBtn: React.CSSProperties = {
   color: "#fca5a5",
   fontSize: 13,
 };
+
+const modalBackdrop: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(0,0,0,0.6)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  zIndex: 100,
+};
+
+const modalCard: React.CSSProperties = {
+  width: "min(720px, 92vw)",
+  height: "min(600px, 88vh)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+  background: "var(--bg-elevated)",
+  border: "1px solid var(--border)",
+  borderRadius: 14,
+  padding: 14,
+  boxSizing: "border-box",
+  boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+};
+
+const modalTitle: React.CSSProperties = { fontSize: 14, fontWeight: 600, flexShrink: 0 };
