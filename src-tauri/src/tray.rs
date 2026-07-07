@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle,
 };
@@ -42,6 +42,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "region" => dispatch(app, "region"),
             "window" => dispatch(app, "window"),
             "scroll" => dispatch(app, "scroll"),
+            "record_full"   => dispatch_record(app, "full"),
+            "record_region" => dispatch_record(app, "region"),
+            "record_window" => dispatch_record(app, "window"),
             "quick" => {
                 let app = app.clone();
                 std::thread::spawn(move || flow::start_quick(&app));
@@ -91,12 +94,26 @@ fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<t
     let sep1   = PredefinedMenuItem::separator(app)?;
     let sep2   = PredefinedMenuItem::separator(app)?;
 
+    // Menu con "Quay màn hình" — 1 mục duy nhất, xổ ra 3 lựa chọn phạm vi quay
+    // (giống hệt 3 lựa chọn của nút "Quay" trong CaptureBar). Không có
+    // accelerator riêng cho từng lựa chọn — phím tắt "Quay màn hình" chung
+    // (xem `hotkey::run_action`) vẫn hoạt động song song, độc lập với menu này.
+    let record_full   = MenuItem::with_id(app, "record_full",   "Toàn màn hình", true, None::<&str>)?;
+    let record_region = MenuItem::with_id(app, "record_region", "Vùng chọn",     true, None::<&str>)?;
+    let record_window = MenuItem::with_id(app, "record_window", "Cửa sổ",        true, None::<&str>)?;
+    let record_menu = Submenu::with_items(
+        app,
+        "Quay màn hình",
+        true,
+        &[&record_full, &record_region, &record_window],
+    )?;
+
     if show_restart {
         let restart = MenuItem::with_id(app, "restart_update", "↺ Khởi động lại để cập nhật", true, None::<&str>)?;
         let sep3    = PredefinedMenuItem::separator(app)?;
-        Menu::with_items(app, &[&restart, &sep3, &quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &history, &settings, &sep2, &quit])
+        Menu::with_items(app, &[&restart, &sep3, &quick, &all, &full, &region, &window, &scroll, &record_menu, &sep1, &bar, &history, &settings, &sep2, &quit])
     } else {
-        Menu::with_items(app, &[&quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &history, &settings, &sep2, &quit])
+        Menu::with_items(app, &[&quick, &all, &full, &region, &window, &scroll, &record_menu, &sep1, &bar, &history, &settings, &sep2, &quit])
     }
 }
 
@@ -266,4 +283,13 @@ fn dispatch(app: &AppHandle, mode: &str) {
         let output = crate::hotkey::default_output(&app);
         flow::run(&app, &mode, &output);
     });
+}
+
+/// Mở overlay chọn phạm vi QUAY (không phải chụp ảnh) — dùng cho menu con
+/// "Quay màn hình" trên tray. Tái dùng nguyên `flow::run_record_picker`, cùng
+/// hàm mà nút "Quay" trong CaptureBar gọi qua IPC `start_record_picker`.
+fn dispatch_record(app: &AppHandle, mode: &str) {
+    let app = app.clone();
+    let mode = mode.to_string();
+    std::thread::spawn(move || flow::run_record_picker(&app, &mode));
 }
