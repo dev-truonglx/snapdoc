@@ -262,6 +262,67 @@ pub fn open_scroll_control(
     Ok(())
 }
 
+/// Mở overlay hiển thị trong suốt quá trình quay 1 VÙNG màn hình — phủ TOÀN
+/// BỘ màn hình `display_id`, làm mờ phần NGOÀI vùng chọn (cùng hiệu ứng
+/// "spotlight" `box-shadow` mà `Overlay.tsx` dùng lúc chọn vùng chụp ảnh) để
+/// người dùng thấy rõ chính xác vùng đang ghi hình — độc lập với viền vàng hệ
+/// thống của Windows (WGC quay nguyên màn hình rồi crop phần mềm, xem
+/// `capture::windows_stream::RecordTarget::Region`, nên viền hệ thống bao
+/// quanh CẢ màn hình chứ không khớp vùng đã chọn). `x,y,w,h` cùng đơn vị đã
+/// truyền cho `record::start_recording_region` (points trên macOS, pixel vật
+/// lý trên Windows) — quy về points local theo góc màn hình rồi truyền cho
+/// frontend qua query string để vẽ đúng vị trí "lỗ" trong suốt.
+pub fn open_region_border(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("region-border") {
+        let _ = win.close();
+    }
+
+    let m = crate::capture::monitor::by_id(display_id)?;
+    let m_x = m.x().map_err(|e| e.to_string())? as f64;
+    let m_y = m.y().map_err(|e| e.to_string())? as f64;
+
+    #[cfg(target_os = "windows")]
+    let (lx, ly, lw, lh, m_w, m_h) = {
+        let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
+        let m_w = m.width().map_err(|e| e.to_string())? as f64 / scale;
+        let m_h = m.height().map_err(|e| e.to_string())? as f64 / scale;
+        (x / scale, y / scale, w / scale, h / scale, m_w, m_h)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (lx, ly, lw, lh, m_w, m_h) = {
+        let m_w = m.width().map_err(|e| e.to_string())? as f64;
+        let m_h = m.height().map_err(|e| e.to_string())? as f64;
+        (x, y, w, h, m_w, m_h)
+    };
+
+    let url_str = format!("region-border&rx={lx}&ry={ly}&rw={lw}&rh={lh}");
+    let border_win = WebviewWindowBuilder::new(app, "region-border", url(&url_str))
+        .title("SnapDoc — Region Border")
+        .inner_size(m_w, m_h)
+        .position(m_x, m_y)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .build()
+        .map_err(|e| format!("Không tạo được khung viền vùng quay: {e}"))?;
+
+    let _ = border_win.set_ignore_cursor_events(true);
+    // Loại overlay khỏi chính video đang quay (SCK trên macOS / WGC trên
+    // Windows bỏ qua cửa sổ content-protected).
+    let _ = border_win.set_content_protected(true);
+    Ok(())
+}
+
+/// Đóng khung viền vùng quay (nếu có) — gọi khi dừng quay. An toàn khi gọi dù
+/// chưa từng mở (no-op) hoặc không phải phiên quay theo vùng.
+pub fn close_region_border(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("region-border") {
+        let _ = win.close();
+    }
+}
+
 /// Mở capture bar và emit event `set-capture-mode` với lastMode từ Rust state.
 /// Chỉ sync chế độ chụp (mode), KHÔNG override output — capture bar tự giữ
 /// defaultOutput từ settings. Dùng cho nút "New" trong editor.

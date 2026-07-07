@@ -230,7 +230,11 @@ pub fn start_recording_region(
     start_with_target(
         app,
         crate::capture::mac_stream::RecordTarget::Region { display_id, x, y, w, h },
-    )
+    )?;
+    if let Err(e) = crate::windows::open_region_border(app, display_id, x, y, w, h) {
+        eprintln!("[SnapDoc][record] Không hiện được khung viền vùng quay: {e}");
+    }
+    Ok(())
 }
 
 /// Quay 1 cửa sổ đã chọn qua overlay.
@@ -459,7 +463,11 @@ pub fn start_recording_region(
     start_with_target(
         app,
         crate::capture::windows_stream::RecordTarget::Region { display_id, x, y, w, h },
-    )
+    )?;
+    if let Err(e) = crate::windows::open_region_border(app, display_id, x, y, w, h) {
+        eprintln!("[SnapDoc][record] Không hiện được khung viền vùng quay: {e}");
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -635,6 +643,7 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
         .map_err(|_| "Luồng ghi video bị panic".to_string())?;
 
     crate::tray::hide_recording_tray(app);
+    crate::windows::close_region_border(app);
 
     write_result?;
 

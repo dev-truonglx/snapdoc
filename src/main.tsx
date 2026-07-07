@@ -9,6 +9,7 @@ import Settings from "./routes/settings/Settings";
 import UpdateWindow from "./routes/update/UpdateWindow";
 import ScrollControl from "./routes/scroll-control/ScrollControl";
 import ScrollBorder from "./routes/scroll-border/ScrollBorder";
+import RegionBorder from "./routes/region-border/RegionBorder";
 import HistoryWindow from "./routes/history/HistoryWindow";
 import RecordReview from "./routes/record-review/RecordReview";
 
@@ -23,6 +24,7 @@ const routes: Record<string, React.ComponentType> = {
   update: UpdateWindow,
   "scroll-control": ScrollControl,
   "scroll-border": ScrollBorder,
+  "region-border": RegionBorder,
   history: HistoryWindow,
   "record-review": RecordReview,
 };
