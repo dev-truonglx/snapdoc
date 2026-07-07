@@ -22,8 +22,9 @@
 //! này.
 
 pub mod encoder;
-#[cfg(target_os = "macos")]
 mod audio_mic;
+#[cfg(target_os = "windows")]
+mod audio_wasapi;
 
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
@@ -60,11 +61,15 @@ fn audio_source_setting(app: &AppHandle) -> AudioSource {
 struct ActiveAudio {
     /// `Some` khi nguồn là mic — cần dừng TRƯỚC `stream.stop()` ở
     /// `stop_recording` để đóng kênh PCM, cho `writer` thấy channel đóng mà
-    /// tự kết thúc (đóng file). Audio hệ thống dùng chung sender với video
-    /// (`RecordingHandle`) nên tự đóng theo `stream.stop()`, không cần field
-    /// riêng ở đây.
-    #[cfg(target_os = "macos")]
+    /// tự kết thúc (đóng file). Audio hệ thống trên macOS dùng chung sender
+    /// với video (`RecordingHandle`) nên tự đóng theo `stream.stop()`, không
+    /// cần field riêng; audio hệ thống trên Windows là 1 capture ĐỘC LẬP
+    /// (WASAPI loopback qua `audio_wasapi.rs`) nên cần field riêng bên dưới.
     mic: Option<audio_mic::MicCapture>,
+    /// `Some` khi nguồn là audio hệ thống TRÊN WINDOWS — xem giải thích ở
+    /// field `mic` phía trên.
+    #[cfg(target_os = "windows")]
+    system_audio: Option<audio_wasapi::SystemAudioCapture>,
     writer: std::thread::JoinHandle<()>,
     raw_path: PathBuf,
     sample_rate: u32,
@@ -179,7 +184,6 @@ pub fn allow_asset_scope_at_startup(app: &AppHandle) {
 /// tiếp trong lúc quay nên `file.write_all` không bao giờ bị chặn bởi ffmpeg
 /// hay bất kỳ ai khác (khác hẳn hướng fifo cũ). Ghép vào video xảy ra SAU
 /// khi dừng quay (xem `encoder::mux_audio`, `stop_recording`).
-#[cfg(target_os = "macos")]
 fn spawn_pcm_file_writer(path: PathBuf, rx: Receiver<Vec<u8>>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use std::io::Write;
@@ -486,15 +490,86 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
         crate::capture::windows_stream::RecordTarget::Window(_) => "window",
     };
 
-    // Giai đoạn 1 (plan Phase 5): chưa hỗ trợ audio trên Windows — luôn quay
-    // không tiếng, bỏ qua setting `recordAudioSource`. Sẽ nối vào
-    // `audio_mic`/`audio_wasapi` ở giai đoạn 5/6.
+    // Giai đoạn 6 (plan Phase 5): audio hệ thống trên Windows dùng WASAPI
+    // loopback qua `audio_wasapi.rs` — ĐỘC LẬP với WGC (khác macOS, nơi audio
+    // hệ thống lấy chung sender với video từ `mac_stream`), giống hệt cách
+    // mic đã là 1 capture riêng từ trước.
+    let audio_source = audio_source_setting(app);
+
     let (stream, frame_rx, _system_audio_rx) =
         crate::capture::windows_stream::start(target, FPS, false)?;
     let (width, height) = (stream.width, stream.height);
 
-    let output_path = new_output_path(app)?;
-    let mut encoder = encoder::Encoder::start(&output_path, width, height, FPS)?;
+    // Chuẩn hoá về ĐÚNG 1 nguồn PCM (mic hoặc audio hệ thống) — lỗi lúc mở
+    // thiết bị (vd không có quyền micro, hoặc cpal không mở được loopback)
+    // không nên làm hỏng cả phiên quay: log rồi tiếp tục quay KHÔNG audio,
+    // còn hơn để người dùng mất trắng bản quay (giống hệt lý do bên macOS).
+    enum AudioCapture {
+        Mic(audio_mic::MicCapture),
+        System(audio_wasapi::SystemAudioCapture),
+    }
+    struct AudioProducer {
+        rx: Receiver<Vec<u8>>,
+        sample_rate: u32,
+        channels: u16,
+        capture: AudioCapture,
+    }
+    let audio_producer: Option<AudioProducer> = match audio_source {
+        AudioSource::Mic => match audio_mic::start() {
+            Ok((mic, rx, sample_rate, channels)) => {
+                Some(AudioProducer { rx, sample_rate, channels: channels as u16, capture: AudioCapture::Mic(mic) })
+            }
+            Err(e) => {
+                eprintln!("[SnapDoc][record] Không ghi được mic (vẫn tiếp tục quay không audio): {e}");
+                None
+            }
+        },
+        AudioSource::System => match audio_wasapi::start() {
+            Ok((sys, rx, sample_rate, channels)) => {
+                Some(AudioProducer { rx, sample_rate, channels, capture: AudioCapture::System(sys) })
+            }
+            Err(e) => {
+                eprintln!("[SnapDoc][record] Không ghi được audio hệ thống (vẫn tiếp tục quay không audio): {e}");
+                None
+            }
+        },
+        AudioSource::Off => None,
+    };
+
+    let (video_path, output_path, audio) = match audio_producer {
+        Some(producer) => {
+            let tmp_dir = std::env::temp_dir().join(format!("snapdoc-rec-audio-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&tmp_dir)
+                .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
+            let raw_path = tmp_dir.join("audio.pcm");
+            let video_tmp_path = tmp_dir.join("video.mp4");
+            let writer = spawn_pcm_file_writer(raw_path.clone(), producer.rx);
+            let final_path = new_output_path(app)?;
+            let (mic, system_audio) = match producer.capture {
+                AudioCapture::Mic(m) => (Some(m), None),
+                AudioCapture::System(s) => (None, Some(s)),
+            };
+            (
+                video_tmp_path,
+                final_path,
+                Some(ActiveAudio {
+                    mic,
+                    system_audio,
+                    writer,
+                    raw_path,
+                    sample_rate: producer.sample_rate,
+                    channels: producer.channels,
+                    tmp_dir,
+                }),
+            )
+        }
+        None => {
+            let final_path = new_output_path(app)?;
+            (final_path.clone(), final_path, None)
+        }
+    };
+
+    let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
 
     let writer = std::thread::spawn(move || -> Result<(), String> {
         while let Ok(frame) = frame_rx.recv() {
@@ -515,8 +590,8 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
         *guard = Some(ActiveRecording {
             stream,
             writer,
-            audio: None,
-            video_path: output_path.clone(),
+            audio,
+            video_path,
             output_path,
             started_at: Instant::now(),
             width,
@@ -612,18 +687,20 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
     // tính TRƯỚC khi `stream.stop()` tiêu thụ field `stream` (partial move).
     let duration_ms = active.started_at.elapsed().as_millis() as i64;
 
-    // Dừng mic (nếu nguồn là mic) TRƯỚC `stream.stop()` — đóng kênh PCM để
-    // `spawn_pcm_file_writer` thấy channel đóng mà tự kết thúc (đóng file).
-    // Audio hệ thống tự đóng theo `stream.stop()` bên dưới (chung sender).
-    #[cfg(target_os = "macos")]
+    // Dừng mic/audio hệ thống (Windows) TRƯỚC `stream.stop()` — đóng kênh PCM
+    // để `spawn_pcm_file_writer` thấy channel đóng mà tự kết thúc (đóng
+    // file). Audio hệ thống trên macOS tự đóng theo `stream.stop()` bên dưới
+    // (chung sender với video, không có field riêng ở đây).
     let audio = active.audio.map(|mut a| {
         if let Some(mic) = a.mic.take() {
             mic.stop();
         }
+        #[cfg(target_os = "windows")]
+        if let Some(sys) = a.system_audio.take() {
+            sys.stop();
+        }
         a
     });
-    #[cfg(not(target_os = "macos"))]
-    let audio = active.audio;
 
     #[cfg(target_os = "macos")]
     active.stream.stop()?;
