@@ -345,9 +345,22 @@ pub async fn reveal_history_item(app: AppHandle, id: String) -> Result<(), Strin
         .map_err(|e| format!("Task join error: {e}"))?
 }
 
+/// Mở cửa sổ History/Library — gọi từ Editor (nút "Xem tất cả").
+///
+/// Trên Windows, `WebviewWindowBuilder::build()` dispatch một message tới
+/// event loop và block chờ kết quả; nếu gọi trực tiếp trên IPC thread (vốn
+/// nested trong callback WebMessageReceived của webview Editor đang chạy
+/// trên cùng thread với event loop chính) thì sẽ deadlock toàn bộ Win32
+/// message pump — mọi cửa sổ treo trắng, app không đóng được. Vì cửa sổ
+/// "history" không được pre-warm như "editor"/"thumbnail", build() ở đây
+/// luôn chạy live lần đầu tiên nên bắt buộc phải tách sang thread riêng,
+/// giống pattern đã dùng cho open_capture_bar_for_new.
 #[tauri::command]
 pub fn open_history(app: AppHandle) -> Result<(), String> {
-    windows::open_history(&app)
+    std::thread::spawn(move || {
+        let _ = windows::open_history(&app);
+    });
+    Ok(())
 }
 
 /// Hoàn tất Quick Capture (copy/save ảnh đã flatten annotation) + ingest vào
