@@ -31,6 +31,10 @@ pub struct PendingCapture {
     pub output: String,
     /// DPI scale thật của màn hình nguồn (1.0 = normal, 2.0 = Retina 2×).
     pub scale_factor: f64,
+    /// Id bản ghi History tương ứng (nếu đã ingest thành công) — Editor dùng
+    /// để Save ghi đè tại chỗ đúng record thay vì chỉ save-as thông thường.
+    #[serde(default)]
+    pub history_id: Option<String>,
 }
 
 /// Chế độ chụp + output gần nhất — dùng cho nút "New" ở editor.
@@ -78,4 +82,7 @@ pub struct AppState {
     pub editor_seq: AtomicU64,
     /// Bộ đệm lưu các lát cắt (slices) của tính năng chụp cuộn.
     pub scroll_slices: Mutex<Vec<image::RgbaImage>>,
+    /// Lỗi đăng ký global shortcut lúc khởi động (nếu có) — Settings query lúc
+    /// mount để hiện banner cảnh báo, thay vì chỉ `eprintln!` không ai thấy.
+    pub hotkey_warning: Mutex<Option<String>>,
 }

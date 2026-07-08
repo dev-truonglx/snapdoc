@@ -724,7 +724,7 @@ pub fn on_editor_closed(app: &AppHandle) {
     // Không tính overlay, thumbnail, scroll-control vì chúng tạm thời/phụ trợ.
     let has_visible = app.webview_windows().values().any(|w| {
         let label = w.label();
-        (label.starts_with("editor") || label == "settings" || label == "capture-bar")
+        (label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history")
             && w.is_visible().unwrap_or(false)
     });
 
@@ -741,12 +741,40 @@ pub fn on_editor_closed(app: &AppHandle) {
         // Windows: ẩn icon trên taskbar nếu không còn cửa sổ "thật" nào mở
         if !has_visible {
             for (label, win) in app.webview_windows() {
-                if label.starts_with("editor") || label == "settings" || label == "capture-bar" {
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" {
                     let _ = win.set_skip_taskbar(true);
                 }
             }
         }
     }
+}
+
+/// History/Library — cửa sổ browse capture đã lưu (theo đúng pattern `open_settings`).
+pub fn open_history(app: &AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+
+    if let Some(win) = app.get_webview_window("history") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        #[cfg(target_os = "windows")]
+        let _ = win.set_skip_taskbar(false);
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, "history", url("history"))
+        .title("SnapDoc — Library")
+        .inner_size(1024.0, 680.0)
+        .min_inner_size(720.0, 480.0)
+        .resizable(true)
+        .center()
+        .skip_taskbar(false)
+        .build()
+        .map_err(|e| format!("Không tạo được cửa sổ History: {e}"))?;
+    Ok(())
 }
 
 

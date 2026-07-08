@@ -127,9 +127,9 @@ export default function CaptureBar() {
       }
       if (e.key === "Enter") {
         if (modeRef.current === "all") {
-          ipc.captureAllScreens(outputRef.current);
+          ipc.captureAllScreens(outputRef.current).catch((err) => alert(String(err)));
         } else {
-          ipc.captureNow(modeRef.current, outputRef.current);
+          ipc.captureNow(modeRef.current, outputRef.current).catch((err) => alert(String(err)));
         }
       }
     };
@@ -170,9 +170,9 @@ export default function CaptureBar() {
 
   const doCapture = () => {
     if (mode === "all") {
-      ipc.captureAllScreens(output);
+      ipc.captureAllScreens(output).catch((e) => alert(String(e)));
     } else {
-      ipc.captureNow(mode, output);
+      ipc.captureNow(mode, output).catch((e) => alert(String(e)));
     }
   };
 
@@ -189,7 +189,7 @@ export default function CaptureBar() {
             {/* Chụp nhanh — hành động chạy NGAY (không phải chế độ để chọn):
                 kéo vùng rồi chú thích tại chỗ. Không đụng state mode/output. */}
             <button
-              onClick={() => ipc.startQuick()}
+              onClick={() => ipc.startQuick().catch((e) => alert(String(e)))}
               style={quickModeBtn}
               title="Chụp nhanh — chọn vùng rồi chú thích ngay tại chỗ"
             >

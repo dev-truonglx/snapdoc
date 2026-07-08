@@ -51,6 +51,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "settings" => {
                 let _ = windows::open_settings(app);
             }
+            "history" => {
+                let _ = windows::open_history(app);
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -81,6 +84,7 @@ fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<t
     let window = MenuItem::with_id(app, "window", "Chụp cửa sổ",          true, sc("window").as_deref())?;
     let scroll = MenuItem::with_id(app, "scroll", "Chụp cuộn",            true, sc("scroll").as_deref())?;
     let bar    = MenuItem::with_id(app, "bar",    "Mở thanh chụp…",       true, sc("bar").as_deref())?;
+    let history = MenuItem::with_id(app, "history", "Thư viện (History)…", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Cài đặt…",         true, None::<&str>)?;
     let quit   = MenuItem::with_id(app, "quit",   "Thoát SnapDoc",         true, None::<&str>)?;
     let sep1   = PredefinedMenuItem::separator(app)?;
@@ -89,9 +93,9 @@ fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<t
     if show_restart {
         let restart = MenuItem::with_id(app, "restart_update", "↺ Khởi động lại để cập nhật", true, None::<&str>)?;
         let sep3    = PredefinedMenuItem::separator(app)?;
-        Menu::with_items(app, &[&restart, &sep3, &quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &settings, &sep2, &quit])
+        Menu::with_items(app, &[&restart, &sep3, &quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &history, &settings, &sep2, &quit])
     } else {
-        Menu::with_items(app, &[&quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &settings, &sep2, &quit])
+        Menu::with_items(app, &[&quick, &all, &full, &region, &window, &scroll, &sep1, &bar, &history, &settings, &sep2, &quit])
     }
 }
 

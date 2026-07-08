@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import Toolbar from "./Toolbar";
+import HistoryStrip from "./HistoryStrip";
 import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
 import { useEditor } from "../../features/annotation/store";
 import { copyToClipboard, saveToFile } from "../../features/output/useOutput";
@@ -31,6 +32,7 @@ export default function Editor() {
       imgH: p.height,
       scaleFactor: p.scale_factor ?? 1,
       annotations: [],
+      historyId: p.history_id,
     });
   };
 
@@ -106,6 +108,15 @@ export default function Editor() {
     if (!url) return;
     setBusy(true);
     try {
+      const historyId = useEditor.getState().doc?.historyId;
+      if (historyId) {
+        // Ảnh gắn với 1 record History (chụp mới hoặc mở lại từ Library) →
+        // ghi đè tại chỗ đúng record thay vì save-as ra vị trí khác.
+        await ipc.updateHistoryAsset(historyId, url);
+        if (alsoCopy) await copyToClipboard(url);
+        ipc.closeSelf();
+        return;
+      }
       const saved = await saveToFile(url, alsoCopy);
       if (saved) {
         ipc.closeSelf();
@@ -238,6 +249,7 @@ export default function Editor() {
         imgH: el.naturalHeight,
         scaleFactor: doc.scaleFactor,
         annotations: [],
+        historyId: doc.historyId,
       });
       flash("Đã flatten — annotation đã được ghi vào ảnh");
     };
@@ -250,6 +262,7 @@ export default function Editor() {
       <div style={{ flex: 1, minHeight: 0, background: "#161619" }}>
         <AnnotationStage ref={stageRef} />
       </div>
+      <HistoryStrip onFlash={flash} />
       {toast && <div style={toastStyle}>{toast}</div>}
       {showFlattenConfirm && (
         <FlattenConfirmDialog

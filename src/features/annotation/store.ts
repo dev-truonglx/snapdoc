@@ -247,7 +247,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((s) => {
       if (!s.doc) return {};
       return {
-        ...commit(s, { image, imgW, imgH, scaleFactor: s.doc.scaleFactor, annotations }),
+        ...commit(s, { image, imgW, imgH, scaleFactor: s.doc.scaleFactor, annotations, historyId: s.doc.historyId }),
         selectedId: null,
       };
     }),
@@ -258,7 +258,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       // Ảnh ghép ở pixel vật lý (không gắn với DPI nguồn nào) → scaleFactor 1.
       // commit() đẩy doc hiện tại vào past → undo khôi phục lại trạng thái trước nối.
       return {
-        ...commit(s, { image, imgW, imgH, scaleFactor: 1, annotations: [] }),
+        ...commit(s, { image, imgW, imgH, scaleFactor: 1, annotations: [], historyId: s.doc.historyId }),
         selectedId: null,
       };
     }),

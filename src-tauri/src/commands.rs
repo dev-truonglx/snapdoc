@@ -23,8 +23,21 @@ pub fn take_pending(state: State<AppState>) -> Option<PendingCapture> {
 /// `data`: data URL đầy đủ (`data:image/png;base64,...`) hoặc base64 trần —
 /// tách bỏ phần prefix nếu có, giữ đúng quy ước của `PendingCapture.base64`.
 #[tauri::command]
-pub fn set_pending_image(state: State<AppState>, data: String, width: u32, height: u32) {
+pub fn set_pending_image(app: AppHandle, state: State<AppState>, data: String, width: u32, height: u32) {
     let base64 = data.split(',').next_back().unwrap_or(&data).to_string();
+
+    // "Mở Editor" từ Quick Capture cũng là một capture hoàn chỉnh (đối xứng với
+    // nhánh `_ => open_editor` của `flow::finish`) — ingest ngay để History
+    // ghi nhận mọi đường ra editor, không chỉ Copy/Save.
+    let cap = crate::capture::Capture { base64: base64.clone(), width, height };
+    let history_id = match crate::history::ingest(&app, &cap, "quick", 1.0) {
+        Ok(rec) => Some(rec.id),
+        Err(e) => {
+            eprintln!("[SnapDoc][history] ingest (set_pending_image) thất bại: {e}");
+            None
+        }
+    };
+
     if let Ok(mut g) = state.pending.lock() {
         *g = Some(PendingCapture {
             base64,
@@ -32,6 +45,7 @@ pub fn set_pending_image(state: State<AppState>, data: String, width: u32, heigh
             height,
             output: "editor".to_string(),
             scale_factor: 1.0,
+            history_id,
         });
     }
 }
@@ -274,6 +288,9 @@ pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> 
                 height,
                 output: "editor".to_string(),
                 scale_factor: 1.0,
+                // "Open with"/file ngoài KHÔNG vào History (chỉ ghi nhận ảnh do
+                // app tự chụp) — history_id luôn None cho luồng này.
+                history_id: None,
             });
         }
         windows::open_editor(app)?;
@@ -402,6 +419,13 @@ pub fn get_last_capture_mode(app: AppHandle) -> (String, String) {
     app.state::<AppState>().last_capture.get()
 }
 
+/// Lỗi đăng ký global shortcut lúc khởi động (nếu có) — Settings gọi lúc mount
+/// để hiện banner cảnh báo phím tắt bị trùng/không đăng ký được.
+#[tauri::command]
+pub fn get_hotkey_warning(app: AppHandle) -> Option<String> {
+    app.state::<AppState>().hotkey_warning.lock().ok().and_then(|g| g.clone())
+}
+
 // ── Autostart commands ───────────────────────────────────────────────────────
 
 /// Trả về trạng thái "khởi động cùng hệ thống" hiện tại.
@@ -496,6 +520,13 @@ pub fn start_scroll_session(state: State<'_, AppState>) {
     }
 }
 
+/// Giới hạn số lát cắt tối đa cho 1 phiên chụp cuộn — mỗi lát là 1
+/// `RgbaImage` full-res giữ nguyên trong RAM tới lúc ghép (không nén), ảnh
+/// ~1920×1440 đã ~11MB/lát. Không giới hạn thì trang cuộn quá dài có thể đẩy
+/// RAM lên hàng GB. 300 lát tương ứng ~3.3GB ở độ phân giải trên — đủ rộng
+/// cho hầu hết trang dài, vẫn có trần để tránh OOM.
+const MAX_SCROLL_SLICES: usize = 300;
+
 /// Chụp một lát cắt trong tính năng chụp cuộn.
 #[tauri::command]
 pub async fn capture_scroll_slice(
@@ -507,6 +538,15 @@ pub async fn capture_scroll_slice(
     rw: u32,
     rh: u32,
 ) -> Result<String, String> {
+    {
+        let slices = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
+        if slices.len() >= MAX_SCROLL_SLICES {
+            return Err(format!(
+                "Đã đạt giới hạn {MAX_SCROLL_SLICES} lát cắt cho 1 lần chụp cuộn — hãy dừng lại và ghép ảnh."
+            ));
+        }
+    }
+
     let raw_img = tauri::async_runtime::spawn_blocking(move || -> Result<image::RgbaImage, String> {
         let m = crate::capture::monitor::at_point(mx, my)?;
         let img = crate::capture::region::capture_region_raw(&m, rx, ry, rw, rh)?;
