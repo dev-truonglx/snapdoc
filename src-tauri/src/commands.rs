@@ -194,9 +194,17 @@ pub fn open_capture_bar_for_new(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Trên Windows, nếu cửa sổ "editor" đã bị đóng trước đó (Save, đóng tay...)
+/// thì `windows::open_editor` phải tạo lại webview mới bằng `build()`, vốn
+/// block chờ event loop chính qua channel — gọi trực tiếp trên IPC thread sẽ
+/// deadlock Win32 message pump (trắng trang + treo app), giống lỗi đã fix ở
+/// `history::open_history`. Tách sang thread riêng để tránh.
 #[tauri::command]
 pub fn open_editor(app: AppHandle) -> Result<(), String> {
-    windows::open_editor(&app)
+    std::thread::spawn(move || {
+        let _ = windows::open_editor(&app);
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -583,7 +591,13 @@ pub fn finalize_scroll_capture(
         height,
     };
     let output = crate::flow::get_output(&app);
-    crate::flow::finish(&app, cap, &output, 1.0)
+    // flow::finish() có thể gọi windows::open_editor() (build() cửa sổ mới) —
+    // tách sang thread riêng để không deadlock IPC thread trên Windows, xem
+    // comment ở commands::open_editor.
+    std::thread::spawn(move || {
+        let _ = crate::flow::finish(&app, cap, &output, 1.0);
+    });
+    Ok(())
 }
 
 // ── Quay màn hình ────────────────────────────────────────────────────────────
