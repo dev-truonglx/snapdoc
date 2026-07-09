@@ -95,18 +95,93 @@ fn url_with_query(win: &str, query: &str) -> WebviewUrl {
     WebviewUrl::App(format!("index.html?win={win}&{query}").into())
 }
 
-/// Đặt cửa sổ ở giữa-đáy màn hình chính (cho capture bar).
-fn place_bottom_center(win: &tauri::WebviewWindow) {
-    if let Ok(Some(monitor)) = win.primary_monitor() {
-        let m_size = monitor.size();
-        let m_pos = monitor.position();
-        let scale = monitor.scale_factor();
-        if let Ok(win_size) = win.outer_size() {
-            let x = m_pos.x + ((m_size.width as i32 - win_size.width as i32) / 2);
-            let y = m_pos.y + m_size.height as i32
-                - win_size.height as i32
-                - (64.0 * scale) as i32;
-            let _ = win.set_position(PhysicalPosition::new(x, y));
+/// Vùng (x, y, width, height) theo LOGICAL/points của màn hình đang chứa con
+/// trỏ chuột. Dùng để mở cửa sổ (capture bar, thumbnail, recording
+/// indicator, và cả Editor/History/Settings/RecordReview/HistoryTrim) đúng
+/// màn hình user đang nhìn vào lúc bấm mở, thay vì luôn mở ở màn hình chính.
+/// Chỉ cần `app` (không cần cửa sổ đã tồn tại) — fallback về
+/// `app.primary_monitor()` (hành vi cũ) nếu không đọc được con trỏ hoặc
+/// không xác định được màn hình chứa nó, nên dùng được cả TRƯỚC khi tạo cửa
+/// sổ (ví dụ để tính kích thước theo % màn hình đích, xem `open_record_review`).
+///
+/// LUÔN trả LOGICAL, KHÔNG physical — lý do (bug đã tái hiện thực tế): trên
+/// macOS, `win.set_position(Position::Physical(..))` (`tao`'s
+/// `set_outer_position`) quy đổi physical→logical bằng **scale hiện tại của
+/// cửa sổ TRƯỚC khi di chuyển**, không phải scale màn hình ĐÍCH. Nếu cửa sổ
+/// đang ở màn Retina (scale 2) và ta tính toạ độ physical theo màn đích scale
+/// 1 (FullHD), `tao` sẽ chia lại theo scale 2 (sai) khi áp dụng → lệch nửa
+/// khoảng cách thật (đúng hiện tượng "FullHD lệch phải, Retina thì đúng" đã
+/// gặp). Dùng `Position::Logical` bỏ HẲN bước quy đổi này — giá trị Logical
+/// chỉ được cast, không bị chia lại theo bất kỳ scale nào — an toàn tuyệt
+/// đối bất kể cửa sổ đang ở màn nào lúc gọi.
+fn cursor_or_primary_monitor_logical_rect(app: &AppHandle) -> Option<(f64, f64, f64, f64)> {
+    if let Some((cx, cy)) = read_cursor(app) {
+        if let Ok(m) = crate::capture::monitor::at_point(cx as i32, cy as i32) {
+            // xcap trả x/y/width/height theo POINTS trên macOS (đã là logical,
+            // dùng thẳng) hoặc physical px trên Windows (chia scale để ra logical).
+            #[cfg(target_os = "macos")]
+            let rect = (
+                m.x().unwrap_or(0) as f64,
+                m.y().unwrap_or(0) as f64,
+                m.width().unwrap_or(0) as f64,
+                m.height().unwrap_or(0) as f64,
+            );
+            #[cfg(not(target_os = "macos"))]
+            let rect = {
+                let scale = (m.scale_factor().unwrap_or(1.0).max(1.0)) as f64;
+                (
+                    m.x().unwrap_or(0) as f64 / scale,
+                    m.y().unwrap_or(0) as f64 / scale,
+                    m.width().unwrap_or(0) as f64 / scale,
+                    m.height().unwrap_or(0) as f64 / scale,
+                )
+            };
+            return Some(rect);
+        }
+    }
+    let pm = app.primary_monitor().ok().flatten()?;
+    let scale = pm.scale_factor() as f64;
+    Some((
+        pm.position().x as f64 / scale,
+        pm.position().y as f64 / scale,
+        pm.size().width as f64 / scale,
+        pm.size().height as f64 / scale,
+    ))
+}
+
+/// Kích thước NGOÀI cửa sổ hiện tại theo LOGICAL — dùng cùng
+/// `cursor_or_primary_monitor_logical_rect` để mọi phép tính vị trí ở CHUNG 1
+/// hệ logical (tránh đúng bug quy đổi scale sai giải thích ở đó). Scale dùng
+/// ở đây là scale HIỆN TẠI của cửa sổ (trước khi di chuyển) — chính xác cho
+/// mục đích này vì chỉ dùng để đổi `outer_size()` (physical) → logical, không
+/// liên quan gì đến scale của màn hình ĐÍCH.
+fn logical_outer_size(win: &tauri::WebviewWindow) -> Option<(f64, f64)> {
+    let size = win.outer_size().ok()?;
+    let scale = win.scale_factor().ok()?.max(0.0001);
+    Some((size.width as f64 / scale, size.height as f64 / scale))
+}
+
+/// Đặt cửa sổ ở giữa-đáy màn hình đang chứa con trỏ chuột (cho capture bar).
+fn place_bottom_center(app: &AppHandle, win: &tauri::WebviewWindow) {
+    if let Some((m_x, m_y, m_w, m_h)) = cursor_or_primary_monitor_logical_rect(app) {
+        if let Some((win_w, win_h)) = logical_outer_size(win) {
+            let x = m_x + (m_w - win_w) / 2.0;
+            let y = m_y + m_h - win_h - 64.0;
+            let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        }
+    }
+}
+
+/// Đặt cửa sổ ở CHÍNH GIỮA màn hình đang chứa con trỏ chuột — dùng cho các
+/// cửa sổ ứng dụng "lớn" (Editor, History, Settings, RecordReview,
+/// HistoryTrim) thay cho `.center()` mặc định của Tauri (luôn là màn hình
+/// chính, bất kể con trỏ đang ở đâu). Cùng kỹ thuật `place_bottom_center`.
+fn place_center_on_monitor(app: &AppHandle, win: &tauri::WebviewWindow) {
+    if let Some((m_x, m_y, m_w, m_h)) = cursor_or_primary_monitor_logical_rect(app) {
+        if let Some((win_w, win_h)) = logical_outer_size(win) {
+            let x = m_x + (m_w - win_w) / 2.0;
+            let y = m_y + (m_h - win_h) / 2.0;
+            let _ = win.set_position(tauri::LogicalPosition::new(x, y));
         }
     }
 }
@@ -126,7 +201,7 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
         // Windows: hiển thị icon trên taskbar khi capture bar visible
         #[cfg(target_os = "windows")]
         let _ = win.set_skip_taskbar(false);
-        place_bottom_center(&win);
+        place_bottom_center(app, &win);
         return Ok(());
     }
     let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
@@ -147,7 +222,7 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
         .shadow(false)
         .build()
         .map_err(|e| format!("Không tạo được capture bar: {e}"))?;
-    place_bottom_center(&win);
+    place_bottom_center(app, &win);
     let _ = win.set_focus();
     Ok(())
 }
@@ -357,7 +432,7 @@ pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| format!("Không tạo được popup đang quay: {e}"))?;
 
-    place_top_center(&win);
+    place_top_center(app, &win);
     let _ = win.set_content_protected(true);
     let _ = win.show();
     Ok(())
@@ -375,15 +450,12 @@ pub fn close_recording_indicator(app: &AppHandle) {
 /// Đặt cửa sổ ở giữa-đỉnh màn hình chính, cách mép trên 1 khoảng nhỏ (cho
 /// popup "đang quay") — cùng kỹ thuật `place_bottom_center` phía trên.
 #[cfg(target_os = "windows")]
-fn place_top_center(win: &tauri::WebviewWindow) {
-    if let Ok(Some(monitor)) = win.primary_monitor() {
-        let m_size = monitor.size();
-        let m_pos = monitor.position();
-        let scale = monitor.scale_factor();
-        if let Ok(win_size) = win.outer_size() {
-            let x = m_pos.x + ((m_size.width as i32 - win_size.width as i32) / 2);
-            let y = m_pos.y + (16.0 * scale) as i32;
-            let _ = win.set_position(PhysicalPosition::new(x, y));
+fn place_top_center(app: &AppHandle, win: &tauri::WebviewWindow) {
+    if let Some((m_x, m_y, m_w, _m_h)) = cursor_or_primary_monitor_logical_rect(app) {
+        if let Some((win_w, _win_h)) = logical_outer_size(win) {
+            let x = m_x + (m_w - win_w) / 2.0;
+            let y = m_y + 16.0;
+            let _ = win.set_position(tauri::LogicalPosition::new(x, y));
         }
     }
 }
@@ -749,6 +821,7 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
+        place_center_on_monitor(app, &win);
         // Windows: hiển thị icon trên taskbar khi editor visible
         #[cfg(target_os = "windows")]
         let _ = win.set_skip_taskbar(false);
@@ -776,7 +849,8 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
             .skip_taskbar(false)  // Windows: hiển thị icon trên taskbar
             .build()
             .map_err(|e| format!("Không tạo được editor: {e}"))?;
-        
+        place_center_on_monitor(app, &win);
+
         let win2 = win.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -785,7 +859,7 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _win = WebviewWindowBuilder::new(app, "editor", url("editor"))
+        let win = WebviewWindowBuilder::new(app, "editor", url("editor"))
             .title("SnapDoc — Editor")
             .inner_size(1040.0, 720.0)
             .min_inner_size(680.0, 480.0)
@@ -794,6 +868,7 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
             .skip_taskbar(false)
             .build()
             .map_err(|e| format!("Không tạo được editor: {e}"))?;
+        place_center_on_monitor(app, &win);
     }
     Ok(())
 }
@@ -889,11 +964,12 @@ pub fn open_history(app: &AppHandle) -> Result<(), String> {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
+        place_center_on_monitor(app, &win);
         #[cfg(target_os = "windows")]
         let _ = win.set_skip_taskbar(false);
         return Ok(());
     }
-    WebviewWindowBuilder::new(app, "history", url("history"))
+    let win = WebviewWindowBuilder::new(app, "history", url("history"))
         .title("SnapDoc — Library")
         .inner_size(1024.0, 680.0)
         .min_inner_size(720.0, 480.0)
@@ -902,6 +978,7 @@ pub fn open_history(app: &AppHandle) -> Result<(), String> {
         .skip_taskbar(false)
         .build()
         .map_err(|e| format!("Không tạo được cửa sổ History: {e}"))?;
+    place_center_on_monitor(app, &win);
     Ok(())
 }
 
@@ -928,7 +1005,7 @@ pub fn open_thumbnail(app: &AppHandle) -> Result<(), String> {
     };
 
     // Đặt vị trí góc dưới-phải trước khi show để tránh flash ở vị trí cũ.
-    place_thumbnail(&win);
+    place_thumbnail(app, &win);
 
     // QUAN TRỌNG: show() TRƯỚC emit() trên Windows.
     // WebView2 suspend JavaScript execution khi window hidden → event bị drop
@@ -963,16 +1040,13 @@ fn create_thumbnail_window(app: &AppHandle) -> Result<tauri::WebviewWindow, Stri
         .map_err(|e| format!("Không tạo được thumbnail: {e}"))
 }
 
-fn place_thumbnail(win: &tauri::WebviewWindow) {
-    if let Ok(Some(monitor)) = win.primary_monitor() {
-        let m_size = monitor.size();
-        let m_pos = monitor.position();
-        let scale = monitor.scale_factor();
-        if let Ok(win_size) = win.outer_size() {
-            let margin = (24.0 * scale) as i32;
-            let x = m_pos.x + m_size.width as i32 - win_size.width as i32 - margin;
-            let y = m_pos.y + m_size.height as i32 - win_size.height as i32 - margin;
-            let _ = win.set_position(PhysicalPosition::new(x, y));
+fn place_thumbnail(app: &AppHandle, win: &tauri::WebviewWindow) {
+    if let Some((m_x, m_y, m_w, m_h)) = cursor_or_primary_monitor_logical_rect(app) {
+        if let Some((win_w, win_h)) = logical_outer_size(win) {
+            let margin = 24.0;
+            let x = m_x + m_w - win_w - margin;
+            let y = m_y + m_h - win_h - margin;
+            let _ = win.set_position(tauri::LogicalPosition::new(x, y));
         }
     }
 }
@@ -1010,26 +1084,20 @@ pub fn open_record_review(app: &AppHandle) -> Result<(), String> {
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
+        place_center_on_monitor(app, &win);
         #[cfg(target_os = "windows")]
         let _ = win.set_skip_taskbar(false);
         bring_record_review_to_front(app, win);
         return Ok(());
     }
 
-    // Mở lớn theo % màn hình chính (thay vì cỡ cố định 640×620 cũ) — người
-    // dùng cần nhìn rõ video + timeline cắt (VideoTrimmer, xem RecordReview.tsx)
-    // ngay khi vừa quay xong, cỡ nhỏ trước đây làm filmstrip/preview bị bóp.
-    // 85% kích thước màn hình (không phải maximize hẳn) để vẫn còn thấy được
-    // nền desktop xung quanh.
-    let (init_w, init_h) = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| {
-            let scale = m.scale_factor();
-            let size = m.size();
-            ((size.width as f64 / scale) * 0.85, (size.height as f64 / scale) * 0.85)
-        })
+    // Mở lớn theo % màn hình ĐANG CHỨA CON TRỎ (không phải luôn màn hình
+    // chính) — người dùng cần nhìn rõ video + timeline cắt (VideoTrimmer, xem
+    // RecordReview.tsx) ngay khi vừa quay xong, cỡ nhỏ trước đây làm
+    // filmstrip/preview bị bóp. 85% kích thước màn hình (không phải maximize
+    // hẳn) để vẫn còn thấy được nền desktop xung quanh.
+    let (init_w, init_h) = cursor_or_primary_monitor_logical_rect(app)
+        .map(|(_, _, w, h)| (w * 0.85, h * 0.85))
         .unwrap_or((1100.0, 780.0));
 
     // Cửa sổ thật có titlebar (thu nhỏ/phóng to/đóng) — giống `open_editor`,
@@ -1050,6 +1118,7 @@ pub fn open_record_review(app: &AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| format!("Không tạo được cửa sổ xem lại bản quay: {e}"))?;
 
+    place_center_on_monitor(app, &win);
     let _ = win.set_focus();
     bring_record_review_to_front(app, win);
     Ok(())
@@ -1098,15 +1167,10 @@ pub fn open_history_trim(app: &AppHandle, id: &str) -> Result<(), String> {
         let _ = win.destroy();
     }
 
-    let (init_w, init_h) = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| {
-            let scale = m.scale_factor();
-            let size = m.size();
-            ((size.width as f64 / scale) * 0.85, (size.height as f64 / scale) * 0.85)
-        })
+    // % màn hình ĐANG CHỨA CON TRỎ (không phải luôn màn hình chính) — cùng lý
+    // do `open_record_review`.
+    let (init_w, init_h) = cursor_or_primary_monitor_logical_rect(app)
+        .map(|(_, _, w, h)| (w * 0.85, h * 0.85))
         .unwrap_or((1100.0, 780.0));
 
     let win = WebviewWindowBuilder::new(app, "history-trim", url_with_query("history-trim", &format!("id={id}")))
@@ -1119,6 +1183,7 @@ pub fn open_history_trim(app: &AppHandle, id: &str) -> Result<(), String> {
         .build()
         .map_err(|e| format!("Không tạo được cửa sổ cắt video: {e}"))?;
 
+    place_center_on_monitor(app, &win);
     let _ = win.set_focus();
     bring_history_trim_to_front(app, win);
     Ok(())
@@ -1229,6 +1294,7 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {    // macOS: chuy�
     if let Some(win) = app.get_webview_window("settings") {
         let _ = win.show();
         let _ = win.unminimize();
+        place_center_on_monitor(app, &win);
         // Windows: hiển thị icon trên taskbar khi settings visible
         #[cfg(target_os = "windows")]
         let _ = win.set_skip_taskbar(false);
@@ -1248,6 +1314,7 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {    // macOS: chuy�
         .skip_taskbar(false)  // Windows: hiển thị icon trên taskbar
         .build()
         .map_err(|e| format!("Không tạo được settings: {e}"))?;
+    place_center_on_monitor(app, &win);
     #[cfg(target_os = "macos")]
     bring_settings_to_front(app, win);
     #[cfg(not(target_os = "macos"))]
