@@ -37,7 +37,7 @@ pub fn get_output(app: &AppHandle) -> String {
         .unwrap_or_else(|_| "editor".to_string())
 }
 
-fn store(app: &AppHandle, cap: &capture::Capture, output: &str, scale_factor: f64) {
+fn store(app: &AppHandle, cap: &capture::Capture, output: &str, scale_factor: f64, mode: &str) {
     let state = app.state::<AppState>();
     let mut guard = match state.pending.lock() {
         Ok(g) => g,
@@ -50,6 +50,7 @@ fn store(app: &AppHandle, cap: &capture::Capture, output: &str, scale_factor: f6
         output: output.to_string(),
         scale_factor,
         history_id: None,
+        capture_mode: mode.to_string(),
     });
 }
 
@@ -79,11 +80,13 @@ pub fn finish(
     output: &str,
     scale_factor: f64,
 ) -> Result<(), String> {
-    store(app, &cap, output, scale_factor);
+    // Đọc mode 1 lần, dùng chung cho `store()` (Editor cần biết để chọn zoom
+    // mặc định, xem `PendingCapture.capture_mode`) và ingest History bên dưới.
+    let (mode, _) = app.state::<AppState>().last_capture.get();
+    store(app, &cap, output, scale_factor, &mode);
 
     // Ingest vào History Library — LUÔN chạy bất kể output, KHÔNG BAO GIỜ làm
     // gián đoạn clipboard/save/editor phía dưới nếu lỗi (đĩa đầy, DB lỗi...).
-    let (mode, _) = app.state::<AppState>().last_capture.get();
     match crate::history::ingest(app, &cap, &mode, scale_factor) {
         Ok(rec) => crate::history::attach_pending_id(app, &rec.id),
         Err(e) => eprintln!("[SnapDoc][history] ingest thất bại, luồng capture vẫn tiếp tục: {e}"),

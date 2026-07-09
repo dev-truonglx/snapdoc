@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ipc } from "../../lib/ipc";
 import { useHistory } from "./useHistoryStore";
+import { dayStartMs, msToDayStr, ONE_DAY_MS } from "./dateUtils";
 
 const MODES = [
   { id: "", label: "Tất cả loại" },
@@ -12,30 +13,24 @@ const MODES = [
   { id: "quick", label: "Chụp nhanh" },
 ] as const;
 
-/** Chuyển "YYYY-MM-DD" (input date, local) sang unix-ms đầu ngày local. */
-function dayStartMs(dateStr: string): number {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
-}
+const MEDIA_TYPES = [
+  { id: "", label: "Tất cả nội dung" },
+  { id: "image", label: "Ảnh" },
+  { id: "video", label: "Video" },
+] as const;
 
 export default function HistoryToolbar() {
   const filter = useHistory((s) => s.filter);
   const setFilter = useHistory((s) => s.setFilter);
   const reload = useHistory((s) => s.reload);
-  const [search, setSearch] = useState("");
   const [emptying, setEmptying] = useState(false);
-
-  const onSearchSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setFilter({ search: search || undefined });
-  };
 
   const onFromChange = (v: string) => {
     setFilter({ from: v ? dayStartMs(v) : undefined });
   };
   const onToChange = (v: string) => {
     // "to" là mốc loại trừ (created_at < to) → +1 ngày để bao trọn ngày đã chọn.
-    setFilter({ to: v ? dayStartMs(v) + 86400_000 : undefined });
+    setFilter({ to: v ? dayStartMs(v) + ONE_DAY_MS : undefined });
   };
 
   const onEmptyTrash = async () => {
@@ -51,14 +46,14 @@ export default function HistoryToolbar() {
 
   return (
     <div style={bar}>
-      <form onSubmit={onSearchSubmit} style={{ display: "flex", gap: 6 }}>
-        <input
-          placeholder="Tìm theo tên..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ width: 160 }}
-        />
-      </form>
+      <select
+        value={filter.mediaType ?? ""}
+        onChange={(e) => setFilter({ mediaType: (e.target.value || undefined) as "image" | "video" | undefined })}
+      >
+        {MEDIA_TYPES.map((m) => (
+          <option key={m.id} value={m.id}>{m.label}</option>
+        ))}
+      </select>
 
       <select
         value={filter.captureMode ?? ""}
@@ -69,9 +64,23 @@ export default function HistoryToolbar() {
         ))}
       </select>
 
-      <input type="date" onChange={(e) => onFromChange(e.target.value)} title="Từ ngày" />
+      {/* Controlled — hiện ĐÚNG ngày đang lọc (mặc định hôm nay, xem
+          `useHistoryStore.ts`) thay vì luôn trống như bản input uncontrolled
+          cũ. "to" lưu dạng mốc loại trừ (+1 ngày) nên trừ lại 1 ngày khi hiện
+          ra cho khớp với ngày người dùng thực sự chọn. */}
+      <input
+        type="date"
+        value={filter.from != null ? msToDayStr(filter.from) : ""}
+        onChange={(e) => onFromChange(e.target.value)}
+        title="Từ ngày"
+      />
       <span style={{ color: "var(--text-dim)" }}>—</span>
-      <input type="date" onChange={(e) => onToChange(e.target.value)} title="Đến ngày" />
+      <input
+        type="date"
+        value={filter.to != null ? msToDayStr(filter.to - ONE_DAY_MS) : ""}
+        onChange={(e) => onToChange(e.target.value)}
+        title="Đến ngày"
+      />
 
       <div style={{ flex: 1 }} />
 

@@ -60,6 +60,12 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const selectedId = useEditor((s) => s.selectedId);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  /** Wrapper NGOÀI `containerRef` — không có `overflow:auto` nên kích thước
+   * của nó không bị đổi bởi thanh cuộn xuất hiện/biến mất bên trong. Dùng để
+   * đo `fitScale` (xem effect bên dưới) thay vì đo trên `containerRef` chính
+   * nó — tránh vòng lặp phản hồi (`ResizeObserver` ↔ thanh cuộn) gây nháy
+   * liên tục khi ảnh lớn hơn khung (ví dụ mặc định 100% cho ảnh vùng chọn to). */
+  const outerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const layerRef = useRef<Konva.Layer>(null);
   const trRef = useRef<Konva.Transformer>(null);
@@ -169,11 +175,18 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     el.onload = () => setImg(el);
   }, [doc?.image]);
 
-  // Tính fitScale để ảnh vừa container, reset zoom khi tải ảnh mới
+  // Tính fitScale để ảnh vừa container, đặt zoom mặc định khi tải ảnh mới.
   useLayoutEffect(() => {
     if (!doc) return;
     const measure = () => {
-      const c = containerRef.current;
+      // Đo trên `outerRef` (KHÔNG có overflow:auto) — xem giải thích ở khai
+      // báo `outerRef`. Đo trên `containerRef` (vùng cuộn thật) sẽ gây vòng
+      // lặp: ảnh tràn khung → thanh cuộn xuất hiện → content-box containerRef
+      // co lại → ResizeObserver bắn lại → fitScale đổi → scale đổi → box đổi
+      // → có thể lại vừa khung → mất thanh cuộn → containerRef giãn lại → lặp
+      // vô hạn — đúng nguyên nhân nháy liên tục khi ảnh lớn hơn khung (ví dụ
+      // mặc định 100% cho ảnh vùng chọn to).
+      const c = outerRef.current;
       if (!c) return;
       // Padding nhỏ (8px mỗi bên) để ảnh không dính mép cứng
       const cw = c.clientWidth - 16;
@@ -181,13 +194,18 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       // Không giới hạn max — ảnh nhỏ hơn window sẽ hiển thị 1:1 hoặc lớn hơn
       const s = Math.max(0.05, Math.min(cw / doc.imgW, ch / doc.imgH));
       setFitScale(s);
+      return s;
     };
-    setZoom(1);
-    measure();
+    const s = measure();
+    // Zoom mặc định tuỳ mode đã chụp ra ảnh (`doc.captureMode`, xem model.ts):
+    // "region" (vùng chọn) → 100% THẬT (1px ảnh = 1px màn hình) — ảnh có thể
+    // tràn khung, tự cuộn/zoom sau. Mọi mode khác → fit cả chiều rộng/cao
+    // (zoom=1 ⇒ scale=fitScale) như trước.
+    setZoom(doc.captureMode === "region" && s ? clampZoom(1 / s) : 1);
     const ro = new ResizeObserver(measure);
-    if (containerRef.current) ro.observe(containerRef.current);
+    if (outerRef.current) ro.observe(outerRef.current);
     return () => ro.disconnect();
-  }, [doc?.imgW, doc?.imgH]);
+  }, [doc?.imgW, doc?.imgH, doc?.captureMode]);
 
   // Cập nhật kích thước stage khi scale thay đổi
   useEffect(() => {
@@ -855,8 +873,9 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const dpiLabel = scaleFactor >= 2 ? `${scaleFactor}×` : null;
 
   return (
-    // outer: bao quanh cả scroll area và zoom bar cố định
-    <div style={{ ...fill, position: "relative" }}>
+    // outer: bao quanh cả scroll area và zoom bar cố định — cũng là điểm đo
+    // fitScale (`outerRef`, xem effect phía trên) vì không có overflow:auto.
+    <div ref={outerRef} style={{ ...fill, position: "relative" }}>
     {/* scroll container — containerRef để gắn wheel listener và tính scroll */}
     <div ref={containerRef} style={{ ...fill, overflow: "auto" }}>
       {/* Căn giữa bằng margin:auto thay vì justify/align center. Lý do: khi canvas

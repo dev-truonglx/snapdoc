@@ -82,6 +82,10 @@ pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, St
 /// Silently download and install the update in the background WITHOUT restarting.
 /// The new version will be applied the next time the user launches the app.
 /// Called automatically on startup when an update is found.
+/// Chỉ được gọi trong `lib.rs` bên trong `#[cfg(not(debug_assertions))]` — nên
+/// `cargo check` (debug profile) báo "never used" dù hàm này CÓ dùng thật ở
+/// release build.
+#[cfg_attr(debug_assertions, allow(dead_code))]
 pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
     // Take the update out of state so the lock isn't held across .await.
     let update = app.state::<PendingUpdate>().0.lock().unwrap().take();

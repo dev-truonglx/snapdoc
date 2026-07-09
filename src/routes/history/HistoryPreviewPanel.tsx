@@ -3,7 +3,6 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { ipc } from "../../lib/ipc";
 import { useHistory } from "./useHistoryStore";
 import { MODE_LABEL } from "./HistoryItemCard";
-import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 
 interface Props {
   onOpenEditor: (id: string) => void;
@@ -36,19 +35,15 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
   const filter = useHistory((s) => s.filter);
   const patchItem = useHistory((s) => s.patchItem);
   const removeItem = useHistory((s) => s.removeItem);
-  const addItem = useHistory((s) => s.addItem);
 
   const item = items.find((it) => it.id === selectedId) ?? null;
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [busy, setBusy] = useState(false);
-  const [trimOpen, setTrimOpen] = useState(false);
-  const [trimming, setTrimming] = useState(false);
 
   useEffect(() => {
     setRenaming(false);
     setTitleDraft(item?.title ?? "");
-    setTrimOpen(false);
   }, [item?.id]);
 
   if (!item) {
@@ -104,22 +99,11 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
 
   const doReveal = () => ipc.revealHistoryItem(item.id).catch(() => {});
 
-  // Tạo record MỚI cho bản đã cắt (xem `trim_history_video_sync`) — bản gốc
-  // (`item` hiện tại) giữ nguyên không đổi, KHÔNG `patchItem` vào chỗ cũ vì
-  // id trả về đã khác. Thêm item mới lên đầu danh sách + tự chọn nó, để
-  // người dùng thấy ngay kết quả vừa cắt thay vì phải tự tìm.
-  const doTrimApply = async (ranges: [number, number][]) => {
-    setTrimming(true);
-    try {
-      const trimmed = await ipc.trimHistoryVideo(item.id, ranges);
-      addItem(trimmed);
-      setTrimOpen(false);
-    } catch (e) {
-      alert(String(e));
-    } finally {
-      setTrimming(false);
-    }
-  };
+  // Mở cửa sổ "Cắt video" riêng (cùng khuôn RecordReview) — bản gốc giữ
+  // nguyên, bản đã cắt tạo thành item MỚI, cửa sổ đó tự emit event cho danh
+  // sách ở đây cập nhật (xem `HistoryWindow.tsx`), không cần chờ/xử lý gì
+  // thêm ở component này.
+  const doOpenTrim = () => ipc.openHistoryTrim(item.id).catch((e) => alert(String(e)));
 
   return (
     <div style={panel}>
@@ -176,7 +160,7 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
               <button style={primaryBtn} disabled={busy} onClick={() => onOpenEditor(item.id)}>Mở Editor</button>
             )}
             {isVideo && (
-              <button style={primaryBtn} disabled={busy} onClick={() => setTrimOpen(true)}>Cắt video</button>
+              <button style={primaryBtn} disabled={busy} onClick={doOpenTrim}>Cắt video</button>
             )}
             <button style={secondaryBtn} disabled={busy} onClick={doReveal}>Hiện trong Finder/Explorer</button>
             <button style={dangerBtn} disabled={busy} onClick={doDelete}>Xoá (chuyển vào Trash)</button>
@@ -188,23 +172,6 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
           </>
         )}
       </div>
-
-      {trimOpen && isVideo && (
-        <div style={modalBackdrop} onClick={() => !trimming && setTrimOpen(false)}>
-          <div style={modalCard} onClick={(e) => e.stopPropagation()}>
-            <div style={modalTitle}>Cắt video</div>
-            <VideoTrimmer
-              key={`${item.id}-${item.updatedAt}`}
-              src={`${convertFileSrc(item.assetPath)}?v=${item.updatedAt}`}
-              filePath={item.assetPath}
-              durationMs={item.durationMs ?? 0}
-              busy={trimming}
-              onApply={doTrimApply}
-            />
-            <button style={secondaryBtn} disabled={trimming} onClick={() => setTrimOpen(false)}>Đóng</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -284,30 +251,3 @@ const dangerBtn: React.CSSProperties = {
   fontSize: 13,
 };
 
-const modalBackdrop: React.CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(0,0,0,0.6)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 100,
-};
-
-const modalCard: React.CSSProperties = {
-  // To hơn hẳn bản cũ (720×600) — cắt video cần nhìn rõ filmstrip/preview,
-  // vùng nhỏ trước đây bóp video/timeline lại rất khó thao tác chính xác.
-  width: "min(1400px, 94vw)",
-  height: "min(900px, 92vh)",
-  display: "flex",
-  flexDirection: "column",
-  gap: 10,
-  background: "var(--bg-elevated)",
-  border: "1px solid var(--border)",
-  borderRadius: 14,
-  padding: 14,
-  boxSizing: "border-box",
-  boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
-};
-
-const modalTitle: React.CSSProperties = { fontSize: 14, fontWeight: 600, flexShrink: 0 };

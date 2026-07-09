@@ -52,7 +52,7 @@ pub struct HistoryFilter {
     pub from: Option<i64>,
     pub to: Option<i64>,
     pub capture_mode: Option<String>,
-    pub search: Option<String>,
+    pub media_type: Option<String>,
     #[serde(default)]
     pub trash_only: bool,
     pub limit: i64,

@@ -4,14 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import { ipc, type PendingRecording } from "../../lib/ipc";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 
-/** `93500` → `"1:34"` — mm:ss. */
-function fmtDuration(ms: number): string {
-  const totalSec = Math.round(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
 /** Cửa sổ bắt buộc xác nhận NGAY sau khi dừng quay (xem
  * `record::stop_recording` — không ingest vào History tự động nữa, chờ
  * người dùng chọn ở đây). Không tự đóng/timeout: quay xong là dữ liệu quan
@@ -28,11 +20,23 @@ export default function RecordReview() {
     hasChanges: false,
     keepRanges: [],
   });
+  // Tiến độ cắt (0..1), `null` = không đang cắt (đang chờ khác/đã xong) — chỉ
+  // có ý nghĩa trong lúc `trimPendingRecording` chạy, xem `doApplyAndSave`.
+  // Backend emit % thật từ ffmpeg (`out_time_us`, xem `encoder::trim`), không
+  // phải giả lập — nên bỏ qua an toàn nếu không nhận được gì (giữ `null`).
+  const [trimProgress, setTrimProgress] = useState<number | null>(null);
 
   useEffect(() => {
     ipc.peekPendingRecording()
       .then((p) => (p ? setPending(p) : setNotFound(true)))
       .catch(() => setNotFound(true));
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<number>("trim-progress", (e) => setTrimProgress(e.payload));
+    return () => {
+      unlisten.then((f) => f());
+    };
   }, []);
 
   // Cửa sổ giờ có titlebar thật (nút đóng, xem `open_record_review` ở
@@ -61,12 +65,17 @@ export default function RecordReview() {
     setBusy(true);
     try {
       if (trimState.hasChanges) {
+        setTrimProgress(0);
         await ipc.trimPendingRecording(trimState.keepRanges);
+        // Xong bước cắt — quay về `null` để nhãn nút chuyển qua "Đang lưu…"
+        // (ingest vào History không có tiến độ %, xem `confirmRecordingSave`).
+        setTrimProgress(null);
       }
       await ipc.confirmRecordingSave();
     } catch (e) {
       alert(String(e));
       setBusy(false);
+      setTrimProgress(null);
     }
   };
 
@@ -101,25 +110,28 @@ export default function RecordReview() {
         )}
       </div>
 
-      {pending && (
-        <div style={metaRow}>
-          <span>{fmtDuration(pending.durationMs)}</span>
-          <span>{pending.width} × {pending.height}px</span>
-        </div>
-      )}
-
       <div style={actions}>
         {/* Huỷ/Xoá: thao tác phụ, nhẹ tay (ghost, không tô đậm) — nút đóng
             titlebar thật giờ cũng dẫn tới đúng hành động này (xem
             `doDiscardRef`), nên không cần 1 khối to ngang hàng với Lưu nữa. */}
-        <button style={discardBtn} disabled={busy || !pending} onClick={doDiscard}>Xoá bản quay</button>
-        {/* Lưu: hành động CHÍNH của màn hình này — gộp cả áp dụng cắt (nếu có
-            thay đổi chưa áp dụng) vào chung nút này, xem `doApplyAndSave`.
-            Đổi nhãn theo `trimState.hasChanges` để không "hứa" áp dụng cắt
-            khi chẳng có gì để cắt. */}
-        <button style={saveBtn} disabled={busy || !pending} onClick={doApplyAndSave}>
-          {busy ? "Đang lưu…" : trimState.hasChanges ? "Áp dụng cắt và lưu" : "Lưu vào Lịch sử"}
-        </button>
+        <button style={discardBtn} disabled={busy || !pending} onClick={doDiscard}>Xoá</button>
+        {/* Kích thước ảnh: dời từ `metaRow` (đã bỏ, xem `previewWrap`) lên
+            đây, bên phải cùng hàng với nút Lưu — thời lượng không cần lặp lại
+            nữa vì đã có ruler thời gian ngay trên timeline (xem `VideoTrimmer`). */}
+        <div style={rightGroup}>
+          {pending && <span style={dimText}>{pending.width} × {pending.height}px</span>}
+          {/* Lưu: hành động CHÍNH của màn hình này — gộp cả áp dụng cắt (nếu có
+              thay đổi chưa áp dụng) vào chung nút này, xem `doApplyAndSave`.
+              Đổi nhãn theo `trimState.hasChanges` để không "hứa" áp dụng cắt
+              khi chẳng có gì để cắt. */}
+          <button style={saveBtn} disabled={busy || !pending} onClick={doApplyAndSave}>
+            {trimProgress != null
+              ? `Đang cắt… ${Math.round(trimProgress * 100)}%`
+              : busy
+              ? "Đang lưu…"
+              : "Lưu"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -150,15 +162,6 @@ const placeholder: React.CSSProperties = {
   fontSize: 13,
 };
 
-const metaRow: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  padding: "8px 14px",
-  fontSize: 12,
-  color: "var(--text-dim)",
-  borderTop: "1px solid var(--border)",
-};
-
 // `space-between` (không phải 2 nút `flex:1` bằng nhau như cũ) — Xoá là thao
 // tác PHỤ (nút đóng titlebar thật đã lo phần này, xem `doDiscardRef`), Lưu là
 // thao tác CHÍNH của cả màn hình → tách rõ 2 đầu, không đặt cạnh nhau như 1
@@ -168,7 +171,23 @@ const actions: React.CSSProperties = {
   justifyContent: "space-between",
   alignItems: "center",
   padding: "10px 14px",
-  borderTop: "1px solid var(--border)",
+  // borderTop: "1px solid var(--border)",
+  // Đen (thay vì màu nền app xám mặc định) — đồng bộ với `previewWrap` phía
+  // trên, để cả preview + footer nút Lưu/Xoá liền thành 1 khối đen.
+  background: "#000",
+};
+
+const rightGroup: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 14,
+};
+
+const dimText: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-dim)",
+  fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap",
 };
 
 const saveBtn: React.CSSProperties = {

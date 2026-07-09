@@ -107,6 +107,10 @@ export interface Doc {
   /** Id bản ghi History tương ứng, nếu có — Save sẽ ghi đè tại chỗ record này
    * thay vì save-as ra vị trí khác. `null`/`undefined` cho ảnh mở từ file ngoài. */
   historyId?: string | null;
+  /** Mode đã chụp ra ảnh này — `AnnotationStage` dùng để chọn zoom mặc định:
+   * "region" → 100%, còn lại → fit cả chiều rộng/cao. `undefined` cho ảnh mở
+   * từ file ngoài (không có khái niệm "mode", fit như bình thường). */
+  captureMode?: string;
 }
 
 export const uid = (): string =>

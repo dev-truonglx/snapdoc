@@ -139,6 +139,8 @@ pub fn run() {
             history::commands::copy_history_item,
             history::commands::reveal_history_item,
             history::commands::open_history,
+            history::commands::open_history_trim,
+            history::commands::close_history_trim,
             history::commands::finish_quick_capture,
         ])
         .setup(|app| {
@@ -224,19 +226,23 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Lần đầu chạy sau khi cài: tự động bật "khởi động cùng hệ thống"
-            // nếu settings chưa có key "launchAtLogin" (= chưa từng user thay đổi).
-            // Sau đó user có thể tắt từ Settings bất cứ lúc nào.
+            // Lần đầu chạy sau khi cài: tự động bật "khởi động cùng hệ thống".
+            // Phát hiện "lần đầu" bằng việc FILE settings.json đã tồn tại
+            // trên đĩa hay chưa (`storage::settings::exists`) — KHÔNG dùng
+            // key trong giá trị `load()` trả về như bản cũ: `load()` fallback
+            // về `defaults()` khi file chưa tồn tại, mà `defaults()` đã có
+            // sẵn key "launchAtLogin" → điều kiện cũ luôn đúng, block này
+            // không bao giờ chạy, nên Settings hiện "ON" nhưng LaunchAgent
+            // chưa từng được đăng ký thật — chỉ có tác dụng sau khi user tự
+            // tắt/bật lại (gọi `set_autostart`, xem `commands.rs`). Sau lần
+            // đầu này, user có thể tắt từ Settings bất cứ lúc nào.
             {
                 use tauri::Manager;
                 use tauri_plugin_autostart::ManagerExt;
                 let config_dir = handle.path().app_config_dir().unwrap_or_default();
-                let settings = storage::settings::load(&config_dir);
-                let has_key = settings.get("launchAtLogin").is_some();
-                if !has_key {
-                    // Lần đầu: bật autostart và lưu preference
+                if !storage::settings::exists(&config_dir) {
                     let _ = handle.autolaunch().enable();
-                    let mut new_settings = settings;
+                    let mut new_settings = storage::settings::load(&config_dir);
                     new_settings["launchAtLogin"] = serde_json::Value::Bool(true);
                     let _ = storage::settings::save(&config_dir, &new_settings);
                 }
@@ -295,16 +301,16 @@ pub fn run() {
                 }
             }
             // macOS: khi cửa sổ "thật" bị đóng (editor, settings, capture-bar,
-            // record-review), trả về Accessory policy (ẩn Dock icon).
-            // Windows: khi cửa sổ "thật" bị đóng, ẩn icon trên taskbar.
+            // record-review, history-trim), trả về Accessory policy (ẩn Dock
+            // icon). Windows: khi cửa sổ "thật" bị đóng, ẩn icon trên taskbar.
             if let tauri::WindowEvent::Destroyed = _event {
                 use tauri::Manager;
                 let label = _window.label();
                 // "editor" (capture) lẫn "editor-ow-N" ("Open with") + "settings"
-                // + "capture-bar" + "record-review" = cửa sổ thật → khi đóng,
-                // cân nhắc trả về Accessory policy (macOS) hoặc ẩn taskbar icon
-                // (Windows).
-                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" {
+                // + "capture-bar" + "record-review" + "history-trim" = cửa sổ
+                // thật → khi đóng, cân nhắc trả về Accessory policy (macOS)
+                // hoặc ẩn taskbar icon (Windows).
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" || label == "history-trim" {
                     windows::on_editor_closed(_window.app_handle());
                 }
             }
@@ -322,10 +328,13 @@ pub fn run() {
                 }
                 // macOS: click dock icon / Spotlight search khi app đang chạy.
                 #[cfg(target_os = "macos")]
-                tauri::RunEvent::Reopen { has_visible_windows: _, .. } => {
-                    // Luôn mở capture bar khi user reopen app (click Dock hoặc Spotlight).
-                    // Nếu capture bar đã mở, hàm open_capture_bar sẽ chỉ show + focus nó.
-                    let _ = windows::open_capture_bar(_app);
+                tauri::RunEvent::Reopen { has_visible_windows, .. } => {
+                    // Đã có cửa sổ nào đó (editor/history/record-review/capture-bar...)
+                    // đang visible → macOS tự đưa nó lên trước, không mở thêm capture bar.
+                    // Chỉ mở capture bar khi app đang "im lặng" hoàn toàn trong tray.
+                    if !has_visible_windows {
+                        let _ = windows::open_capture_bar(_app);
+                    }
                 }
                 // macOS: nhận file từ "Open with" / Finder / kéo vào Dock icon.
                 // Tauri v2 expose qua RunEvent::Opened (tao: application:openURLs:).

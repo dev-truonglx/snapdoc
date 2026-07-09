@@ -37,11 +37,9 @@ fn list_history_sync(app: &AppHandle, filter: HistoryFilter) -> Result<HistoryPa
         where_clauses.push("capture_mode = ?".to_string());
         params.push(Box::new(mode.clone()));
     }
-    if let Some(search) = &filter.search {
-        if !search.is_empty() {
-            where_clauses.push("title LIKE ?".to_string());
-            params.push(Box::new(format!("%{search}%")));
-        }
+    if let Some(media_type) = &filter.media_type {
+        where_clauses.push("media_type = ?".to_string());
+        params.push(Box::new(media_type.clone()));
     }
     let where_sql = where_clauses.join(" AND ");
 
@@ -155,6 +153,7 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
             output: "editor".to_string(),
             scale_factor: rec.scale_factor,
             history_id: Some(id.to_string()),
+            capture_mode: rec.capture_mode.clone(),
         });
     }
     windows::open_editor(app)
@@ -201,7 +200,13 @@ fn trim_history_video_sync(app: &AppHandle, id: &str, keep_ranges_ms: &[(i64, i6
 
     let asset_path = std::path::Path::new(&rec.asset_path);
     let new_path = crate::record::new_output_path(app)?;
-    crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path)?;
+    // Báo tiến độ % cho cửa sổ `history-trim` qua event toàn app — xem
+    // doc-comment `encoder::trim` + listener ở `HistoryTrim.tsx`.
+    let progress_app = app.clone();
+    crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path, move |frac| {
+        use tauri::Emitter;
+        let _ = progress_app.emit("trim-progress", frac);
+    })?;
 
     let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
     let file_size = std::fs::metadata(&new_path).ok().map(|m| m.len() as i64);
@@ -342,15 +347,25 @@ pub async fn update_history_asset(app: AppHandle, id: String, data: String) -> R
 /// Cắt 1 video đã lưu trong Library — xem `trim_history_video_sync`.
 /// `spawn_blocking` bắt buộc: chạy ffmpeg re-encode + concat, có thể mất vài
 /// giây (cùng lý do `commands::trim_pending_recording`/`stop_recording`).
+///
+/// Gọi từ cửa sổ RIÊNG `history-trim` (xem `windows::open_history_trim`) —
+/// KHÁC webview với cửa sổ "history" (mỗi cửa sổ Tauri là 1 JS heap/Zustand
+/// store riêng), nên thêm item mới xong không thể gọi thẳng `addItem` của
+/// store bên "history" được — phải emit event cho cửa sổ đó tự cập nhật, xem
+/// listener ở `HistoryWindow.tsx`.
 #[tauri::command]
 pub async fn trim_history_video(
     app: AppHandle,
     id: String,
     ranges: Vec<(i64, i64)>,
 ) -> Result<HistoryRecord, String> {
-    tauri::async_runtime::spawn_blocking(move || trim_history_video_sync(&app, &id, &ranges))
+    let app_for_blocking = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || trim_history_video_sync(&app_for_blocking, &id, &ranges))
         .await
-        .map_err(|e| format!("Task join error: {e}"))?
+        .map_err(|e| format!("Task join error: {e}"))??;
+    use tauri::Emitter;
+    let _ = app.emit("history:item-added", &result);
+    Ok(result)
 }
 
 /// Copy nhanh 1 item History vào clipboard (đọc thẳng từ asset trên đĩa) —
@@ -385,6 +400,26 @@ pub fn open_history(app: AppHandle) -> Result<(), String> {
         let _ = windows::open_history(&app);
     });
     Ok(())
+}
+
+/// Mở cửa sổ "Cắt video" cho 1 item — nút "Cắt video" ở `HistoryPreviewPanel.tsx`.
+/// Cùng lý do tách thread như `open_history` trên (cửa sổ không pre-warm,
+/// `build()` chạy live lần đầu, gọi trực tiếp trên IPC thread của Windows sẽ
+/// deadlock message pump).
+#[tauri::command]
+pub fn open_history_trim(app: AppHandle, id: String) -> Result<(), String> {
+    std::thread::spawn(move || {
+        let _ = windows::open_history_trim(&app, &id);
+    });
+    Ok(())
+}
+
+/// Đóng cửa sổ "Cắt video" — gọi sau khi áp dụng cắt xong (thành công) hoặc
+/// bấm "Đóng". Không có gì rủi ro mất dữ liệu khi đóng ngang (khác
+/// `record-review`) nên không cần chặn nút "x" của titlebar như bên đó.
+#[tauri::command]
+pub fn close_history_trim(app: AppHandle) {
+    windows::close_history_trim(&app);
 }
 
 /// Hoàn tất Quick Capture (copy/save ảnh đã flatten annotation) + ingest vào
