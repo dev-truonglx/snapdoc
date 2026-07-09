@@ -36,7 +36,7 @@ export interface HistoryFilter {
   from?: number;
   to?: number;
   captureMode?: string;
-  search?: string;
+  mediaType?: "image" | "video";
   trashOnly?: boolean;
   limit: number;
   offset: number;
@@ -159,6 +159,11 @@ export const ipc = {
   copyHistoryItem: (id: string) => invoke<void>("copy_history_item", { id }),
   revealHistoryItem: (id: string) => invoke<void>("reveal_history_item", { id }),
   openHistory: () => invoke<void>("open_history"),
+  /** Mở cửa sổ "Cắt video" riêng cho 1 item — cùng khuôn `record-review`
+   * (titlebar thật, thu nhỏ/phóng to/đóng). Cửa sổ mới đọc `id` qua query
+   * string (`HistoryTrim.tsx`), không qua tham số truyền trực tiếp. */
+  openHistoryTrim: (id: string) => invoke<void>("open_history_trim", { id }),
+  closeHistoryTrim: () => invoke<void>("close_history_trim"),
   finishQuickCapture: (data: string, width: number, height: number, output: string) =>
     invoke<string | null>("finish_quick_capture", { data, width, height, output }),
   // Quay màn hình — dừng quay/xem trạng thái chủ yếu vẫn qua tray icon (menu

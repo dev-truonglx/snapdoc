@@ -87,6 +87,14 @@ fn url(win: &str) -> WebviewUrl {
     WebviewUrl::App(format!("index.html?win={win}").into())
 }
 
+/// Như `url` nhưng kèm query string riêng — dùng cho `history-trim` truyền
+/// `id` của item History cần cắt (đọc lại ở `HistoryTrim.tsx` qua
+/// `URLSearchParams`, KHÔNG qua AppState — đơn giản hơn hẳn cho 1 giá trị
+/// đọc 1 lần lúc mount, không cần dọn dẹp state như `PendingRecordingState`).
+fn url_with_query(win: &str, query: &str) -> WebviewUrl {
+    WebviewUrl::App(format!("index.html?win={win}&{query}").into())
+}
+
 /// Đặt cửa sổ ở giữa-đáy màn hình chính (cho capture bar).
 fn place_bottom_center(win: &tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = win.primary_monitor() {
@@ -835,16 +843,16 @@ pub fn open_editor_with_file(app: &AppHandle, data_url: String) -> Result<(), St
 }
 
 /// Trả về Accessory policy (ẩn Dock) trên macOS hoặc ẩn taskbar icon trên Windows
-/// nếu không còn cửa sổ editor/settings/capture-bar/record-review nào đang mở.
-/// Gọi từ on_window_event khi 1 trong các cửa sổ đó bị đóng.
+/// nếu không còn cửa sổ editor/settings/capture-bar/record-review/history-trim
+/// nào đang mở. Gọi từ on_window_event khi 1 trong các cửa sổ đó bị đóng.
 pub fn on_editor_closed(app: &AppHandle) {
     // Kiểm tra còn cửa sổ "thật" nào đang mở không (editor, settings,
-    // capture-bar, record-review — từ khi có titlebar thật, xem
-    // `open_record_review`). Không tính overlay, thumbnail, scroll-control vì
-    // chúng tạm thời/phụ trợ.
+    // capture-bar, record-review, history-trim — từ khi có titlebar thật, xem
+    // `open_record_review`/`open_history_trim`). Không tính overlay,
+    // thumbnail, scroll-control vì chúng tạm thời/phụ trợ.
     let has_visible = app.webview_windows().values().any(|w| {
         let label = w.label();
-        (label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review")
+        (label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" || label == "history-trim")
             && w.is_visible().unwrap_or(false)
     });
 
@@ -861,7 +869,7 @@ pub fn on_editor_closed(app: &AppHandle) {
         // Windows: ẩn icon trên taskbar nếu không còn cửa sổ "thật" nào mở
         if !has_visible {
             for (label, win) in app.webview_windows() {
-                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" {
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" || label == "history-trim" {
                     let _ = win.set_skip_taskbar(true);
                 }
             }
@@ -1065,6 +1073,89 @@ pub fn close_record_review(app: &AppHandle) {
         let _ = win.destroy();
     }
 }
+
+/// Cửa sổ "Cắt video" cho 1 item trong History — cùng khuôn `open_record_review`
+/// (titlebar thật, thu nhỏ/phóng to/đóng) để 2 màn cắt video (sau khi quay
+/// VS đã lưu trong History) trải nghiệm giống nhau hệt như nhau. Khác
+/// `record-review`: KHÔNG cần chặn nút đóng (không có dữ liệu gì rủi ro mất —
+/// đóng ngang lúc nào cũng an toàn, bản gốc trong History không đổi) và
+/// KHÔNG dùng `AppState` để truyền item cần cắt — chỉ 1 giá trị `id` đọc 1
+/// lần lúc mount nên nhét thẳng vào query string qua `url_with_query`, phía
+/// `HistoryTrim.tsx` tự gọi `ipc.getHistoryItem(id)` để lấy dữ liệu, đơn giản
+/// hơn hẳn 1 State + lock riêng.
+pub fn open_history_trim(app: &AppHandle, id: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+
+    // Đóng cửa sổ cũ (nếu có, đang cắt 1 item KHÁC) trước khi mở cửa sổ mới
+    // cho `id` này — đơn giản hơn hẳn việc tự "navigate" nội dung cửa sổ có
+    // sẵn sang item khác, và tình huống này hiếm (chỉ xảy ra khi bấm "Cắt
+    // video" ở item khác trong lúc cửa sổ cắt trước đó còn mở).
+    if let Some(win) = app.get_webview_window("history-trim") {
+        let _ = win.destroy();
+    }
+
+    let (init_w, init_h) = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| {
+            let scale = m.scale_factor();
+            let size = m.size();
+            ((size.width as f64 / scale) * 0.85, (size.height as f64 / scale) * 0.85)
+        })
+        .unwrap_or((1100.0, 780.0));
+
+    let win = WebviewWindowBuilder::new(app, "history-trim", url_with_query("history-trim", &format!("id={id}")))
+        .title("SnapDoc — Cắt video")
+        .inner_size(init_w, init_h)
+        .min_inner_size(560.0, 480.0)
+        .resizable(true)
+        .center()
+        .skip_taskbar(false)
+        .build()
+        .map_err(|e| format!("Không tạo được cửa sổ cắt video: {e}"))?;
+
+    let _ = win.set_focus();
+    bring_history_trim_to_front(app, win);
+    Ok(())
+}
+
+pub fn close_history_trim(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("history-trim") {
+        let _ = win.close();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn bring_history_trim_to_front(app: &AppHandle, win: tauri::WebviewWindow) {
+    let app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        use objc2::msg_send;
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::MainThreadMarker;
+
+        if let Some(mtm) = MainThreadMarker::new() {
+            let ns_app = NSApplication::sharedApplication(mtm);
+            let _: () = unsafe { msg_send![&*ns_app, activateIgnoringOtherApps: true] };
+        }
+
+        if let Ok(ptr) = win.ns_window() {
+            let ns_win = ptr as *mut objc2_app_kit::NSWindow;
+            if !ns_win.is_null() {
+                unsafe {
+                    let _: () = msg_send![&*ns_win, makeKeyAndOrderFront: Option::<&objc2::runtime::AnyObject>::None];
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bring_history_trim_to_front(_app: &AppHandle, _win: tauri::WebviewWindow) {}
 
 /// macOS: kích hoạt app + đưa cửa sổ lên trước — quay thường được dừng từ
 /// tray icon/hotkey lúc app đang ở chế độ Accessory (không có cửa sổ nào

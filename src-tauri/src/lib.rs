@@ -139,6 +139,8 @@ pub fn run() {
             history::commands::copy_history_item,
             history::commands::reveal_history_item,
             history::commands::open_history,
+            history::commands::open_history_trim,
+            history::commands::close_history_trim,
             history::commands::finish_quick_capture,
         ])
         .setup(|app| {
@@ -295,16 +297,16 @@ pub fn run() {
                 }
             }
             // macOS: khi cửa sổ "thật" bị đóng (editor, settings, capture-bar,
-            // record-review), trả về Accessory policy (ẩn Dock icon).
-            // Windows: khi cửa sổ "thật" bị đóng, ẩn icon trên taskbar.
+            // record-review, history-trim), trả về Accessory policy (ẩn Dock
+            // icon). Windows: khi cửa sổ "thật" bị đóng, ẩn icon trên taskbar.
             if let tauri::WindowEvent::Destroyed = _event {
                 use tauri::Manager;
                 let label = _window.label();
                 // "editor" (capture) lẫn "editor-ow-N" ("Open with") + "settings"
-                // + "capture-bar" + "record-review" = cửa sổ thật → khi đóng,
-                // cân nhắc trả về Accessory policy (macOS) hoặc ẩn taskbar icon
-                // (Windows).
-                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" {
+                // + "capture-bar" + "record-review" + "history-trim" = cửa sổ
+                // thật → khi đóng, cân nhắc trả về Accessory policy (macOS)
+                // hoặc ẩn taskbar icon (Windows).
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" || label == "history-trim" {
                     windows::on_editor_closed(_window.app_handle());
                 }
             }
