@@ -79,6 +79,20 @@ VERSION="$VERSION" node -e '
 echo "==> [2/6] Building macOS universal bundle (a few minutes)"
 export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-SnapDoc Dev}"
 bash scripts/macos-codesign.sh --ensure-only
+
+# Tauri's bundler can reuse a stale `externalBin` sidecar (e.g. ffmpeg) copied
+# into a PREVIOUS bundle output — confirmed by hand in this exact repo (see
+# same sweep in dev-mac.sh/build-mac.sh): after fixing a broken ffmpeg in
+# src-tauri/binaries/, a stale bundle under target/ kept the old broken bytes
+# across rebuilds until every existing `SnapDoc.app` anywhere under target/
+# was wiped first — deleting only the universal-apple-darwin profile's own
+# bundle was NOT enough. This script builds straight into
+# target/universal-apple-darwin/release, the exact profile shipped to real
+# users, so skipping this sweep risks shipping a stale/broken sidecar (e.g.
+# recording/trim/thumbnail silently breaking) to every user who installs this
+# release.
+find src-tauri/target -type d -name "SnapDoc.app" -prune -exec rm -rf {} +
+
 rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null
 npm install
 npm run tauri build -- --target universal-apple-darwin

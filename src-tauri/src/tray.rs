@@ -31,6 +31,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "restart_update" => app.restart(),
+            
+            "full"   => dispatch(app, "full"),
+            "region" => dispatch(app, "region"),
+            "window" => dispatch(app, "window"),
+            "scroll" => dispatch(app, "scroll"),
             "all" => {
                 let app = app.clone();
                 std::thread::spawn(move || {
@@ -38,10 +43,6 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
                     flow::capture_all_screens(&app, &output).ok();
                 });
             }
-            "full"   => dispatch(app, "full"),
-            "region" => dispatch(app, "region"),
-            "window" => dispatch(app, "window"),
-            "scroll" => dispatch(app, "scroll"),
             "record_full"   => dispatch_record(app, "full"),
             "record_region" => dispatch_record(app, "region"),
             "record_window" => dispatch_record(app, "window"),
@@ -111,9 +112,9 @@ fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<t
     if show_restart {
         let restart = MenuItem::with_id(app, "restart_update", "↺ Khởi động lại để cập nhật", true, None::<&str>)?;
         let sep3    = PredefinedMenuItem::separator(app)?;
-        Menu::with_items(app, &[&restart, &sep3, &quick, &all, &full, &region, &window, &scroll, &record_menu, &sep1, &bar, &history, &settings, &sep2, &quit])
+        Menu::with_items(app, &[&restart, &sep3, &quick, &full, &region, &window, &scroll, &all, &record_menu, &sep1, &bar, &history, &settings, &sep2, &quit])
     } else {
-        Menu::with_items(app, &[&quick, &all, &full, &region, &window, &scroll, &record_menu, &sep1, &bar, &history, &settings, &sep2, &quit])
+        Menu::with_items(app, &[&quick, &full, &region, &window, &scroll, &all, &record_menu, &sep1, &bar, &history, &settings, &sep2, &quit])
     }
 }
 
