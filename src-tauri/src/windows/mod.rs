@@ -835,14 +835,16 @@ pub fn open_editor_with_file(app: &AppHandle, data_url: String) -> Result<(), St
 }
 
 /// Trả về Accessory policy (ẩn Dock) trên macOS hoặc ẩn taskbar icon trên Windows
-/// nếu không còn cửa sổ editor/settings/capture-bar nào đang mở.
-/// Gọi từ on_window_event khi editor/settings/capture-bar bị đóng.
+/// nếu không còn cửa sổ editor/settings/capture-bar/record-review nào đang mở.
+/// Gọi từ on_window_event khi 1 trong các cửa sổ đó bị đóng.
 pub fn on_editor_closed(app: &AppHandle) {
-    // Kiểm tra còn cửa sổ "thật" nào đang mở không (editor, settings, capture-bar).
-    // Không tính overlay, thumbnail, scroll-control vì chúng tạm thời/phụ trợ.
+    // Kiểm tra còn cửa sổ "thật" nào đang mở không (editor, settings,
+    // capture-bar, record-review — từ khi có titlebar thật, xem
+    // `open_record_review`). Không tính overlay, thumbnail, scroll-control vì
+    // chúng tạm thời/phụ trợ.
     let has_visible = app.webview_windows().values().any(|w| {
         let label = w.label();
-        (label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history")
+        (label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review")
             && w.is_visible().unwrap_or(false)
     });
 
@@ -859,7 +861,7 @@ pub fn on_editor_closed(app: &AppHandle) {
         // Windows: ẩn icon trên taskbar nếu không còn cửa sổ "thật" nào mở
         if !has_visible {
             for (label, win) in app.webview_windows() {
-                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" {
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" {
                     let _ = win.set_skip_taskbar(true);
                 }
             }
@@ -984,27 +986,59 @@ pub fn prewarm_thumbnail(app: &AppHandle) -> Result<(), String> {
 /// mỗi lần không đáng lo hiệu năng, và tạo mới mỗi lần tránh phải tự
 /// reset state cũ còn sót lại trong webview.
 pub fn open_record_review(app: &AppHandle) -> Result<(), String> {
+    // macOS: chuyển về Regular (cùng khuôn `open_editor`/`open_settings`) —
+    // BẮT BUỘC để cửa sổ có titlebar chuẩn (nút đóng/thu nhỏ/phóng to hoạt
+    // động, xem đổi từ `decorations(false)` bên dưới) + xuất hiện ở Dock/
+    // Cmd+Tab. Quay có thể dừng từ tray/hotkey lúc app đang ở Accessory
+    // policy (không cửa sổ nào mở) nên phải set lại mỗi lần mở, không chỉ
+    // lúc tạo cửa sổ lần đầu.
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+
     if let Some(win) = app.get_webview_window("record-review") {
         let _ = win.show();
+        let _ = win.unminimize();
         let _ = win.set_focus();
+        #[cfg(target_os = "windows")]
+        let _ = win.set_skip_taskbar(false);
         bring_record_review_to_front(app, win);
         return Ok(());
     }
 
+    // Mở lớn theo % màn hình chính (thay vì cỡ cố định 640×620 cũ) — người
+    // dùng cần nhìn rõ video + timeline cắt (VideoTrimmer, xem RecordReview.tsx)
+    // ngay khi vừa quay xong, cỡ nhỏ trước đây làm filmstrip/preview bị bóp.
+    // 85% kích thước màn hình (không phải maximize hẳn) để vẫn còn thấy được
+    // nền desktop xung quanh.
+    let (init_w, init_h) = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| {
+            let scale = m.scale_factor();
+            let size = m.size();
+            ((size.width as f64 / scale) * 0.85, (size.height as f64 / scale) * 0.85)
+        })
+        .unwrap_or((1100.0, 780.0));
+
+    // Cửa sổ thật có titlebar (thu nhỏ/phóng to/đóng) — giống `open_editor`,
+    // KHÔNG còn borderless/transparent/always-on-top như bản cũ (cảm giác
+    // "popup nổi" không phù hợp cho 1 màn hình chỉnh sửa cần thao tác lâu:
+    // không thu nhỏ được, luôn che các cửa sổ khác). Đóng bằng nút "x" thật
+    // trên titlebar giờ được chặn lại và coi như "Xoá" — xem
+    // `WindowEvent::CloseRequested` cho label "record-review" ở `lib.rs`.
     let win = WebviewWindowBuilder::new(app, "record-review", url("record-review"))
         .title("SnapDoc — Xem lại bản quay")
-        // 640×620 (thay vì 480×420 cũ) — đủ chỗ ngang cho timeline cắt video
-        // (VideoTrimmer, xem RecordReview.tsx) bên dưới phần preview.
-        // resizable + min_inner_size để người dùng có thể kéo rộng ra thao
-        // tác cắt dễ hơn với video dài (cùng khuôn `open_editor`/`open_history`).
-        .inner_size(640.0, 620.0)
+        // resizable + min_inner_size để người dùng có thể kéo rộng/hẹp thêm
+        // tuỳ ý (cùng khuôn `open_editor`/`open_history`).
+        .inner_size(init_w, init_h)
         .min_inner_size(560.0, 480.0)
         .resizable(true)
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
         .center()
-        .skip_taskbar(true)
+        .skip_taskbar(false)
         .build()
         .map_err(|e| format!("Không tạo được cửa sổ xem lại bản quay: {e}"))?;
 
@@ -1014,10 +1048,21 @@ pub fn open_record_review(app: &AppHandle) -> Result<(), String> {
 }
 
 /// Đóng (huỷ hẳn, không ẩn) cửa sổ xem lại — gọi sau khi
-/// `confirm_recording_save`/`confirm_recording_discard` xử lý xong.
+/// `confirm_recording_save`/`confirm_recording_discard` xử lý xong (dữ liệu
+/// đã lưu/xoá xong xuôi, giờ mới thật sự đóng cửa sổ).
+///
+/// PHẢI dùng `destroy()`, KHÔNG dùng `close()` — theo doc của tauri, `close()`
+/// "emits `CloseRequested` first like a user-initiated close request", tức
+/// gọi lại ĐÚNG event mà `WindowEvent::CloseRequested` cho label
+/// "record-review" ở `lib.rs` đang chặn (coi là bấm nút "x" trên titlebar).
+/// Dùng `close()` ở đây tạo vòng lặp tự chặn chính mình: Lưu/Xoá xử lý xong
+/// gọi hàm này → `close()` → lại bắn `CloseRequested` → bị chặn lại →
+/// cửa sổ KHÔNG BAO GIỜ đóng được dù dữ liệu đã xử lý xong. `destroy()`
+/// "does not emit any events and force close the window instead" — đúng
+/// đường "đã xử lý xong, đóng thật" cần ở đây.
 pub fn close_record_review(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("record-review") {
-        let _ = win.close();
+        let _ = win.destroy();
     }
 }
 

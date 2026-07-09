@@ -22,11 +22,12 @@
 //! này.
 
 pub mod encoder;
+pub mod filmstrip;
 mod audio_mic;
 #[cfg(target_os = "windows")]
 mod audio_wasapi;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -122,6 +123,18 @@ pub struct PendingRecording {
     pub height: u32,
     pub duration_ms: i64,
     pub capture_mode: String,
+    /// Đường dẫn bản THÔ (trước khi cắt lần đầu) — chỉ set sau lần
+    /// `trim_pending_recording` ĐẦU TIÊN, giữ nguyên ở các lần cắt tiếp theo
+    /// (xem đó để hiểu vì sao). `#[serde(skip)]`: thuần nội bộ, frontend
+    /// không cần biết — `confirm_recording_save` tự ingest thêm bản này vào
+    /// History nếu có, `confirm_recording_discard` tự xoá luôn file này.
+    #[serde(skip)]
+    pub raw_path: Option<PathBuf>,
+    /// Thời lượng (ms) của bản thô — `duration_ms` ở trên bị ghi đè thành
+    /// thời lượng MỚI mỗi lần cắt nên phải lưu riêng, dùng khi ingest bản thô
+    /// vào History lúc Lưu.
+    #[serde(skip)]
+    pub raw_duration_ms: Option<i64>,
 }
 
 #[derive(Default)]
@@ -149,7 +162,7 @@ fn resolve_save_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 /// Đường dẫn file mp4 mới: `{saveDir hoặc Pictures/SnapDoc}/Recording_<timestamp>.mp4`
 /// — cùng thư mục lưu với ảnh chụp (tôn trọng `saveDir` đã cấu hình trong Settings).
-fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = resolve_save_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Không tạo được thư mục lưu: {e}"))?;
     // mp4 nằm NGOÀI `$APPDATA/SnapDoc/library` (scope tĩnh khai trong
@@ -760,6 +773,8 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
             height: active.height,
             duration_ms,
             capture_mode: active.capture_mode.to_string(),
+            raw_path: None,
+            raw_duration_ms: None,
         });
     }
 
@@ -776,28 +791,48 @@ pub fn peek_pending_recording(app: &AppHandle) -> Option<PendingRecording> {
     app.state::<PendingRecordingState>().0.lock().ok()?.clone()
 }
 
-/// Cắt bản quay đang chờ xác nhận (trước khi Lưu/Xoá ở `record-review`) —
-/// ghi đè TẠI CHỖ (`path` giữ nguyên, chỉ thay nội dung file) rồi cập nhật
-/// `duration_ms` trong `PendingRecordingState`. `confirm_recording_save`/
-/// `confirm_recording_discard` không cần biết gì về việc này — chúng luôn
-/// thao tác trên `pending.path` hiện tại nên tự động thấy nội dung đã cắt.
+/// Cắt bản quay đang chờ xác nhận (trước khi Lưu/Xoá ở `record-review`).
+/// `path` giữ nguyên vị trí (nội dung thay đổi) NHƯNG lần cắt ĐẦU TIÊN sẽ
+/// dời bản THÔ (chưa cắt gì) sang 1 file riêng (`raw_path`) trước khi ghi đè
+/// — cắt sai thì vẫn còn bản gốc để Lưu cùng lúc lúc bấm "Lưu" (xem
+/// `confirm_recording_save`), thay vì mất trắng ngay khi cắt. Các lần cắt
+/// tiếp theo (đã có `raw_path` từ trước) KHÔNG dời lại — bản thô luôn là bản
+/// DUY NHẤT trước lần cắt đầu tiên, không phải "bản trước lần cắt gần nhất".
 /// `keep_ranges_ms`: danh sách đoạn GIỮ LẠI (ms), xem `encoder::trim`.
 pub fn trim_pending_recording(app: &AppHandle, keep_ranges_ms: &[(i64, i64)]) -> Result<PendingRecording, String> {
     let pending_state = app.state::<PendingRecordingState>();
-    let path = {
+    let (path, has_raw, current_duration_ms) = {
         let guard = pending_state.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
-        guard
+        let pending = guard
             .as_ref()
-            .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?
-            .path
-            .clone()
+            .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
+        (pending.path.clone(), pending.raw_path.is_some(), pending.duration_ms)
     };
 
     // Không giữ lock trong lúc chạy ffmpeg (có thể mất vài giây) — chỉ khoá
-    // lại ở bước đọc path (trên) và bước ghi duration_ms (dưới).
+    // lại ở bước đọc state (trên) và bước ghi kết quả (dưới).
     let input_path = PathBuf::from(&path);
+
+    // `rename` (không `copy`) — tránh nhân đôi I/O với file video có thể vài
+    // trăm MB, chỉ đổi tên/entry thư mục nên gần như tức thời trên cùng ổ đĩa.
+    let new_raw: Option<(PathBuf, i64)> = if has_raw {
+        None
+    } else {
+        let raw_path = input_path.with_file_name(format!(
+            "{}-raw.mp4",
+            input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording"),
+        ));
+        std::fs::rename(&input_path, &raw_path)
+            .map_err(|e| format!("Không sao lưu được bản thô: {e}"))?;
+        Some((raw_path, current_duration_ms))
+    };
+
+    // Nguồn để trim: lần đầu là bản thô vừa dời đi; các lần sau là bản HIỆN
+    // TẠI ở `input_path` (đã cắt từ lần trước, ranges frontend gửi luôn tính
+    // theo toạ độ của bản hiện tại, không phải bản thô).
+    let trim_source: &Path = new_raw.as_ref().map(|(p, _)| p.as_path()).unwrap_or(&input_path);
     let tmp_output = input_path.with_extension("trimtmp.mp4");
-    encoder::trim(&input_path, keep_ranges_ms, &tmp_output)?;
+    encoder::trim(trim_source, keep_ranges_ms, &tmp_output)?;
     std::fs::rename(&tmp_output, &input_path)
         .map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
 
@@ -808,12 +843,23 @@ pub fn trim_pending_recording(app: &AppHandle, keep_ranges_ms: &[(i64, i64)]) ->
         .as_mut()
         .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
     pending.duration_ms = new_duration_ms;
+    if let Some((raw_path, raw_duration_ms)) = new_raw {
+        pending.raw_path = Some(raw_path);
+        pending.raw_duration_ms = Some(raw_duration_ms);
+    }
     Ok(pending.clone())
 }
 
 /// Người dùng chọn "Lưu" ở `record-review`: ingest bản quay đang chờ vào
-/// History rồi đóng cửa sổ. Lỗi ingest (thumbnail/DB) vẫn coi là thành công
-/// đối với người dùng — file mp4 đã tồn tại sẵn trên đĩa từ trước, không mất.
+/// History rồi đóng cửa sổ. Nếu đã từng cắt (có `raw_path`) thì ingest CẢ bản
+/// thô lẫn bản đã cắt — 2 item riêng trong History, giống hành vi cắt video
+/// đã lưu (`history::trim_history_video_sync`): không đánh đổi "cắt sai mất
+/// bản gốc" chỉ vì cắt trước khi Lưu thay vì sau. Ingest bản thô TRƯỚC (nếu
+/// có) rồi bản hiện tại SAU, để bản hiện tại — thứ người dùng vừa hoàn tất —
+/// hiện lên đầu danh sách (sort theo `created_at DESC`). Lỗi ingest
+/// (thumbnail/DB) vẫn coi là thành công đối với người dùng — file mp4 đã tồn
+/// tại sẵn trên đĩa từ trước, không mất; lỗi ở bản thô không chặn ingest bản
+/// hiện tại (vẫn còn ít nhất 1 bản trong History thay vì mất trắng cả 2).
 pub fn confirm_recording_save(app: &AppHandle) -> Result<(), String> {
     let pending = app
         .state::<PendingRecordingState>()
@@ -822,6 +868,19 @@ pub fn confirm_recording_save(app: &AppHandle) -> Result<(), String> {
         .map_err(|_| "Lock PendingRecordingState lỗi".to_string())?
         .take()
         .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
+
+    if let (Some(raw_path), Some(raw_duration_ms)) = (&pending.raw_path, pending.raw_duration_ms) {
+        if let Err(e) = crate::history::ingest_video(
+            app,
+            raw_path,
+            pending.width,
+            pending.height,
+            raw_duration_ms,
+            &pending.capture_mode,
+        ) {
+            eprintln!("[SnapDoc][record] Ingest bản thô vào History thất bại: {e}");
+        }
+    }
 
     if let Err(e) = crate::history::ingest_video(
         app,
@@ -838,8 +897,9 @@ pub fn confirm_recording_save(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Người dùng chọn "Xoá" ở `record-review`: xoá hẳn file mp4 (chưa từng vào
-/// History nên không cần dọn DB) rồi đóng cửa sổ.
+/// Người dùng chọn "Xoá" ở `record-review`: xoá hẳn file mp4 HIỆN TẠI lẫn
+/// bản thô (`raw_path`, nếu có — tức đã cắt ít nhất 1 lần trước khi Xoá) —
+/// cả 2 chưa từng vào History nên không cần dọn DB, chỉ xoá file trên đĩa.
 pub fn confirm_recording_discard(app: &AppHandle) -> Result<(), String> {
     let pending = app
         .state::<PendingRecordingState>()
@@ -848,6 +908,12 @@ pub fn confirm_recording_discard(app: &AppHandle) -> Result<(), String> {
         .map_err(|_| "Lock PendingRecordingState lỗi".to_string())?
         .take()
         .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
+
+    if let Some(raw_path) = &pending.raw_path {
+        if let Err(e) = std::fs::remove_file(raw_path) {
+            eprintln!("[SnapDoc][record] Không xoá được bản thô: {e}");
+        }
+    }
 
     let result = std::fs::remove_file(&pending.path).map_err(|e| format!("Không xoá được file: {e}"));
     crate::windows::close_record_review(app);

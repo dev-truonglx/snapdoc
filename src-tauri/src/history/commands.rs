@@ -185,12 +185,14 @@ fn update_history_asset_sync(app: &AppHandle, id: &str, data: &str) -> Result<Hi
     get_history_item_sync(app, id)
 }
 
-/// Cắt 1 video đã lưu trong Library — sửa TẠI CHỖ (ghi đè `asset_path`, path
-/// không đổi), sinh lại thumbnail (frame ở giây thứ 0.5 cũ có thể đã nằm
-/// trong đoạn vừa xoá) và cập nhật `duration_ms`/`file_size`/`is_edited`.
-/// Theo đúng khung `update_history_asset_sync` (ảnh) nhưng thao tác trên file
-/// path thay vì base64 trong bộ nhớ — video có thể nặng hàng chục/trăm MB,
-/// không hợp để round-trip qua IPC dạng base64.
+/// Cắt 1 video đã lưu trong Library — tạo 1 record MỚI cho bản đã cắt, GIỮ
+/// NGUYÊN record gốc (không đổi 1 byte nào của asset/thumbnail/DB row cũ).
+/// Trước đây ghi đè tại chỗ — cắt sai 1 lần là mất trắng phần đã xoá, không
+/// có đường lùi. Đổi lại: mỗi lần cắt tốn thêm dung lượng cho 1 file video
+/// mới (đã cân nhắc — với video quay màn hình, đánh đổi này hợp lý hơn nguy
+/// cơ mất bản gốc). File mới nằm ở `saveDir` giống video quay bình thường
+/// (`record::new_output_path`, KHÔNG copy vào `library/assets` — theo đúng
+/// quy ước hiện có cho video, xem `history::ingest_video`).
 fn trim_history_video_sync(app: &AppHandle, id: &str, keep_ranges_ms: &[(i64, i64)]) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type != "video" {
@@ -198,31 +200,53 @@ fn trim_history_video_sync(app: &AppHandle, id: &str, keep_ranges_ms: &[(i64, i6
     }
 
     let asset_path = std::path::Path::new(&rec.asset_path);
-    let tmp_output = asset_path.with_extension("trimtmp.mp4");
-    crate::record::encoder::trim(asset_path, keep_ranges_ms, &tmp_output)?;
-    std::fs::rename(&tmp_output, asset_path)
-        .map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
-
-    // Lỗi sinh thumbnail KHÔNG chặn kết quả cắt — file video đã cắt xong và
-    // hợp lệ, chỉ ảnh thu nhỏ hiển thị tạm thời là ảnh cũ (giống cách
-    // `ingest_video` xử lý lỗi thumbnail).
-    if let Err(e) = super::video_thumbnail::generate(asset_path, std::path::Path::new(&rec.thumb_path)) {
-        eprintln!("[SnapDoc][history] Sinh lại thumbnail sau khi cắt thất bại: {e}");
-    }
+    let new_path = crate::record::new_output_path(app)?;
+    crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path)?;
 
     let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
-    let file_size = std::fs::metadata(asset_path).ok().map(|m| m.len() as i64);
+    let file_size = std::fs::metadata(&new_path).ok().map(|m| m.len() as i64);
+
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let thumb_path = super::assets::thumb_path_for(app, &new_id)?;
+    // Lỗi sinh thumbnail KHÔNG chặn kết quả cắt — file video đã cắt xong và
+    // hợp lệ, chỉ ảnh thu nhỏ hiển thị tạm là fallback trống (giống cách
+    // `ingest_video` xử lý lỗi thumbnail).
+    if let Err(e) = super::video_thumbnail::generate(&new_path, &thumb_path) {
+        eprintln!("[SnapDoc][history] Sinh thumbnail cho bản đã cắt thất bại: {e}");
+    }
+
+    let asset_path_str = new_path.to_string_lossy().to_string();
+    let thumb_path_str = thumb_path.to_string_lossy().to_string();
+    // Gắn "(đã cắt)" vào tên để phân biệt với bản gốc trong danh sách — nếu
+    // bản gốc chưa đặt tên thì để trống, dựa vào fallback "(Không tên)" +
+    // thứ tự mới nhất trong list là đủ phân biệt.
+    let new_title = rec.title.as_ref().map(|t| format!("{t} (đã cắt)"));
+    let now = now_ms();
 
     let st = state(app)?;
     {
         let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
         conn.execute(
-            "UPDATE history SET updated_at = ?1, duration_ms = ?2, file_size = ?3, is_edited = 1 WHERE id = ?4",
-            rusqlite::params![now_ms(), new_duration_ms, file_size, id],
+            "INSERT INTO history (id, created_at, updated_at, capture_mode, media_type, width, height, scale_factor, duration_ms, asset_path, thumb_path, file_size, title, is_edited) \
+             VALUES (?1,?2,?3,?4,'video',?5,?6,?7,?8,?9,?10,?11,?12,1)",
+            rusqlite::params![
+                new_id,
+                now,
+                now,
+                rec.capture_mode,
+                rec.width,
+                rec.height,
+                rec.scale_factor,
+                new_duration_ms,
+                asset_path_str,
+                thumb_path_str,
+                file_size,
+                new_title,
+            ],
         )
         .map_err(|e| e.to_string())?;
     }
-    get_history_item_sync(app, id)
+    get_history_item_sync(app, &new_id)
 }
 
 fn copy_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {

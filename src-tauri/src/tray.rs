@@ -5,7 +5,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle,
+    AppHandle, Emitter,
 };
 
 /// Track whether the "restart to update" item should be shown in tray menu.
@@ -189,6 +189,7 @@ pub fn show_recording_tray(app: &AppHandle) {
                 std::thread::spawn(move || {
                     if let Err(e) = crate::record::stop_recording(&app) {
                         eprintln!("[SnapDoc][record] Dừng quay từ tray icon thất bại: {e}");
+                        let _ = app.emit("snapdoc-error", format!("Dừng quay thất bại: {e}"));
                     }
                 });
             }
@@ -196,7 +197,15 @@ pub fn show_recording_tray(app: &AppHandle) {
         .build(app);
     match result {
         Ok(tray) => *guard = Some(tray),
-        Err(e) => eprintln!("[SnapDoc][record] Không tạo được tray icon quay: {e}"),
+        Err(e) => {
+            // Trước đây chỉ `eprintln!` (vô hình trong bản đóng gói, không có
+            // console đính kèm) — quay vẫn chạy (file vẫn ghi) nhưng người
+            // dùng không thấy DẤU HIỆU nào là đang quay. Emit qua kênh lỗi
+            // chung (CaptureBar.tsx lắng `snapdoc-error`) để ít nhất còn 1
+            // thông báo hiện ra thay vì im lặng hoàn toàn.
+            eprintln!("[SnapDoc][record] Không tạo được tray icon quay: {e}");
+            let _ = app.emit("snapdoc-error", format!("Đang quay nhưng không hiện được icon trên tray: {e}"));
+        }
     }
 }
 

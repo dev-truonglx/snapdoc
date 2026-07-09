@@ -541,16 +541,26 @@ pub fn start(
     // không thì bằng toàn bộ nội dung của filter (`contentRect`).
     let (px_w, px_h) = if let Some(rect) = source_rect {
         (
-            ((rect.size.width * scale).round() as usize).max(1),
-            ((rect.size.height * scale).round() as usize).max(1),
+            ((rect.size.width * scale).round() as usize).max(2),
+            ((rect.size.height * scale).round() as usize).max(2),
         )
     } else {
         let content_rect: CGRect = unsafe { filter.contentRect() };
         (
-            ((content_rect.size.width * scale).round() as usize).max(1),
-            ((content_rect.size.height * scale).round() as usize).max(1),
+            ((content_rect.size.width * scale).round() as usize).max(2),
+            ((content_rect.size.height * scale).round() as usize).max(2),
         )
     };
+    // Ép về SỐ CHẴN (`& !1` xoá bit thấp nhất, luôn còn >= 2 nhờ `.max(2)`
+    // trên) — `Encoder::start` (encoder.rs) encode ra `yuv420p`, đòi hỏi CẢ
+    // width/height chẵn (chroma subsampling 4:2:0 chia đôi từng chiều).
+    // `content_rect` (toàn màn hình/cửa sổ) thường sẵn chẵn nên hiếm gặp, nhưng
+    // `source_rect` (quay 1 VÙNG do người dùng tự kéo chọn, kích thước bất kỳ)
+    // ra số lẻ rất dễ xảy ra — ffmpeg từ chối ngay khi bắt đầu encode, đóng
+    // stdin, mọi lần `write_frame()` sau đó lỗi "Broken pipe" (đã tái hiện và
+    // xác nhận qua log: 1822×1161 — 1161 lẻ — đúng lúc quay 1 vùng chọn tự do).
+    let px_w = px_w & !1;
+    let px_h = px_h & !1;
 
     let config = unsafe { SCStreamConfiguration::new() };
     unsafe {

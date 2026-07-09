@@ -7,10 +7,19 @@
 // `tauri build` (kể cả scripts/dev-mac.sh, scripts/build-mac.sh).
 //
 // - macOS: bản build release là UNIVERSAL BINARY (cần cả 2 kiến trúc cùng
-//   lúc, không phải chỉ đúng kiến trúc máy đang chạy) — kiến trúc NATIVE của
-//   máy (vd arm64 trên Apple Silicon) cài qua Homebrew (`brew install ffmpeg`,
-//   không làm gì nếu đã có sẵn); kiến trúc CÒN LẠI (x86_64 Intel — luôn cần
-//   dù máy là Apple Silicon hay Intel) tải bản static build từ evermeet.cx.
+//   lúc, không phải chỉ đúng kiến trúc máy đang chạy) — CẢ 2 kiến trúc đều
+//   tải bản STATIC build (arm64 từ osxexperts.net, x86_64 Intel từ
+//   evermeet.cx). Trước đây arm64 cài qua Homebrew (`brew install ffmpeg`)
+//   rồi copy binary ra khỏi Cellar — ĐÃ BỎ vì binary đó liên kết ĐỘNG tới
+//   hàng chục .dylib trong chính Cellar Homebrew (`/opt/homebrew/Cellar/
+//   ffmpeg/<version>/lib/...` + libvmaf/x264/x265/dav1d/opus/lame/openssl...)
+//   — chỉ chạy được trên đúng máy dev có Homebrew, và ĐÃ TỰ GẪY ngay trên máy
+//   dev khi `brew upgrade` đổi version Cellar: binary cũ trong
+//   `src-tauri/binaries/` (được cache, script không re-check) vẫn trỏ tới
+//   path phiên bản cũ không còn tồn tại → app đóng gói báo "Library not
+//   loaded" khi chạy ffmpeg, dù bản thân code không đổi gì. Static build
+//   không có lớp rủi ro này (chỉ liên kết System framework/`/usr/lib`, luôn
+//   có sẵn trên mọi máy macOS).
 // - Windows (host Windows HOẶC container Linux của scripts/build-win-docker.sh
 //   cross-build sang x86_64-pc-windows-msvc): tải bản dựng TĨNH (static) mới
 //   nhất từ BtbN/FFmpeg-Builds trên GitHub Releases (tag "latest" luôn được
@@ -22,7 +31,7 @@
 // tiện ích chuẩn bị trước — nếu tải thất bại (không mạng, đổi URL, thiếu
 // Homebrew...) thì chỉ log cảnh báo rồi thoát BÌNH THƯỜNG — nếu binary vẫn
 // thật sự thiếu, chính Tauri sẽ tự báo lỗi rõ ràng ở bước build/bundle như cũ.
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -36,14 +45,6 @@ function log(msg) {
 }
 function warn(msg) {
   console.warn(`[fetch-ffmpeg] ${msg}`);
-}
-
-// Cả 2 kiến trúc macOS đều cần chuẩn bị sẵn (universal binary — xem doc-
-// comment đầu file), bất kể máy đang chạy là Apple Silicon hay Intel.
-const MAC_TRIPLES = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
-
-function macNativeTriple() {
-  return process.arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
 }
 
 // Windows KHÔNG có khái niệm universal binary — chỉ cần đúng 1 kiến trúc của
@@ -116,26 +117,31 @@ async function fetchWindows(dest, triple) {
   }
 }
 
-// Kiến trúc NATIVE của máy — cài qua Homebrew (idempotent, không làm gì nếu
-// đã có sẵn) rồi copy binary ra khỏi Cellar.
-function fetchMacNativeViaBrew(dest) {
-  log("Đang cài ffmpeg qua Homebrew (bỏ qua nếu máy đã có sẵn)...");
+// Kiến trúc arm64 (Apple Silicon) — tải bản static build từ osxexperts.net
+// (cùng nguồn cấp cả arm64 lẫn Intel, xem `fetchMacIntelViaEvermeet` bên
+// dưới dùng evermeet.cx cho Intel — giữ nguyên vì đã chạy ổn, chỉ đổi nguồn
+// cho arm64 vì Homebrew không cho static build). Tên file trên server ghim
+// theo version cụ thể (ví dụ "ffmpeg81arm.zip" = ffmpeg 8.1) nên định kỳ cần
+// cập nhật `OSXEXPERTS_ARM_FILE` khi có major version mới — không tự dò được
+// "latest" như evermeet.cx (không có endpoint JSON tương đương).
+const OSXEXPERTS_ARM_FILE = "ffmpeg81arm.zip";
+
+async function fetchMacArmViaOsxExperts(dest) {
+  const url = `https://www.osxexperts.net/${OSXEXPERTS_ARM_FILE}`;
+  log(`Đang tải ffmpeg (macOS arm64) từ osxexperts.net (${OSXEXPERTS_ARM_FILE})...`);
+  const tmp = mkdtempSync(join(tmpdir(), "snapdoc-ffmpeg-"));
   try {
-    execSync("command -v brew", { stdio: "ignore" });
-  } catch {
-    throw new Error(
-      `Không tìm thấy Homebrew (https://brew.sh) — cài rồi chạy lại, hoặc tự tải bản ffmpeg static build và đặt tại ${dest}`,
-    );
+    const zipPath = join(tmp, "ffmpeg.zip");
+    await downloadFile(url, zipPath);
+    execFileSync("tar", ["-xf", zipPath, "-C", tmp]);
+    const found = findFileRecursive(tmp, "ffmpeg");
+    if (!found) throw new Error("Không tìm thấy binary ffmpeg sau khi giải nén");
+    mkdirSync(BINARIES_DIR, { recursive: true });
+    copyFileSync(found, dest);
+    chmodSync(dest, 0o755);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
-  execSync("brew install ffmpeg", { stdio: "inherit" });
-  const brewPrefix = execSync("brew --prefix ffmpeg").toString().trim();
-  const src = join(brewPrefix, "bin", "ffmpeg");
-  if (!existsSync(src)) {
-    throw new Error(`Không thấy ffmpeg tại ${src} sau khi "brew install ffmpeg"`);
-  }
-  mkdirSync(BINARIES_DIR, { recursive: true });
-  copyFileSync(src, dest);
-  chmodSync(dest, 0o755);
 }
 
 // Kiến trúc x86_64 Intel — CẦN cho universal binary dù máy đang chạy là Apple
@@ -217,14 +223,8 @@ async function ensureOne(triple, fetcher) {
 
 async function main() {
   if (process.platform === "darwin") {
-    const native = macNativeTriple();
-    for (const triple of MAC_TRIPLES) {
-      if (triple === native) {
-        await ensureOne(triple, (dest) => fetchMacNativeViaBrew(dest));
-      } else {
-        await ensureOne(triple, fetchMacIntelViaEvermeet);
-      }
-    }
+    await ensureOne("aarch64-apple-darwin", fetchMacArmViaOsxExperts);
+    await ensureOne("x86_64-apple-darwin", fetchMacIntelViaEvermeet);
     ensureMacUniversal();
     return;
   }

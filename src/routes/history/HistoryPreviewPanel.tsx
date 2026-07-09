@@ -36,6 +36,7 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
   const filter = useHistory((s) => s.filter);
   const patchItem = useHistory((s) => s.patchItem);
   const removeItem = useHistory((s) => s.removeItem);
+  const addItem = useHistory((s) => s.addItem);
 
   const item = items.find((it) => it.id === selectedId) ?? null;
   const [renaming, setRenaming] = useState(false);
@@ -103,11 +104,15 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
 
   const doReveal = () => ipc.revealHistoryItem(item.id).catch(() => {});
 
+  // Tạo record MỚI cho bản đã cắt (xem `trim_history_video_sync`) — bản gốc
+  // (`item` hiện tại) giữ nguyên không đổi, KHÔNG `patchItem` vào chỗ cũ vì
+  // id trả về đã khác. Thêm item mới lên đầu danh sách + tự chọn nó, để
+  // người dùng thấy ngay kết quả vừa cắt thay vì phải tự tìm.
   const doTrimApply = async (ranges: [number, number][]) => {
     setTrimming(true);
     try {
-      const updated = await ipc.trimHistoryVideo(item.id, ranges);
-      patchItem(item.id, updated);
+      const trimmed = await ipc.trimHistoryVideo(item.id, ranges);
+      addItem(trimmed);
       setTrimOpen(false);
     } catch (e) {
       alert(String(e));
@@ -191,6 +196,7 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
             <VideoTrimmer
               key={`${item.id}-${item.updatedAt}`}
               src={`${convertFileSrc(item.assetPath)}?v=${item.updatedAt}`}
+              filePath={item.assetPath}
               durationMs={item.durationMs ?? 0}
               busy={trimming}
               onApply={doTrimApply}
@@ -289,8 +295,10 @@ const modalBackdrop: React.CSSProperties = {
 };
 
 const modalCard: React.CSSProperties = {
-  width: "min(720px, 92vw)",
-  height: "min(600px, 88vh)",
+  // To hơn hẳn bản cũ (720×600) — cắt video cần nhìn rõ filmstrip/preview,
+  // vùng nhỏ trước đây bóp video/timeline lại rất khó thao tác chính xác.
+  width: "min(1400px, 94vw)",
+  height: "min(900px, 92vh)",
   display: "flex",
   flexDirection: "column",
   gap: 10,

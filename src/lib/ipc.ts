@@ -180,9 +180,21 @@ export const ipc = {
   /** Cắt bản quay đang chờ xác nhận (trước khi Lưu) — `ranges` là các đoạn GIỮ LẠI (ms). */
   trimPendingRecording: (ranges: [number, number][]) =>
     invoke<PendingRecording>("trim_pending_recording", { ranges: roundRanges(ranges) }),
-  /** Cắt 1 video đã lưu trong History — xem `trimPendingRecording`. */
+  /** Cắt 1 video ĐÃ LƯU trong History — KHÁC `trimPendingRecording` (ghi đè
+   * tại chỗ): tạo 1 item MỚI cho bản đã cắt, giữ nguyên item gốc — trả về
+   * item MỚI (id khác `id` truyền vào), không phải bản đã update tại chỗ. */
   trimHistoryVideo: (id: string, ranges: [number, number][]) =>
     invoke<HistoryItem>("trim_history_video", { id, ranges: roundRanges(ranges) }),
+  /** Trích frame tại các mốc ms cho trước — trả data URL JPEG base64, `null`
+   * cho mốc nào trích lỗi. `scaleW` là bề rộng đích (px): filmstrip zoom của
+   * `VideoTrimmer` dùng nhỏ (160, nhiều tile), hover-scrub preview dùng lớn
+   * hơn hẳn (~480, xem `HOVER_PREVIEW_SCALE_W`) để không bị mờ khi phóng to. */
+  generateVideoFrames: (path: string, timestampsMs: number[], scaleW: number) =>
+    invoke<(string | null)[]>("generate_video_frames", {
+      path,
+      timestampsMs: timestampsMs.map(Math.round),
+      scaleW,
+    }),
 };
 
 /** Rust nhận `Vec<(i64, i64)>` — `ranges` tính từ tỉ lệ pixel kéo-thả

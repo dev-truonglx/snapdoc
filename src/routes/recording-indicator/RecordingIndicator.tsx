@@ -37,13 +37,20 @@ export default function RecordingIndicator() {
   const stop = () => {
     if (stopping) return;
     setStopping(true);
-    ipc.stopRecording().catch(() => setStopping(false));
+    ipc.stopRecording().catch((e) => {
+      // Trước đây nuốt lỗi lặng lẽ (chỉ reset `stopping`) — bấm dừng mà
+      // `stop_recording` lỗi (state RecordingState rỗng, panic thread ghi
+      // video, lỗi dừng WGC/SCStream...) thì người dùng thấy y hệt "bấm
+      // không có gì xảy ra", không biết đâu mà báo/gỡ lỗi.
+      alert(String(e));
+      setStopping(false);
+    });
   };
 
   return (
     <div style={wrap} onClick={stop} title="Bấm để dừng quay">
       <span style={dot} />
-      <span style={time}>{fmt(elapsedMs)}</span>
+      <span style={time}>{stopping ? "Đang dừng…" : fmt(elapsedMs)}</span>
       <style>{`
         @keyframes sd-rec-dot-pulse {
           0%   { box-shadow: 0 0 0 0 rgba(239,68,68,0.55); }

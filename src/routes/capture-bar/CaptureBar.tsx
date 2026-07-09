@@ -160,6 +160,15 @@ export default function CaptureBar() {
       setShowPopover(false);
     });
 
+    // `run_record_picker`/`finalize_region`/`finalize_window` (flow.rs) emit
+    // lỗi xảy ra TRONG lúc chạy nền (sau khi command IPC ban đầu đã trả về,
+    // ví dụ mở overlay chọn vùng quay thất bại) qua event này — trước đây
+    // KHÔNG có nơi nào lắng nghe, lỗi rơi vào hư không nên bấm "Quay" mà
+    // lỗi ở bước này sẽ trông y hệt như không có gì xảy ra.
+    const unlistenError = listen<string>("snapdoc-error", (e) => {
+      alert(e.payload);
+    });
+
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (showPopoverRef.current) { setShowPopover(false); return; }
@@ -192,6 +201,7 @@ export default function CaptureBar() {
       unlistenSettings.then((fn) => fn());
       unlistenBlur.then((fn) => fn());
       unlistenHidePopover.then((fn) => fn());
+      unlistenError.then((fn) => fn());
     };
   }, []);
 
