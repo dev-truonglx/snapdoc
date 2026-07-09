@@ -6,6 +6,7 @@ mod history;
 mod hotkey;
 mod input;
 mod permissions;
+mod record;
 mod state;
 mod storage;
 mod tray;
@@ -67,6 +68,8 @@ pub fn run() {
         )
         .manage(AppState::default())
         .manage(update::PendingUpdate::default())
+        .manage(record::RecordingState::default())
+        .manage(record::PendingRecordingState::default())
         .invoke_handler(tauri::generate_handler![
             commands::peek_pending,
             commands::take_pending,
@@ -114,6 +117,15 @@ pub fn run() {
             commands::finalize_scroll_capture,
             commands::start_scroll_session,
             commands::finalize_scroll_stitch,
+            commands::start_recording,
+            commands::start_record_picker,
+            commands::peek_pending_recording,
+            commands::confirm_recording_save,
+            commands::confirm_recording_discard,
+            commands::stop_recording,
+            commands::recording_status,
+            commands::trim_pending_recording,
+            record::filmstrip::generate_video_frames,
             history::commands::list_history,
             history::commands::get_history_item,
             history::commands::delete_history_item,
@@ -123,6 +135,7 @@ pub fn run() {
             history::commands::rename_history_item,
             history::commands::open_history_item_in_editor,
             history::commands::update_history_asset,
+            history::commands::trim_history_video,
             history::commands::copy_history_item,
             history::commands::reveal_history_item,
             history::commands::open_history,
@@ -186,6 +199,12 @@ pub fn run() {
                 }
             }
 
+            // Mở scope asset-protocol cho thư mục lưu video hiện tại — nếu
+            // không, `convertFileSrc` trong record-review/History sẽ bị chặn
+            // đọc video đã quay ở phiên trước (scope tĩnh trong tauri.conf.json
+            // chỉ cho phép $APPDATA/SnapDoc/library, không phải saveDir).
+            record::allow_asset_scope_at_startup(&handle);
+
             tray::build(&handle)?;
             if let Err(e) = hotkey::register_all(&handle) {
                 eprintln!("[SnapDoc] {e}");
@@ -226,20 +245,32 @@ pub fn run() {
             // Startup: kiểm tra update im lặng sau 3s (không chặn khởi động).
             // Khi có update → tự động tải về và cài đặt ở nền, KHÔNG hiện popup.
             // Phiên bản mới sẽ được áp dụng khi app khởi động lại lần tiếp theo.
-            let app_handle = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                let result = update::check_update(app_handle.clone(), false).await;
-                if let Ok(info) = result {
-                    if info.available {
-                        tray::set_update_badge(&app_handle);
-                        // Tự động tải và cài — không restart, không hiện cửa sổ.
-                        if let Err(e) = update::silent_download_and_install(app_handle.clone()).await {
-                            eprintln!("[SnapDoc][update] background install failed: {e}");
+            //
+            // CHỈ chạy ở release build (`#[cfg(not(debug_assertions))]`) — build
+            // debug (`npm run dev:mac`/`tauri build --debug`) LUÔN có
+            // `debug_assertions` bật, bất kể target/`--debug` flag. Thiếu guard
+            // này từng khiến 1 phiên dev-test tự âm thầm ghi đè .app đang chạy
+            // bằng bản release mới hơn tải từ update server (v0.2.9) NGAY GIỮA
+            // lúc test — biến mất mọi fix cục bộ chưa release, và có thể là
+            // nguyên nhân trực tiếp của lỗi "chọn vùng xong không quay" (file
+            // trong bundle bị ghi đè khi process đang chạy).
+            #[cfg(not(debug_assertions))]
+            {
+                let app_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let result = update::check_update(app_handle.clone(), false).await;
+                    if let Ok(info) = result {
+                        if info.available {
+                            tray::set_update_badge(&app_handle);
+                            // Tự động tải và cài — không restart, không hiện cửa sổ.
+                            if let Err(e) = update::silent_download_and_install(app_handle.clone()).await {
+                                eprintln!("[SnapDoc][update] background install failed: {e}");
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
 
             Ok(())
         })
@@ -250,16 +281,30 @@ pub fn run() {
                     let _ = _window.emit("hide-popover", ());
                 }
             }
-            // macOS: khi cửa sổ "thật" bị đóng (editor, settings, capture-bar),
-            // trả về Accessory policy (ẩn Dock icon).
+            // "record-review" giờ có titlebar thật (nút đóng, xem
+            // `open_record_review`) nhưng KHÔNG được phép đóng "trắng" —
+            // buộc người dùng phải quyết định Lưu/Xoá bản quay (dữ liệu quan
+            // trọng, không tự phục hồi được). Chặn close mặc định, coi như
+            // bấm "Xoá": để RecordReview.tsx tự chạy lại xác nhận + dọn dẹp
+            // (`confirmRecordingDiscard`) rồi mới đóng thật.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
+                if _window.label() == "record-review" {
+                    api.prevent_close();
+                    use tauri::Emitter;
+                    let _ = _window.emit("record-review-close-requested", ());
+                }
+            }
+            // macOS: khi cửa sổ "thật" bị đóng (editor, settings, capture-bar,
+            // record-review), trả về Accessory policy (ẩn Dock icon).
             // Windows: khi cửa sổ "thật" bị đóng, ẩn icon trên taskbar.
             if let tauri::WindowEvent::Destroyed = _event {
                 use tauri::Manager;
                 let label = _window.label();
                 // "editor" (capture) lẫn "editor-ow-N" ("Open with") + "settings"
-                // + "capture-bar" = cửa sổ thật → khi đóng, cân nhắc trả về Accessory policy
-                // (macOS) hoặc ẩn taskbar icon (Windows).
-                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" {
+                // + "capture-bar" + "record-review" = cửa sổ thật → khi đóng,
+                // cân nhắc trả về Accessory policy (macOS) hoặc ẩn taskbar icon
+                // (Windows).
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" {
                     windows::on_editor_closed(_window.app_handle());
                 }
             }

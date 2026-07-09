@@ -123,7 +123,12 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
         .title("SnapDoc")
-        .inner_size(660.0, 280.0)
+        // 830px — bar chia 2 khu vực (chụp ảnh + quay màn hình, mỗi khu 1
+        // modeGroup riêng) rộng ~798px đo qua getBoundingClientRect trong
+        // preview. Cửa sổ resizable(false) + body overflow:hidden nên rộng
+        // hơn nội dung thật 1 chút để không bao giờ bị cắt, kể cả khi font
+        // render rộng hơn 1 chút trên Windows.
+        .inner_size(850.0, 280.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -255,6 +260,124 @@ pub fn open_scroll_control(
 
     let _ = control_win.set_focus();
     Ok(())
+}
+
+/// Mở overlay hiển thị trong suốt quá trình quay 1 VÙNG màn hình — phủ TOÀN
+/// BỘ màn hình `display_id`, làm mờ phần NGOÀI vùng chọn (cùng hiệu ứng
+/// "spotlight" `box-shadow` mà `Overlay.tsx` dùng lúc chọn vùng chụp ảnh) để
+/// người dùng thấy rõ chính xác vùng đang ghi hình — độc lập với viền vàng hệ
+/// thống của Windows (WGC quay nguyên màn hình rồi crop phần mềm, xem
+/// `capture::windows_stream::RecordTarget::Region`, nên viền hệ thống bao
+/// quanh CẢ màn hình chứ không khớp vùng đã chọn). `x,y,w,h` cùng đơn vị đã
+/// truyền cho `record::start_recording_region` (points trên macOS, pixel vật
+/// lý trên Windows) — quy về points local theo góc màn hình rồi truyền cho
+/// frontend qua query string để vẽ đúng vị trí "lỗ" trong suốt.
+pub fn open_region_border(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("region-border") {
+        let _ = win.close();
+    }
+
+    let m = crate::capture::monitor::by_id(display_id)?;
+    let m_x = m.x().map_err(|e| e.to_string())? as f64;
+    let m_y = m.y().map_err(|e| e.to_string())? as f64;
+
+    #[cfg(target_os = "windows")]
+    let (lx, ly, lw, lh, m_w, m_h) = {
+        let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
+        let m_w = m.width().map_err(|e| e.to_string())? as f64 / scale;
+        let m_h = m.height().map_err(|e| e.to_string())? as f64 / scale;
+        (x / scale, y / scale, w / scale, h / scale, m_w, m_h)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (lx, ly, lw, lh, m_w, m_h) = {
+        let m_w = m.width().map_err(|e| e.to_string())? as f64;
+        let m_h = m.height().map_err(|e| e.to_string())? as f64;
+        (x, y, w, h, m_w, m_h)
+    };
+
+    let url_str = format!("region-border&rx={lx}&ry={ly}&rw={lw}&rh={lh}");
+    let border_win = WebviewWindowBuilder::new(app, "region-border", url(&url_str))
+        .title("SnapDoc — Region Border")
+        .inner_size(m_w, m_h)
+        .position(m_x, m_y)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .build()
+        .map_err(|e| format!("Không tạo được khung viền vùng quay: {e}"))?;
+
+    let _ = border_win.set_ignore_cursor_events(true);
+    // Loại overlay khỏi chính video đang quay (SCK trên macOS / WGC trên
+    // Windows bỏ qua cửa sổ content-protected).
+    let _ = border_win.set_content_protected(true);
+    Ok(())
+}
+
+/// Đóng khung viền vùng quay (nếu có) — gọi khi dừng quay. An toàn khi gọi dù
+/// chưa từng mở (no-op) hoặc không phải phiên quay theo vùng.
+pub fn close_region_border(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("region-border") {
+        let _ = win.close();
+    }
+}
+
+/// Popup nổi "đang quay" trên Windows — chấm đỏ + đồng hồ đếm mm:ss, bấm vào
+/// để dừng quay ngay (`commands::stop_recording`). Thay cho vai trò của
+/// `NSStatusItem.title` bên macOS (hiện text cạnh icon tray) — tray icon Win32
+/// (`NOTIFYICONDATA`) không có API tương đương, chỉ có tooltip khi hover, nên
+/// cần 1 cửa sổ riêng để hiện đồng hồ đếm luôn hiển thị. Nổi trên mọi cửa sổ
+/// khác + loại khỏi chính video đang quay qua `set_content_protected(true)`
+/// (WGC bỏ qua cửa sổ content-protected, cùng kỹ thuật `open_region_border`).
+#[cfg(target_os = "windows")]
+pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("recording-indicator") {
+        let _ = win.show();
+        return Ok(());
+    }
+
+    let win = WebviewWindowBuilder::new(app, "recording-indicator", url("recording-indicator"))
+        .title("SnapDoc — Đang quay")
+        .inner_size(148.0, 44.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .build()
+        .map_err(|e| format!("Không tạo được popup đang quay: {e}"))?;
+
+    place_top_center(&win);
+    let _ = win.set_content_protected(true);
+    let _ = win.show();
+    Ok(())
+}
+
+/// Đóng popup "đang quay" (nếu có) — gọi khi dừng quay. An toàn khi gọi dù
+/// chưa từng mở.
+#[cfg(target_os = "windows")]
+pub fn close_recording_indicator(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("recording-indicator") {
+        let _ = win.close();
+    }
+}
+
+/// Đặt cửa sổ ở giữa-đỉnh màn hình chính, cách mép trên 1 khoảng nhỏ (cho
+/// popup "đang quay") — cùng kỹ thuật `place_bottom_center` phía trên.
+#[cfg(target_os = "windows")]
+fn place_top_center(win: &tauri::WebviewWindow) {
+    if let Ok(Some(monitor)) = win.primary_monitor() {
+        let m_size = monitor.size();
+        let m_pos = monitor.position();
+        let scale = monitor.scale_factor();
+        if let Ok(win_size) = win.outer_size() {
+            let x = m_pos.x + ((m_size.width as i32 - win_size.width as i32) / 2);
+            let y = m_pos.y + (16.0 * scale) as i32;
+            let _ = win.set_position(PhysicalPosition::new(x, y));
+        }
+    }
 }
 
 /// Mở capture bar và emit event `set-capture-mode` với lastMode từ Rust state.
@@ -717,14 +840,16 @@ pub fn open_editor_with_file(app: &AppHandle, data_url: String) -> Result<(), St
 }
 
 /// Trả về Accessory policy (ẩn Dock) trên macOS hoặc ẩn taskbar icon trên Windows
-/// nếu không còn cửa sổ editor/settings/capture-bar nào đang mở.
-/// Gọi từ on_window_event khi editor/settings/capture-bar bị đóng.
+/// nếu không còn cửa sổ editor/settings/capture-bar/record-review nào đang mở.
+/// Gọi từ on_window_event khi 1 trong các cửa sổ đó bị đóng.
 pub fn on_editor_closed(app: &AppHandle) {
-    // Kiểm tra còn cửa sổ "thật" nào đang mở không (editor, settings, capture-bar).
-    // Không tính overlay, thumbnail, scroll-control vì chúng tạm thời/phụ trợ.
+    // Kiểm tra còn cửa sổ "thật" nào đang mở không (editor, settings,
+    // capture-bar, record-review — từ khi có titlebar thật, xem
+    // `open_record_review`). Không tính overlay, thumbnail, scroll-control vì
+    // chúng tạm thời/phụ trợ.
     let has_visible = app.webview_windows().values().any(|w| {
         let label = w.label();
-        (label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history")
+        (label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review")
             && w.is_visible().unwrap_or(false)
     });
 
@@ -741,7 +866,7 @@ pub fn on_editor_closed(app: &AppHandle) {
         // Windows: ẩn icon trên taskbar nếu không còn cửa sổ "thật" nào mở
         if !has_visible {
             for (label, win) in app.webview_windows() {
-                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" {
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" {
                     let _ = win.set_skip_taskbar(true);
                 }
             }
@@ -858,6 +983,125 @@ pub fn prewarm_thumbnail(app: &AppHandle) -> Result<(), String> {
     create_thumbnail_window(app)?;
     Ok(())
 }
+
+/// Cửa sổ "xem lại bản quay" — mở NGAY sau khi `record::stop_recording`
+/// ghi xong mp4, bắt người dùng xác nhận Lưu/Xoá trước khi ingest vào
+/// History (xem `record::confirm_recording_save/discard`). KHÔNG pre-warm
+/// như thumbnail: sự kiện này hiếm hơn nhiều (1 lần/phiên quay) nên tạo mới
+/// mỗi lần không đáng lo hiệu năng, và tạo mới mỗi lần tránh phải tự
+/// reset state cũ còn sót lại trong webview.
+pub fn open_record_review(app: &AppHandle) -> Result<(), String> {
+    // macOS: chuyển về Regular (cùng khuôn `open_editor`/`open_settings`) —
+    // BẮT BUỘC để cửa sổ có titlebar chuẩn (nút đóng/thu nhỏ/phóng to hoạt
+    // động, xem đổi từ `decorations(false)` bên dưới) + xuất hiện ở Dock/
+    // Cmd+Tab. Quay có thể dừng từ tray/hotkey lúc app đang ở Accessory
+    // policy (không cửa sổ nào mở) nên phải set lại mỗi lần mở, không chỉ
+    // lúc tạo cửa sổ lần đầu.
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+
+    if let Some(win) = app.get_webview_window("record-review") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+        #[cfg(target_os = "windows")]
+        let _ = win.set_skip_taskbar(false);
+        bring_record_review_to_front(app, win);
+        return Ok(());
+    }
+
+    // Mở lớn theo % màn hình chính (thay vì cỡ cố định 640×620 cũ) — người
+    // dùng cần nhìn rõ video + timeline cắt (VideoTrimmer, xem RecordReview.tsx)
+    // ngay khi vừa quay xong, cỡ nhỏ trước đây làm filmstrip/preview bị bóp.
+    // 85% kích thước màn hình (không phải maximize hẳn) để vẫn còn thấy được
+    // nền desktop xung quanh.
+    let (init_w, init_h) = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| {
+            let scale = m.scale_factor();
+            let size = m.size();
+            ((size.width as f64 / scale) * 0.85, (size.height as f64 / scale) * 0.85)
+        })
+        .unwrap_or((1100.0, 780.0));
+
+    // Cửa sổ thật có titlebar (thu nhỏ/phóng to/đóng) — giống `open_editor`,
+    // KHÔNG còn borderless/transparent/always-on-top như bản cũ (cảm giác
+    // "popup nổi" không phù hợp cho 1 màn hình chỉnh sửa cần thao tác lâu:
+    // không thu nhỏ được, luôn che các cửa sổ khác). Đóng bằng nút "x" thật
+    // trên titlebar giờ được chặn lại và coi như "Xoá" — xem
+    // `WindowEvent::CloseRequested` cho label "record-review" ở `lib.rs`.
+    let win = WebviewWindowBuilder::new(app, "record-review", url("record-review"))
+        .title("SnapDoc — Xem lại bản quay")
+        // resizable + min_inner_size để người dùng có thể kéo rộng/hẹp thêm
+        // tuỳ ý (cùng khuôn `open_editor`/`open_history`).
+        .inner_size(init_w, init_h)
+        .min_inner_size(560.0, 480.0)
+        .resizable(true)
+        .center()
+        .skip_taskbar(false)
+        .build()
+        .map_err(|e| format!("Không tạo được cửa sổ xem lại bản quay: {e}"))?;
+
+    let _ = win.set_focus();
+    bring_record_review_to_front(app, win);
+    Ok(())
+}
+
+/// Đóng (huỷ hẳn, không ẩn) cửa sổ xem lại — gọi sau khi
+/// `confirm_recording_save`/`confirm_recording_discard` xử lý xong (dữ liệu
+/// đã lưu/xoá xong xuôi, giờ mới thật sự đóng cửa sổ).
+///
+/// PHẢI dùng `destroy()`, KHÔNG dùng `close()` — theo doc của tauri, `close()`
+/// "emits `CloseRequested` first like a user-initiated close request", tức
+/// gọi lại ĐÚNG event mà `WindowEvent::CloseRequested` cho label
+/// "record-review" ở `lib.rs` đang chặn (coi là bấm nút "x" trên titlebar).
+/// Dùng `close()` ở đây tạo vòng lặp tự chặn chính mình: Lưu/Xoá xử lý xong
+/// gọi hàm này → `close()` → lại bắn `CloseRequested` → bị chặn lại →
+/// cửa sổ KHÔNG BAO GIỜ đóng được dù dữ liệu đã xử lý xong. `destroy()`
+/// "does not emit any events and force close the window instead" — đúng
+/// đường "đã xử lý xong, đóng thật" cần ở đây.
+pub fn close_record_review(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("record-review") {
+        let _ = win.destroy();
+    }
+}
+
+/// macOS: kích hoạt app + đưa cửa sổ lên trước — quay thường được dừng từ
+/// tray icon/hotkey lúc app đang ở chế độ Accessory (không có cửa sổ nào
+/// hiện, không nằm trong Cmd+Tab), nên `always_on_top` không đủ để đảm bảo
+/// cửa sổ nhận focus bàn phím/chuột ngay. Cùng kỹ thuật với
+/// `bring_settings_to_front`.
+#[cfg(target_os = "macos")]
+fn bring_record_review_to_front(app: &AppHandle, win: tauri::WebviewWindow) {
+    let app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        use objc2::msg_send;
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::MainThreadMarker;
+
+        if let Some(mtm) = MainThreadMarker::new() {
+            let ns_app = NSApplication::sharedApplication(mtm);
+            let _: () = unsafe { msg_send![&*ns_app, activateIgnoringOtherApps: true] };
+        }
+
+        if let Ok(ptr) = win.ns_window() {
+            let ns_win = ptr as *mut objc2_app_kit::NSWindow;
+            if !ns_win.is_null() {
+                unsafe {
+                    let _: () = msg_send![&*ns_win, makeKeyAndOrderFront: Option::<&objc2::runtime::AnyObject>::None];
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bring_record_review_to_front(_app: &AppHandle, _win: tauri::WebviewWindow) {}
 
 /// macOS: gọi makeKeyAndOrderFront + NSApp.activate trên main thread để
 /// cửa sổ settings luôn nổi lên trước mọi app khác.

@@ -22,6 +22,14 @@ interface HistoryState {
   patchItem: (id: string, patch: Partial<HistoryItem>) => void;
   /** Bỏ 1 item khỏi danh sách hiện tại (sau delete/restore đổi view). */
   removeItem: (id: string) => void;
+  /** Thêm 1 item MỚI lên đầu danh sách (sau khi cắt video — tạo record mới,
+   * KHÔNG ghi đè bản gốc, xem `trim_history_video_sync`) rồi chọn luôn item
+   * đó — người dùng vừa cắt xong nên thấy ngay kết quả, không phải tự tìm
+   * trong danh sách. Không kiểm tra trùng filter hiện tại (ví dụ đang filter
+   * theo `capture_mode` khác) — hiếm gặp và item mới luôn hợp lệ dữ liệu, chỉ
+   * là có thể bị ẩn tạm nếu filter không khớp, tự nhất quán lại ở lần
+   * `reload()`/`setFilter()` kế tiếp. */
+  addItem: (item: HistoryItem) => void;
 }
 
 export const useHistory = create<HistoryState>((set, get) => ({
@@ -80,5 +88,9 @@ export const useHistory = create<HistoryState>((set, get) => ({
       items: s.items.filter((it) => it.id !== id),
       selectedId: s.selectedId === id ? null : s.selectedId,
     }));
+  },
+
+  addItem: (item) => {
+    set((s) => ({ items: [item, ...s.items], selectedId: item.id }));
   },
 }));

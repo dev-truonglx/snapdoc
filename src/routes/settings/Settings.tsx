@@ -13,6 +13,7 @@ const OUTPUTS = [
 
 const SHORTCUT_KEYS: { key: string; label: string; hint?: string }[] = [
   { key: "quick",       label: "Chụp nhanh",          hint: "Chọn vùng rồi chú thích ngay tại chỗ" },
+  { key: "record",      label: "Quay màn hình",       hint: "Bắt đầu/dừng quay toàn màn hình — chọn màn hình nếu máy có nhiều màn hình" },
   { key: "captureBar",  label: "Mở thanh chụp",      hint: "Mở thanh công cụ chụp nổi" },
   { key: "full",        label: "Chụp toàn màn hình",  hint: "Chụp ngay không cần chọn vùng" },
   { key: "region",      label: "Chụp vùng chọn",      hint: "Kéo chọn vùng để chụp" },
@@ -42,6 +43,7 @@ export default function Settings() {
     ipc.getSettings().then(async (loaded) => {
       const defaults: Record<string, string> = {
         quick:       "CmdOrCtrl+Shift+Q",
+        record:      "CmdOrCtrl+Shift+7",
         captureBar:  "CmdOrCtrl+Shift+5",
         full:        "CmdOrCtrl+Shift+1",
         region:      "CmdOrCtrl+Shift+2",
@@ -279,6 +281,24 @@ export default function Settings() {
               {[0, 3, 5].map((t) => <option key={t} value={t}>{t === 0 ? "Không hẹn giờ" : `${t} giây`}</option>)}
             </select>
           </Field>
+        </Card>
+
+        {/* QUAY MÀN HÌNH */}
+        <Card title="QUAY MÀN HÌNH">
+          <Field label="Ghi âm khi quay">
+            <select
+              value={s.recordAudioSource ?? "off"}
+              onChange={(e) => update({ recordAudioSource: e.target.value as S["recordAudioSource"] })}
+            >
+              <option value="off">Tắt (chỉ hình, không tiếng)</option>
+              <option value="mic">Microphone</option>
+              <option value="system">Âm thanh hệ thống</option>
+            </select>
+          </Field>
+          <p style={hint}>
+            Chỉ chọn được 1 nguồn tại 1 thời điểm — mic cần cấp quyền Microphone,
+            âm thanh hệ thống dùng chung quyền Screen Recording đã cấp.
+          </p>
         </Card>
 
         {/* KHỞI ĐỘNG */}

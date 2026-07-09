@@ -2,10 +2,10 @@ import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { HistoryItem } from "../../lib/ipc";
 
-const MODE_LABEL: Record<string, string> = {
+export const MODE_LABEL: Record<string, string> = {
   region: "Vùng chọn",
   window: "Cửa sổ",
-  monitor: "Màn hình",
+  full: "Toàn màn hình",
   all: "Mọi màn hình",
   scroll: "Cuộn dài",
   quick: "Nhanh",
@@ -17,6 +17,14 @@ function fmtTime(ms: number): string {
   return `${p(d.getDate())}/${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/** `93500` → `"1:34"` — mm:ss, không hiện giờ (video quay màn hình hiếm khi dài hơn vài chục phút). */
+function fmtDuration(ms: number): string {
+  const totalSec = Math.round(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 interface Props {
   item: HistoryItem;
   selected: boolean;
@@ -26,18 +34,22 @@ interface Props {
 
 export default function HistoryItemCard({ item, selected, onSelect, onOpenEditor }: Props) {
   const [broken, setBroken] = useState(false);
+  const isVideo = item.mediaType === "video";
 
   return (
     <div
       style={{ ...card, outline: selected ? "2px solid var(--accent)" : "2px solid transparent" }}
       onClick={onSelect}
-      onDoubleClick={onOpenEditor}
+      // Video chưa hỗ trợ Editor — double-click chỉ mở với ảnh.
+      onDoubleClick={isVideo ? undefined : onOpenEditor}
       title={item.title ?? undefined}
     >
       <div style={thumbWrap}>
         {!broken ? (
           <img
-            src={convertFileSrc(item.thumbPath)}
+            // `?v=updatedAt`: thumbPath không đổi khi cắt video (ghi đè tại
+            // chỗ) — bust cache để hiện đúng thumbnail mới sau khi cắt.
+            src={`${convertFileSrc(item.thumbPath)}?v=${item.updatedAt}`}
             alt=""
             style={thumbImg}
             onError={() => setBroken(true)}
@@ -45,6 +57,18 @@ export default function HistoryItemCard({ item, selected, onSelect, onOpenEditor
           />
         ) : (
           <div style={brokenBox}>Không tải được ảnh</div>
+        )}
+        {isVideo && (
+          <>
+            <div style={playBadge} aria-hidden>
+              <svg width="14" height="14" viewBox="0 0 20 20" fill="#fff">
+                <path d="M6 4.5v11l9-5.5-9-5.5Z" />
+              </svg>
+            </div>
+            {item.durationMs != null && (
+              <span style={{ ...badge, top: "auto", bottom: 4 }}>{fmtDuration(item.durationMs)}</span>
+            )}
+          </>
         )}
         {item.scaleFactor > 1 && <span style={badge}>{item.scaleFactor}×</span>}
         {item.isEdited && <span style={{ ...badge, left: 4, right: "auto" }}>✎</span>}
@@ -101,6 +125,21 @@ const badge: React.CSSProperties = {
   fontSize: 10,
   padding: "1px 5px",
   borderRadius: 4,
+};
+
+const playBadge: React.CSSProperties = {
+  position: "absolute",
+  top: "50%",
+  left: "50%",
+  transform: "translate(-50%, -50%)",
+  width: 30,
+  height: 30,
+  borderRadius: "50%",
+  background: "rgba(0,0,0,0.5)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  pointerEvents: "none",
 };
 
 const meta: React.CSSProperties = {

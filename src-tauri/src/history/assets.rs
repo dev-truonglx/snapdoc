@@ -33,3 +33,14 @@ pub fn paths_for(app: &AppHandle, id: &str) -> Result<(PathBuf, PathBuf), String
     std::fs::create_dir_all(&thumbs).map_err(|e| format!("Không tạo được thư mục thumbs: {e}"))?;
     Ok((assets.join(format!("{id}.png")), thumbs.join(format!("{id}.jpg"))))
 }
+
+/// Chỉ đường dẫn thumbnail (không kèm asset_path trong `library/assets`) —
+/// dùng cho video: file mp4 đã nằm sẵn ở `saveDir`/Pictures (do
+/// `record::new_output_path` quyết định), KHÔNG cần bản sao thứ 2 trong
+/// Library nội bộ (khác ảnh chụp — dung lượng nhỏ nên nhân đôi không đáng
+/// kể). Chỉ thumbnail (JPEG nhỏ) là thứ thật sự cần sinh riêng.
+pub fn thumb_path_for(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
+    let thumbs = thumbs_dir(app)?;
+    std::fs::create_dir_all(&thumbs).map_err(|e| format!("Không tạo được thư mục thumbs: {e}"))?;
+    Ok(thumbs.join(format!("{id}.jpg")))
+}

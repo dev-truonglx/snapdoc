@@ -19,3 +19,14 @@ pub fn primary() -> Result<Monitor, String> {
 pub fn at_point(x: i32, y: i32) -> Result<Monitor, String> {
     Monitor::from_point(x, y).or_else(|_| primary())
 }
+
+/// Tìm màn hình theo id (`xcap::Monitor::id()`) — dùng khi chỉ có id sẵn
+/// (vd `display_id` lưu lại từ lúc bắt đầu quay), không có toạ độ điểm để
+/// tra qua `at_point`.
+pub fn by_id(display_id: u32) -> Result<Monitor, String> {
+    let monitors = Monitor::all().map_err(|e| format!("Không liệt kê được màn hình: {e}"))?;
+    monitors
+        .into_iter()
+        .find(|m| m.id().map(|i| i == display_id).unwrap_or(false))
+        .ok_or_else(|| "Không tìm thấy màn hình với id này".to_string())
+}

@@ -15,6 +15,7 @@ fn defaults() -> Value {
         "timerSeconds": 0,
         "rememberLastRegion": false,
         "launchAtLogin": true,
+        "recordAudioSource": "off",
         "shortcuts": {
             "captureBar": "CmdOrCtrl+Shift+5",
             "full": "CmdOrCtrl+Shift+1",
@@ -22,7 +23,8 @@ fn defaults() -> Value {
             "window": "CmdOrCtrl+Shift+3",
             "all": "CmdOrCtrl+Shift+4",
             "captureCopy": "CmdOrCtrl+Shift+C",
-            "scroll": "CmdOrCtrl+Shift+6"
+            "scroll": "CmdOrCtrl+Shift+6",
+            "record": "CmdOrCtrl+Shift+7"
         }
     })
 }

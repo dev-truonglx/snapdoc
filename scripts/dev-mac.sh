@@ -32,6 +32,46 @@ fi
 
 # 2) Debug build, app bundle only (skip the slow .dmg). Tauri picks up
 #    APPLE_SIGNING_IDENTITY and signs the bundle with it.
+#
+#    Tauri's bundler can reuse a stale `externalBin` sidecar (e.g. ffmpeg)
+#    copied into a PREVIOUS bundle output — confirmed by hand: after fixing a
+#    broken ffmpeg in src-tauri/binaries/, `target/debug/bundle/.../ffmpeg`
+#    kept the old broken bytes across rebuilds until every existing
+#    `SnapDoc.app` anywhere under target/ (debug, release, and the separate
+#    universal-apple-darwin tree used for updater/universal builds) was wiped
+#    first. Deleting only the current profile's `$APP` was NOT enough — some
+#    other target/* bundle output still fed the stale copy in. Sweep all of
+#    them so this can't come back regardless of which one is the real cause.
+find src-tauri/target -type d -name "SnapDoc.app" -prune -exec rm -rf {} +
+
+# This script never passes --target, so cargo only ever writes into
+# target/debug — the per-triple dirs below (aarch64-apple-darwin,
+# x86_64-apple-darwin, universal-apple-darwin) only exist because
+# scripts/release-all.sh built a universal release at some point. Left in
+# place they just sit there unused (measured: 3.5GB combined) — safe to wipe
+# every dev build; release-all.sh recompiles them fresh anyway when it runs.
+rm -rf src-tauri/target/aarch64-apple-darwin src-tauri/target/x86_64-apple-darwin src-tauri/target/universal-apple-darwin
+
+# cargo never deletes superseded incremental artifacts on its own — every
+# dependency/profile change leaves the old .rlib/.o versions behind in
+# target/debug/deps forever (measured: 28k+ files, ~10GB, after normal use).
+#
+# `cargo sweep --file` (stamp-before/sweep-after a single build) looks
+# tempting but is WRONG here and was tried first: it deletes anything with an
+# mtime older than the stamp, and cargo does NOT rewrite an unchanged
+# dependency's .rlib when a build just reuses it — so it deleted every
+# untouched-but-still-needed dep after one normal build, turning the very
+# next `dev:mac` into a full from-scratch recompile (measured: 3m16s instead
+# of ~3s). `--time <days>` instead only removes artifacts untouched for that
+# many days, which can't catch anything from today's active incremental
+# cache — confirmed via `--dry-run --time 3` cleaning nothing right after a
+# fresh build, so this is safe to run on every invocation.
+if ! command -v cargo-sweep >/dev/null 2>&1; then
+  echo "==> Installing cargo-sweep (one-time, prunes stale target/ artifacts)"
+  cargo install cargo-sweep
+fi
+cargo sweep --time 3 src-tauri
+
 echo "==> [2/4] Building debug .app bundle"
 if [ -f "$KEYFILE" ]; then
   npm run tauri build -- --debug --bundles app "$@"

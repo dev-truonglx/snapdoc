@@ -194,9 +194,17 @@ pub fn open_capture_bar_for_new(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Trên Windows, nếu cửa sổ "editor" đã bị đóng trước đó (Save, đóng tay...)
+/// thì `windows::open_editor` phải tạo lại webview mới bằng `build()`, vốn
+/// block chờ event loop chính qua channel — gọi trực tiếp trên IPC thread sẽ
+/// deadlock Win32 message pump (trắng trang + treo app), giống lỗi đã fix ở
+/// `history::open_history`. Tách sang thread riêng để tránh.
 #[tauri::command]
 pub fn open_editor(app: AppHandle) -> Result<(), String> {
-    windows::open_editor(&app)
+    std::thread::spawn(move || {
+        let _ = windows::open_editor(&app);
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -583,7 +591,104 @@ pub fn finalize_scroll_capture(
         height,
     };
     let output = crate::flow::get_output(&app);
-    crate::flow::finish(&app, cap, &output, 1.0)
+    // flow::finish() có thể gọi windows::open_editor() (build() cửa sổ mới) —
+    // tách sang thread riêng để không deadlock IPC thread trên Windows, xem
+    // comment ở commands::open_editor.
+    std::thread::spawn(move || {
+        let _ = crate::flow::finish(&app, cap, &output, 1.0);
+    });
+    Ok(())
+}
+
+// ── Quay màn hình ────────────────────────────────────────────────────────────
+// "start" (hotkey — quay ngay màn hình chính, không qua overlay) + 1 lệnh mở
+// picker dùng CHUNG mode với nút "Chụp" (full/window/region — Phase 3, tái
+// dùng overlay chọn vùng có sẵn của tính năng chụp ảnh, xem
+// `flow::run_record_picker`) là những thứ duy nhất cần lộ ra IPC lúc BẮT ĐẦU
+// quay. Dừng quay/đọc trạng thái chủ yếu vẫn đi qua Rust thuần (tray icon +
+// ticker, xem tray.rs) — `stop_recording`/`recording_status` bên dưới chỉ
+// thêm 1 đường dừng/đọc trạng thái nữa cho popup "đang quay" trên Windows
+// (`windows::open_recording_indicator`), vì Win32 tray icon không có API
+// tương đương `NSStatusItem.title` để tự vẽ đồng hồ đếm cạnh icon.
+
+/// Bắt đầu quay toàn màn hình chính (macOS), KHÔNG qua overlay — dùng cho
+/// hotkey (lối tắt tức thời, không có UI để chọn phạm vi). `spawn_blocking`
+/// vì phần khởi tạo `SCStream`/ffmpeg chờ đồng bộ qua completion handler
+/// (blocking recv).
+#[tauri::command]
+pub async fn start_recording(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::start_recording(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Mở overlay chọn phạm vi quay — dùng nút "Quay" trong CaptureBar, `mode`
+/// là đúng CaptureMode đang chọn ("full" | "window" | "region") giống hệt
+/// input của nút "Chụp".
+#[tauri::command]
+pub fn start_record_picker(app: AppHandle, mode: String) {
+    std::thread::spawn(move || flow::run_record_picker(&app, &mode));
+}
+
+/// Đọc bản quay đang chờ xác nhận (không xoá) — cửa sổ "record-review" gọi
+/// lúc mount để biết đường dẫn/kích thước/thời lượng cần hiển thị.
+#[tauri::command]
+pub fn peek_pending_recording(app: AppHandle) -> Option<crate::record::PendingRecording> {
+    crate::record::peek_pending_recording(&app)
+}
+
+/// Người dùng bấm "Lưu" ở cửa sổ xem lại — ingest vào History rồi đóng cửa sổ.
+#[tauri::command]
+pub async fn confirm_recording_save(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::confirm_recording_save(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Người dùng bấm "Xoá" ở cửa sổ xem lại — xoá file mp4 rồi đóng cửa sổ.
+#[tauri::command]
+pub async fn confirm_recording_discard(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::confirm_recording_discard(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Dừng quay từ popup "đang quay" trên Windows (xem
+/// `windows::open_recording_indicator`) — trên macOS việc dừng vẫn chủ yếu đi
+/// qua tray icon (`tray.rs`), lệnh này chỉ thêm 1 đường dừng nữa, không thay
+/// thế đường cũ. `spawn_blocking` BẮT BUỘC (giống `confirm_recording_save/discard`
+/// phía trên): `record::stop_recording` join các thread ghi video/audio và
+/// chạy `ffmpeg` đồng bộ để ghép audio (có thể mất vài giây) — nếu để hàm này
+/// là `fn` thường (không `async`), Tauri chạy nó THẲNG trên main thread của
+/// webview (execution context "sync", không qua thread pool), nghẽn toàn bộ
+/// message pump và Windows báo "Not Responding" ở màn xác nhận lưu/xoá.
+#[tauri::command]
+pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::stop_recording(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Thời lượng đã quay (ms) — popup "đang quay" trên Windows poll lệnh này mỗi
+/// giây để hiện đồng hồ đếm (`None` nếu không có phiên quay nào).
+#[tauri::command]
+pub fn recording_status(app: AppHandle) -> Option<u64> {
+    crate::record::status(&app)
+}
+
+/// Cắt bản quay đang chờ xác nhận ở `record-review` — xem
+/// `record::trim_pending_recording`. `spawn_blocking` bắt buộc: chạy ffmpeg
+/// re-encode + concat, có thể mất vài giây, không được chặn Tokio event loop
+/// / WebView2 message pump (cùng lý do đã sửa bug "Not Responding" ở
+/// `stop_recording` phía trên).
+#[tauri::command]
+pub async fn trim_pending_recording(
+    app: AppHandle,
+    ranges: Vec<(i64, i64)>,
+) -> Result<crate::record::PendingRecording, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::trim_pending_recording(&app, &ranges))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[derive(serde::Deserialize)]

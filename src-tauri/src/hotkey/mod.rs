@@ -11,6 +11,7 @@ pub const DEFAULT_ALL: &str = "CmdOrCtrl+Shift+4";
 pub const DEFAULT_COPY: &str = "CmdOrCtrl+Shift+C";
 pub const DEFAULT_SCROLL: &str = "CmdOrCtrl+Shift+6";
 pub const DEFAULT_QUICK: &str = "CmdOrCtrl+Shift+Q";
+pub const DEFAULT_RECORD: &str = "CmdOrCtrl+Shift+7";
 
 /// Lấy map (action → combo) từ settings.
 /// Trả về empty string nếu user đã xóa phím tắt (không fall back về default).
@@ -38,6 +39,7 @@ pub fn shortcuts_from_settings(app: &AppHandle) -> Vec<(String, String)> {
         ("captureCopy".into(), get("captureCopy", DEFAULT_COPY)),
         ("scroll".into(),      get("scroll",      DEFAULT_SCROLL)),
         ("quick".into(),       get("quick",       DEFAULT_QUICK)),
+        ("record".into(),      get("record",      DEFAULT_RECORD)),
     ]
 }
 
@@ -100,6 +102,27 @@ fn run_action(app: &AppHandle, action: &str) {
         "quick" => {
             let app = app.clone();
             std::thread::spawn(move || flow::start_quick(&app));
+        }
+        "record" => {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                if crate::record::status(&app).is_some() {
+                    if let Err(e) = crate::record::stop_recording(&app) {
+                        eprintln!("[SnapDoc] Dừng quay (phím tắt) thất bại: {e}");
+                    }
+                    return;
+                }
+                // Nhiều màn hình: mở overlay chọn quay màn hình nào (đúng
+                // hành vi mode "full" của nút "Quay" trong CaptureBar, xem
+                // `flow::run_record_picker`) — 1 màn hình thì quay thẳng
+                // luôn, không có gì để chọn nên bỏ qua overlay cho nhanh.
+                let monitor_count = xcap::Monitor::all().map(|m| m.len()).unwrap_or(1);
+                if monitor_count > 1 {
+                    flow::run_record_picker(&app, "full");
+                } else if let Err(e) = crate::record::start_recording(&app) {
+                    eprintln!("[SnapDoc] Bắt đầu quay (phím tắt) thất bại: {e}");
+                }
+            });
         }
         _ => {
             // Lấy defaultOutput từ settings để áp dụng cho mọi phím tắt chụp.

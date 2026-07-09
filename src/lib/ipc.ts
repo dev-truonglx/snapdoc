@@ -17,7 +17,7 @@ export interface HistoryItem {
   id: string;
   createdAt: number;
   updatedAt: number;
-  captureMode: "region" | "window" | "monitor" | "all" | "scroll" | "quick";
+  captureMode: "region" | "window" | "full" | "all" | "scroll" | "quick";
   mediaType: "image" | "video" | "gif";
   width: number;
   height: number;
@@ -60,6 +60,11 @@ export interface WindowInfo {
   app: string;
 }
 
+/** Nguồn audio ghi kèm khi quay màn hình — chỉ chọn 1, không trộn (xem lý do
+ * ở record/mod.rs: ghép audio+video "sống" qua ffmpeg từng gây bug video bị
+ * cắt cụt sau vài giây). */
+export type AudioSource = "off" | "mic" | "system";
+
 export interface Settings {
   saveDir: string;
   format: string;
@@ -68,6 +73,8 @@ export interface Settings {
   timerSeconds: number;
   rememberLastRegion: boolean;
   launchAtLogin: boolean;
+  /** Nguồn audio ghi kèm khi quay màn hình — chỉ 1 trong 3, mặc định "off". */
+  recordAudioSource: AudioSource;
   shortcuts: Record<string, string>;
 }
 
@@ -154,4 +161,53 @@ export const ipc = {
   openHistory: () => invoke<void>("open_history"),
   finishQuickCapture: (data: string, width: number, height: number, output: string) =>
     invoke<string | null>("finish_quick_capture", { data, width, height, output }),
+  // Quay màn hình — dừng quay/xem trạng thái chủ yếu vẫn qua tray icon (menu
+  // bar, xem src-tauri/src/tray.rs); `stopRecording`/`recordingStatus` bên
+  // dưới chỉ thêm 1 đường nữa cho popup "đang quay" trên Windows.
+  /** Bắt đầu quay toàn màn hình chính NGAY, không qua overlay (dùng cho hotkey). */
+  startRecording: () => invoke<void>("start_recording"),
+  /** Mở overlay chọn phạm vi quay — dùng chung CaptureMode với nút "Chụp" ("full" | "window" | "region"). */
+  startRecordPicker: (mode: "full" | "window" | "region") =>
+    invoke<void>("start_record_picker", { mode }),
+  // Xem lại bản quay trước khi lưu vào History (record-review window).
+  peekPendingRecording: () => invoke<PendingRecording | null>("peek_pending_recording"),
+  confirmRecordingSave: () => invoke<void>("confirm_recording_save"),
+  confirmRecordingDiscard: () => invoke<void>("confirm_recording_discard"),
+  /** Dừng quay — dùng cho popup "đang quay" trên Windows (bấm vào để dừng). */
+  stopRecording: () => invoke<string>("stop_recording"),
+  /** Thời lượng đã quay (ms), `null` nếu không có phiên quay — popup "đang quay" poll mỗi giây. */
+  recordingStatus: () => invoke<number | null>("recording_status"),
+  /** Cắt bản quay đang chờ xác nhận (trước khi Lưu) — `ranges` là các đoạn GIỮ LẠI (ms). */
+  trimPendingRecording: (ranges: [number, number][]) =>
+    invoke<PendingRecording>("trim_pending_recording", { ranges: roundRanges(ranges) }),
+  /** Cắt 1 video ĐÃ LƯU trong History — KHÁC `trimPendingRecording` (ghi đè
+   * tại chỗ): tạo 1 item MỚI cho bản đã cắt, giữ nguyên item gốc — trả về
+   * item MỚI (id khác `id` truyền vào), không phải bản đã update tại chỗ. */
+  trimHistoryVideo: (id: string, ranges: [number, number][]) =>
+    invoke<HistoryItem>("trim_history_video", { id, ranges: roundRanges(ranges) }),
+  /** Trích frame tại các mốc ms cho trước — trả data URL JPEG base64, `null`
+   * cho mốc nào trích lỗi. `scaleW` là bề rộng đích (px): filmstrip zoom của
+   * `VideoTrimmer` dùng nhỏ (160, nhiều tile), hover-scrub preview dùng lớn
+   * hơn hẳn (~480, xem `HOVER_PREVIEW_SCALE_W`) để không bị mờ khi phóng to. */
+  generateVideoFrames: (path: string, timestampsMs: number[], scaleW: number) =>
+    invoke<(string | null)[]>("generate_video_frames", {
+      path,
+      timestampsMs: timestampsMs.map(Math.round),
+      scaleW,
+    }),
 };
+
+/** Rust nhận `Vec<(i64, i64)>` — `ranges` tính từ tỉ lệ pixel kéo-thả
+ * (`VideoTrimmer.tsx`) luôn ra số thập phân (JS không phân biệt int/float),
+ * làm tròn ở biên IPC để tránh lỗi deserialize "expected i64". */
+function roundRanges(ranges: [number, number][]): [number, number][] {
+  return ranges.map(([s, e]) => [Math.round(s), Math.round(e)]);
+}
+
+export interface PendingRecording {
+  path: string;
+  width: number;
+  height: number;
+  durationMs: number;
+  captureMode: string;
+}

@@ -20,7 +20,10 @@ export default function HistoryStrip({ onFlash }: Props) {
   const load = useCallback(() => {
     if (!("__TAURI_INTERNALS__" in window)) return; // dev-mode ngoài Tauri: bỏ qua
     ipc.listHistory({ limit: LIMIT, offset: 0, trashOnly: false })
-      .then((page) => setItems(page.items))
+      // Dải này chỉ phục vụ "mở lại trong Editor"/"copy nhanh" — cả 2 đều
+      // chưa hỗ trợ video (xem history/commands.rs), nên lọc bớt ở đây thay
+      // vì hiện video rồi báo lỗi khi bấm vào.
+      .then((page) => setItems(page.items.filter((it) => it.mediaType !== "video")))
       .catch(() => {});
   }, []);
 

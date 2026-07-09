@@ -4,8 +4,10 @@
 # to x86_64-pc-windows-msvc via cargo-xwin (same as on macOS).
 FROM node:22-bookworm
 
+# unzip: scripts/fetch-ffmpeg.mjs cần giải nén .zip trong beforeBuildCommand
+# (Debian's GNU tar không tự giải nén .zip như bsdtar trên macOS/Windows).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      nsis clang lld llvm pkg-config curl ca-certificates build-essential rsync \
+      nsis clang lld llvm pkg-config curl ca-certificates build-essential rsync unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust + the Windows MSVC target + cargo-xwin (downloads the MS CRT/SDK at build).

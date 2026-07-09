@@ -53,10 +53,11 @@ fn store(app: &AppHandle, cap: &capture::Capture, output: &str, scale_factor: f6
     });
 }
 
-/// Tên file theo template `Screenshot_YYYY-MM-DD_HHMMSS` (UTC) — dùng chung
-/// cho capture thường (output "save"/"save_copy") và Quick Capture
-/// (`history::save_quick_auto`) để cùng một quy ước đặt tên.
-pub(crate) fn stamp_filename() -> String {
+/// Tên file theo template `{prefix}_YYYY-MM-DD_HHMMSS` (UTC) — dùng chung cho
+/// capture thường (output "save"/"save_copy", prefix "Screenshot"), Quick
+/// Capture (`history::save_quick_auto`) và quay màn hình (`record::mod`,
+/// prefix "Recording") để cùng một quy ước đặt tên.
+pub(crate) fn stamp_filename(prefix: &str) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -67,7 +68,7 @@ pub(crate) fn stamp_filename() -> String {
     let hh = secs / 3600;
     let mm = (secs % 3600) / 60;
     let ss = secs % 60;
-    format!("Screenshot_{y:04}-{mo:02}-{d:02}_{hh:02}{mm:02}{ss:02}")
+    format!("{prefix}_{y:04}-{mo:02}-{d:02}_{hh:02}{mm:02}{ss:02}")
 }
 
 /// `scale_factor`: hệ số quy đổi pixel-vật-lý-của-bitmap → CSS/logical px,
@@ -112,7 +113,7 @@ pub fn finish(
                     dir
                 }
             };
-            let path = format!("{save_dir}/{}.png", stamp_filename());
+            let path = format!("{save_dir}/{}.png", stamp_filename("Screenshot"));
             let data = format!("data:image/png;base64,{}", cap.base64);
             let saved = storage::save::write_png(&path, &data)?;
             if output == "save_copy" {
@@ -152,6 +153,38 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
     if let Err(e) = result {
         let _ = app.emit("snapdoc-error", e);
     }
+}
+
+/// Mở overlay chọn PHẠM VI QUAY (không phải chụp ảnh) — tái dùng NGUYÊN VẸN
+/// overlay chọn vùng/cửa sổ/màn hình đã có cho chụp ảnh tĩnh. `mode` nhận
+/// đúng giá trị CaptureMode phía UI ("full" | "window" | "region") — cùng
+/// input với nút "Chụp", để 1 mode đang chọn dùng chung cho cả 2 hành động.
+/// "full" được map sang overlay "monitor" giống hệt `run()` (chụp "full"
+/// cũng luôn mở overlay chọn màn hình, không có gì tự động ở đây). Set cờ
+/// `pending_record` để `finalize_region`/`finalize_window`/`finalize_monitor`
+/// biết đường CHUYỂN HƯỚNG sang `record::start_recording_*` thay vì chụp ảnh
+/// + `finish()` như bình thường.
+pub fn run_record_picker(app: &AppHandle, mode: &str) {
+    let result: Result<(), String> = (|| {
+        if bar_is_visible(app) {
+            hide_bar(app);
+        }
+        *app.state::<AppState>().pending_record.lock().unwrap() = true;
+        let overlay_mode = if mode == "full" { "monitor" } else { mode };
+        windows::open_overlays(app, overlay_mode)
+    })();
+    if let Err(e) = result {
+        *app.state::<AppState>().pending_record.lock().unwrap() = false;
+        let _ = app.emit("snapdoc-error", e);
+    }
+}
+
+/// `true` nếu cờ `pending_record` đang bật — nếu có, TẮT LUÔN (lấy 1 lần) để
+/// lần chọn tiếp theo mặc định quay về chụp ảnh như thường lệ.
+fn take_pending_record(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let mut guard = state.pending_record.lock().unwrap();
+    std::mem::take(&mut *guard)
 }
 
 pub fn finalize_region(
@@ -204,6 +237,12 @@ pub fn finalize_region(
         return Err("Vung chon khong hop le".to_string());
     }
 
+    if take_pending_record(app) {
+        windows::close_overlays(app);
+        let display_id = m.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
+        return crate::record::start_recording_region(app, display_id, rx, ry, rw, rh);
+    }
+
     let (mode, _) = app.state::<AppState>().last_capture.get();
     if mode == "scroll" {
         windows::close_overlays(app);
@@ -236,6 +275,10 @@ pub fn finalize_region(
 pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
     windows::close_overlays(app);
 
+    if take_pending_record(app) {
+        return crate::record::start_recording_window(app, id);
+    }
+
     // Chờ WM_CLOSE được main thread xử lý và DWM unregister protected surface.
     // Không poll (deadlock risk) — sleep cố định 200ms là đủ.
     #[cfg(not(target_os = "macos"))]
@@ -252,6 +295,13 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
     let center_x = (s.x + s.w / 2.0) as i32;
     let center_y = (s.y + s.h / 2.0) as i32;
     let m = capture::monitor::at_point(center_x, center_y)?;
+
+    if take_pending_record(app) {
+        windows::close_overlays(app);
+        let display_id = m.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
+        return crate::record::start_recording_monitor(app, display_id);
+    }
+
     // KHÔNG poll sau close — deadlock risk (xem close_overlays). Sleep 200ms.
     windows::close_overlays(app);
     #[cfg(not(target_os = "macos"))]
@@ -262,6 +312,10 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
 }
 
 pub fn cancel_overlay(app: &AppHandle) {
+    // Reset cờ chọn phạm vi quay — tránh rò rỉ sang lần chọn vùng/cửa sổ kế
+    // tiếp (vốn dành cho chụp ảnh) nếu người dùng bấm Esc giữa lúc đang chọn
+    // phạm vi quay.
+    *app.state::<AppState>().pending_record.lock().unwrap() = false;
     windows::close_overlays(app);
 }
 
