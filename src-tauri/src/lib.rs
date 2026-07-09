@@ -324,10 +324,13 @@ pub fn run() {
                 }
                 // macOS: click dock icon / Spotlight search khi app đang chạy.
                 #[cfg(target_os = "macos")]
-                tauri::RunEvent::Reopen { has_visible_windows: _, .. } => {
-                    // Luôn mở capture bar khi user reopen app (click Dock hoặc Spotlight).
-                    // Nếu capture bar đã mở, hàm open_capture_bar sẽ chỉ show + focus nó.
-                    let _ = windows::open_capture_bar(_app);
+                tauri::RunEvent::Reopen { has_visible_windows, .. } => {
+                    // Đã có cửa sổ nào đó (editor/history/record-review/capture-bar...)
+                    // đang visible → macOS tự đưa nó lên trước, không mở thêm capture bar.
+                    // Chỉ mở capture bar khi app đang "im lặng" hoàn toàn trong tray.
+                    if !has_visible_windows {
+                        let _ = windows::open_capture_bar(_app);
+                    }
                 }
                 // macOS: nhận file từ "Open with" / Finder / kéo vào Dock icon.
                 // Tauri v2 expose qua RunEvent::Opened (tao: application:openURLs:).

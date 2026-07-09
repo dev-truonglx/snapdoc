@@ -71,3 +71,34 @@ select,
 .solid-bg {
   background: var(--bg);
 }
+
+/* Skeleton shimmer cho tile filmstrip chưa có frame nào (kiểu YouTube/CapCut)
+   — xem `VideoTrimmer.tsx`, thay cho chữ "Đang tải khung hình…" tĩnh ở góc. */
+@keyframes snapdoc-shimmer-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.filmstrip-shimmer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.filmstrip-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.14) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: snapdoc-shimmer-sweep 1.4s ease-in-out infinite;
+}

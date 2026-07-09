@@ -199,7 +199,13 @@ fn trim_history_video_sync(app: &AppHandle, id: &str, keep_ranges_ms: &[(i64, i6
 
     let asset_path = std::path::Path::new(&rec.asset_path);
     let new_path = crate::record::new_output_path(app)?;
-    crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path)?;
+    // Báo tiến độ % cho cửa sổ `history-trim` qua event toàn app — xem
+    // doc-comment `encoder::trim` + listener ở `HistoryTrim.tsx`.
+    let progress_app = app.clone();
+    crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path, move |frac| {
+        use tauri::Emitter;
+        let _ = progress_app.emit("trim-progress", frac);
+    })?;
 
     let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
     let file_size = std::fs::metadata(&new_path).ok().map(|m| m.len() as i64);

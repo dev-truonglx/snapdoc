@@ -832,7 +832,13 @@ pub fn trim_pending_recording(app: &AppHandle, keep_ranges_ms: &[(i64, i64)]) ->
     // theo toạ độ của bản hiện tại, không phải bản thô).
     let trim_source: &Path = new_raw.as_ref().map(|(p, _)| p.as_path()).unwrap_or(&input_path);
     let tmp_output = input_path.with_extension("trimtmp.mp4");
-    encoder::trim(trim_source, keep_ranges_ms, &tmp_output)?;
+    // Báo tiến độ % cho `record-review` qua event toàn app (webview đang mở
+    // sẽ tự lắng, xem `RecordReview.tsx`) — xem doc-comment `encoder::trim`.
+    let progress_app = app.clone();
+    encoder::trim(trim_source, keep_ranges_ms, &tmp_output, move |frac| {
+        use tauri::Emitter;
+        let _ = progress_app.emit("trim-progress", frac);
+    })?;
     std::fs::rename(&tmp_output, &input_path)
         .map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
 

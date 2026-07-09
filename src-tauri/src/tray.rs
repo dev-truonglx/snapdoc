@@ -275,6 +275,10 @@ pub fn set_update_badge(app: &AppHandle) {
 }
 
 /// Đổi tooltip + menu tray sau khi update đã cài xong, chờ restart.
+/// Chỉ được gọi từ `update::silent_download_and_install`, nơi bị loại khỏi
+/// debug build bởi `#[cfg(not(debug_assertions))]` — nên `cargo check` (debug
+/// profile) báo "never used" dù hàm này CÓ dùng thật ở release build.
+#[cfg_attr(debug_assertions, allow(dead_code))]
 pub fn set_restart_badge(app: &AppHandle) {
     RESTART_PENDING.store(true, Ordering::Relaxed);
     if let Some(tray) = app.tray_by_id("main-tray") {

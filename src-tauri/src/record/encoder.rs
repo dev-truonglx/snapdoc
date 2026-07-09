@@ -224,7 +224,20 @@ pub fn mux_audio(
 /// thêm không đáng kể). `output_path` chỉ được ghi khi mọi bước thành công —
 /// `input_path` không bao giờ bị đụng vào (caller tự quyết định
 /// `fs::rename` đè lên file gốc sau khi hàm này trả về `Ok`).
-pub fn trim(input_path: &Path, keep_ranges_ms: &[(i64, i64)], output_path: &Path) -> Result<(), String> {
+///
+/// `on_progress` được gọi liên tục với tỉ lệ 0.0..=1.0 trong lúc encode từng
+/// đoạn (đọc `out_time_us=` từ `-progress pipe:1` của ffmpeg — machine-
+/// readable, ổn định hơn parse chuỗi `time=` trong stderr thường), quy đổi
+/// theo tổng thời lượng CÒN LẠI của mọi đoạn (không phải % số đoạn xong, vì 1
+/// đoạn dài có thể chiếm hầu hết thời gian trong khi các đoạn khác rất ngắn).
+/// Bước ghép cuối (`-c copy`) rất nhanh nên không cần progress riêng — nhảy
+/// thẳng lên `1.0` khi xong.
+pub fn trim(
+    input_path: &Path,
+    keep_ranges_ms: &[(i64, i64)],
+    output_path: &Path,
+    mut on_progress: impl FnMut(f64),
+) -> Result<(), String> {
     if keep_ranges_ms.is_empty() {
         return Err("Không có đoạn nào được giữ lại".to_string());
     }
@@ -233,12 +246,17 @@ pub fn trim(input_path: &Path, keep_ranges_ms: &[(i64, i64)], output_path: &Path
     let tmp_dir = std::env::temp_dir().join(format!("snapdoc-trim-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("Không tạo được thư mục tạm: {e}"))?;
 
-    let run = || -> Result<(), String> {
+    let total_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum::<i64>().max(1);
+    let mut done_ms: i64 = 0;
+    on_progress(0.0);
+
+    let mut run = || -> Result<(), String> {
         let mut seg_paths = Vec::with_capacity(keep_ranges_ms.len());
         for (i, (start_ms, end_ms)) in keep_ranges_ms.iter().enumerate() {
             let seg_path = tmp_dir.join(format!("seg_{i}.mp4"));
             let start_s = (*start_ms as f64) / 1000.0;
-            let dur_s = ((*end_ms - *start_ms).max(0) as f64) / 1000.0;
+            let dur_ms = (*end_ms - *start_ms).max(0);
+            let dur_s = (dur_ms as f64) / 1000.0;
 
             let mut cmd = Command::new(&ffmpeg);
             cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
@@ -249,10 +267,11 @@ pub fn trim(input_path: &Path, keep_ranges_ms: &[(i64, i64)], output_path: &Path
                     "-t", &dur_s.to_string(),
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
                     "-c:a", "aac", "-b:a", "160k",
+                    "-progress", "pipe:1",
                 ])
                 .arg(&seg_path)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
 
             #[cfg(windows)]
@@ -261,13 +280,43 @@ pub fn trim(input_path: &Path, keep_ranges_ms: &[(i64, i64)], output_path: &Path
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
 
-            let output = cmd
-                .output()
+            let mut child = cmd
+                .spawn()
                 .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("ffmpeg cắt đoạn {i} thất bại: {} — {stderr}", output.status));
+            // Đọc stderr trên thread riêng — chỉ để giữ lại cho thông báo lỗi
+            // nếu process thất bại, KHÔNG để buffer đầy gây deadlock (child chờ
+            // ghi stderr, ta chờ đọc stdout) trong lúc đọc `-progress` ở dưới.
+            let mut stderr_pipe = child.stderr.take().expect("stderr đã piped");
+            let stderr_thread = std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = String::new();
+                let _ = stderr_pipe.read_to_string(&mut buf);
+                buf
+            });
+
+            let stdout = child.stdout.take().expect("stdout đã piped");
+            {
+                use std::io::{BufRead, BufReader};
+                let seg_base_ms = done_ms;
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if let Some(v) = line.strip_prefix("out_time_us=") {
+                        if let Ok(us) = v.trim().parse::<i64>() {
+                            let seg_ms = (us / 1000).clamp(0, dur_ms);
+                            on_progress(((seg_base_ms + seg_ms) as f64 / total_ms as f64).min(1.0));
+                        }
+                    }
+                }
             }
+
+            let status = child
+                .wait()
+                .map_err(|e| format!("ffmpeg lỗi khi chờ tiến trình: {e}"))?;
+            let stderr = stderr_thread.join().unwrap_or_default();
+            if !status.success() {
+                return Err(format!("ffmpeg cắt đoạn {i} thất bại: {status} — {stderr}"));
+            }
+            done_ms += dur_ms;
+            on_progress((done_ms as f64 / total_ms as f64).min(1.0));
             seg_paths.push(seg_path);
         }
 
@@ -307,6 +356,7 @@ pub fn trim(input_path: &Path, keep_ranges_ms: &[(i64, i64)], output_path: &Path
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("ffmpeg ghép các đoạn thất bại: {} — {stderr}", output.status));
         }
+        on_progress(1.0);
         Ok(())
     };
 
@@ -439,7 +489,10 @@ mod tests {
 
         let out = tmp_dir.join("trimmed.mp4");
         // Giữ 0–1.5s và 3.5–5s (xoá đoạn giữa 1.5–3.5s) → kết quả ~3s.
-        trim(&src, &[(0, 1_500), (3_500, 5_000)], &out).expect("trim() thất bại — kiểm tra cú pháp ffmpeg");
+        let mut last_progress = 0.0;
+        trim(&src, &[(0, 1_500), (3_500, 5_000)], &out, |p| last_progress = p)
+            .expect("trim() thất bại — kiểm tra cú pháp ffmpeg");
+        assert!((last_progress - 1.0).abs() < 1e-9, "progress cuối phải là 1.0, thấy {last_progress}");
 
         let meta = std::fs::metadata(&out).expect("không đọc được file output");
         assert!(meta.len() > 1000, "file mp4 sau khi cắt quá nhỏ ({} byte)", meta.len());

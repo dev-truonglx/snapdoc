@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ipc, type HistoryItem } from "../../lib/ipc";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 
@@ -27,6 +28,9 @@ export default function HistoryTrim() {
     hasChanges: false,
     keepRanges: [],
   });
+  // Tiến độ cắt (0..1) — cùng kỹ thuật `RecordReview.tsx`, backend emit %
+  // thật từ ffmpeg qua event `trim-progress`, xem `encoder::trim`.
+  const [trimProgress, setTrimProgress] = useState(0);
 
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("id");
@@ -37,6 +41,13 @@ export default function HistoryTrim() {
     ipc.getHistoryItem(id)
       .then(setItem)
       .catch(() => setNotFound(true));
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<number>("trim-progress", (e) => setTrimProgress(e.payload));
+    return () => {
+      unlisten.then((f) => f());
+    };
   }, []);
 
   const doClose = () => {
@@ -50,6 +61,7 @@ export default function HistoryTrim() {
   const doApply = async () => {
     if (busy || !item || !trimState.hasChanges) return;
     setBusy(true);
+    setTrimProgress(0);
     try {
       await ipc.trimHistoryVideo(item.id, trimState.keepRanges);
       await ipc.closeHistoryTrim();
@@ -94,7 +106,7 @@ export default function HistoryTrim() {
             RecordReview. */}
         <button style={closeBtn} disabled={busy} onClick={doClose}>Đóng</button>
         <button style={applyBtn} disabled={busy || !item || !trimState.hasChanges} onClick={doApply}>
-          {busy ? "Đang cắt…" : "Áp dụng cắt"}
+          {busy ? `Đang cắt… ${Math.round(trimProgress * 100)}%` : "Áp dụng cắt"}
         </button>
       </div>
     </div>
@@ -131,7 +143,8 @@ const metaRow: React.CSSProperties = {
   padding: "8px 14px",
   fontSize: 12,
   color: "var(--text-dim)",
-  borderTop: "1px solid var(--border)",
+  // borderTop: "1px solid var(--border)",
+  background: "#000",
 };
 
 const actions: React.CSSProperties = {
@@ -140,6 +153,8 @@ const actions: React.CSSProperties = {
   alignItems: "center",
   padding: "10px 14px",
   borderTop: "1px solid var(--border)",
+  // Đen — đồng bộ với `RecordReview.tsx` (cùng khuôn cửa sổ cắt video).
+  background: "#000",
 };
 
 const applyBtn: React.CSSProperties = {

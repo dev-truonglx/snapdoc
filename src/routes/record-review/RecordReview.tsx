@@ -28,11 +28,23 @@ export default function RecordReview() {
     hasChanges: false,
     keepRanges: [],
   });
+  // Tiến độ cắt (0..1), `null` = không đang cắt (đang chờ khác/đã xong) — chỉ
+  // có ý nghĩa trong lúc `trimPendingRecording` chạy, xem `doApplyAndSave`.
+  // Backend emit % thật từ ffmpeg (`out_time_us`, xem `encoder::trim`), không
+  // phải giả lập — nên bỏ qua an toàn nếu không nhận được gì (giữ `null`).
+  const [trimProgress, setTrimProgress] = useState<number | null>(null);
 
   useEffect(() => {
     ipc.peekPendingRecording()
       .then((p) => (p ? setPending(p) : setNotFound(true)))
       .catch(() => setNotFound(true));
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<number>("trim-progress", (e) => setTrimProgress(e.payload));
+    return () => {
+      unlisten.then((f) => f());
+    };
   }, []);
 
   // Cửa sổ giờ có titlebar thật (nút đóng, xem `open_record_review` ở
@@ -61,12 +73,17 @@ export default function RecordReview() {
     setBusy(true);
     try {
       if (trimState.hasChanges) {
+        setTrimProgress(0);
         await ipc.trimPendingRecording(trimState.keepRanges);
+        // Xong bước cắt — quay về `null` để nhãn nút chuyển qua "Đang lưu…"
+        // (ingest vào History không có tiến độ %, xem `confirmRecordingSave`).
+        setTrimProgress(null);
       }
       await ipc.confirmRecordingSave();
     } catch (e) {
       alert(String(e));
       setBusy(false);
+      setTrimProgress(null);
     }
   };
 
@@ -118,7 +135,13 @@ export default function RecordReview() {
             Đổi nhãn theo `trimState.hasChanges` để không "hứa" áp dụng cắt
             khi chẳng có gì để cắt. */}
         <button style={saveBtn} disabled={busy || !pending} onClick={doApplyAndSave}>
-          {busy ? "Đang lưu…" : trimState.hasChanges ? "Áp dụng cắt và lưu" : "Lưu vào Lịch sử"}
+          {trimProgress != null
+            ? `Đang cắt… ${Math.round(trimProgress * 100)}%`
+            : busy
+            ? "Đang lưu…"
+            : trimState.hasChanges
+            ? "Áp dụng cắt và lưu"
+            : "Lưu vào Lịch sử"}
         </button>
       </div>
     </div>
@@ -157,6 +180,7 @@ const metaRow: React.CSSProperties = {
   fontSize: 12,
   color: "var(--text-dim)",
   borderTop: "1px solid var(--border)",
+  background: "#000",
 };
 
 // `space-between` (không phải 2 nút `flex:1` bằng nhau như cũ) — Xoá là thao
@@ -168,7 +192,10 @@ const actions: React.CSSProperties = {
   justifyContent: "space-between",
   alignItems: "center",
   padding: "10px 14px",
-  borderTop: "1px solid var(--border)",
+  // borderTop: "1px solid var(--border)",
+  // Đen (thay vì màu nền app xám mặc định) — đồng bộ với `previewWrap` phía
+  // trên, để cả preview + footer nút Lưu/Xoá liền thành 1 khối đen.
+  background: "#000",
 };
 
 const saveBtn: React.CSSProperties = {

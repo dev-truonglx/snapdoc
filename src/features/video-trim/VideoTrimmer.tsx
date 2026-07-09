@@ -89,6 +89,14 @@ const BASE_FRAME_COUNT = 40;
 /** Bề rộng đích (px) khi trích frame cho tile filmstrip — nhỏ, vì mỗi tile
  * trên timeline chỉ rộng ~100px (xem `THUMB_TARGET_PX`). */
 const FILMSTRIP_SCALE_W = 160;
+/** Chiều cao dải khung hình filmstrip — giữ NGUYÊN giá trị cũ (không đổi độ
+ * phân giải/tỉ lệ hiện của frame), xem `track`/`filmstripLayer`. */
+const FILMSTRIP_BAND_H = 64;
+/** Chiều cao khối timeline — CAO HƠN dải khung hình (`FILMSTRIP_BAND_H`) để
+ * `playhead` tràn ra lề trên/dưới dải frame, dễ thấy đang chạy tới đâu (trước
+ * đây playhead cao bằng đúng dải frame nên bị "chìm" khi clip có màu trắng
+ * trùng màu vạch). */
+const TRACK_H = 104;
 /** Bán kính bắt "hút" (snap) playhead/điểm chia vào ranh giới đoạn gần nhất
  * khi kéo/rê chuột trên timeline, tính bằng px màn hình (không đổi theo
  * zoom) — xem `snapTimelineMs`. */
@@ -171,7 +179,6 @@ export default function VideoTrimmer({
   const [scrollLeft, setScrollLeft] = useState(0);
   const [containerWidth, setContainerWidth] = useState(0);
   const [frames, setFrames] = useState<Map<number, string>>(new Map());
-  const [pendingFetches, setPendingFetches] = useState(0);
   /** Vị trí đang rê chuột trên timeline (chưa click) — hiện preview lớn nổi
    * theo con trỏ, kiểu "hover-scrub" của CapCut. `clientX`/`trackTop` là toạ
    * độ viewport (dùng `position: fixed` để không bị `trackScroll` cắt mất do
@@ -410,7 +417,6 @@ export default function VideoTrimmer({
       return;
     }
     fetchInFlightRef.current = true;
-    setPendingFetches((n) => n + 1);
     ipc.generateVideoFrames(filePath, missing, FILMSTRIP_SCALE_W)
       .then((urls) => {
         setFrames((prev) => {
@@ -438,7 +444,6 @@ export default function VideoTrimmer({
       .catch(() => {})
       .finally(() => {
         fetchInFlightRef.current = false;
-        setPendingFetches((n) => n - 1);
         const queued = pendingMissingRef.current;
         pendingMissingRef.current = null;
         if (queued && queued.length > 0) runFetch(queued);
@@ -758,7 +763,6 @@ export default function VideoTrimmer({
           {isPlaying ? "❚❚" : "▶"}
         </button>
         <span style={timeText}>{fmtDuration(playheadMs)} / {fmtDuration(total)}</span>
-        {pendingFetches > 0 && <span style={loadingText}>Đang tải khung hình…</span>}
         <div style={toolsGroup}>
           <button style={toolBtn} onClick={zoomOut} disabled={zoom <= MIN_ZOOM} title="Thu nhỏ timeline">−</button>
           <button style={toolBtn} onClick={zoomReset} title="Đặt lại zoom 100%">{Math.round(zoom * 100)}%</button>
@@ -827,7 +831,16 @@ export default function VideoTrimmer({
               const url = nearestFrameUrl(srcMs);
               return (
                 <div key={key} style={{ ...filmstripTile, left: `${leftPct}%`, width: `${widthPct}%` }}>
-                  {url && <img src={url} style={filmstripImg} draggable={false} alt="" />}
+                  {url ? (
+                    <img src={url} style={filmstripImg} draggable={false} alt="" />
+                  ) : (
+                    // Chưa có frame nào cho mốc này (kể cả từ lớp nền
+                    // `BASE_FRAME_COUNT`) — thường chỉ xảy ra rất ngắn lúc mới
+                    // mount. Shimmer NGAY TRÊN tile (kiểu YouTube/CapCut) thay
+                    // chữ "Đang tải khung hình…" ở góc — dễ nhận ra hơn vì
+                    // đúng ngay chỗ người dùng đang nhìn.
+                    <div className="filmstrip-shimmer" />
+                  )}
                 </div>
               );
             })}
@@ -956,12 +969,6 @@ const timeText: React.CSSProperties = {
   fontVariantNumeric: "tabular-nums",
 };
 
-const loadingText: React.CSSProperties = {
-  fontSize: 11,
-  color: "var(--text-dim)",
-  fontStyle: "italic",
-};
-
 const toolsGroup: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -1073,10 +1080,16 @@ const trackScroll: React.CSSProperties = {
 };
 
 /** Lớp filmstrip nằm dưới cùng trong `track` — `pointerEvents:none` để không
- * chặn kéo/bấm (segment/playhead vẫn xử lý pointer riêng ở track cha). */
+ * chặn kéo/bấm (segment/playhead vẫn xử lý pointer riêng ở track cha).
+ * Chỉ cao `FILMSTRIP_BAND_H` (giữ đúng chiều cao frame cũ), CANH GIỮA trong
+ * `track` (nay cao hơn, xem `track`) — phần lề trên/dưới còn lại là để
+ * `playhead` tràn ra ngoài dải khung hình, dễ nhìn thấy đang chạy tới đâu. */
 const filmstripLayer: React.CSSProperties = {
   position: "absolute",
-  inset: 0,
+  top: (TRACK_H - FILMSTRIP_BAND_H) / 2,
+  height: FILMSTRIP_BAND_H,
+  left: 0,
+  right: 0,
   overflow: "hidden",
   borderRadius: 8,
   pointerEvents: "none",
@@ -1099,10 +1112,9 @@ const filmstripImg: React.CSSProperties = {
 
 const track: React.CSSProperties = {
   position: "relative",
-  // 64 (thay vì 44 cũ) — khung preview/cửa sổ giờ lớn hơn hẳn (xem
-  // `open_record_review`/modal cắt video ở History), filmstrip cao hơn giúp
-  // nhìn rõ nội dung từng frame hơn là chỉ 1 dải màu mỏng.
-  height: 64,
+  // Cao hơn dải khung hình thật (`FILMSTRIP_BAND_H`, xem `filmstripLayer`) —
+  // phần lề trên/dưới dư ra là để `playhead` tràn ra ngoài, xem `TRACK_H`.
+  height: TRACK_H,
   borderRadius: 8,
   background: "rgba(255,255,255,0.08)",
   cursor: "pointer",
@@ -1125,14 +1137,21 @@ const segmentSelected: React.CSSProperties = {
   background: "rgba(255,255,255,0.16)",
 };
 
+// Đỏ cam (thay vì trắng cũ) — clip quay màn hình rất hay có nền trắng, vạch
+// trắng lúc đó gần như biến mất vào nền. Kèm viền đen mỏng (`boxShadow`) để
+// vẫn nổi rõ cả trên clip sáng màu. `top:0, bottom:0` = tràn hết chiều cao
+// TĂNG THÊM của `track` (xem `TRACK_H`) — nhô ra khỏi dải khung hình
+// (`FILMSTRIP_BAND_H`, thấp hơn) ở cả trên và dưới.
 const playhead: React.CSSProperties = {
   position: "absolute",
   top: 0,
   bottom: 0,
   width: 2,
-  background: "#fff",
-  opacity: 0.8,
+  background: "#ff5252",
+  boxShadow: "0 0 0 1px rgba(0,0,0,0.6)",
+  borderRadius: 1,
   pointerEvents: "none",
+  zIndex: 5,
 };
 
 // Chỉ còn text info (không nút, xem `trimCommitGroup`) — dim, nhỏ, đúng mức
