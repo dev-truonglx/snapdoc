@@ -9,6 +9,9 @@ export interface Pending {
   output: string;
   /** Id bản ghi History tương ứng (nếu đã ingest) — dùng để Save ghi đè tại chỗ. */
   history_id: string | null;
+  /** Mode đã chụp ra ảnh này ("region"/"window"/"full"/"all"/"scroll"/"quick"/
+   * "file") — Editor dùng để chọn zoom mặc định, xem `AnnotationStage.tsx`. */
+  capture_mode: string;
 }
 
 // ── History / Library ────────────────────────────────────────────────────────

@@ -97,6 +97,19 @@ const FILMSTRIP_BAND_H = 64;
  * đây playhead cao bằng đúng dải frame nên bị "chìm" khi clip có màu trắng
  * trùng màu vạch). */
 const TRACK_H = 104;
+/** Chiều cao dải thước thời gian (ruler) phía trên track — hiện mốc giờ:phút
+ * dọc theo timeline, mật độ tự đổi theo zoom (xem `NICE_TICK_INTERVALS_MS`). */
+const RULER_H = 22;
+/** Các bước nhảy thời gian "đẹp" cho mốc trên ruler — chọn bước NHỎ NHẤT
+ * trong danh sách vẫn cho khoảng cách giữa 2 mốc ≥ `MIN_TICK_PX` ở mức zoom
+ * hiện tại, để mật độ mốc luôn dễ đọc: zoom thấp (video dài hiện gọn) → bước
+ * lớn (phút), zoom cao (xem từng giây) → bước nhỏ (giây). */
+const NICE_TICK_INTERVALS_MS = [
+  1_000, 2_000, 5_000, 10_000, 15_000, 30_000,
+  60_000, 120_000, 300_000, 600_000, 900_000, 1_800_000, 3_600_000,
+];
+/** Khoảng cách tối thiểu (px) giữa 2 mốc ruler — đủ chỗ cho nhãn "12:34". */
+const MIN_TICK_PX = 70;
 /** Bán kính bắt "hút" (snap) playhead/điểm chia vào ranh giới đoạn gần nhất
  * khi kéo/rê chuột trên timeline, tính bằng px màn hình (không đổi theo
  * zoom) — xem `snapTimelineMs`. */
@@ -322,9 +335,12 @@ export default function VideoTrimmer({
     };
   }, [segments]);
 
-  // Phím tắt Undo/Redo/Xoá — không dep array (chạy lại mỗi render) để closure
-  // luôn thấy `segments`/`past`/`future`/`selectedSegmentId` mới nhất, tránh
-  // lớp bug "stale closure" hay gặp với listener gắn 1 lần trên window.
+  // Phím tắt Undo/Redo/Xoá/Chia/Cắt đầu-cuối — không dep array (chạy lại mỗi
+  // render) để closure luôn thấy `segments`/`past`/`future`/`selectedSegmentId`
+  // mới nhất, tránh lớp bug "stale closure" hay gặp với listener gắn 1 lần
+  // trên window. Q/W không có modifier (giống quy ước hotkey dựng phim) nên
+  // chỉ nhận khi KHÔNG bấm cùng Ctrl/Cmd/Shift/Alt — tránh đè lên tổ hợp hệ
+  // thống (ví dụ Cmd+Q thoát app).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -339,6 +355,15 @@ export default function VideoTrimmer({
       } else if ((e.key === "Delete" || e.key === "Backspace") && selectedSegmentId) {
         e.preventDefault();
         doDeleteSelected();
+      } else if (mod && !e.shiftKey && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        if (canSplitAt(segments, playheadMs)) doSplit();
+      } else if (!mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "q") {
+        e.preventDefault();
+        if (canTrimHead(segments, playheadMs)) doTrimHead();
+      } else if (!mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        if (canTrimTail(segments, playheadMs)) doTrimTail();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -405,6 +430,29 @@ export default function VideoTrimmer({
     }
     return tiles;
   }, [segments, containerWidth, zoom, scrollLeft]);
+
+  // Mốc thời gian trên ruler — bước nhảy tự đổi theo zoom (xem
+  // `NICE_TICK_INTERVALS_MS`/`MIN_TICK_PX`) để không bao giờ dày đặc/rối mắt
+  // hay quá thưa. KHÔNG phụ thuộc `scrollLeft` (khác `visibleTiles`) — chỉ
+  // ~vài chục mốc cho toàn timeline nên render hết luôn, không cần cửa sổ nhìn.
+  const timeTicks = useMemo(() => {
+    const trackWidthPx = containerWidth * zoom;
+    const total = totalTimelineMs(segments);
+    if (trackWidthPx <= 0 || total <= 0) return [] as { ms: number; leftPct: number }[];
+
+    let intervalMs = NICE_TICK_INTERVALS_MS[NICE_TICK_INTERVALS_MS.length - 1];
+    for (const candidate of NICE_TICK_INTERVALS_MS) {
+      if ((candidate / total) * trackWidthPx >= MIN_TICK_PX) {
+        intervalMs = candidate;
+        break;
+      }
+    }
+    const ticks: { ms: number; leftPct: number }[] = [];
+    for (let t = 0; t <= total; t += intervalMs) {
+      ticks.push({ ms: t, leftPct: (t / total) * 100 });
+    }
+    return ticks;
+  }, [segments, containerWidth, zoom]);
 
   const runFetch = (missing: number[]) => {
     if (fetchInFlightRef.current) {
@@ -777,16 +825,16 @@ export default function VideoTrimmer({
         <button style={iconToolBtn} disabled={past.length === 0} onClick={undo} title="Hoàn tác (Ctrl+Z)">↶</button>
         <button style={iconToolBtn} disabled={future.length === 0} onClick={redo} title="Làm lại (Ctrl+Shift+Z)">↷</button>
         <div style={toolDivider} />
-        <button style={iconToolBtn} disabled={!canSplitAt(segments, playheadMs)} onClick={doSplit} title="Chia đoạn tại vị trí đang dừng">
+        <button style={iconToolBtn} disabled={!canSplitAt(segments, playheadMs)} onClick={doSplit} title="Chia đoạn tại vị trí đang dừng (Ctrl+B)">
           <ScissorsIcon />
         </button>
         <button style={iconToolBtn} disabled={!selectedSegmentId || segments.length <= 1} onClick={doDeleteSelected} title="Xoá đoạn đang chọn (Delete)">
           <TrashIcon />
         </button>
-        <button style={iconToolBtn} disabled={!canTrimHead(segments, playheadMs)} onClick={doTrimHead} title="Cắt từ đầu tới vị trí đang dừng">
+        <button style={iconToolBtn} disabled={!canTrimHead(segments, playheadMs)} onClick={doTrimHead} title="Cắt từ đầu tới vị trí đang dừng (Q)">
           <span style={bracketGlyph}>[</span>
         </button>
-        <button style={iconToolBtn} disabled={!canTrimTail(segments, playheadMs)} onClick={doTrimTail} title="Cắt từ vị trí đang dừng tới cuối">
+        <button style={iconToolBtn} disabled={!canTrimTail(segments, playheadMs)} onClick={doTrimTail} title="Cắt từ vị trí đang dừng tới cuối (W)">
           <span style={bracketGlyph}>]</span>
         </button>
         {/* Đặt lại: đặt NGAY CẠNH nhóm icon cắt (chia/xoá/cắt đầu-cuối) —
@@ -814,14 +862,35 @@ export default function VideoTrimmer({
         style={trackScroll}
         onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
       >
-        <div
-          ref={trackRef}
-          style={{ ...track, width: `${zoom * 100}%`, touchAction: "none" }}
-          onPointerDown={onTrackDown}
-          onPointerMove={onTrackMove}
-          onPointerUp={onTrackUp}
-          onPointerLeave={onTrackLeave}
-        >
+        {/* Bọc chung ruler + track theo đúng 1 chiều rộng (zoom) — cùng cuộn
+            với nhau vì là con trực tiếp của `trackScroll`, không cần đồng bộ
+            scrollLeft riêng cho ruler. */}
+        <div style={{ width: `${zoom * 100}%` }}>
+          {/* Thước thời gian — mốc giờ:phút dọc timeline, mật độ tự đổi theo
+              zoom (xem `timeTicks`). Thay cho dòng thời lượng cũ ở metaRow. */}
+          <div style={timeRuler}>
+            {timeTicks.map(({ ms, leftPct }) => (
+              <div
+                key={ms}
+                style={{
+                  ...tickWrap,
+                  left: `${leftPct}%`,
+                  transform: leftPct > 90 ? "translateX(-100%)" : leftPct > 0 ? "translateX(-1px)" : undefined,
+                }}
+              >
+                <span style={tickLabel}>{fmtDuration(ms)}</span>
+                <div style={tickLine} />
+              </div>
+            ))}
+          </div>
+          <div
+            ref={trackRef}
+            style={{ ...track, touchAction: "none" }}
+            onPointerDown={onTrackDown}
+            onPointerMove={onTrackMove}
+            onPointerUp={onTrackUp}
+            onPointerLeave={onTrackLeave}
+          >
           {/* Filmstrip — frame thật lấy theo khung đang xem/mức zoom, xem
               `visibleTiles`/`runFetch` ở trên. Nằm dưới các lớp segment/playhead
               (thứ tự DOM = thứ tự layer), `pointerEvents:none` để không chặn
@@ -864,6 +933,7 @@ export default function VideoTrimmer({
 
           {/* Vạch phát hiện tại. */}
           <div style={{ ...playhead, left: `${pct(playheadMs)}%` }} />
+          </div>
         </div>
       </div>
 
@@ -1073,6 +1143,13 @@ const hoverPreviewTime: React.CSSProperties = {
  * JSX, `width: zoom*100%`), container này clip + cho cuộn phần bị tràn. */
 const trackScroll: React.CSSProperties = {
   position: "relative",
+  // Cao CỐ ĐỊNH bằng ruler + track (RULER_H + TRACK_H) — không để trình
+  // duyệt tự cộng thêm chiều cao cho thanh cuộn ngang lúc nó xuất hiện
+  // (Windows/WebView2 dùng scrollbar "classic" chiếm chỗ layout, khác overlay
+  // scrollbar của macOS). Thiếu height cố định, mỗi lần zoom làm thanh cuộn
+  // hiện/ẩn sẽ làm khối này co giãn vài px, đẩy khung video phía trên theo —
+  // đúng hiện tượng "giao diện lệch lên trên" khi zoom out.
+  height: RULER_H + TRACK_H,
   overflowX: "auto",
   overflowY: "hidden",
   borderRadius: 8,
@@ -1119,6 +1196,39 @@ const track: React.CSSProperties = {
   background: "rgba(255,255,255,0.08)",
   cursor: "pointer",
   userSelect: "none",
+};
+
+/** Thước thời gian phía trên track — `pointerEvents:none` (thuần hiển thị,
+ * không chặn tương tác), cao `RULER_H`. */
+const timeRuler: React.CSSProperties = {
+  position: "relative",
+  height: RULER_H,
+  pointerEvents: "none",
+  flexShrink: 0,
+};
+
+const tickWrap: React.CSSProperties = {
+  position: "absolute",
+  top: 0,
+  bottom: 0,
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "flex-start",
+  justifyContent: "flex-end",
+};
+
+const tickLabel: React.CSSProperties = {
+  fontSize: 10,
+  color: "var(--text-dim)",
+  fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap",
+  marginBottom: 2,
+};
+
+const tickLine: React.CSSProperties = {
+  width: 1,
+  height: 5,
+  background: "var(--border)",
 };
 
 const segmentBlock: React.CSSProperties = {

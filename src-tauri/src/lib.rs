@@ -226,19 +226,23 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Lần đầu chạy sau khi cài: tự động bật "khởi động cùng hệ thống"
-            // nếu settings chưa có key "launchAtLogin" (= chưa từng user thay đổi).
-            // Sau đó user có thể tắt từ Settings bất cứ lúc nào.
+            // Lần đầu chạy sau khi cài: tự động bật "khởi động cùng hệ thống".
+            // Phát hiện "lần đầu" bằng việc FILE settings.json đã tồn tại
+            // trên đĩa hay chưa (`storage::settings::exists`) — KHÔNG dùng
+            // key trong giá trị `load()` trả về như bản cũ: `load()` fallback
+            // về `defaults()` khi file chưa tồn tại, mà `defaults()` đã có
+            // sẵn key "launchAtLogin" → điều kiện cũ luôn đúng, block này
+            // không bao giờ chạy, nên Settings hiện "ON" nhưng LaunchAgent
+            // chưa từng được đăng ký thật — chỉ có tác dụng sau khi user tự
+            // tắt/bật lại (gọi `set_autostart`, xem `commands.rs`). Sau lần
+            // đầu này, user có thể tắt từ Settings bất cứ lúc nào.
             {
                 use tauri::Manager;
                 use tauri_plugin_autostart::ManagerExt;
                 let config_dir = handle.path().app_config_dir().unwrap_or_default();
-                let settings = storage::settings::load(&config_dir);
-                let has_key = settings.get("launchAtLogin").is_some();
-                if !has_key {
-                    // Lần đầu: bật autostart và lưu preference
+                if !storage::settings::exists(&config_dir) {
                     let _ = handle.autolaunch().enable();
-                    let mut new_settings = settings;
+                    let mut new_settings = storage::settings::load(&config_dir);
                     new_settings["launchAtLogin"] = serde_json::Value::Bool(true);
                     let _ = storage::settings::save(&config_dir, &new_settings);
                 }

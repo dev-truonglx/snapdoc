@@ -35,6 +35,11 @@ pub struct PendingCapture {
     /// để Save ghi đè tại chỗ đúng record thay vì chỉ save-as thông thường.
     #[serde(default)]
     pub history_id: Option<String>,
+    /// Mode đã chụp ra ảnh này ("region"/"window"/"full"/"all"/"scroll"/
+    /// "quick"/"file") — Editor dùng để chọn zoom mặc định: "region" → 100%,
+    /// còn lại → fit cả chiều rộng/cao (xem `AnnotationStage.tsx`).
+    #[serde(default)]
+    pub capture_mode: String,
 }
 
 /// Chế độ chụp + output gần nhất — dùng cho nút "New" ở editor.

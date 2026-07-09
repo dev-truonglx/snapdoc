@@ -32,6 +32,7 @@ export default function Editor() {
       scaleFactor: p.scale_factor ?? 1,
       annotations: [],
       historyId: p.history_id,
+      captureMode: p.capture_mode,
     });
   };
 

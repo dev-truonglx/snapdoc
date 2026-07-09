@@ -46,6 +46,7 @@ pub fn set_pending_image(app: AppHandle, state: State<AppState>, data: String, w
             output: "editor".to_string(),
             scale_factor: 1.0,
             history_id,
+            capture_mode: "quick".to_string(),
         });
     }
 }
@@ -299,6 +300,7 @@ pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> 
                 // "Open with"/file ngoài KHÔNG vào History (chỉ ghi nhận ảnh do
                 // app tự chụp) — history_id luôn None cho luồng này.
                 history_id: None,
+                capture_mode: "file".to_string(),
             });
         }
         windows::open_editor(app)?;

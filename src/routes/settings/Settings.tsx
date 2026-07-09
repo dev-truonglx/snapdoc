@@ -273,14 +273,14 @@ export default function Settings() {
               {OUTPUTS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
             </select>
           </Field>
-          <Field label="Hẹn giờ trước khi chụp">
+          {/* <Field label="Hẹn giờ trước khi chụp">
             <select
               value={s.timerSeconds}
               onChange={(e) => update({ timerSeconds: Number(e.target.value) })}
             >
               {[0, 3, 5].map((t) => <option key={t} value={t}>{t === 0 ? "Không hẹn giờ" : `${t} giây`}</option>)}
             </select>
-          </Field>
+          </Field> */}
         </Card>
 
         {/* QUAY MÀN HÌNH */}

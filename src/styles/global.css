@@ -19,6 +19,29 @@
   padding: 0;
 }
 
+/* Thanh cuộn mặc định của hệ điều hành quá mờ trên nền app tối (đặc biệt là
+   trên nền video/ảnh đen — không phân biệt được thanh cuộn với nội dung) —
+   custom lại rõ ràng, đồng nhất trên mọi nền tối của app (Chromium/WebKit
+   dùng chung API ::-webkit-scrollbar, khớp cả WebView2/Windows và
+   WKWebView/macOS mà Tauri dùng). */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.5);
+  background-clip: content-box;
+}
+
 html,
 body,
 #root {

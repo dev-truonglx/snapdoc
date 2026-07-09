@@ -29,6 +29,15 @@ fn defaults() -> Value {
     })
 }
 
+/// File settings.json đã từng được lưu chưa — dùng để phát hiện "lần đầu
+/// chạy sau khi cài" (xem `lib.rs`). KHÔNG dùng key trong giá trị trả về từ
+/// `load()` để kiểm tra: `load()` tự fallback về `defaults()` khi file chưa
+/// tồn tại, mà `defaults()` đã có sẵn mọi key (kể cả `launchAtLogin`) — kiểm
+/// tra key sẽ luôn đúng dù file thật sự chưa từng được ghi.
+pub fn exists(config_dir: &PathBuf) -> bool {
+    settings_path(config_dir).exists()
+}
+
 pub fn load(config_dir: &PathBuf) -> Value {
     let path = settings_path(config_dir);
     match std::fs::read_to_string(&path) {
@@ -44,4 +53,29 @@ pub fn save(config_dir: &PathBuf, value: &Value) -> Result<(), String> {
         serde_json::to_string_pretty(value).map_err(|e| format!("Lỗi serialize: {e}"))?;
     std::fs::write(&path, content).map_err(|e| format!("Lỗi ghi settings: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Xác nhận đúng bug đã sửa ở `lib.rs`: kiểm tra key trong `load()` LUÔN
+    /// đúng (vì fallback về `defaults()` đã có sẵn key) dù file chưa từng
+    /// được ghi — phải dùng `exists()` (kiểm tra file thật) mới phân biệt
+    /// được "lần đầu chạy" với "đã từng lưu".
+    #[test]
+    fn exists_reflects_actual_file_presence_not_defaults() {
+        let dir = std::env::temp_dir().join(format!("snapdoc-settings-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!exists(&dir), "chưa từng save() thì exists() phải là false");
+        let loaded = load(&dir);
+        assert!(loaded.get("launchAtLogin").is_some(), "load() fallback vẫn có key này");
+        assert!(!exists(&dir), "load() không được tự tạo file trên đĩa");
+
+        save(&dir, &loaded).unwrap();
+        assert!(exists(&dir), "sau save() phải thấy file thật trên đĩa");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

@@ -4,14 +4,6 @@ import { listen } from "@tauri-apps/api/event";
 import { ipc, type HistoryItem } from "../../lib/ipc";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 
-/** `93500` → `"1:34"` — mm:ss (cùng định dạng `RecordReview.tsx`). */
-function fmtDuration(ms: number): string {
-  const totalSec = Math.round(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
 /** Cửa sổ "Cắt video" riêng cho 1 item trong History — cùng khuôn
  * `RecordReview.tsx` (titlebar thật, thu nhỏ/phóng to/đóng), thay cho modal
  * cũ nổi trong cửa sổ History. Đóng lúc nào cũng an toàn (khác
@@ -93,21 +85,20 @@ export default function HistoryTrim() {
         )}
       </div>
 
-      {item && (
-        <div style={metaRow}>
-          <span>{fmtDuration(item.durationMs ?? 0)}</span>
-          <span>{item.width} × {item.height}px</span>
-        </div>
-      )}
-
       <div style={actions}>
         {/* Đóng: an toàn tuyệt đối (không áp dụng thì bản gốc không đổi) nên
             chỉ cần ghost/nhẹ tay, không cần cảnh báo đỏ như "Xoá bản quay" ở
             RecordReview. */}
         <button style={closeBtn} disabled={busy} onClick={doClose}>Đóng</button>
-        <button style={applyBtn} disabled={busy || !item || !trimState.hasChanges} onClick={doApply}>
-          {busy ? `Đang cắt… ${Math.round(trimProgress * 100)}%` : "Áp dụng cắt"}
-        </button>
+        {/* Kích thước ảnh: dời từ `metaRow` (đã bỏ) lên đây, bên phải cùng
+            hàng với nút Áp dụng cắt — thời lượng không cần lặp lại nữa vì đã
+            có ruler thời gian ngay trên timeline (xem `VideoTrimmer`). */}
+        <div style={rightGroup}>
+          {item && <span style={dimText}>{item.width} × {item.height}px</span>}
+          <button style={applyBtn} disabled={busy || !item || !trimState.hasChanges} onClick={doApply}>
+            {busy ? `Đang cắt… ${Math.round(trimProgress * 100)}%` : "Lưu"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -137,16 +128,6 @@ const placeholder: React.CSSProperties = {
   fontSize: 13,
 };
 
-const metaRow: React.CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  padding: "8px 14px",
-  fontSize: 12,
-  color: "var(--text-dim)",
-  // borderTop: "1px solid var(--border)",
-  background: "#000",
-};
-
 const actions: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
@@ -155,6 +136,19 @@ const actions: React.CSSProperties = {
   borderTop: "1px solid var(--border)",
   // Đen — đồng bộ với `RecordReview.tsx` (cùng khuôn cửa sổ cắt video).
   background: "#000",
+};
+
+const rightGroup: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 14,
+};
+
+const dimText: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-dim)",
+  fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap",
 };
 
 const applyBtn: React.CSSProperties = {

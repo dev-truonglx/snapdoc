@@ -153,6 +153,7 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
             output: "editor".to_string(),
             scale_factor: rec.scale_factor,
             history_id: Some(id.to_string()),
+            capture_mode: rec.capture_mode.clone(),
         });
     }
     windows::open_editor(app)
