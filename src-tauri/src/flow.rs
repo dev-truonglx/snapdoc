@@ -19,6 +19,38 @@ fn bar_is_visible(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// macOS: chụp lại "cửa sổ sản phẩm nào đang thật sự hiển thị" NGAY LÚC mở
+/// overlay chọn vùng/màn hình/Quick Capture — trước khi user có cơ hội bấm
+/// phím tắt Copy/Save (và trước khi hiện tượng cửa sổ tự bị đẩy lên có thể
+/// xảy ra). Lưu vào AppState để dùng lại ở bước capture pixel thật, có thể
+/// diễn ra trễ hơn nhiều (user kéo chọn vùng xong mới bấm Copy).
+#[cfg(target_os = "macos")]
+fn snapshot_product_windows(app: &AppHandle) {
+    let keep = windows::snapshot_visible_product_windows(app);
+    *app.state::<AppState>().visible_product_windows.lock().unwrap() = keep;
+}
+#[cfg(not(target_os = "macos"))]
+fn snapshot_product_windows(_app: &AppHandle) {}
+
+/// Bọc 1 lần chụp pixel thật (`f`) bằng protect/unprotect cửa sổ sản phẩm
+/// theo allowlist đã chụp ở `snapshot_product_windows` — chỉ có tác dụng
+/// trên macOS (nơi quan sát thấy cửa sổ tự bị đẩy lên khi xử lý phím tắt);
+/// no-op ở nơi khác. Luôn gỡ protect ngay sau `f`, kể cả khi `f` lỗi.
+fn with_product_windows_protected<T>(app: &AppHandle, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let keep = app.state::<AppState>().visible_product_windows.lock().unwrap().clone();
+        windows::protect_product_windows(app, &keep);
+        let result = f();
+        windows::unprotect_product_windows(app);
+        result
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        f()
+    }
+}
+
 fn set_output(app: &AppHandle, output: &str) {
     let state = app.state::<AppState>();
     let mut guard = match state.pending_output.lock() {
@@ -145,6 +177,12 @@ fn overlay_snap(app: &AppHandle, win: &WebviewWindow) -> Option<MonitorSnap> {
 pub fn run(app: &AppHandle, mode: &str, output: &str) {
     // Lưu chế độ trước khi chụp (kể cả "full" → overlay monitor)
     app.state::<AppState>().last_capture.set(mode, output);
+    // Snapshot TRƯỚC KHI đụng tới bất kỳ cửa sổ/focus nào (kể cả hide_bar và
+    // mở overlay) — vì bản thân open_overlays() cũng gọi set_focus() lên 1
+    // cửa sổ của app, có thể tự kích hoạt app và đẩy cửa sổ ẩn lên trước NGAY
+    // TỪ ĐÂY, tức là TRƯỚC khi user kịp bấm phím tắt Copy/Save. Nếu snapshot
+    // sau open_overlays thì đã quá trễ — window đã bị đẩy lên rồi.
+    snapshot_product_windows(app);
     let result: Result<(), String> = (|| {
         if bar_is_visible(app) {
             hide_bar(app);
@@ -270,7 +308,9 @@ pub fn finalize_region(
     #[cfg(not(target_os = "linux"))]
     let bitmap_scale: f64 = s.scale;
 
-    let cap = capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)?;
+    let cap = with_product_windows_protected(app, || {
+        capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)
+    })?;
     let output = get_output(app);
     finish(app, cap, &output, bitmap_scale)
 }
@@ -309,7 +349,7 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
     windows::close_overlays(app);
     #[cfg(not(target_os = "macos"))]
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let cap = capture::fullscreen::capture_monitor(&m)?;
+    let cap = with_product_windows_protected(app, || capture::fullscreen::capture_monitor(&m))?;
     let output = get_output(app);
     finish(app, cap, &output, s.scale)
 }
@@ -330,7 +370,11 @@ pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> 
         hide_bar(app);
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
-    let cap = capture::fullscreen::capture_all_monitors()?;
+    // Không có bước "mở overlay, chờ user bấm nút" ở flow này (chụp ngay lập
+    // tức) nên snapshot ngay trước khi chụp là đủ — không có khoảng hở thời
+    // gian nào cho hiện tượng cửa sổ tự bị đẩy lên xảy ra.
+    snapshot_product_windows(app);
+    let cap = with_product_windows_protected(app, capture::fullscreen::capture_all_monitors)?;
     finish(app, cap, output, 1.0)
 }
 
@@ -341,6 +385,10 @@ pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> 
 /// đúng vùng nhỏ đã chọn (nhanh), rồi ghép chú thích. Đúng yêu cầu "vẽ khung
 /// xong chưa chụp, di chuyển được, tới lúc lưu/copy mới chụp".
 pub fn start_quick(app: &AppHandle) {
+    // Xem comment ở `run()` — snapshot TRƯỚC hide_bar/open_overlays, vì bản
+    // thân open_overlays() có thể tự kích hoạt app (set_focus) và đẩy cửa sổ
+    // ẩn lên trước ngay từ bước này.
+    snapshot_product_windows(app);
     let result: Result<(), String> = (|| {
         if bar_is_visible(app) {
             hide_bar(app);
@@ -397,7 +445,15 @@ pub fn capture_quick_region(
     #[cfg(not(target_os = "macos"))]
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let cap = capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)?;
+    // Loại editor/settings/history/record-review/history-trim khỏi ảnh trong
+    // đúng khoảnh khắc chụp — TRỪ những cửa sổ đã thật sự hiển thị từ lúc mở
+    // overlay (`start_quick` → `snapshot_product_windows`, ý user đang muốn
+    // tự chụp chính nó). Bảo vệ những cửa sổ còn lại phòng trường hợp bị hệ
+    // thống tự đưa lên trước ngay lúc xử lý phím tắt Copy/Save (quan sát thấy
+    // trên macOS). Luôn gỡ lại ngay sau, kể cả khi capture lỗi.
+    let cap = with_product_windows_protected(app, || {
+        capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)
+    })?;
     Ok(cap.base64)
 }
 

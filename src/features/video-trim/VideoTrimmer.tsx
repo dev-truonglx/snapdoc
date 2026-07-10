@@ -364,6 +364,11 @@ export default function VideoTrimmer({
       } else if (!mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "w") {
         e.preventDefault();
         if (canTrimTail(segments, playheadMs)) doTrimTail();
+      } else if (!mod && !e.shiftKey && !e.altKey && e.code === "Space") {
+        // preventDefault: chặn hành vi mặc định (cuộn trang / bấm lại nút
+        // đang focus bằng bàn phím) khi Space dùng để play/pause thay vào đó.
+        e.preventDefault();
+        togglePlay();
       }
     };
     window.addEventListener("keydown", onKeyDown);

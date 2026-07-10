@@ -1,7 +1,7 @@
 //! macOS: quay video liên tục bằng ScreenCaptureKit `SCStream` — khác với
 //! `mac_sck.rs` (chụp MỘT lần qua `SCScreenshotManager`), module này giữ một
-//! `SCStream` chạy liên tục, đẩy mỗi frame (BGRA thô) qua channel cho tới khi
-//! gọi `stop()`.
+//! `SCStream` chạy liên tục, đẩy frame (BGRA thô) qua channel cho tới khi gọi
+//! `stop()`.
 //!
 //! Luồng hoạt động:
 //! 1. `start()` liệt kê `SCShareableContent` để tìm đúng `SCDisplay` theo
@@ -12,10 +12,22 @@
 //!    tự định nghĩa (`define_class!`) implement `SCStreamOutput` +
 //!    `SCStreamDelegate`. Frame callback chạy trên 1 dispatch queue serial
 //!    RIÊNG (không phải main queue) để không bị chặn bởi UI thread.
-//! 4. Mỗi `CMSampleBuffer` nhận được → lock `CVPixelBuffer` (readonly), copy
-//!    đúng phần dữ liệu hữu ích (bỏ padding cuối hàng do IOSurface) thành
-//!    `Vec<u8>` BGRA rồi gửi qua channel `mpsc` (KHÔNG giữ callback thread lâu
-//!    — nếu consumer chậm hơn tốc độ quay, DROP frame thay vì chặn SCK).
+//! 4. Mỗi `CMSampleBuffer` video nhận được → lock `CVPixelBuffer` (readonly),
+//!    copy đúng phần dữ liệu hữu ích (bỏ padding cuối hàng do IOSurface)
+//!    thành `Vec<u8>` BGRA rồi ghi vào `latest` (KHÔNG đẩy thẳng vào channel).
+//!
+//! KIẾN TRÚC FRAME PACING — xem doc-comment `spawn_ticker`/`windows_stream.rs`
+//! đầu file đó: SCStream chỉ THỰC SỰ gọi callback khi nội dung màn hình đổi
+//! (`setMinimumFrameInterval` chỉ giới hạn tốc độ TỐI ĐA, không đảm bảo tốc độ
+//! TỐI THIỂU) — nếu ghi thẳng từng frame nhận được vào encoder (giả định 1
+//! frame = 1/fps giây, đúng cách module này làm TRƯỚC ĐÂY), video quay ra sẽ
+//! "tua nhanh" mỗi khi màn hình đứng yên: kết thúc SỚM HƠN thời lượng hiển thị
+//! (đo đồng hồ treo tường ở `record/mod.rs`) và LỆCH với audio hệ thống (vẫn
+//! ghi đều theo thời gian thực). Cách sửa: TÁCH RIÊNG "SCStream cập nhật nội
+//! dung mới nhất" (callback chỉ ghi vào `latest`) khỏi "nhịp đẩy vào encoder"
+//! (`spawn_ticker` chạy đúng `fps` lần/giây, mỗi nhịp lấy `latest` hiện có —
+//! LẶP LẠI frame cũ nếu SCStream chưa gửi gì mới — rồi mới đẩy vào channel
+//! `Frame`) — cùng kiến trúc `windows_stream.rs` đã dùng cho WGC.
 
 // Tên phương thức protocol (`stream:didOutputSampleBuffer:ofType:`...) phải
 // khớp đúng selector Objective-C nên không thể đổi sang snake_case.
@@ -24,8 +36,9 @@
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
@@ -80,7 +93,10 @@ const LOCK_READONLY: CVPixelBufferLockFlags = CVPixelBufferLockFlags(1);
 /// Một frame video thô: BGRA, chưa nén — thứ tự kênh giữ nguyên như SCK trả
 /// về (không đảo sang RGBA như luồng chụp ảnh) vì bước encode video kế tiếp
 /// (ffmpeg `-pix_fmt bgra`) nhận thẳng định dạng này, tránh 1 lượt swap kênh
-/// tốn CPU trên mỗi frame ở tốc độ 30fps.
+/// tốn CPU trên mỗi frame ở tốc độ 30fps. `Clone` để `spawn_ticker` có thể
+/// gửi LẠI cùng nội dung cho nhiều nhịp liên tiếp khi SCStream chưa gửi
+/// frame mới (màn hình đứng yên) — xem doc-comment `spawn_ticker`.
+#[derive(Clone)]
 pub struct Frame {
     pub bgra: Vec<u8>,
     pub width: u32,
@@ -96,14 +112,20 @@ pub struct Frame {
 /// Ivars của delegate object — Objective-C giữ instance này nên không thể
 /// dùng lifetime tham chiếu ra ngoài, phải sở hữu `Sender` trực tiếp.
 pub struct StreamOutputIvars {
-    frame_tx: mpsc::SyncSender<Frame>,
+    /// Nội dung frame VIDEO mới nhất SCStream đã gửi — callback chỉ cập nhật
+    /// chỗ này, KHÔNG tự đẩy vào channel; `spawn_ticker` mới là nơi đẩy vào
+    /// `frame_tx` theo đúng nhịp fps thật (xem doc-comment `spawn_ticker`).
+    latest: Arc<Mutex<Option<Frame>>>,
     /// `Some` khi bật quay âm thanh hệ thống (`capturesAudio=true` lúc
-    /// `start()`) — callback nhận `SCStreamOutputType::Audio` sẽ gửi vào đây
-    /// thay vì `frame_tx`. `None` thì callback bỏ qua hẳn sample buffer audio
-    /// (SCK không gửi loại này nếu config không bật `capturesAudio`, nhưng
-    /// vẫn kiểm tra cho chắc).
+    /// `start()`) — callback nhận `SCStreamOutputType::Audio` sẽ gửi thẳng
+    /// vào đây (audio không cần "nhịp lại" như video — gói tới đều theo thời
+    /// gian thực, không rơi vào tình huống "màn hình đứng yên → ít gói hơn"
+    /// như video). `None` thì callback bỏ qua hẳn sample buffer audio (SCK
+    /// không gửi loại này nếu config không bật `capturesAudio`, nhưng vẫn
+    /// kiểm tra cho chắc).
     audio_tx: Option<mpsc::SyncSender<Vec<u8>>>,
-    /// Đếm số frame đã DROP vì consumer chậm hơn tốc độ quay — log khi stop.
+    /// Đếm số frame đã DROP vì consumer (audio) hoặc `spawn_ticker` (video)
+    /// chậm hơn tốc độ quay — log khi stop.
     dropped: Arc<AtomicBool>,
     /// Set bởi `stream:didStopWithError:` khi SCStream tự dừng NGOÀI Ý MUỐN —
     /// ví dụ người dùng bấm "Stop" trên icon "Screen Sharing" của HỆ THỐNG
@@ -135,12 +157,11 @@ define_class!(
             match r#type {
                 SCStreamOutputType::Screen => {
                     if let Some(frame) = unsafe { sample_buffer_to_frame(sample_buffer) } {
-                        // try_send: nếu channel đầy (consumer/encoder chậm), DROP
-                        // frame này thay vì block callback queue của SCK — chặn ở
-                        // đây sẽ làm SCK dồn ứ và cuối cùng crash/treo stream.
-                        if self.ivars().frame_tx.try_send(frame).is_err() {
-                            self.ivars().dropped.store(true, Ordering::Relaxed);
-                        }
+                        // Chỉ ghi đè frame mới nhất — KHÔNG đẩy thẳng vào
+                        // channel nữa (xem doc-comment `latest`/`spawn_ticker`).
+                        // Lock rất ngắn (chỉ gán con trỏ) nên không lo chặn
+                        // callback queue của SCK.
+                        *self.ivars().latest.lock().unwrap() = Some(frame);
                     }
                 }
                 SCStreamOutputType::Audio => {
@@ -174,19 +195,70 @@ define_class!(
 
 impl StreamOutputHandler {
     fn new(
-        frame_tx: mpsc::SyncSender<Frame>,
+        latest: Arc<Mutex<Option<Frame>>>,
         audio_tx: Option<mpsc::SyncSender<Vec<u8>>>,
         dropped: Arc<AtomicBool>,
         stopped_externally: Arc<AtomicBool>,
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(StreamOutputIvars {
-            frame_tx,
+            latest,
             audio_tx,
             dropped,
             stopped_externally,
         });
         unsafe { msg_send![super(this), init] }
     }
+}
+
+/// Thread đếm nhịp đúng `interval` (= 1/fps giây) — MỖI NHỊP lấy frame mới
+/// nhất SCStream đã gửi (`latest`, lặp lại frame cũ nếu chưa có gì mới kể từ
+/// nhịp trước) rồi đẩy vào `frame_tx`. Bắt buộc vì SCStream chỉ THỰC SỰ gọi
+/// callback khi nội dung màn hình thay đổi — `setMinimumFrameInterval` chỉ
+/// giới hạn tốc độ TỐI ĐA, không đảm bảo tốc độ TỐI THIỂU. Nếu ghi thẳng
+/// từng frame nhận được vào encoder (giả định 1 frame = 1/fps giây), video
+/// quay ra sẽ "tua nhanh" so với thời gian quay thực tế mỗi khi màn hình
+/// đứng yên — khiến video phát xong SỚM HƠN mốc thời lượng hiển thị (đo bằng
+/// đồng hồ treo tường ở `record/mod.rs`), và tệ hơn, sẽ LỆCH với audio hệ
+/// thống (vẫn ghi đều theo thời gian thực, không bị "hụt" như video). Cùng
+/// kiến trúc hệt `windows_stream.rs::spawn_ticker` (xem doc-comment đầu file
+/// đó để hiểu đầy đủ bối cảnh — đã áp dụng đúng ở đó, module này trước đây
+/// còn thiếu).
+fn spawn_ticker(
+    frame_tx: mpsc::SyncSender<Frame>,
+    latest: Arc<Mutex<Option<Frame>>>,
+    dropped: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    interval: Duration,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let start = Instant::now();
+        let mut frame_index: u32 = 0;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let target_time = start + interval * frame_index;
+            let now = Instant::now();
+            if target_time > now {
+                // Ngủ từng đoạn ngắn thay vì ngủ hết `interval` 1 lần — để
+                // phản hồi nhanh với cờ `stop` khi người dùng bấm dừng quay.
+                std::thread::sleep((target_time - now).min(Duration::from_millis(20)));
+                continue;
+            }
+            frame_index += 1;
+
+            let frame = latest.lock().unwrap().clone();
+            if let Some(frame) = frame {
+                // try_send: nếu channel đầy (encoder chậm hơn tốc độ quay),
+                // DROP frame này thay vì chặn ticker.
+                if frame_tx.try_send(frame).is_err() {
+                    dropped.store(true, Ordering::Relaxed);
+                }
+            }
+            // `latest` vẫn `None` (chưa có frame đầu tiên từ SCK) — bỏ qua
+            // nhịp này, không gửi gì, đợi nhịp sau.
+        }
+    })
 }
 
 /// `CMSampleBuffer` (BGRA, IOSurface-backed `CVPixelBuffer`) → `Frame`.
@@ -428,6 +500,12 @@ fn find_window(window_id: u32) -> Result<Retained<SCWindow>, String> {
 pub struct RecordingHandle {
     stream: Retained<SCStream>,
     _handler: Retained<StreamOutputHandler>,
+    /// Cờ dừng cho `spawn_ticker` + handle thread của nó — phải dừng/join
+    /// TRƯỚC khi coi phiên quay là kết thúc (xem `stop()`), vì `frame_tx` giờ
+    /// do ticker giữ (không phải `_handler` như trước), đóng nó là cách duy
+    /// nhất để writer thread bên `record/mod.rs` thấy EOF mà kết thúc.
+    ticker_stop: Arc<AtomicBool>,
+    ticker_thread: Option<JoinHandle<()>>,
     dropped: Arc<AtomicBool>,
     /// Cờ dùng chung với `StreamOutputIvars` (xem giải thích ở đó) — báo SCK
     /// đã tự dừng ngoài ý muốn của ta.
@@ -454,13 +532,21 @@ impl RecordingHandle {
     }
 
     /// Dừng quay, đợi SCStream xác nhận đã dừng hẳn (có timeout).
-    pub fn stop(self) -> Result<(), String> {
+    pub fn stop(mut self) -> Result<(), String> {
+        // Dừng ticker TRƯỚC (đóng `frame_tx` nó đang giữ, kết thúc writer
+        // thread bên `record/mod.rs`) — cùng thứ tự với
+        // `windows_stream.rs::RecordingHandle::stop`. Phải làm bước này ở CẢ
+        // 2 nhánh dưới đây (kể cả nhánh SCK đã tự dừng), nếu không ticker
+        // thread sẽ chạy mãi không bao giờ dừng.
+        self.ticker_stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.ticker_thread.take() {
+            let _ = t.join();
+        }
+
         // SCK đã tự dừng rồi (xem `is_stopped_externally`) — gọi lại
         // `stopCaptureWithCompletionHandler` trên 1 stream không còn chạy có
         // thể không bao giờ gọi completion handler, khiến ta chờ hết
-        // `TIMEOUT` (10s) một cách vô ích. Coi như đã dừng xong; `self` vẫn
-        // drop bình thường ở cuối hàm (giải phóng `_handler` → đóng
-        // `frame_tx` → luồng ghi video tự kết thúc).
+        // `TIMEOUT` (10s) một cách vô ích. Coi như đã dừng xong.
         if self.stopped_externally.load(Ordering::SeqCst) {
             if self.dropped.load(Ordering::Relaxed) {
                 eprintln!("[SnapDoc][record] Một số frame đã bị drop do encoder/consumer chậm hơn tốc độ quay");
@@ -604,8 +690,9 @@ pub fn start(
     };
     let dropped = Arc::new(AtomicBool::new(false));
     let stopped_externally = Arc::new(AtomicBool::new(false));
+    let latest: Arc<Mutex<Option<Frame>>> = Arc::new(Mutex::new(None));
     let handler_obj =
-        StreamOutputHandler::new(frame_tx, audio_tx, dropped.clone(), stopped_externally.clone());
+        StreamOutputHandler::new(latest.clone(), audio_tx, dropped.clone(), stopped_externally.clone());
 
     let delegate_proto = ProtocolObject::from_ref(&*handler_obj);
     let stream = unsafe {
@@ -661,10 +748,17 @@ pub fn start(
         .recv_timeout(TIMEOUT)
         .map_err(|_| "Hết thời gian chờ bắt đầu quay".to_string())??;
 
+    // Nhịp đẩy frame ra encoder ĐÚNG fps thật — xem doc-comment `spawn_ticker`.
+    let interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
+    let ticker_stop = Arc::new(AtomicBool::new(false));
+    let ticker_thread = spawn_ticker(frame_tx, latest, dropped.clone(), ticker_stop.clone(), interval);
+
     Ok((
         RecordingHandle {
             stream,
             _handler: handler_obj,
+            ticker_stop,
+            ticker_thread: Some(ticker_thread),
             dropped,
             stopped_externally,
             width: px_w as u32,

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
 use std::sync::Mutex;
 
@@ -97,4 +97,9 @@ pub struct AppState {
     /// window/monitor) vì bản thân hàm finalize nào được gọi đã tự xác định
     /// đúng loại phạm vi rồi.
     pub pending_record: Mutex<bool>,
+    /// macOS: nhãn các cửa sổ sản phẩm (editor/settings/history/…) đang thật
+    /// sự hiển thị (không bị che) ngay lúc bắt đầu phiên chụp hiện tại — xem
+    /// `windows::snapshot_visible_product_windows`/`windows::protect_product_windows`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub visible_product_windows: Mutex<HashSet<String>>,
 }
