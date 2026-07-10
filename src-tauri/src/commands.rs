@@ -632,6 +632,14 @@ pub fn start_record_picker(app: AppHandle, mode: String) {
     std::thread::spawn(move || flow::run_record_picker(&app, &mode));
 }
 
+/// Bấm nút "Quay" ở CaptureBar trong lúc khung chọn vùng quay đã đang mở —
+/// coi như bấm "Bắt đầu quay" ngay tại khung đó (xem
+/// `flow::confirm_region_record_start`), không mở lại phiên chọn vùng mới.
+#[tauri::command]
+pub fn confirm_region_record_start(app: AppHandle) {
+    flow::confirm_region_record_start(&app);
+}
+
 /// Đọc bản quay đang chờ xác nhận (không xoá) — cửa sổ "record-review" gọi
 /// lúc mount để biết đường dẫn/kích thước/thời lượng cần hiển thị.
 #[tauri::command]

@@ -177,6 +177,10 @@ export const ipc = {
   /** Mở overlay chọn phạm vi quay — dùng chung CaptureMode với nút "Chụp" ("full" | "window" | "region"). */
   startRecordPicker: (mode: "full" | "window" | "region") =>
     invoke<void>("start_record_picker", { mode }),
+  /** Bấm nút "Quay" ở CaptureBar trong lúc khung chọn vùng quay đã đang mở —
+   * coi như bấm "Bắt đầu quay" ngay tại khung đó, không mở lại phiên chọn
+   * vùng mới. */
+  confirmRegionRecordStart: () => invoke<void>("confirm_region_record_start"),
   // Xem lại bản quay trước khi lưu vào History (record-review window).
   peekPendingRecording: () => invoke<PendingRecording | null>("peek_pending_recording"),
   confirmRecordingSave: () => invoke<void>("confirm_recording_save"),

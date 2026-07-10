@@ -176,7 +176,14 @@ export default function CaptureBar() {
       }
       if (e.key === "Enter") {
         if (activeGroupRef.current === "video") {
-          ipc.startRecordPicker(videoModeRef.current).catch((err) => alert(String(err)));
+          // "Vùng chọn": khung chọn/chỉnh vùng đã mở sẵn từ lúc chọn mode
+          // (xem `selectVideoMode`) — Enter ở đây cũng phải tương đương bấm
+          // "Bắt đầu quay" ngay tại khung, giống hệt nút "Quay" (`doRecord`).
+          if (videoModeRef.current === "region") {
+            ipc.confirmRegionRecordStart().catch((err) => alert(String(err)));
+          } else {
+            ipc.startRecordPicker(videoModeRef.current).catch((err) => alert(String(err)));
+          }
         } else if (photoModeRef.current === "all") {
           ipc.captureAllScreens(outputRef.current).catch((err) => alert(String(err)));
         } else {
@@ -237,6 +244,13 @@ export default function CaptureBar() {
   const selectVideoMode = (m: RecordMode) => {
     setVideoMode(m);
     setActiveGroup("video");
+    // "Vùng chọn": mở luôn khung chọn/chỉnh vùng NGAY khi chọn mode này (hiện
+    // vùng đã quay lần gần nhất, hoặc chờ kéo vùng mới nếu chưa có) — không
+    // cần bấm "Quay" trước nữa. "Toàn màn hình"/"Cửa sổ" giữ nguyên hành vi cũ
+    // (chọn-là-chụp/quay ngay khi bấm "Quay", không có bước chỉnh sửa nào).
+    if (m === "region") {
+      ipc.startRecordPicker("region").catch((e) => alert(String(e)));
+    }
   };
 
   const doCapture = () => {
@@ -248,6 +262,14 @@ export default function CaptureBar() {
   };
 
   const doRecord = () => {
+    // "Vùng chọn": khung chọn/chỉnh vùng đã mở sẵn từ lúc chọn mode (xem
+    // `selectVideoMode`) — bấm "Quay" ở đây giờ tương đương bấm "Bắt đầu
+    // quay" ngay tại khung đó, KHÔNG mở lại 1 phiên chọn vùng mới (sẽ làm mất
+    // vùng user vừa kéo/chỉnh dở).
+    if (videoMode === "region") {
+      ipc.confirmRegionRecordStart().catch((e) => alert(String(e)));
+      return;
+    }
     ipc.startRecordPicker(videoMode).catch((e) => alert(String(e)));
   };
 

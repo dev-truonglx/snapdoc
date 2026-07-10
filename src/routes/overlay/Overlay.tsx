@@ -12,6 +12,19 @@ const params = new URLSearchParams(window.location.search);
 const MODE = params.get("mode") ?? "region";
 const MY_IDX = Number(params.get("idx") ?? "0");
 const SCALE = Number(params.get("scale") ?? "1") || 1;
+// "record=1" = đang chọn phạm vi QUAY (không phải chụp ảnh) — chỉ MODE=="region"
+// quan tâm tới cờ này (window/monitor picker chọn tức thì, không cần bước
+// chỉnh vùng). "px/py/pw/ph" (nếu có) = vùng đã quay lần gần nhất, đề xuất lại
+// ngay trên đúng màn hình đã lưu (xem `windows::open_overlays_ex`).
+const RECORD = params.get("record") === "1";
+const PRESET: Sel | null = (() => {
+  const px = params.get("px");
+  const py = params.get("py");
+  const pw = params.get("pw");
+  const ph = params.get("ph");
+  if (px == null || py == null || pw == null || ph == null) return null;
+  return { x: Number(px), y: Number(py), w: Number(pw), h: Number(ph) };
+})();
 
 type Vec2 = [number, number];
 
@@ -57,6 +70,7 @@ export default function Overlay() {
   if (MODE === "window") return <WindowPicker />;
   if (MODE === "monitor") return <MonitorPick />;
   if (MODE === "quick") return <QuickAnnotate />;
+  if (MODE === "region" && RECORD) return <RecordRegionSelect />;
   return <RegionSelect />;
 }
 
@@ -121,6 +135,345 @@ function RegionSelect() {
       )}
     </div>
   );
+}
+
+/* ───────────── Record region: chọn/nhớ vùng quay, kéo chỉnh + nút Bắt đầu ─────────────
+ *
+ * Khác `RegionSelect` (chụp ảnh — thả chuột là chụp NGAY): ở đây thả chuột chỉ
+ * chuyển sang pha "adjusting" (khung có thể kéo di chuyển + resize, giống
+ * pattern của `QuickAnnotate` bên dưới) — phải bấm nút "Bắt đầu quay" mới thật
+ * sự start recording (`ipc.finalizeRegion`, Rust tự nhận biết qua cờ
+ * `pending_record` để rẽ sang quay thay vì chụp). Nếu có `PRESET` (vùng quay
+ * lần gần nhất, do Rust đề xuất qua query string) thì vào thẳng "adjusting"
+ * với khung đó, khỏi cần kéo lại từ đầu.
+ *
+ * KHÔNG có nút "Chọn vùng khác" riêng — bấm/kéo NGOÀI khung hiện tại (dù đang
+ * ở pha nào) tự động bắt đầu 1 lần chọn vùng mới, giống hành vi tự nhiên của
+ * việc vẽ lại. Bấm bên TRONG khung hoặc lên thanh nút thì di chuyển/resize/bấm
+ * nút như bình thường (phân biệt qua toạ độ + target capture-phase, xem
+ * `pressInfoRef`, cùng kỹ thuật `QuickAnnotate` bên dưới dùng).
+ *
+ * Sau khi bấm "Bắt đầu quay" thành công: cửa sổ overlay này KHÔNG bị đóng/ẩn/
+ * resize/reposition gì cả — Rust chỉ bật `ignore_cursor_events` (click xuyên
+ * qua) trên chính nó, giữ khung đỏ + nền mờ hiển thị Y NGUYÊN PIXEL suốt từ
+ * lúc "adjusting" sang lúc quay (không một khung hình nào bị bỏ lỡ → không
+ * còn nháy hình). Component chỉ đơn giản BỎ handle resize + thanh nút (vì giờ
+ * click xuyên qua, không còn ai bấm được nữa) — nút "■ Dừng quay" thật sự nằm
+ * ở 1 cửa sổ NHỎ RIÊNG (`record-stop-control`, xem `windows::open_stop_control`),
+ * không click-through, nổi cạnh khung.
+ */
+
+const REC_MIN_SEL = 20;
+const recClamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+type RecPhase = "selecting" | "adjusting";
+
+const REC_HANDLES = [
+  { id: "nw", cx: 0, cy: 0, cur: "nwse-resize" },
+  { id: "n", cx: 0.5, cy: 0, cur: "ns-resize" },
+  { id: "ne", cx: 1, cy: 0, cur: "nesw-resize" },
+  { id: "e", cx: 1, cy: 0.5, cur: "ew-resize" },
+  { id: "se", cx: 1, cy: 1, cur: "nwse-resize" },
+  { id: "s", cx: 0.5, cy: 1, cur: "ns-resize" },
+  { id: "sw", cx: 0, cy: 1, cur: "nesw-resize" },
+  { id: "w", cx: 0, cy: 0.5, cur: "ew-resize" },
+] as const;
+
+/** Vị trí + kích thước thanh nút "Bắt đầu quay" — DÙNG CHUNG giữa lúc render
+ * (`RecordRegionToolbar`) và lúc hit-test press toàn cục (xem `useInput` bên
+ * dưới) để bấm nút không bao giờ bị hiểu nhầm thành "chọn vùng khác". */
+function recToolbarRect(sel: Sel, winW: number, winH: number): Sel {
+  const barH = 48;
+  const gap = 12;
+  const barW = 260;
+  const below = sel.y + sel.h + gap + barH <= winH;
+  const top = below ? sel.y + sel.h + gap : Math.max(gap, sel.y - gap - barH);
+  const left = recClamp(sel.x, 0, Math.max(0, winW - barW));
+  return { x: left, y: top, w: barW, h: barH };
+}
+
+/** true nếu (x,y) rơi vào khung đang chỉnh HOẶC thanh nút của nó — dùng
+ * CHUNG cho cả phép hit-test khi bấm (chặn "chọn lại" nhầm) lẫn khi hover
+ * (đổi con trỏ gợi ý), xem `RecordRegionSelect`. */
+function isOverBoxOrBar(sel: Sel, winW: number, winH: number, x: number, y: number): boolean {
+  const inRect = (r: Sel, m: number) =>
+    x >= r.x - m && x <= r.x + r.w + m && y >= r.y - m && y <= r.y + r.h + m;
+  return inRect(sel, 14) || inRect(recToolbarRect(sel, winW, winH), 6);
+}
+
+function RecordRegionSelect() {
+  const [phase, setPhase] = useState<RecPhase>(PRESET ? "adjusting" : "selecting");
+  const [sel, setSel] = useState<Sel | null>(PRESET);
+  const [busy, setBusy] = useState(false);
+  const [recording, setRecording] = useState(false);
+  // true khi con trỏ đang ở nền trống (ngoài khung + ngoài thanh nút) lúc
+  // "adjusting" — đổi con trỏ sang crosshair để user biết bấm/kéo tại đây sẽ
+  // chọn lại vùng khác, thay vì để con trỏ "default" gây hiểu lầm không bấm
+  // được (chính là nguyên nhân gốc của lỗi bấm nhầm nút Bắt đầu quay).
+  const [bgHover, setBgHover] = useState(false);
+  const startRef = useRef<Vec2 | null>(null);
+
+  const winW = window.innerWidth;
+  const winH = window.innerHeight;
+
+  // Cú bấm native gần nhất rơi vào NỀN TRỐNG (root) hay 1 phần UI (khung/
+  // handle/toolbar)? `overlay-press` bắn cho MỌI cú bấm kể cả lên nút toolbar
+  // (nằm ngoài khung) — chỉ dựa toạ độ sẽ hiểu nhầm bấm nút thành "chọn lại".
+  const rootRef = useRef<HTMLDivElement>(null);
+  const pressInfoRef = useRef<{ onBackdrop: boolean; t: number } | null>(null);
+  const onDownCapture = (e: React.PointerEvent) => {
+    pressInfoRef.current = { onBackdrop: e.target === rootRef.current, t: performance.now() };
+  };
+
+  // ── Pha "adjusting": kéo di chuyển / resize khung bằng pointer event thường ──
+  // (khai báo TRƯỚC useInput bên dưới — callback hover cần đọc `.current` của
+  // 2 ref này để không đổi con trỏ giữa lúc đang kéo/resize dở).
+  const moveRef = useRef<{ mx: number; my: number; start: Sel } | null>(null);
+  const resizeRef = useRef<{ id: string; mx: number; my: number; start: Sel } | null>(null);
+
+  // ── Kéo chọn vùng: hoạt động ở CẢ 2 pha — trong "adjusting", bấm/kéo NGOÀI
+  // khung hiện tại (và ngoài thanh nút) tự khởi động 1 lần chọn mới. ──
+  useInput(
+    (active, x, y) => {
+      if (recording) return;
+      // Hover thường (không đang kéo chọn/di chuyển/resize) → cập nhật gợi ý
+      // con trỏ cho vùng nền trống.
+      if (active && phase === "adjusting" && sel && !startRef.current && !moveRef.current && !resizeRef.current) {
+        setBgHover(!isOverBoxOrBar(sel, winW, winH, x, y));
+      }
+      if (!active || !startRef.current) return;
+      setSel(rectFrom(startRef.current[0], startRef.current[1], x, y));
+    },
+    (x, y) => {
+      if (recording) return;
+      if (sel && phase === "adjusting") {
+        const info = pressInfoRef.current;
+        const onUI = !!info && performance.now() - info.t < 600 && !info.onBackdrop;
+        if (isOverBoxOrBar(sel, winW, winH, x, y) || onUI) return; // đang kéo di chuyển/resize khung, hoặc bấm nút toolbar
+      }
+      startRef.current = [x, y];
+      setSel({ x, y, w: 0, h: 0 });
+      setPhase("selecting");
+    },
+    (x, y) => {
+      if (recording) return;
+      const s = startRef.current;
+      startRef.current = null;
+      if (!s) return; // không phải đang kéo chọn (đang move/resize khung)
+      const r = rectFrom(s[0], s[1], x, y);
+      if (r.w >= REC_MIN_SEL && r.h >= REC_MIN_SEL) {
+        setSel(r);
+        setPhase("adjusting");
+        getCurrentWindow().setFocus().catch(() => {});
+      } else if (phase === "selecting") {
+        setSel(null);
+      }
+      // Kéo quá nhỏ khi đang "adjusting" (vd: click nhầm) → giữ nguyên khung cũ.
+    },
+  );
+
+  // Màn hình KHÁC vừa được bấm → xoá khung ở màn này (chỉ 1 khung active tại
+  // 1 thời điểm, đa màn hình — mỗi overlay-{i} là 1 webview/state React RIÊNG
+  // nên không tự biết màn khác vừa bắt đầu vẽ, phải nghe global input loop).
+  useEffect(() => {
+    const un = listen<[number, number, number]>("overlay-press", (e) => {
+      if (recording) return;
+      if (e.payload[0] !== MY_IDX) {
+        startRef.current = null;
+        setSel(null);
+        setPhase("selecting");
+      }
+    });
+    return () => { un.then((f) => f()); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recording]);
+
+  const onMoveDown = (e: React.PointerEvent) => {
+    if (phase !== "adjusting" || !sel) return;
+    e.stopPropagation();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    moveRef.current = { mx: e.clientX, my: e.clientY, start: sel };
+  };
+  const onResizeDown = (id: string) => (e: React.PointerEvent) => {
+    if (!sel) return;
+    e.stopPropagation();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    resizeRef.current = { id, mx: e.clientX, my: e.clientY, start: sel };
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    const m = moveRef.current;
+    if (m) {
+      const dx = e.clientX - m.mx;
+      const dy = e.clientY - m.my;
+      setSel({
+        x: recClamp(m.start.x + dx, 0, winW - m.start.w),
+        y: recClamp(m.start.y + dy, 0, winH - m.start.h),
+        w: m.start.w,
+        h: m.start.h,
+      });
+      return;
+    }
+    const r = resizeRef.current;
+    if (r) {
+      const dx = e.clientX - r.mx;
+      const dy = e.clientY - r.my;
+      let { x, y, w, h } = r.start;
+      if (r.id.includes("w")) { const nx = recClamp(x + dx, 0, x + w - REC_MIN_SEL); w += x - nx; x = nx; }
+      if (r.id.includes("e")) { w = recClamp(w + dx, REC_MIN_SEL, winW - x); }
+      if (r.id.includes("n")) { const ny = recClamp(y + dy, 0, y + h - REC_MIN_SEL); h += y - ny; y = ny; }
+      if (r.id.includes("s")) { h = recClamp(h + dy, REC_MIN_SEL, winH - y); }
+      setSel({ x, y, w, h });
+    }
+  };
+  const onPointerUp = () => {
+    moveRef.current = null;
+    resizeRef.current = null;
+  };
+
+  const doCancel = () => ipc.cancelOverlay();
+  const doStart = async () => {
+    if (!sel || busy) return;
+    setBusy(true);
+    try {
+      await ipc.finalizeRegion(sel.x, sel.y, sel.w, sel.h);
+      // Thành công → cửa sổ này giờ đã click-through (Rust), khung đỏ + nền
+      // mờ vẫn hiển thị y nguyên vị trí. Chỉ cần bỏ handle/thanh nút vì không
+      // ai bấm được nữa (nút "Dừng quay" thật ở cửa sổ nhỏ riêng).
+      setRecording(true);
+      setBusy(false);
+    } catch (e) {
+      setBusy(false);
+      alert(String(e));
+    }
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (recording) return;
+      if (e.key === "Escape") { e.preventDefault(); doCancel(); }
+      if (e.key === "Enter" && phase === "adjusting") { e.preventDefault(); doStart(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, sel, busy, recording]);
+
+  // Nút "Quay" ở CaptureBar bấm trong lúc khung này đang mở (xem
+  // `flow::confirm_region_record_start`) = coi như bấm "Bắt đầu quay" ngay
+  // tại đây — chỉ phản ứng khi đang ở pha "adjusting" (đã có khung); bắn cho
+  // MỌI overlay-{i} nên các màn hình khác (đang "selecting", chưa có khung)
+  // tự bỏ qua.
+  useEffect(() => {
+    const un = listen("region-record-confirm", () => {
+      if (phase === "adjusting" && sel && !recording && !busy) doStart();
+    });
+    return () => { un.then((f) => f()); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, sel, recording, busy]);
+
+  return (
+    <div
+      ref={rootRef}
+      style={{
+        ...root,
+        // "selecting": luôn crosshair (đang vẽ vùng). "adjusting": crosshair
+        // CHỈ khi hover trên nền trống (bấm/kéo ở đây = chọn lại vùng khác);
+        // trên khung/handle/thanh nút, cursor riêng của từng phần tử (move/
+        // resize/pointer) tự động thắng nhờ CSS specificity. "recording":
+        // không quan trọng nữa (cửa sổ đã click-through, không ai thấy).
+        cursor: !recording && (phase === "selecting" || (phase === "adjusting" && bgHover)) ? CROSSHAIR_CURSOR : "default",
+      }}
+      onPointerDownCapture={onDownCapture}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onContextMenu={(e) => { e.preventDefault(); doCancel(); }}
+    >
+      {sel && sel.w > 0 ? (
+        <div
+          style={{
+            position: "fixed",
+            left: sel.x,
+            top: sel.y,
+            width: sel.w,
+            height: sel.h,
+            outline: "2px solid #ef4444",
+            boxShadow: "0 0 0 9999px rgba(0,0,0,0.6)",
+            cursor: !recording && phase === "adjusting" ? "move" : "default",
+          }}
+          onPointerDown={onMoveDown}
+        >
+          {!recording && phase === "selecting" && (
+            <span style={sizeLabel}>{Math.round(sel.w)} × {Math.round(sel.h)}</span>
+          )}
+          {/* "recording": bỏ handle + thanh nút — cửa sổ đã click-through,
+              không ai bấm được nữa; nút "Dừng quay" thật ở cửa sổ nhỏ riêng
+              (`record-stop-control`). Vẫn giữ NGUYÊN div khung ở trên (cùng
+              vị trí/kích thước, không remount) để không có khung hình nào
+              trông khác giữa lúc "adjusting" và lúc quay. */}
+          {!recording && phase === "adjusting" && REC_HANDLES.map((hd) => (
+            <div key={hd.id} onPointerDown={onResizeDown(hd.id)} style={quickHandleStyle(hd)} />
+          ))}
+          {!recording && phase === "adjusting" && (
+            <RecordRegionToolbar sel={sel} winW={winW} winH={winH} busy={busy} onStart={doStart} onCancel={doCancel} />
+          )}
+        </div>
+      ) : (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)" }}>
+          <div style={banner}>Kéo để chọn vùng quay • Esc / chuột phải để huỷ</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Thanh nút nổi ngay dưới (hoặc trên nếu sát mép dưới màn hình) khung đang chỉnh. */
+function RecordRegionToolbar({
+  sel, winW, winH, busy, onStart, onCancel,
+}: {
+  sel: Sel; winW: number; winH: number; busy: boolean;
+  onStart: () => void; onCancel: () => void;
+}) {
+  const bar = recToolbarRect(sel, winW, winH);
+  return (
+    <div
+      style={{
+        position: "fixed",
+        left: bar.x,
+        top: bar.y,
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        background: "rgba(20,20,24,0.95)",
+        borderRadius: 10,
+        padding: "8px 10px",
+        boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+        cursor: "default",
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <span style={{ color: "#fff", fontSize: 12, whiteSpace: "nowrap", padding: "0 4px" }}>
+        {Math.round(sel.w)} × {Math.round(sel.h)}
+      </span>
+      <button style={recBtnStyle(false)} onClick={onCancel} disabled={busy}>Huỷ</button>
+      <button style={recBtnStyle(true)} onClick={onStart} disabled={busy}>
+        {busy ? "Đang bắt đầu…" : "● Bắt đầu quay"}
+      </button>
+    </div>
+  );
+}
+
+function recBtnStyle(primary: boolean): React.CSSProperties {
+  return {
+    border: "none",
+    borderRadius: 6,
+    padding: "6px 12px",
+    fontSize: 12,
+    fontWeight: primary ? 600 : 500,
+    cursor: "pointer",
+    color: primary ? "#fff" : "#e5e7eb",
+    background: primary ? "#ef4444" : "rgba(255,255,255,0.12)",
+    whiteSpace: "nowrap",
+  };
 }
 
 /* ───────────── Quick: Chụp nhanh (chọn vùng + chú thích tại chỗ) ───────────── */

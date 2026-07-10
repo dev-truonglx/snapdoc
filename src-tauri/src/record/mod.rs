@@ -247,11 +247,11 @@ pub fn start_recording_region(
     start_with_target(
         app,
         crate::capture::mac_stream::RecordTarget::Region { display_id, x, y, w, h },
-    )?;
-    if let Err(e) = crate::windows::open_region_border(app, display_id, x, y, w, h) {
-        eprintln!("[SnapDoc][record] Không hiện được khung viền vùng quay: {e}");
-    }
-    Ok(())
+    )
+    // KHÔNG tự mở khung viền ở đây nữa — caller duy nhất (`flow::finalize_region`)
+    // đã có sẵn overlay đang hiển thị đúng khung này (từ lúc chọn/chỉnh vùng)
+    // và tự chuyển nó thành lớp click-through cho khung viền, tránh nháy hình
+    // do phải tạo/ẩn 1 cửa sổ khung viền RIÊNG (xem comment ở đó).
 }
 
 /// Quay 1 cửa sổ đã chọn qua overlay.
@@ -480,11 +480,8 @@ pub fn start_recording_region(
     start_with_target(
         app,
         crate::capture::windows_stream::RecordTarget::Region { display_id, x, y, w, h },
-    )?;
-    if let Err(e) = crate::windows::open_region_border(app, display_id, x, y, w, h) {
-        eprintln!("[SnapDoc][record] Không hiện được khung viền vùng quay: {e}");
-    }
-    Ok(())
+    )
+    // KHÔNG tự mở khung viền ở đây nữa — xem comment ở bản macOS phía trên.
 }
 
 #[cfg(target_os = "windows")]
@@ -736,7 +733,11 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
         .map_err(|_| "Luồng ghi video bị panic".to_string())?;
 
     crate::tray::hide_recording_tray(app);
-    crate::windows::close_region_border(app);
+    // Đóng overlay (khung + nền mờ, vẫn đang hiển thị/click-through suốt lúc
+    // quay — xem `flow::finalize_region`) + thanh "Dừng quay" riêng (nếu
+    // phiên quay này bắt đầu từ `RecordRegionSelect`). No-op nếu không có.
+    crate::windows::close_overlays(app);
+    crate::windows::close_stop_control(app);
     #[cfg(target_os = "windows")]
     crate::windows::close_recording_indicator(app);
 

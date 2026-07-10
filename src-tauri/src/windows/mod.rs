@@ -345,64 +345,94 @@ pub fn open_scroll_control(
     Ok(())
 }
 
-/// Mở overlay hiển thị trong suốt quá trình quay 1 VÙNG màn hình — phủ TOÀN
-/// BỘ màn hình `display_id`, làm mờ phần NGOÀI vùng chọn (cùng hiệu ứng
-/// "spotlight" `box-shadow` mà `Overlay.tsx` dùng lúc chọn vùng chụp ảnh) để
-/// người dùng thấy rõ chính xác vùng đang ghi hình — độc lập với viền vàng hệ
-/// thống của Windows (WGC quay nguyên màn hình rồi crop phần mềm, xem
-/// `capture::windows_stream::RecordTarget::Region`, nên viền hệ thống bao
-/// quanh CẢ màn hình chứ không khớp vùng đã chọn). `x,y,w,h` cùng đơn vị đã
-/// truyền cho `record::start_recording_region` (points trên macOS, pixel vật
-/// lý trên Windows) — quy về points local theo góc màn hình rồi truyền cho
-/// frontend qua query string để vẽ đúng vị trí "lỗ" trong suốt.
-pub fn open_region_border(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("region-border") {
-        let _ = win.close();
+/// Pre-warm cửa sổ nhỏ chứa nút "Dừng quay" (nổi cạnh vùng đang quay) — hoàn
+/// toàn TÁCH RIÊNG khỏi overlay khung/backdrop (khung viền lúc quay 1 VÙNG
+/// giờ KHÔNG còn là 1 cửa sổ riêng nữa — chính overlay chọn vùng, đang hiển
+/// thị sẵn từ lúc user kéo/chỉnh khung, được BIẾN THÀNH lớp click-through cho
+/// khung viền luôn, xem `flow::finalize_region` — không tạo/ẩn cửa sổ nào
+/// thêm cho phần khung nên không thể có khoảng hở giữa 2 khung khác nhau
+/// (nguồn gây "nháy hình" trước đây, dù đã pre-warm để giảm độ trễ tải trang
+/// cũng không triệt tiêu hết vì bản chất vẫn là 2 cửa sổ được compositor xử
+/// lý độc lập)). Thanh nút này là cửa sổ NHỎ, KHÔNG click-through, chỉ che
+/// đúng khoảng của chính nó — user vẫn tương tác được với toàn bộ phần còn
+/// lại của màn hình (kể cả bên trong vùng đang quay) khi quay, giống tinh
+/// thần `open_scroll_control`.
+pub fn prewarm_stop_control(app: &AppHandle) -> Result<(), String> {
+    if app.get_webview_window("record-stop-control").is_some() {
+        return Ok(());
     }
-
-    let m = crate::capture::monitor::by_id(display_id)?;
-    let m_x = m.x().map_err(|e| e.to_string())? as f64;
-    let m_y = m.y().map_err(|e| e.to_string())? as f64;
-
-    #[cfg(target_os = "windows")]
-    let (lx, ly, lw, lh, m_w, m_h) = {
-        let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
-        let m_w = m.width().map_err(|e| e.to_string())? as f64 / scale;
-        let m_h = m.height().map_err(|e| e.to_string())? as f64 / scale;
-        (x / scale, y / scale, w / scale, h / scale, m_w, m_h)
-    };
-    #[cfg(not(target_os = "windows"))]
-    let (lx, ly, lw, lh, m_w, m_h) = {
-        let m_w = m.width().map_err(|e| e.to_string())? as f64;
-        let m_h = m.height().map_err(|e| e.to_string())? as f64;
-        (x, y, w, h, m_w, m_h)
-    };
-
-    let url_str = format!("region-border&rx={lx}&ry={ly}&rw={lw}&rh={lh}");
-    let border_win = WebviewWindowBuilder::new(app, "region-border", url(&url_str))
-        .title("SnapDoc — Region Border")
-        .inner_size(m_w, m_h)
-        .position(m_x, m_y)
+    WebviewWindowBuilder::new(app, "record-stop-control", url("record-stop-control"))
+        .title("SnapDoc — Dừng quay")
+        .inner_size(200.0, 56.0)
+        .resizable(false)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)
+        .visible(false)
+        .focused(false)
         .build()
-        .map_err(|e| format!("Không tạo được khung viền vùng quay: {e}"))?;
-
-    let _ = border_win.set_ignore_cursor_events(true);
-    // Loại overlay khỏi chính video đang quay (SCK trên macOS / WGC trên
-    // Windows bỏ qua cửa sổ content-protected).
-    let _ = border_win.set_content_protected(true);
+        .map_err(|e| format!("Không tạo được nút dừng quay: {e}"))?;
     Ok(())
 }
 
-/// Đóng khung viền vùng quay (nếu có) — gọi khi dừng quay. An toàn khi gọi dù
-/// chưa từng mở (no-op) hoặc không phải phiên quay theo vùng.
-pub fn close_region_border(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("region-border") {
-        let _ = win.close();
+/// Hiện thanh "Dừng quay" cạnh vùng `rx,ry,rw,rh` (cùng đơn vị với
+/// `record::start_recording_region`) trên màn hình `s`. Đặt vị trí ưu tiên
+/// NGAY DƯỚI khung (fallback lên trên nếu sát mép dưới màn hình) — cùng công
+/// thức `RecordRegionToolbar` phía frontend dùng lúc còn ở pha "adjusting",
+/// nên thanh nút hiện ra ĐÚNG NGAY vị trí user vừa thấy nút "Bắt đầu quay",
+/// không bị nhảy chỗ. Tái dùng cửa sổ pre-warm — chỉ reposition rồi show +
+/// focus (bấm 1 lần là ăn ngay, không cửa sổ nào khác giành mất vì mọi cửa sổ
+/// tạo sau nó đều đã `.focused(false)`).
+pub fn open_stop_control(app: &AppHandle, s: &MonitorSnap, rx: f64, ry: f64, _rw: f64, rh: f64) -> Result<(), String> {
+    if app.get_webview_window("record-stop-control").is_none() {
+        prewarm_stop_control(app)?;
+    }
+    let win = app
+        .get_webview_window("record-stop-control")
+        .ok_or_else(|| "Không tìm thấy nút dừng quay".to_string())?;
+
+    #[cfg(target_os = "windows")]
+    let scale_conv = s.scale.max(0.0001);
+    #[cfg(not(target_os = "windows"))]
+    let scale_conv = 1.0_f64;
+    let logical = |v: f64| v / scale_conv;
+    let (l_x, l_y, l_w_mon, l_h_mon) = (logical(s.x), logical(s.y), logical(s.w), logical(s.h));
+    let (l_rx, l_ry, l_rh) = (logical(rx), logical(ry), logical(rh));
+
+    const CTRL_W: f64 = 200.0;
+    const CTRL_H: f64 = 56.0;
+    const MARGIN: f64 = 12.0;
+
+    let below_y = l_y + l_ry + l_rh + MARGIN;
+    let fits_below = below_y + CTRL_H <= l_y + l_h_mon;
+    let ty = if fits_below {
+        below_y
+    } else {
+        (l_y + l_ry - MARGIN - CTRL_H).max(l_y)
+    };
+    let tx = (l_x + l_rx).max(l_x).min(l_x + l_w_mon - CTRL_W);
+
+    let _ = win.set_size(tauri::LogicalSize::new(CTRL_W, CTRL_H));
+    let _ = win.set_position(tauri::LogicalPosition::new(tx, ty));
+    // Cửa sổ được TÁI SỬ DỤNG (chỉ `hide()`, không `close()` — xem
+    // `close_stop_control`) nên webview + state React của nó SỐNG SÓT qua
+    // nhiều phiên quay. Không reset thì state `busy` (đặt `true` lúc bấm
+    // "Dừng quay" lần trước) còn sót lại → lần quay MỚI mở ra nút đã hiện sẵn
+    // "Đang dừng…", bấm không ăn thua gì (disabled). Emit event để frontend
+    // tự reset local state mỗi lần được show lại.
+    let _ = win.emit("record-stop-control-reset", ());
+    let _ = win.show();
+    let _ = win.set_focus();
+    Ok(())
+}
+
+/// Ẩn (KHÔNG đóng) thanh "Dừng quay" khi dừng quay — giữ webview sống cho
+/// phiên quay tiếp theo, tránh phải tải lại bundle JS mỗi lần.
+pub fn close_stop_control(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("record-stop-control") {
+        let _ = win.hide();
     }
 }
 
@@ -429,6 +459,9 @@ pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)
+        // Không giành focus của cửa sổ đang key hiện tại lúc vừa tạo — cùng lý
+        // do với `.focused(false)` ở `open_region_border`.
+        .focused(false)
         .build()
         .map_err(|e| format!("Không tạo được popup đang quay: {e}"))?;
 
@@ -504,6 +537,23 @@ pub fn open_capture_bar_with_last_mode(app: &AppHandle) -> Result<(), String> {
 /// quán giữa các màn khác scale. Định vị overlay trên macOS qua `NSScreen.frame`
 /// (native, chính xác); các OS khác dùng set_position/set_size physical.
 pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
+    open_overlays_ex(app, mode, false, None)
+}
+
+/// Như `open_overlays`, kèm `record` (đang chọn phạm vi QUAY, không phải chụp
+/// ảnh — frontend `Overlay.tsx` dựa vào đây để hiện bước "chỉnh vùng + nút
+/// Bắt đầu" thay vì quay ngay khi thả chuột) và `preset` = vùng chọn lần quay
+/// gần nhất (`display_id`, x, y, w, h theo hệ đơn vị của `MonitorSnap`) để đề
+/// xuất lại — chỉ overlay đúng màn hình chứa `display_id` đó nhận preset qua
+/// query string (`px/py/pw/ph`, đã đổi sang CSS px cục bộ của màn đó); preset
+/// không khớp màn nào hiện tại (đổi cấu hình màn hình) hoặc vượt biên thì bị
+/// bỏ qua lặng lẽ, coi như chưa từng có.
+pub fn open_overlays_ex(
+    app: &AppHandle,
+    mode: &str,
+    record: bool,
+    preset: Option<(u32, f64, f64, f64, f64)>,
+) -> Result<(), String> {
     close_overlays(app);
 
     // Snapshot từ xcap: trên macOS = POINTS (CGDisplayBounds) + CGDirectDisplayID;
@@ -547,14 +597,31 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
 
     for (i, snap) in snaps.iter().enumerate() {
         let label = format!("overlay-{i}");
+        // scale: cần cho mode "quick" (Chụp nhanh) để canvas chú thích render
+        // đúng độ phân giải vật lý; các mode khác bỏ qua tham số này.
+        let mut query = format!("win=overlay&mode={mode}&idx={i}&scale={}", snap.scale);
+        if record {
+            query.push_str("&record=1");
+        }
+        if let Some((preset_display, px, py, pw, ph)) = preset {
+            if preset_display == snap.id {
+                #[cfg(target_os = "windows")]
+                let scale_conv = snap.scale.max(0.0001);
+                #[cfg(not(target_os = "windows"))]
+                let scale_conv = 1.0_f64;
+                let (cx, cy, cw, ch) = (px / scale_conv, py / scale_conv, pw / scale_conv, ph / scale_conv);
+                let (snap_w_css, snap_h_css) = (snap.w / scale_conv, snap.h / scale_conv);
+                let fits = cw >= 1.0 && ch >= 1.0 && cx >= 0.0 && cy >= 0.0
+                    && cx + cw <= snap_w_css + 0.5 && cy + ch <= snap_h_css + 0.5;
+                if fits {
+                    query.push_str(&format!("&px={cx}&py={cy}&pw={cw}&ph={ch}"));
+                }
+            }
+        }
         let win = WebviewWindowBuilder::new(
             app,
             &label,
-            // scale: cần cho mode "quick" (Chụp nhanh) để canvas chú thích render
-            // đúng độ phân giải vật lý; các mode khác bỏ qua tham số này.
-            WebviewUrl::App(
-                format!("index.html?win=overlay&mode={mode}&idx={i}&scale={}", snap.scale).into(),
-            ),
+            WebviewUrl::App(format!("index.html?{query}").into()),
         )
         .title("SnapDoc")
         .decorations(false)
@@ -775,6 +842,23 @@ pub fn close_overlays(app: &AppHandle) {
         }
     }
     // KHÔNG poll ở đây — xem comment trên.
+}
+
+/// Như `close_overlays`, TRỪ 1 cửa sổ (`keep_label`) — dùng khi bắt đầu quay
+/// vùng chọn qua `RecordRegionSelect`: đóng overlay ở MỌI màn hình khác, giữ
+/// lại đúng overlay nơi vùng vừa chọn — cửa sổ này tiếp tục sống SUỐT phiên
+/// quay, đóng vai trò khung viền click-through (xem `flow::finalize_region`),
+/// không resize/reposition/tạo lại gì cả nên không có nguồn gây nháy hình.
+pub fn close_overlays_except(app: &AppHandle, keep_label: &str) {
+    for (label, win) in app.webview_windows() {
+        if label.starts_with("overlay") && label != keep_label {
+            let _ = win.close();
+        }
+    }
+    // Dừng luôn vòng lặp input_loop toàn cục (nếu không, nó vẫn tiếp tục poll
+    // + emit overlay-input/press/release cho overlay còn lại dù đã hết tác
+    // dụng chọn vùng) — bump generation để lần kiểm tra tiếp theo tự thoát.
+    app.state::<AppState>().overlay_gen.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Ẩn editor và trả về Accessory policy (ẩn Dock) / ẩn icon khỏi taskbar (Windows).

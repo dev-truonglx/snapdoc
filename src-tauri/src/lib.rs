@@ -119,6 +119,7 @@ pub fn run() {
             commands::finalize_scroll_stitch,
             commands::start_recording,
             commands::start_record_picker,
+            commands::confirm_region_record_start,
             commands::peek_pending_recording,
             commands::confirm_recording_save,
             commands::confirm_recording_discard,
@@ -220,6 +221,9 @@ pub fn run() {
             let _ = windows::prewarm_editor(&handle);
             // Pre-warm thumbnail (ẩn) → hiển thị tức thì sau khi chụp.
             let _ = windows::prewarm_thumbnail(&handle);
+            // Pre-warm thanh "Dừng quay" (ẩn) → lần bắt đầu quay vùng chọn đầu
+            // tiên hiện tức thì, không chờ tải webview mới.
+            let _ = windows::prewarm_stop_control(&handle);
 
             // macOS: app sống ở menu bar, ẩn khỏi Dock lúc khởi động.
             // Khi editor mở sẽ chuyển sang Regular (xem windows::open_editor).

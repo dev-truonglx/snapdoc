@@ -19,6 +19,37 @@ fn bar_is_visible(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// Đọc vùng quay gần nhất đã lưu (persist trong settings.json, sống qua cả
+/// lần khởi động lại app — không chỉ trong 1 phiên) — (display_id, x, y, w, h)
+/// theo ĐÚNG hệ đơn vị của `MonitorSnap` (points trên macOS, physical px trên
+/// Windows/Linux), local theo màn hình (KHÔNG cộng offset `snap.x`/`snap.y`),
+/// giống hệt `rx/ry/rw/rh` mà `finalize_region` tính ra. `None` nếu chưa từng
+/// quay vùng chọn lần nào hoặc file settings hỏng.
+pub fn load_last_region(app: &AppHandle) -> Option<(u32, f64, f64, f64, f64)> {
+    let config_dir = app.path().app_config_dir().ok()?;
+    let settings = storage::settings::load(&config_dir);
+    let v = settings.get("lastRecordRegion")?;
+    Some((
+        v.get("displayId")?.as_u64()? as u32,
+        v.get("x")?.as_f64()?,
+        v.get("y")?.as_f64()?,
+        v.get("w")?.as_f64()?,
+        v.get("h")?.as_f64()?,
+    ))
+}
+
+/// Lưu lại vùng vừa dùng để quay — gọi mỗi khi 1 phiên quay vùng chọn bắt đầu
+/// thành công, để lần "Quay > Vùng chọn" tiếp theo có thể đề xuất dùng lại
+/// ngay (xem `run_record_picker`), không bắt user kéo chọn lại từ đầu.
+fn save_last_region(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h: f64) {
+    let Ok(config_dir) = app.path().app_config_dir() else { return };
+    let mut settings = storage::settings::load(&config_dir);
+    settings["lastRecordRegion"] = serde_json::json!({
+        "displayId": display_id, "x": x, "y": y, "w": w, "h": h,
+    });
+    let _ = storage::settings::save(&config_dir, &settings);
+}
+
 /// macOS: chụp lại "cửa sổ sản phẩm nào đang thật sự hiển thị" NGAY LÚC mở
 /// overlay chọn vùng/màn hình/Quick Capture — trước khi user có cơ hội bấm
 /// phím tắt Copy/Save (và trước khi hiện tượng cửa sổ tự bị đẩy lên có thể
@@ -212,12 +243,35 @@ pub fn run_record_picker(app: &AppHandle, mode: &str) {
         }
         *app.state::<AppState>().pending_record.lock().unwrap() = true;
         let overlay_mode = if mode == "full" { "monitor" } else { mode };
-        windows::open_overlays(app, overlay_mode)
+        // "region": đề xuất lại vùng đã quay lần gần nhất (nếu có) — overlay
+        // tự khớp đúng màn hình + validate còn nằm trong biên (xem
+        // `windows::open_overlays_ex`), KHÔNG áp dụng cho "window"/"monitor"
+        // (bấm chọn tức thì, không cần bước chỉnh vùng).
+        let preset = if overlay_mode == "region" { load_last_region(app) } else { None };
+        windows::open_overlays_ex(app, overlay_mode, true, preset)?;
+        // Overlay mới tạo (always_on_top) có thể đè lên CaptureBar (cũng
+        // always_on_top, tạo trước) — đưa CaptureBar lên lại để user vẫn thấy
+        // và bấm được nút "Quay" của nó cạnh khung chọn vùng.
+        if mode == "region" {
+            if let Some(bar) = app.get_webview_window("capture-bar") {
+                let _ = bar.set_focus();
+            }
+        }
+        Ok(())
     })();
     if let Err(e) = result {
         *app.state::<AppState>().pending_record.lock().unwrap() = false;
         let _ = app.emit("snapdoc-error", e);
     }
+}
+
+/// Bấm nút "Quay" ở CaptureBar TRONG LÚC khung chọn vùng quay
+/// (`RecordRegionSelect`) đã đang mở/hiển thị — coi như bấm "Bắt đầu quay"
+/// NGAY tại khung đó (dùng đúng vùng đang hiển thị, kể cả đã kéo/resize),
+/// KHÔNG mở lại phiên chọn vùng mới. Bắn event cho overlay đang mở tự xử lý —
+/// no-op nếu overlay đã đóng hoặc đang ở pha "selecting" (chưa có khung nào).
+pub fn confirm_region_record_start(app: &AppHandle) {
+    let _ = app.emit("region-record-confirm", ());
 }
 
 /// `true` nếu cờ `pending_record` đang bật — nếu có, TẮT LUÔN (lấy 1 lần) để
@@ -279,9 +333,26 @@ pub fn finalize_region(
     }
 
     if take_pending_record(app) {
-        windows::close_overlays(app);
+        windows::close_overlays_except(app, win.label());
         let display_id = m.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
-        return crate::record::start_recording_region(app, display_id, rx, ry, rw, rh);
+        save_last_region(app, display_id, rx, ry, rw, rh);
+        crate::record::start_recording_region(app, display_id, rx, ry, rw, rh)?;
+
+        // KHÔNG resize/reposition/ẩn/tạo lại BẤT KỲ cửa sổ nào cho phần
+        // khung+backdrop — chính overlay đang hiển thị (đã đứng y nguyên từ
+        // lúc user kéo/chỉnh vùng) được giữ lại, chỉ bật click-through để
+        // click xuyên qua được xuống nội dung thật phía dưới trong lúc quay.
+        // Vì không có bất kỳ thao tác cửa sổ nào xảy ra, khung đỏ + nền mờ
+        // hiển thị Y NGUYÊN PIXEL suốt từ pha "adjusting" sang lúc quay —
+        // không một khung hình nào bị bỏ lỡ, loại bỏ HOÀN TOÀN nguồn gây
+        // nháy hình (2 cửa sổ khác nhau luôn có độ trễ dù chỉ 1 khung hình do
+        // compositor xử lý độc lập, dù đã pre-warm để giảm thời gian tải).
+        let _ = win.set_ignore_cursor_events(true);
+        // Thanh "Dừng quay" là cửa sổ NHỎ, RIÊNG (không click-through) — nổi
+        // đúng ngay vị trí nút "Bắt đầu quay" vừa hiện, xem
+        // `windows::open_stop_control`.
+        windows::open_stop_control(app, &s, rx, ry, rw, rh)?;
+        return Ok(());
     }
 
     let (mode, _) = app.state::<AppState>().last_capture.get();
