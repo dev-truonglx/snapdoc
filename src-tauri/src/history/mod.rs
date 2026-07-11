@@ -123,6 +123,11 @@ pub fn ingest(
         let _ = tx.send(IngestJob { id, asset_path, thumb_path, base64: cap.base64.clone() });
     }
 
+    // KHÔNG emit "history:item-added" ở đây — thumbnail còn chưa được ghi
+    // (chạy nền ở `ingest_finish_bg`), cửa sổ History có thể race và hiện
+    // "Không tải được ảnh" vĩnh viễn (thẻ ảnh không tự retry sau khi lỗi).
+    // Emit sau khi thumbnail đã tồn tại trên đĩa, xem `ingest_finish_bg`.
+
     Ok(record)
 }
 
@@ -145,6 +150,16 @@ fn ingest_finish_bg(app: &AppHandle, id: String, asset_path: PathBuf, thumb_path
                     "UPDATE history SET file_size = ?1 WHERE id = ?2",
                     rusqlite::params![file_size, id],
                 );
+                // Asset + thumbnail đã ghi xong trên đĩa — an toàn để cửa sổ
+                // History load ảnh ngay, xem giải thích ở `ingest()`.
+                if let Ok(record) = conn.query_row(
+                    "SELECT * FROM history WHERE id = ?1",
+                    [&id],
+                    HistoryRecord::from_row,
+                ) {
+                    use tauri::Emitter;
+                    let _ = app.emit("history:item-added", &record);
+                }
             }
         }
         Err(e) => {
@@ -209,7 +224,7 @@ pub fn ingest_video(
         .map_err(|e| format!("Insert history thất bại: {e}"))?;
     }
 
-    Ok(HistoryRecord {
+    let record = HistoryRecord {
         id,
         created_at: now,
         updated_at: now,
@@ -226,7 +241,15 @@ pub fn ingest_video(
         title: None,
         is_edited: false,
         deleted_at: None,
-    })
+    };
+
+    // Xem giải thích ở `ingest()` — cùng cơ chế báo cho cửa sổ History cập nhật ngay.
+    {
+        use tauri::Emitter;
+        let _ = app.emit("history:item-added", &record);
+    }
+
+    Ok(record)
 }
 
 /// Gắn `history_id` vào `PendingCapture` hiện tại (nếu còn tồn tại) — gọi

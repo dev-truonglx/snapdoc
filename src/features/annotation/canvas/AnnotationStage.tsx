@@ -198,10 +198,12 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     };
     const s = measure();
     // Zoom mặc định tuỳ mode đã chụp ra ảnh (`doc.captureMode`, xem model.ts):
-    // "region" (vùng chọn) → 100% THẬT (1px ảnh = 1px màn hình) — ảnh có thể
-    // tràn khung, tự cuộn/zoom sau. Mọi mode khác → fit cả chiều rộng/cao
-    // (zoom=1 ⇒ scale=fitScale) như trước.
-    setZoom(doc.captureMode === "region" && s ? clampZoom(1 / s) : 1);
+    // "region" (vùng chọn) → ảnh NHỎ hơn khung Editor (fitScale s ≥ 1, tức
+    // không cần thu nhỏ mới vừa) thì hiện đúng 100% THẬT (1px ảnh = 1px màn
+    // hình, zoom = 1/s ⇒ scale = 1); ảnh LỚN hơn khung (s < 1) thì tự fit vừa
+    // khung (zoom = 1 ⇒ scale = fitScale) thay vì luôn ép 100% khiến ảnh to
+    // tràn ra ngoài tầm nhìn. Mọi mode khác → luôn fit như trước.
+    setZoom(doc.captureMode === "region" && s ? (s < 1 ? 1 : clampZoom(1 / s)) : 1);
     const ro = new ResizeObserver(measure);
     if (outerRef.current) ro.observe(outerRef.current);
     return () => ro.disconnect();

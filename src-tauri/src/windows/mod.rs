@@ -1011,8 +1011,10 @@ pub fn open_editor_with_file(app: &AppHandle, data_url: String) -> Result<(), St
 /// thấy trên macOS — bị hệ thống tự đưa lên trước ngay lúc xử lý phím tắt
 /// Copy/Save trong 1 phiên chụp. Xem `snapshot_visible_product_windows` +
 /// `protect_product_windows` bên dưới.
+#[cfg(target_os = "macos")]
 const PRODUCT_WINDOW_LABELS: &[&str] = &["settings", "history", "record-review", "history-trim"];
 
+#[cfg(target_os = "macos")]
 fn is_product_window(label: &str) -> bool {
     label.starts_with("editor") || PRODUCT_WINDOW_LABELS.contains(&label)
 }
@@ -1067,6 +1069,7 @@ pub fn snapshot_visible_product_windows(app: &AppHandle) -> std::collections::Ha
 /// condition khiến `set_content_protected(true)` không kịp phát huy tác dụng.
 /// Chạy qua `run_on_main_thread` + kênh chặn để đảm bảo áp dụng xong THẬT SỰ
 /// trước khi trả quyền điều khiển lại cho caller.
+#[cfg(target_os = "macos")]
 fn run_on_main_sync(app: &AppHandle, f: impl FnOnce() + Send + 'static) {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     if app
@@ -1087,6 +1090,7 @@ fn run_on_main_sync(app: &AppHandle, f: impl FnOnce() + Send + 'static) {
 /// hiển thị thật từ đầu phiên) được giữ nguyên để user vẫn tự chụp được
 /// chính Editor/Settings/History khi cố ý làm vậy. Chạy đồng bộ qua main
 /// thread — xem `run_on_main_sync`.
+#[cfg(target_os = "macos")]
 pub fn protect_product_windows(app: &AppHandle, keep_visible: &std::collections::HashSet<String>) {
     let app2 = app.clone();
     let keep = keep_visible.clone();
@@ -1103,6 +1107,7 @@ pub fn protect_product_windows(app: &AppHandle, keep_visible: &std::collections:
 /// chụp pixel thật, kể cả khi capture lỗi. Chạy đồng bộ qua main thread —
 /// xem `run_on_main_sync` (không bắt buộc về đúng, nhưng nhất quán và tránh
 /// để lại `sharingType` áp dụng trễ sau khi hàm đã return).
+#[cfg(target_os = "macos")]
 pub fn unprotect_product_windows(app: &AppHandle) {
     let app2 = app.clone();
     run_on_main_sync(app, move || {

@@ -67,7 +67,10 @@ fn snapshot_product_windows(_app: &AppHandle) {}
 /// theo allowlist đã chụp ở `snapshot_product_windows` — chỉ có tác dụng
 /// trên macOS (nơi quan sát thấy cửa sổ tự bị đẩy lên khi xử lý phím tắt);
 /// no-op ở nơi khác. Luôn gỡ protect ngay sau `f`, kể cả khi `f` lỗi.
-fn with_product_windows_protected<T>(app: &AppHandle, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn with_product_windows_protected<T>(
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] app: &AppHandle,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     #[cfg(target_os = "macos")]
     {
         let keep = app.state::<AppState>().visible_product_windows.lock().unwrap().clone();
