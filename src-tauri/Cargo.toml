@@ -1,6 +1,6 @@
 [package]
 name = "snapdoc"
-version = "0.2.7"
+version = "1.0.2"
 description = "SnapDoc — fast screenshot + annotation app"
 authors = ["SnapDoc"]
 edition = "2021"

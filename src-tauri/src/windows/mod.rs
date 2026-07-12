@@ -528,6 +528,36 @@ pub fn open_capture_bar_with_last_mode(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Mở capture bar và emit event `set-record-mode` để chọn sẵn đúng phạm vi
+/// quay (`mode`: "full" | "window" | "region") ở khu vực QUAY MÀN HÌNH — dùng
+/// cho nút "Quay lại" ở `record-review` (xem `record::redo_recording`). Cùng
+/// cơ chế delay-emit với `open_capture_bar_with_last_mode` (window mới cần đợi
+/// React mount + đăng ký listener xong mới emit tới nơi).
+pub fn open_capture_bar_with_record_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
+    let is_new_window = app.get_webview_window("capture-bar").is_none();
+
+    open_capture_bar(app)?;
+
+    let app = app.clone();
+    let mode = mode.to_string();
+    tauri::async_runtime::spawn(async move {
+        let first_delay = if is_new_window { 400 } else { 80 };
+        tokio::time::sleep(std::time::Duration::from_millis(first_delay)).await;
+        if let Some(win) = app.get_webview_window("capture-bar") {
+            let payload = serde_json::json!({ "mode": mode });
+            let _ = win.emit("set-record-mode", payload.clone());
+            if is_new_window {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                if let Some(win2) = app.get_webview_window("capture-bar") {
+                    let _ = win2.emit("set-record-mode", payload);
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 /// Mở overlay trên TẤT CẢ màn hình (mỗi màn một cái). `mode` =
 /// "region" | "window" | "monitor". Input do `input_loop` xử lý qua con trỏ +
 /// nút chuột toàn cục (không cần focus) → không nháy, độ trễ chuyển màn = 0.

@@ -127,6 +127,24 @@ export default function Editor() {
     }
   };
 
+  // "Save As…" — LUÔN mở dialog chọn file (kể cả khi ảnh có `historyId`, tức
+  // ảnh chụp/mở từ Library), khác `doSave` (ghi đè tại chỗ record History nếu
+  // có). Xuất ra 1 file mới ở vị trí tuỳ chọn, KHÔNG đụng tới record History
+  // gốc (giống "Save As" của các phần mềm khác: tạo bản sao, giữ nguyên bản gốc).
+  const doSaveAs = async () => {
+    const url = stageRef.current?.exportPng();
+    if (!url) return;
+    setBusy(true);
+    try {
+      const saved = await saveToFile(url, false);
+      if (saved) {
+        ipc.closeSelf();
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Phím tắt editor
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -259,7 +277,7 @@ export default function Editor() {
 
   return (
     <div className="solid-bg" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <Toolbar onSave={() => doSave(false)} onCopy={doCopy} onSaveCopy={() => doSave(true)} onFlatten={doFlatten} onNew={doNew} onOpen={doOpen} onStitch={doStitch} busy={busy} />
+      <Toolbar onSave={() => doSave(false)} onSaveAs={doSaveAs} onCopy={doCopy} onSaveCopy={() => doSave(true)} onFlatten={doFlatten} onNew={doNew} onOpen={doOpen} onStitch={doStitch} busy={busy} />
       <div style={{ flex: 1, minHeight: 0, background: "#161619" }}>
         <AnnotationStage ref={stageRef} />
       </div>

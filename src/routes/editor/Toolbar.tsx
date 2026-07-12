@@ -116,6 +116,7 @@ const TOOLS_GROUP2: { id: Tool; label: string; hint: string }[] = [
 
 interface Props {
   onSave: () => void;
+  onSaveAs: () => void;
   onCopy: () => void;
   onSaveCopy: () => void;
   onFlatten: () => void;
@@ -263,7 +264,7 @@ function CustomColorButton({
   );
 }
 
-export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy }: Props) {
+export default function Toolbar({ onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy }: Props) {
   const {
     tool, setTool,
     color, setColor,
@@ -284,6 +285,21 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
   const [customColor, setCustomColor] = useState("#ef4444");
   const [customHighlight, setCustomHighlight] = useState("#fbbf24");
   const [customSolid, setCustomSolid] = useState("#1a1a1a");
+
+  // Popover "Save As…" gắn cạnh nút Save (split button) — đóng khi click ra
+  // ngoài, cùng cơ chế với các popover khác trong app (CaptureBar, RecordReview).
+  const [showSaveMenu, setShowSaveMenu] = useState(false);
+  const saveMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showSaveMenu) return;
+    const onClickOutside = (e: MouseEvent) => {
+      if (saveMenuRef.current && !saveMenuRef.current.contains(e.target as Node)) {
+        setShowSaveMenu(false);
+      }
+    };
+    window.addEventListener("mousedown", onClickOutside);
+    return () => window.removeEventListener("mousedown", onClickOutside);
+  }, [showSaveMenu]);
 
   // Sync custom colors with store values
   useEffect(() => {
@@ -588,30 +604,64 @@ export default function Toolbar({ onSave, onCopy, onSaveCopy, onFlatten, onNew, 
 
       <div style={{ flex: 1 }} />
 
-      {/* Output */}
+      {/* Output — nhóm Save (chính) / Save+Copy / Copy, dùng chung kiểu pill
+          icon+label như nhóm New/Open/Ghép phía trên (nhất quán ngôn ngữ hình
+          ảnh toàn thanh công cụ, thay vì 3 nút vuông chỉ icon tách biệt như
+          trước). Save đứng đầu và tô accent vì là hành động dùng nhiều nhất
+          (giống Quick Access Toolbar của Office: Save luôn là icon đầu tiên);
+          Copy nhẹ nhàng nhất (không đụng file nào) đứng cuối. */}
       <div style={group}>
-        <button onClick={onCopy} disabled={busy} style={outBtn(false)} title="Copy vào clipboard (Ctrl/Cmd+C)">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-            <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
-            <path d="M3 11H2.5A1.5 1.5 0 0 1 1 9.5v-7A1.5 1.5 0 0 1 2.5 1h7A1.5 1.5 0 0 1 11 2.5V3" stroke="currentColor" strokeWidth="1.5"/>
-          </svg>
-        </button>
-        <button onClick={onSave} disabled={busy} style={outBtn(false)} title="Lưu file (Ctrl/Cmd+S)">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-            <path d="M13 14H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L14 5.5V13a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.5"/>
-            <path d="M5 2v3.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.5"/>
-            <path d="M4 14v-4.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V14" stroke="currentColor" strokeWidth="1.5"/>
-          </svg>
-        </button>
-        <button onClick={onSaveCopy} disabled={busy} style={outBtn(true)} title="Lưu + Copy (Ctrl/Cmd+Shift+S)">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+        {/* Save: split button — bấm chính giữ nguyên hành vi cũ (ghi đè tại
+            chỗ record History nếu ảnh có historyId, hoặc mở dialog nếu
+            không); mũi tên "▾" mở "Save As…" — LUÔN mở dialog chọn file mới,
+            xem `doSaveAs` ở Editor.tsx. */}
+        <div ref={saveMenuRef} style={splitGroup}>
+          <button onClick={onSave} disabled={busy} style={savePillBtn} title="Lưu (Ctrl/Cmd+S)">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M13 14H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L14 5.5V13a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.5"/>
+              <path d="M5 2v3.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.5"/>
+              <path d="M4 14v-4.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V14" stroke="currentColor" strokeWidth="1.5"/>
+            </svg>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>Save</span>
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); setShowSaveMenu((v) => !v); }}
+            disabled={busy}
+            style={saveCaretBtn}
+            title="Tuỳ chọn lưu khác"
+            aria-label="Tuỳ chọn lưu khác"
+          >
+            ▾
+          </button>
+          {showSaveMenu && (
+            <div style={saveMenuPopover}>
+              <button
+                style={saveMenuItem}
+                onClick={() => { setShowSaveMenu(false); onSaveAs(); }}
+              >
+                Save As…
+              </button>
+            </div>
+          )}
+        </div>
+
+        <button onClick={onSaveCopy} disabled={busy} style={newBtn} title="Lưu + Copy (Ctrl/Cmd+Shift+S)">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
             <path d="M12 13.5H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L13 5v7.5a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.4"/>
             <path d="M4.5 2v3a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.4"/>
             <path d="M3.5 13.5V10h9v3.5" stroke="currentColor" strokeWidth="1.4"/>
-            {/* Small clipboard badge */}
             <rect x="9" y="8.5" width="5.5" height="5.5" rx="1" fill="var(--bg-elevated)" stroke="currentColor" strokeWidth="1.3"/>
             <path d="M10.5 9.5h2.5M10.5 11h2.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
           </svg>
+          <span style={{ fontSize: 12, fontWeight: 600 }}>Save+Copy</span>
+        </button>
+
+        <button onClick={onCopy} disabled={busy} style={newBtn} title="Copy vào clipboard (Ctrl/Cmd+C)">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
+            <path d="M3 11H2.5A1.5 1.5 0 0 1 1 9.5v-7A1.5 1.5 0 0 1 2.5 1h7A1.5 1.5 0 0 1 11 2.5V3" stroke="currentColor" strokeWidth="1.5"/>
+          </svg>
+          <span style={{ fontSize: 12, fontWeight: 600 }}>Copy</span>
         </button>
       </div>
     </div>
@@ -642,6 +692,79 @@ const newBtn: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 const group: React.CSSProperties = { display: "flex", alignItems: "center", gap: 3 };
+
+// Bọc nút Save + mũi tên "▾" — cùng khối để trông như 1 nút "split button"
+// (Save | ▾) thay vì 2 nút rời, và làm điểm neo `position: relative` cho
+// popover "Save As…" bên dưới (cùng pattern với `RecordReview.tsx`).
+const splitGroup: React.CSSProperties = {
+  position: "relative",
+  display: "flex",
+  alignItems: "stretch",
+};
+
+// Nút Save chính — cùng kiểu pill icon+label với `newBtn` nhưng tô accent vì
+// là hành động dùng nhiều nhất trong toolbar (đứng đầu nhóm Output).
+const savePillBtn: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  height: 30,
+  padding: "0 10px",
+  borderRadius: "6px 0 0 6px",
+  border: "none",
+  background: "var(--accent)",
+  color: "#fff",
+  cursor: "pointer",
+  flexShrink: 0,
+  whiteSpace: "nowrap",
+};
+
+// Mũi tên nhỏ mở popover "Save As…" — cùng màu nền với Save, tách biệt bằng
+// viền mảnh, đúng hình dáng "split button" quen thuộc.
+const saveCaretBtn: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  height: 30,
+  padding: "0 8px",
+  borderRadius: "0 6px 6px 0",
+  borderLeft: "1px solid rgba(0,0,0,0.15)",
+  background: "var(--accent)",
+  color: "#fff",
+  fontSize: 11,
+  opacity: 0.85,
+  cursor: "pointer",
+  flexShrink: 0,
+};
+
+const saveMenuPopover: React.CSSProperties = {
+  position: "absolute",
+  top: "calc(100% + 6px)",
+  left: 0,
+  background: "rgba(30,30,36,0.99)",
+  border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 10,
+  padding: 4,
+  display: "flex",
+  flexDirection: "column",
+  gap: 1,
+  boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
+  zIndex: 100,
+  whiteSpace: "nowrap",
+};
+
+const saveMenuItem: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  padding: "7px 12px",
+  borderRadius: 6,
+  fontSize: 12,
+  color: "var(--text, #cdd6f4)",
+  background: "transparent",
+  border: "none",
+  cursor: "pointer",
+  textAlign: "left",
+};
 const sep: React.CSSProperties = { width: 1, height: 24, background: "var(--border)", flexShrink: 0 };
 const dimLabel: React.CSSProperties = { fontSize: 11, color: "var(--text-dim)", marginRight: 2, whiteSpace: "nowrap" };
 const blurLabel: React.CSSProperties = {
@@ -662,23 +785,6 @@ function toolBtn(active: boolean): React.CSSProperties {
     flexShrink: 0,
   };
 }
-function outBtn(primary: boolean): React.CSSProperties {
-  return {
-    width: 32,
-    height: 32,
-    padding: 0,
-    borderRadius: 6,
-    fontWeight: 500,
-    background: primary ? "var(--accent)" : "transparent",
-    color: primary ? "#fff" : "var(--text)",
-    border: primary ? "none" : "1px solid var(--border)",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-  };
-}
-
 function modeBtn(active: boolean): React.CSSProperties {
   return {
     height: 26, padding: "0 9px", borderRadius: 5, fontSize: 11, fontWeight: 600,

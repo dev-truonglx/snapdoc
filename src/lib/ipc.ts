@@ -183,8 +183,12 @@ export const ipc = {
   confirmRegionRecordStart: () => invoke<void>("confirm_region_record_start"),
   // Xem lại bản quay trước khi lưu vào History (record-review window).
   peekPendingRecording: () => invoke<PendingRecording | null>("peek_pending_recording"),
-  confirmRecordingSave: () => invoke<void>("confirm_recording_save"),
+  /** `destDir`: thư mục lưu tuỳ chọn ("Lưu vào thư mục khác…") — bỏ trống để
+   * giữ nguyên vị trí file đã quay (saveDir mặc định trong Settings). */
+  confirmRecordingSave: (destDir?: string) => invoke<void>("confirm_recording_save", { destDir: destDir ?? null }),
   confirmRecordingDiscard: () => invoke<void>("confirm_recording_discard"),
+  /** "Quay lại": xoá bản quay đang xem rồi mở CaptureBar đúng phạm vi vừa quay. */
+  redoRecording: () => invoke<void>("redo_recording"),
   /** Dừng quay — dùng cho popup "đang quay" trên Windows (bấm vào để dừng). */
   stopRecording: () => invoke<string>("stop_recording"),
   /** Thời lượng đã quay (ms), `null` nếu không có phiên quay — popup "đang quay" poll mỗi giây. */

@@ -144,6 +144,14 @@ export default function CaptureBar() {
       }
     });
 
+    // Nút "Quay lại" ở `record-review` (xem `record::redo_recording`) — sync
+    // đúng phạm vi quay vừa xoá sang khu vực QUAY MÀN HÌNH, y hệt hành vi bấm
+    // tay vào nút phạm vi đó (xem `selectVideoMode`: "region" cần mở luôn
+    // khung chọn/chỉnh vùng, "full"/"window" thì chỉ chọn mode chờ bấm "Quay").
+    const unlistenRecordMode = listen<{ mode: string }>("set-record-mode", (e) => {
+      selectVideoMode(e.payload.mode as RecordMode);
+    });
+
     const onFocus = () => {
       ipc.getLastCaptureMode().then(([m]) => {
         if (m) setPhotoMode(m as CaptureMode);
@@ -205,6 +213,7 @@ export default function CaptureBar() {
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("mousedown", onClickOutside);
       unlisten.then((fn) => fn());
+      unlistenRecordMode.then((fn) => fn());
       unlistenSettings.then((fn) => fn());
       unlistenBlur.then((fn) => fn());
       unlistenHidePopover.then((fn) => fn());

@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { ipc, type PendingRecording } from "../../lib/ipc";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
+
+/** Thư mục chứa file (hỗ trợ cả `/` và `\` — mp4 quay trên Windows dùng `\`). */
+function dirnameOf(path: string): string {
+  return path.replace(/[\\/][^\\/]*$/, "");
+}
 
 /** Cửa sổ bắt buộc xác nhận NGAY sau khi dừng quay (xem
  * `record::stop_recording` — không ingest vào History tự động nữa, chờ
@@ -25,6 +31,24 @@ export default function RecordReview() {
   // Backend emit % thật từ ffmpeg (`out_time_us`, xem `encoder::trim`), không
   // phải giả lập — nên bỏ qua an toàn nếu không nhận được gì (giữ `null`).
   const [trimProgress, setTrimProgress] = useState<number | null>(null);
+  // Thư mục lưu tuỳ chọn cho LẦN LƯU NÀY — `null` = giữ nguyên vị trí mặc định
+  // (saveDir trong Settings, nơi file mp4 đã nằm sẵn từ lúc quay xong). Chỉ là
+  // lựa chọn tạm thời của phiên xem lại này, không ghi đè `saveDir` trong
+  // Settings (xem `record::confirm_recording_save_to`).
+  const [customSaveDir, setCustomSaveDir] = useState<string | null>(null);
+  const [showSaveMenu, setShowSaveMenu] = useState(false);
+  const saveMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showSaveMenu) return;
+    const onClickOutside = (e: MouseEvent) => {
+      if (saveMenuRef.current && !saveMenuRef.current.contains(e.target as Node)) {
+        setShowSaveMenu(false);
+      }
+    };
+    window.addEventListener("mousedown", onClickOutside);
+    return () => window.removeEventListener("mousedown", onClickOutside);
+  }, [showSaveMenu]);
 
   useEffect(() => {
     ipc.peekPendingRecording()
@@ -60,7 +84,11 @@ export default function RecordReview() {
   // cần cập nhật lại `pending`/reload video sau khi cắt như bản cũ — cửa sổ
   // đóng ngay sau khi lưu thành công, không ai còn xem lại video trong này
   // nữa (xem `confirmRecordingSave` → đóng cửa sổ ở backend).
-  const doApplyAndSave = async () => {
+  // `destDirOverride`: dùng khi gọi thẳng từ `pickSaveDir` (chọn thư mục xong
+  // là lưu luôn ngay, không đợi bấm thêm nút Lưu) — ưu tiên hơn `customSaveDir`
+  // đã lưu trong state vì state đó có thể chưa kịp cập nhật (setState bất đồng
+  // bộ) tại thời điểm gọi hàm này trong cùng 1 handler.
+  const doApplyAndSave = async (destDirOverride?: string) => {
     if (busy || !pending) return;
     setBusy(true);
     try {
@@ -71,12 +99,27 @@ export default function RecordReview() {
         // (ingest vào History không có tiến độ %, xem `confirmRecordingSave`).
         setTrimProgress(null);
       }
-      await ipc.confirmRecordingSave();
+      await ipc.confirmRecordingSave(destDirOverride ?? customSaveDir ?? undefined);
     } catch (e) {
       alert(String(e));
       setBusy(false);
       setTrimProgress(null);
     }
+  };
+
+  // Thư mục SẼ lưu vào nếu bấm "Lưu" ngay bây giờ — ưu tiên lựa chọn tuỳ ý
+  // (`customSaveDir`), rơi về thư mục file mp4 đang nằm sẵn (mặc định) nếu
+  // chưa chọn gì khác.
+  const currentSaveDir = customSaveDir ?? (pending ? dirnameOf(pending.path) : null);
+
+  /** Mở dialog chọn thư mục — chọn xong LƯU LUÔN vào đó ngay (như bấm "Lưu"),
+   * không đợi thêm 1 cú bấm nữa, không đổi cấu hình saveDir chung của app. */
+  const pickSaveDir = async () => {
+    setShowSaveMenu(false);
+    const dir = await open({ directory: true });
+    if (typeof dir !== "string") return;
+    setCustomSaveDir(dir);
+    doApplyAndSave(dir);
   };
 
   const doDiscard = async () => {
@@ -91,6 +134,21 @@ export default function RecordReview() {
     }
   };
   doDiscardRef.current = doDiscard;
+
+  // "Quay lại": xoá bản quay đang xem rồi mở CaptureBar đúng phạm vi vừa quay
+  // (`pending.captureMode`) — xem `record::redo_recording`. Cửa sổ này tự
+  // đóng ở backend sau khi xoá xong (giống Xoá/Lưu), không cần tự đóng ở đây.
+  const doRedo = async () => {
+    if (busy || !pending) return;
+    if (!confirm("Xoá bản quay này để quay lại?")) return;
+    setBusy(true);
+    try {
+      await ipc.redoRecording();
+    } catch (e) {
+      alert(String(e));
+      setBusy(false);
+    }
+  };
 
   return (
     <div style={card}>
@@ -111,26 +169,67 @@ export default function RecordReview() {
       </div>
 
       <div style={actions}>
-        {/* Huỷ/Xoá: thao tác phụ, nhẹ tay (ghost, không tô đậm) — nút đóng
-            titlebar thật giờ cũng dẫn tới đúng hành động này (xem
-            `doDiscardRef`), nên không cần 1 khối to ngang hàng với Lưu nữa. */}
-        <button style={discardBtn} disabled={busy || !pending} onClick={doDiscard}>Xoá</button>
+        {/* Huỷ/Xoá + Quay lại: cả 2 đều là thao tác phụ, nhẹ tay (ghost, không
+            tô đậm) — nút đóng titlebar thật vẫn dẫn tới đúng hành động Xoá
+            (xem `doDiscardRef`), nên không cần 1 khối to ngang hàng với Lưu. */}
+        <div style={leftGroup}>
+          <button style={discardBtn} disabled={busy || !pending} onClick={doDiscard}>Xoá</button>
+          {/* "Quay lại": xoá bản quay này rồi mở CaptureBar đúng phạm vi vừa
+              quay để quay lại ngay — xem `doRedo`. */}
+          <button style={discardBtn} disabled={busy || !pending} onClick={doRedo}>Quay lại</button>
+        </div>
         {/* Kích thước ảnh: dời từ `metaRow` (đã bỏ, xem `previewWrap`) lên
             đây, bên phải cùng hàng với nút Lưu — thời lượng không cần lặp lại
             nữa vì đã có ruler thời gian ngay trên timeline (xem `VideoTrimmer`). */}
         <div style={rightGroup}>
           {pending && <span style={dimText}>{pending.width} × {pending.height}px</span>}
-          {/* Lưu: hành động CHÍNH của màn hình này — gộp cả áp dụng cắt (nếu có
-              thay đổi chưa áp dụng) vào chung nút này, xem `doApplyAndSave`.
-              Đổi nhãn theo `trimState.hasChanges` để không "hứa" áp dụng cắt
-              khi chẳng có gì để cắt. */}
-          <button style={saveBtn} disabled={busy || !pending} onClick={doApplyAndSave}>
-            {trimProgress != null
-              ? `Đang cắt… ${Math.round(trimProgress * 100)}%`
-              : busy
-              ? "Đang lưu…"
-              : "Lưu"}
-          </button>
+          {/* Luôn hiện thư mục SẼ lưu vào — mặc định là chỗ file mp4 đang nằm
+              sẵn (thư mục chứa `pending.path`, xem `dirnameOf`), hoặc thư mục
+              vừa chọn ở popover nếu có — để người dùng biết ngay từ lúc mở màn
+              xem lại, không phải đợi bấm gì mới rõ. */}
+          {currentSaveDir && (
+            <span style={dimText} title={currentSaveDir}>
+              Lưu tại: {currentSaveDir.split(/[\\/]/).filter(Boolean).pop()}
+            </span>
+          )}
+          <div ref={saveMenuRef} style={saveGroup}>
+            {/* Lưu: hành động CHÍNH của màn hình này — gộp cả áp dụng cắt (nếu
+                có thay đổi chưa áp dụng) vào chung nút này, xem `doApplyAndSave`.
+                Đổi nhãn theo `trimState.hasChanges` để không "hứa" áp dụng cắt
+                khi chẳng có gì để cắt. */}
+            <button style={saveBtn} disabled={busy || !pending} onClick={() => doApplyAndSave()}>
+              {trimProgress != null
+                ? `Đang cắt… ${Math.round(trimProgress * 100)}%`
+                : busy
+                ? "Đang lưu…"
+                : "Lưu"}
+            </button>
+            {/* Option nhỏ cạnh nút Lưu — chọn thư mục lưu khác cho riêng lần
+                này, không đụng tới nút Lưu chính (tránh bấm nhầm mở dialog khi
+                chỉ muốn lưu ngay). */}
+            <button
+              style={saveMenuBtn}
+              disabled={busy || !pending}
+              title="Chọn thư mục lưu khác"
+              aria-label="Chọn thư mục lưu khác"
+              onClick={(e) => { e.stopPropagation(); setShowSaveMenu((v) => !v); }}
+            >
+              ▾
+            </button>
+            {showSaveMenu && (
+              <div style={saveMenuPopover}>
+                <button style={saveMenuItem} onClick={pickSaveDir}>Chọn thư mục khác…</button>
+                {customSaveDir && (
+                  <button
+                    style={saveMenuItem}
+                    onClick={() => { setCustomSaveDir(null); setShowSaveMenu(false); }}
+                  >
+                    Dùng thư mục mặc định
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -177,6 +276,12 @@ const actions: React.CSSProperties = {
   background: "#000",
 };
 
+const leftGroup: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 4,
+};
+
 const rightGroup: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -190,13 +295,61 @@ const dimText: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
+// Bọc nút Lưu + nút mũi tên nhỏ chọn thư mục — cùng khối để trông như 1 nút
+// "split button" (Lưu | ▾) thay vì 2 nút rời rạc, và làm điểm neo `position:
+// relative` cho popover bên dưới.
+const saveGroup: React.CSSProperties = {
+  position: "relative",
+  display: "flex",
+  alignItems: "stretch",
+};
+
 const saveBtn: React.CSSProperties = {
   padding: "10px 22px",
-  borderRadius: 8,
+  borderRadius: "8px 0 0 8px",
   background: "var(--accent)",
   color: "var(--accent-text)",
   fontWeight: 600,
   fontSize: 13,
+};
+
+// Mũi tên nhỏ mở popover chọn thư mục — cùng màu nền với nút Lưu nhưng tách
+// biệt bằng 1 viền mảnh, đúng hình dáng "split button" quen thuộc.
+const saveMenuBtn: React.CSSProperties = {
+  padding: "10px 10px",
+  borderRadius: "0 8px 8px 0",
+  borderLeft: "1px solid rgba(0,0,0,0.15)",
+  background: "var(--accent)",
+  color: "var(--accent-text)",
+  fontSize: 11,
+  opacity: 0.85,
+};
+
+const saveMenuPopover: React.CSSProperties = {
+  position: "absolute",
+  bottom: "calc(100% + 6px)",
+  right: 0,
+  background: "rgba(30,30,36,0.99)",
+  border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 10,
+  padding: 4,
+  display: "flex",
+  flexDirection: "column",
+  gap: 1,
+  boxShadow: "0 -4px 20px rgba(0,0,0,0.4)",
+  zIndex: 100,
+  whiteSpace: "nowrap",
+};
+
+const saveMenuItem: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  padding: "7px 12px",
+  borderRadius: 6,
+  fontSize: 12,
+  color: "var(--text, #cdd6f4)",
+  background: "transparent",
+  textAlign: "left",
 };
 
 // Ghost/text button — không viền/nền tô đậm như bản cũ, chỉ chữ màu đỏ nhạt,

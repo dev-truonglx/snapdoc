@@ -123,6 +123,7 @@ pub fn run() {
             commands::peek_pending_recording,
             commands::confirm_recording_save,
             commands::confirm_recording_discard,
+            commands::redo_recording,
             commands::stop_recording,
             commands::recording_status,
             commands::trim_pending_recording,

@@ -648,9 +648,12 @@ pub fn peek_pending_recording(app: AppHandle) -> Option<crate::record::PendingRe
 }
 
 /// Người dùng bấm "Lưu" ở cửa sổ xem lại — ingest vào History rồi đóng cửa sổ.
+/// `destDir`: thư mục lưu tuỳ chọn (nút "Lưu vào thư mục khác…" ở
+/// `RecordReview.tsx`) — `None`/rỗng thì giữ nguyên vị trí file đã quay
+/// (`saveDir` mặc định trong Settings), xem `record::confirm_recording_save_to`.
 #[tauri::command]
-pub async fn confirm_recording_save(app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || crate::record::confirm_recording_save(&app))
+pub async fn confirm_recording_save(app: AppHandle, dest_dir: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::record::confirm_recording_save_to(&app, dest_dir))
         .await
         .map_err(|e| format!("Task join error: {e}"))?
 }
@@ -661,6 +664,19 @@ pub async fn confirm_recording_discard(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || crate::record::confirm_recording_discard(&app))
         .await
         .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Người dùng bấm "Quay lại" ở cửa sổ xem lại — xoá bản quay đang xem rồi mở
+/// lại CaptureBar đúng phạm vi vừa quay để bấm "Quay" lại ngay.
+#[tauri::command]
+pub async fn redo_recording(app: AppHandle) -> Result<(), String> {
+    let mode = tauri::async_runtime::spawn_blocking({
+        let app = app.clone();
+        move || crate::record::redo_recording(&app)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
+    windows::open_capture_bar_with_record_mode(&app, &mode)
 }
 
 /// Dừng quay từ popup "đang quay" trên Windows (xem
