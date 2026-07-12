@@ -759,6 +759,32 @@ fn to_css(s: &MonitorSnap, cx: f64, cy: f64) -> (f64, f64) {
     }
 }
 
+/// Kích thước 1 màn hình theo đơn vị CSS px (cùng hệ với `to_css`) — dùng để
+/// clamp con trỏ khi đang kéo vượt biên (xem `input_loop`).
+fn css_size(s: &MonitorSnap) -> (f64, f64) {
+    #[cfg(target_os = "macos")]
+    {
+        (s.w, s.h)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (s.w / s.scale, s.h / s.scale)
+    }
+}
+
+/// `to_css` + clamp vào đúng biên `s` — dùng khi con trỏ đã ra khỏi màn hình
+/// `s` (đang kéo/thả từ màn khác sang) để toạ độ trả về LUÔN nằm trong
+/// `[0, css_w] × [0, css_h]` của `s`, không tràn ra ngoài. Dùng chung cho cả
+/// `overlay-input` (di chuyển) lẫn `overlay-release` (thả chuột) trong
+/// `input_loop` — nếu chỉ clamp 1 trong 2 nơi, nơi còn lại vẫn có thể phát ra
+/// toạ độ tràn biên, làm khung chọn/toolbar lệch hoặc nằm ngoài viewport (bị
+/// `overflow: hidden` của overlay cắt mất, xem `Overlay.tsx`).
+fn to_css_clamped(s: &MonitorSnap, cx: f64, cy: f64) -> (f64, f64) {
+    let (x, y) = to_css(s, cx, cy);
+    let (cw, ch) = css_size(s);
+    (x.clamp(0.0, cw), y.clamp(0.0, ch))
+}
+
 /// Luồng input: poll con trỏ + nút chuột toàn cục, phát sự kiện cho overlay.
 /// - `overlay-input` (idx_active, x, y): con trỏ đang ở overlay nào + toạ độ CSS.
 /// - `overlay-press` / `overlay-release` (idx, x, y): cạnh nhấn/thả chuột trái.
@@ -810,8 +836,18 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize) {
 
                 // Khi đang drag, mọi input/release route về overlay bắt đầu
                 // drag để không "rớt" sang overlay khác giữa chừng — kể cả
-                // khi con trỏ vượt biên màn hình.
+                // khi con trỏ vượt biên màn hình. QUAN TRỌNG: toạ độ CSS phải
+                // quy đổi theo snapshot của overlay ĐÍCH (`target_idx`), KHÔNG
+                // phải overlay con trỏ đang thực sự đứng (`i`) — trộn lẫn 2 hệ
+                // gốc toạ độ khác nhau (khi `i != target_idx`, tức con trỏ đã
+                // sang màn hình khác) khiến x/y "nhảy cóc" về giá trị nhỏ/âm,
+                // làm khung chọn bị lật (rectFrom ở frontend dùng min/abs nên
+                // đảo ngược ngay khi x/y đột ngột đổi dấu/độ lớn).
                 let target_idx = drag_idx.unwrap_or(i);
+                // Vùng chọn vốn không thể kéo sang màn hình khác, nên khi con
+                // trỏ vượt biên, khung chỉ dừng lại đúng mép thay vì báo kích
+                // thước tràn ra ngoài màn hình gốc — xem `to_css_clamped`.
+                let (x, y) = if target_idx == i { (x, y) } else { to_css_clamped(&snaps[target_idx], cx, cy) };
                 let _ = app.emit("overlay-input", (target_idx, x, y));
                 if left && !prev_left {
                     drag_idx = Some(i);
@@ -819,9 +855,12 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize) {
                 }
                 if !left && prev_left {
                     let release_idx = drag_idx.take().unwrap_or(i);
-                    // Nếu thả ở overlay khác, đổi hệ trục về snapshot nguồn.
+                    // Nếu thả ở overlay khác, đổi hệ trục về snapshot nguồn
+                    // (clamp — CÙNG lý do với nhánh di chuyển ở trên, nếu không
+                    // toạ độ thả chuột có thể tràn biên dù lúc di chuyển đã
+                    // được clamp đúng, làm khung/toolbar cuối cùng vẫn lệch).
                     let (rx, ry) = if release_idx != i {
-                        to_css(&snaps[release_idx], cx, cy)
+                        to_css_clamped(&snaps[release_idx], cx, cy)
                     } else {
                         (x, y)
                     };
@@ -833,8 +872,10 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize) {
                     focused_idx = Some(release_idx);
                 }
             } else if !left && prev_left {
+                // Thả chuột ở NGOÀI mọi màn hình (kéo tràn ra rìa desktop ảo)
+                // — cùng lý do clamp với 2 nhánh trên.
                 if let Some(src_idx) = drag_idx.take() {
-                    let (rx, ry) = to_css(&snaps[src_idx], cx, cy);
+                    let (rx, ry) = to_css_clamped(&snaps[src_idx], cx, cy);
                     let _ = app.emit("overlay-release", (src_idx, rx, ry));
                 }
             }
