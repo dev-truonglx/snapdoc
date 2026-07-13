@@ -4,10 +4,10 @@ import { ipc, type AudioSource, type CaptureMode, type OutputMode } from "../../
 
 type RecordMode = "full" | "window" | "region";
 /** "photo" = đang thao tác nhóm chụp ảnh, "video" = đang thao tác nhóm quay
- * màn hình — quyết định cặp (option + nút hành động) nào hiện ở cuối thanh
- * (xem `ActionArea`). Chỉ 1 trong 2 nhóm "active" tại 1 thời điểm, giống
- * cách thanh chụp màn hình gốc của macOS (Cmd+Shift+5) chỉ có 1 lựa chọn
- * được bôi sáng trong toàn bộ dải icon dù chia làm 2 cụm. */
+ * màn hình — quyết định popover option nào (Output ảnh / Nguồn audio) hiện ở
+ * cuối thanh. Chỉ 1 trong 2 nhóm "active" tại 1 thời điểm, giống cách thanh
+ * chụp màn hình gốc của macOS (Cmd+Shift+5) chỉ có 1 lựa chọn được bôi sáng
+ * trong toàn bộ dải icon dù chia làm 2 cụm. */
 type ActiveGroup = "photo" | "video";
 
 // Icon dùng chung cho "phạm vi" (Full/Window/Region) — cả nhóm chụp ảnh lẫn
@@ -185,8 +185,8 @@ export default function CaptureBar() {
       if (e.key === "Enter") {
         if (activeGroupRef.current === "video") {
           // "Vùng chọn": khung chọn/chỉnh vùng đã mở sẵn từ lúc chọn mode
-          // (xem `selectVideoMode`) — Enter ở đây cũng phải tương đương bấm
-          // "Bắt đầu quay" ngay tại khung, giống hệt nút "Quay" (`doRecord`).
+          // (xem `selectVideoMode`) — Enter ở đây tương đương bấm "Bắt đầu
+          // quay" ngay tại khung, KHÔNG mở lại phiên chọn vùng mới.
           if (videoModeRef.current === "region") {
             ipc.confirmRegionRecordStart().catch((err) => alert(String(err)));
           } else {
@@ -246,40 +246,27 @@ export default function CaptureBar() {
     }).catch(() => {});
   };
 
+  // Chọn mode = thực hiện NGAY (không còn nút "Chụp" riêng để bấm thêm 1 lần
+  // nữa) — mọi mode ("all"/"full"/"window"/"region"/"scroll") đều chỉ MỞ một
+  // luồng tương tác (overlay chọn màn hình/cửa sổ/vùng, hoặc phiên cuộn), việc
+  // "chụp" thật sự luôn xảy ra ở bước sau đó (thả chuột trên overlay) nên bấm
+  // là chạy luôn không mất đi bước xác nhận nào.
   const selectPhotoMode = (m: CaptureMode) => {
     setPhotoMode(m);
     setActiveGroup("photo");
+    if (m === "all") {
+      ipc.captureAllScreens(output).catch((e) => alert(String(e)));
+    } else {
+      ipc.captureNow(m, output).catch((e) => alert(String(e)));
+    }
   };
+  // Tương tự cho quay màn hình — "region" đã mở luôn khung chọn/chỉnh vùng từ
+  // trước (không cần bấm "Quay" mới mở), giờ "full"/"window" cũng mở overlay
+  // chọn màn hình/cửa sổ ngay khi chọn, đồng nhất với hành vi "chọn = chạy".
   const selectVideoMode = (m: RecordMode) => {
     setVideoMode(m);
     setActiveGroup("video");
-    // "Vùng chọn": mở luôn khung chọn/chỉnh vùng NGAY khi chọn mode này (hiện
-    // vùng đã quay lần gần nhất, hoặc chờ kéo vùng mới nếu chưa có) — không
-    // cần bấm "Quay" trước nữa. "Toàn màn hình"/"Cửa sổ" giữ nguyên hành vi cũ
-    // (chọn-là-chụp/quay ngay khi bấm "Quay", không có bước chỉnh sửa nào).
-    if (m === "region") {
-      ipc.startRecordPicker("region").catch((e) => alert(String(e)));
-    }
-  };
-
-  const doCapture = () => {
-    if (photoMode === "all") {
-      ipc.captureAllScreens(output).catch((e) => alert(String(e)));
-    } else {
-      ipc.captureNow(photoMode, output).catch((e) => alert(String(e)));
-    }
-  };
-
-  const doRecord = () => {
-    // "Vùng chọn": khung chọn/chỉnh vùng đã mở sẵn từ lúc chọn mode (xem
-    // `selectVideoMode`) — bấm "Quay" ở đây giờ tương đương bấm "Bắt đầu
-    // quay" ngay tại khung đó, KHÔNG mở lại 1 phiên chọn vùng mới (sẽ làm mất
-    // vùng user vừa kéo/chỉnh dở).
-    if (videoMode === "region") {
-      ipc.confirmRegionRecordStart().catch((e) => alert(String(e)));
-      return;
-    }
-    ipc.startRecordPicker(videoMode).catch((e) => alert(String(e)));
+    ipc.startRecordPicker(m).catch((e) => alert(String(e)));
   };
 
   const currentOutput = OUTPUTS.find((o) => o.id === output);
@@ -371,18 +358,6 @@ export default function CaptureBar() {
             )}
           </div>
 
-          {/* Nút hành động — Chụp (ảnh) hoặc Quay (video), đổi theo activeGroup. */}
-          {isPhoto ? (
-            <button style={shootBtn} onClick={doCapture}>
-              Chụp
-            </button>
-          ) : (
-            <button style={recordBtn} onClick={doRecord} title="Quay video đúng phạm vi đang chọn">
-              <span style={recordDot} aria-hidden />
-              Quay
-            </button>
-          )}
-
           {/* Close */}
           <button aria-label="Đóng" style={closeBtn} onClick={() => ipc.closeSelf()}>
             ✕
@@ -467,8 +442,9 @@ const optBtn: React.CSSProperties = {
   cursor: "pointer",
 };
 
-// Nút "Chụp nhanh" trong cụm chế độ: cùng khối với mode buttons nhưng nhấn
-// nhấn accent (vàng) để phân biệt đây là hành động chạy ngay, không phải chế độ.
+// Nút "Chụp nhanh" trong cụm chế độ: cùng khối với mode buttons nhưng tô vàng
+// để phân biệt — nó không thuộc `photoMode`/`activeGroup` (không có trạng
+// thái "đang chọn" để nhớ lại như các mode khác), chỉ là 1 hành động rời.
 const quickModeBtn: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
@@ -497,42 +473,6 @@ const recordDotBadge: React.CSSProperties = {
   height: 6,
   borderRadius: "50%",
   background: "var(--danger)",
-};
-
-// Nút "Quay" — pill tông đỏ, giữ nguyên hình dạng như "Chụp" để 2 nút hành
-// động luôn chiếm đúng 1 vị trí, không làm bar giật kích thước khi đổi nhóm.
-const recordBtn: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "7px 16px",
-  borderRadius: 8,
-  background: "rgba(239,68,68,0.16)",
-  color: "var(--danger)",
-  fontWeight: 600,
-  fontSize: 13,
-  border: "none",
-  cursor: "pointer",
-  whiteSpace: "nowrap",
-};
-
-const recordDot: React.CSSProperties = {
-  width: 8,
-  height: 8,
-  borderRadius: "50%",
-  background: "var(--danger)",
-  display: "inline-block",
-};
-
-const shootBtn: React.CSSProperties = {
-  padding: "7px 18px",
-  borderRadius: 8,
-  background: "var(--accent)",
-  color: "#fff",
-  fontWeight: 600,
-  fontSize: 13,
-  border: "none",
-  cursor: "pointer",
 };
 
 const closeBtn: React.CSSProperties = {
