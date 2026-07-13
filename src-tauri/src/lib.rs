@@ -104,7 +104,6 @@ pub fn run() {
             commands::reload_shortcuts,
             commands::suspend_shortcuts,
             commands::resume_shortcuts,
-            commands::get_last_capture_mode,
             commands::get_hotkey_warning,
             commands::get_autostart,
             commands::set_autostart,

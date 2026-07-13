@@ -493,46 +493,11 @@ fn place_top_center(app: &AppHandle, win: &tauri::WebviewWindow) {
     }
 }
 
-/// Mở capture bar và emit event `set-capture-mode` với lastMode từ Rust state.
-/// Chỉ sync chế độ chụp (mode), KHÔNG override output — capture bar tự giữ
-/// defaultOutput từ settings. Dùng cho nút "New" trong editor.
-pub fn open_capture_bar_with_last_mode(app: &AppHandle) -> Result<(), String> {
-    use crate::state::AppState;
-
-    let (mode, _output) = app.state::<AppState>().last_capture.get();
-    let is_new_window = app.get_webview_window("capture-bar").is_none();
-
-    open_capture_bar(app)?;
-
-    // Với window đã tồn tại: listener JS đã active → delay ngắn.
-    // Với window mới: cần đợi React mount + register listener → delay dài hơn.
-    // Chỉ emit mode, không emit output → capture bar tự load defaultOutput từ settings.
-    // Dùng async_runtime (Tokio) để emit an toàn từ async context.
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let first_delay = if is_new_window { 400 } else { 80 };
-        tokio::time::sleep(std::time::Duration::from_millis(first_delay)).await;
-        if let Some(win) = app.get_webview_window("capture-bar") {
-            let payload = serde_json::json!({ "mode": mode, "output": serde_json::Value::Null });
-            let _ = win.emit("set-capture-mode", payload.clone());
-            // Emit lần 2 cho window mới (đảm bảo listener đã mount)
-            if is_new_window {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                if let Some(win2) = app.get_webview_window("capture-bar") {
-                    let _ = win2.emit("set-capture-mode", payload);
-                }
-            }
-        }
-    });
-
-    Ok(())
-}
-
 /// Mở capture bar và emit event `set-record-mode` để chọn sẵn đúng phạm vi
 /// quay (`mode`: "full" | "window" | "region") ở khu vực QUAY MÀN HÌNH — dùng
-/// cho nút "Quay lại" ở `record-review` (xem `record::redo_recording`). Cùng
-/// cơ chế delay-emit với `open_capture_bar_with_last_mode` (window mới cần đợi
-/// React mount + đăng ký listener xong mới emit tới nơi).
+/// cho nút "Quay lại" ở `record-review` (xem `record::redo_recording`). Emit
+/// 2 lần cho window mới (delay ngắn rồi delay dài hơn) để đợi React mount +
+/// đăng ký listener xong mới chắc emit tới nơi.
 pub fn open_capture_bar_with_record_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
     let is_new_window = app.get_webview_window("capture-bar").is_none();
 

@@ -175,22 +175,32 @@ pub fn open_capture_bar(app: AppHandle) -> Result<(), String> {
     windows::open_capture_bar(&app)
 }
 
-/// Mở capture bar với chế độ chụp gần nhất pre-selected — dùng cho nút "New" trong editor.
+/// Nút "New" trong editor — chạy THẲNG đúng chế độ chụp gần nhất, KHÔNG mở/hiện
+/// capture bar nữa (coi như hành động đã được "chọn" sẵn từ capture bar rồi,
+/// giống hệt cách phím tắt toàn cục kích hoạt chụp mà không cần mở bar — xem
+/// `hotkey::run_action`). Trước đây có mở bar + emit `set-capture-mode` để bar
+/// tự bấm; đã bỏ vì capture bar không còn nút "Chụp" xác nhận (chọn mode =
+/// chạy luôn), nên mở bar chỉ để rồi tự bắn action ngay là thừa — và từng gây
+/// lỗi "webview overlay-0 already exists" do bar nhận event `set-capture-mode`
+/// những HAI lần (cơ chế delay-emit an toàn cho window mới mount) nên chạy
+/// `capture_now` lặp lại, mở overlay đè lên chính nó.
 ///
 /// Luồng trên Windows:
-/// - hide_editor() + open_capture_bar() là các lời gọi nhanh (không block).
+/// - hide_editor() là lời gọi nhanh (không block).
 /// - Toàn bộ được spawn sang std::thread riêng để tránh block Tauri IPC thread,
-///   đặc biệt tránh trường hợp Win32 message pump stall khi show/hide window
-///   từ thread không có message loop.
+///   đặc biệt tránh trường hợp Win32 message pump stall khi hide window từ
+///   thread không có message loop.
 #[tauri::command]
 pub fn open_capture_bar_for_new(app: AppHandle) -> Result<(), String> {
     std::thread::spawn(move || {
         windows::hide_editor(&app);
-        // Trên Windows: đợi WM_SHOWWINDOW được xử lý trước khi mở capture bar,
-        // tránh race condition giữa hai thao tác window.
+        // Trên Windows: đợi WM_SHOWWINDOW được xử lý trước khi tiếp tục,
+        // tránh race condition với thao tác window vừa rồi.
         #[cfg(target_os = "windows")]
         std::thread::sleep(std::time::Duration::from_millis(80));
-        let _ = windows::open_capture_bar_with_last_mode(&app);
+        let (mode, _) = app.state::<AppState>().last_capture.get();
+        let output = crate::hotkey::default_output(&app);
+        flow::run(&app, &mode, &output);
     });
     Ok(())
 }
@@ -421,12 +431,6 @@ pub fn check_screen_permission() -> bool {
 #[tauri::command]
 pub fn request_screen_permission() -> bool {
     permissions::request_capture()
-}
-
-/// Lấy chế độ chụp gần nhất (mode + output) — dùng cho nút "New" ở editor.
-#[tauri::command]
-pub fn get_last_capture_mode(app: AppHandle) -> (String, String) {
-    app.state::<AppState>().last_capture.get()
 }
 
 /// Lỗi đăng ký global shortcut lúc khởi động (nếu có) — Settings gọi lúc mount

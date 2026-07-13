@@ -130,7 +130,6 @@ export const ipc = {
   reloadShortcuts: () => invoke<void>("reload_shortcuts"),
   suspendShortcuts: () => invoke<void>("suspend_shortcuts"),
   resumeShortcuts: () => invoke<void>("resume_shortcuts"),
-  getLastCaptureMode: () => invoke<[string, string]>("get_last_capture_mode"),
   getHotkeyWarning: () => invoke<string | null>("get_hotkey_warning"),
   getAutostart: () => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),

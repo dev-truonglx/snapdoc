@@ -61,9 +61,9 @@ const PHOTO_MODES: { id: CaptureMode; label: string; icon: React.ReactNode }[] =
 ];
 
 // Khu vực 2: chế độ QUAY MÀN HÌNH — đúng 3 phạm vi, dùng chung icon phạm vi
-// với nhóm chụp ảnh nhưng tô đỏ khi active (xem `scopeBtn`) để phân biệt rõ
-// đây là quay video, không phải chụp ảnh — cùng ngôn ngữ hình khối, khác
-// "công cụ" đang chọn, giống cách thanh Cmd+Shift+5 của macOS chia 2 cụm.
+// với nhóm chụp ảnh nhưng gắn thêm chấm đỏ nhỏ (xem `recordDotBadge`) để phân
+// biệt rõ đây là quay video, không phải chụp ảnh — cùng ngôn ngữ hình khối,
+// khác nhóm hành động, giống cách thanh Cmd+Shift+5 của macOS chia 2 cụm.
 const RECORD_MODES: { id: RecordMode; label: string }[] = [
   { id: "full", label: "Full" },
   { id: "window", label: "Window" },
@@ -118,10 +118,6 @@ export default function CaptureBar() {
       if (s?.recordAudioSource) setAudioSource(s.recordAudioSource);
     }).catch(() => {});
 
-    ipc.getLastCaptureMode().then(([m]) => {
-      if (m) setPhotoMode(m as CaptureMode);
-    }).catch(() => {});
-
     // Sync output/audio khi Settings thay đổi từ cửa sổ Settings. Output chỉ
     // áp dụng khi user KHÔNG đang chủ động chọn trong capture bar; audio thì
     // luôn áp dụng (không có input debounce nào tranh chấp ở đây).
@@ -134,30 +130,12 @@ export default function CaptureBar() {
       }
     });
 
-    const unlisten = listen<{ mode: string; output: string | null }>("set-capture-mode", (e) => {
-      setPhotoMode(e.payload.mode as CaptureMode);
-      setActiveGroup("photo");
-      // set-capture-mode từ editor "New" truyền output=null để chỉ sync mode,
-      // giữ nguyên defaultOutput từ settings. Chỉ override output khi có giá trị thực.
-      if (e.payload.output) {
-        setOutput(e.payload.output as OutputMode);
-      }
-    });
-
-    // Nút "Quay lại" ở `record-review` (xem `record::redo_recording`) — sync
-    // đúng phạm vi quay vừa xoá sang khu vực QUAY MÀN HÌNH, y hệt hành vi bấm
-    // tay vào nút phạm vi đó (xem `selectVideoMode`: "region" cần mở luôn
-    // khung chọn/chỉnh vùng, "full"/"window" thì chỉ chọn mode chờ bấm "Quay").
+    // Nút "Quay lại" ở `record-review` (xem `record::redo_recording`) — mở
+    // lại đúng phạm vi quay vừa xoá, y hệt hành vi bấm tay vào nút phạm vi đó
+    // (xem `selectVideoMode`).
     const unlistenRecordMode = listen<{ mode: string }>("set-record-mode", (e) => {
       selectVideoMode(e.payload.mode as RecordMode);
     });
-
-    const onFocus = () => {
-      ipc.getLastCaptureMode().then(([m]) => {
-        if (m) setPhotoMode(m as CaptureMode);
-      }).catch(() => {});
-    };
-    window.addEventListener("focus", onFocus);
 
     // Listen to native Tauri blur event to close popover when clicking outside the window
     const unlistenBlur = listen("tauri://blur", () => {
@@ -210,9 +188,7 @@ export default function CaptureBar() {
 
     return () => {
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("focus", onFocus);
       window.removeEventListener("mousedown", onClickOutside);
-      unlisten.then((fn) => fn());
       unlistenRecordMode.then((fn) => fn());
       unlistenSettings.then((fn) => fn());
       unlistenBlur.then((fn) => fn());
@@ -297,7 +273,7 @@ export default function CaptureBar() {
               <button
                 key={m.id}
                 onClick={() => selectPhotoMode(m.id)}
-                style={scopeBtn(isPhoto && photoMode === m.id, "photo")}
+                style={scopeBtn}
                 title={m.label}
               >
                 {m.icon}
@@ -308,14 +284,13 @@ export default function CaptureBar() {
 
           <div style={divider} />
 
-          {/* Khu vực 2: chế độ QUAY MÀN HÌNH — luôn hiện đủ 3 lựa chọn, tô đỏ
-              khi active để phân biệt với khu vực chụp ảnh phía trên. */}
+          {/* Khu vực 2: chế độ QUAY MÀN HÌNH — luôn hiện đủ 3 lựa chọn. */}
           <div style={modeGroup}>
             {RECORD_MODES.map((r) => (
               <button
                 key={r.id}
                 onClick={() => selectVideoMode(r.id)}
-                style={scopeBtn(!isPhoto && videoMode === r.id, "video")}
+                style={scopeBtn}
                 title={`Quay ${r.label.toLowerCase()}`}
               >
                 <span style={recordIconWrap}>
@@ -403,23 +378,20 @@ const modeGroup: React.CSSProperties = {
   padding: 2,
 };
 
-// Nút phạm vi (Full/Window/Region…) dùng chung cho cả 2 khu vực — chỉ khác
-// màu khi active: xanh (accent) cho chụp ảnh, đỏ (danger) cho quay màn hình,
-// giúp phân biệt "đang ở công cụ nào" chỉ bằng màu sắc.
-function scopeBtn(active: boolean, kind: "photo" | "video"): React.CSSProperties {
-  return {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: 3,
-    width: 56,
-    padding: "6px 4px",
-    borderRadius: 6,
-    background: active ? (kind === "video" ? "var(--danger)" : "var(--accent)") : "transparent",
-    color: active ? "#fff" : "var(--text-dim)",
-    transition: "background 0.12s",
-  };
-}
+// Nút phạm vi (Full/Window/Region…) dùng chung cho cả 2 khu vực — mỗi bấm là
+// 1 hành động chạy ngay nên không còn trạng thái "đang chọn" để tô màu; phân
+// biệt chụp ảnh/quay màn hình qua icon + chấm đỏ (`recordDotBadge`), không
+// qua màu nền nút nữa.
+const scopeBtn: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 3,
+  width: 56,
+  padding: "6px 4px",
+  borderRadius: 6,
+  color: "var(--text-dim)",
+};
 
 const divider: React.CSSProperties = {
   width: 1,
