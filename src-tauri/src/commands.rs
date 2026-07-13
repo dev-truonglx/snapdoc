@@ -232,6 +232,14 @@ pub fn close_self(window: tauri::WebviewWindow) {
             let _ = border.close();
         }
     }
+    // capture-bar không bao giờ bị destroy nữa — phải luôn tồn tại để giữ
+    // Dock/taskbar icon xuyên suốt vòng đời app (xem `windows::prewarm_capture_bar`).
+    // Bấm "X"/Escape chỉ minimize; `windows::open_capture_bar` tự unminimize
+    // khi mở lại.
+    if label == "capture-bar" {
+        let _ = window.minimize();
+        return;
+    }
     let _ = window.close();
 }
 
