@@ -94,6 +94,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   useEffect(() => { fitScaleRef.current = fitScale; }, [fitScale]);
   useEffect(() => { docRef.current = doc; }, [doc]);
 
+  // true = zoom đang ở mức mặc định tự động theo rule (ảnh nhỏ hơn khung →
+  // 100% thật, ảnh lớn hơn khung → fit vừa khung) và phải tự cập nhật lại mỗi
+  // khi khung Editor đổi kích thước (resize/full màn) — xem effect đo
+  // `fitScale` bên dưới. Tắt (false) ngay khi user tự tay đổi zoom (wheel,
+  // nút +/-, Fit, Actual size) để không ghi đè lựa chọn thủ công của họ.
+  const autoZoomRef = useRef(true);
+
   // Scroll cần apply sau khi React render canvas ở scale mới
   const pendingScrollRef = useRef<{ x: number; y: number } | null>(null);
 
@@ -181,9 +188,12 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     el.onload = () => setImg(el);
   }, [doc?.image]);
 
-  // Tính fitScale để ảnh vừa container, đặt zoom mặc định khi tải ảnh mới.
+  // Tính fitScale để ảnh vừa container, đặt zoom mặc định khi tải ảnh mới —
+  // và tính lại MỖI LẦN khung Editor đổi kích thước (resize/full màn), không
+  // chỉ lúc tải ảnh, miễn user chưa tự tay chỉnh zoom (xem `autoZoomRef`).
   useLayoutEffect(() => {
     if (!doc) return;
+    autoZoomRef.current = true; // ảnh mới → về lại chế độ zoom mặc định tự động
     const measure = () => {
       // Đo trên `outerRef` (KHÔNG có overflow:auto) — xem giải thích ở khai
       // báo `outerRef`. Đo trên `containerRef` (vùng cuộn thật) sẽ gây vòng
@@ -200,16 +210,19 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       // Không giới hạn max — ảnh nhỏ hơn window sẽ hiển thị 1:1 hoặc lớn hơn
       const s = Math.max(0.05, Math.min(cw / doc.imgW, ch / doc.imgH));
       setFitScale(s);
-      return s;
+      // Zoom mặc định tuỳ mode đã chụp ra ảnh (`doc.captureMode`, xem model.ts):
+      // "region" (vùng chọn) → ảnh NHỎ hơn khung Editor (fitScale s ≥ 1, tức
+      // không cần thu nhỏ mới vừa) thì hiện đúng 100% THẬT (1px ảnh = 1px màn
+      // hình, zoom = 1/s ⇒ scale = 1); ảnh LỚN hơn khung (s < 1) thì tự fit vừa
+      // khung (zoom = 1 ⇒ scale = fitScale) thay vì luôn ép 100% khiến ảnh to
+      // tràn ra ngoài tầm nhìn. Mọi mode khác → luôn fit như trước. Chỉ áp
+      // dụng khi còn ở chế độ auto (`autoZoomRef`) — nếu không, resize sẽ ghi
+      // đè zoom user vừa tự chỉnh tay.
+      if (autoZoomRef.current) {
+        setZoom(doc.captureMode === "region" && s ? (s < 1 ? 1 : clampZoom(1 / s)) : 1);
+      }
     };
-    const s = measure();
-    // Zoom mặc định tuỳ mode đã chụp ra ảnh (`doc.captureMode`, xem model.ts):
-    // "region" (vùng chọn) → ảnh NHỎ hơn khung Editor (fitScale s ≥ 1, tức
-    // không cần thu nhỏ mới vừa) thì hiện đúng 100% THẬT (1px ảnh = 1px màn
-    // hình, zoom = 1/s ⇒ scale = 1); ảnh LỚN hơn khung (s < 1) thì tự fit vừa
-    // khung (zoom = 1 ⇒ scale = fitScale) thay vì luôn ép 100% khiến ảnh to
-    // tràn ra ngoài tầm nhìn. Mọi mode khác → luôn fit như trước.
-    setZoom(doc.captureMode === "region" && s ? (s < 1 ? 1 : clampZoom(1 / s)) : 1);
+    measure();
     const ro = new ResizeObserver(measure);
     if (outerRef.current) ro.observe(outerRef.current);
     return () => ro.disconnect();
@@ -243,6 +256,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const zoomAround = (vx: number, vy: number, opts: { factor?: number; target?: number }) => {
     const el = containerRef.current;
     if (!el) return;
+    autoZoomRef.current = false; // user tự chỉnh zoom → thôi tự động tính lại khi resize
     setZoom((oldZoom) => {
       const fs = fitScaleRef.current;
       const d = docRef.current;
@@ -502,7 +516,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const doZoomOut = () => zoomCenter({ factor: 1 / ZOOM_STEP });
   // Fit: zoom=1 ⇒ scale=fitScale (ảnh vừa khung). Canvas ≤ container nên flex tự
   // canh giữa, không cần bù scroll.
-  const doZoomFit = () => { pendingScrollRef.current = null; setZoom(1); };
+  const doZoomFit = () => { autoZoomRef.current = false; pendingScrollRef.current = null; setZoom(1); };
   // Actual size 1:1 pixel: scale=1 ⇒ zoom = 1/fitScale. Neo tâm viewport.
   const doZoomActual = () => zoomCenter({ target: 1 / fitScaleRef.current });
   // Toggle nhanh giữa Fit và 100% khi bấm vào ô phần trăm.
