@@ -101,6 +101,7 @@ export default function CaptureBar() {
   const optionWrapRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const syncWindowFrameRef = useRef<(() => Promise<void>) | null>(null);
   // Dùng ref để tránh setOutput ghi đè khi user đang chủ động chọn output
   // trong cùng một session (selectOutput đã lưu settings rồi → event sẽ fire
   // lại đúng giá trị đó, không gây loop).
@@ -256,32 +257,58 @@ export default function CaptureBar() {
   const currentAudio = AUDIO_OPTIONS.find((a) => a.id === audioSource);
   const isPhoto = activeGroup === "photo";
 
-  useLayoutEffect(() => {
+  syncWindowFrameRef.current = async () => {
     if (!("__TAURI_INTERNALS__" in window)) return;
 
-    const syncWindowFrame = async () => {
-      const windowApi = getCurrentWebviewWindow();
-      const currentSize = await windowApi.innerSize();
-      const currentPosition = await windowApi.outerPosition();
-      const barHeight = barRef.current?.getBoundingClientRect().height ?? 0;
-      const popoverHeight = showPopover ? (popoverRef.current?.getBoundingClientRect().height ?? 0) : 0;
-      const nextHeight = Math.ceil(
-        barHeight
-        + CAPTURE_BAR_BOTTOM_PADDING
-        + (showPopover ? popoverHeight + CAPTURE_BAR_POPOVER_GAP : 0),
-      );
+    const windowApi = getCurrentWebviewWindow();
+    const currentSize = await windowApi.innerSize();
+    const currentPosition = await windowApi.outerPosition();
+    const barHeight = barRef.current?.getBoundingClientRect().height ?? 0;
+    const popoverHeight = showPopover ? (popoverRef.current?.getBoundingClientRect().height ?? 0) : 0;
+    const nextHeight = Math.ceil(
+      barHeight
+      + CAPTURE_BAR_BOTTOM_PADDING
+      + (showPopover ? popoverHeight + CAPTURE_BAR_POPOVER_GAP : 0),
+    );
 
-      if (nextHeight <= 0) return;
+    if (nextHeight <= 0) return;
 
-      const heightDelta = nextHeight - currentSize.height;
-      await windowApi.setSize(new PhysicalSize(currentSize.width, nextHeight));
-      if (heightDelta !== 0) {
-        await windowApi.setPosition(new PhysicalPosition(currentPosition.x, currentPosition.y - heightDelta));
-      }
-    };
+    const heightDelta = nextHeight - currentSize.height;
+    await windowApi.setSize(new PhysicalSize(currentSize.width, nextHeight));
+    if (heightDelta !== 0) {
+      await windowApi.setPosition(new PhysicalPosition(currentPosition.x, currentPosition.y - heightDelta));
+    }
+  };
 
-    void syncWindowFrame();
+  useLayoutEffect(() => {
+    void syncWindowFrameRef.current?.();
   }, [showPopover, output, audioSource]);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    let firstFrame = 0;
+    let secondFrame = 0;
+    const observer = new ResizeObserver(() => {
+      void syncWindowFrameRef.current?.();
+    });
+
+    if (barRef.current) {
+      observer.observe(barRef.current);
+    }
+
+    firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        void syncWindowFrameRef.current?.();
+      });
+    });
+
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, []);
 
   return (
     // Wrap toàn bộ height, flex-end để bar nằm đáy — popover có không gian phía trên

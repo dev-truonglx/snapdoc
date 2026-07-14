@@ -215,7 +215,7 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
         // preview. Cửa sổ resizable(false) + body overflow:hidden nên rộng
         // hơn nội dung thật 1 chút để không bao giờ bị cắt, kể cả khi font
         // render rộng hơn 1 chút trên Windows.
-        .inner_size(850.0, 280.0)
+        .inner_size(730.0, 80.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -250,7 +250,7 @@ pub fn prewarm_capture_bar(app: &AppHandle) -> Result<(), String> {
     }
     let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
         .title("SnapDoc")
-        .inner_size(850.0, 280.0)
+        .inner_size(730.0, 80.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
