@@ -261,6 +261,16 @@ pub fn prewarm_capture_bar(app: &AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| format!("Không tạo được capture bar: {e}"))?;
     place_bottom_center(app, &win);
+    #[cfg(target_os = "windows")]
+    {
+        // Windows chỉ giữ icon app trên taskbar khi có cửa sổ hiện diện.
+        // Prewarm theo kiểu hidden (`visible(false)`) sẽ rơi về tray-only.
+        // Show rồi minimize để taskbar icon luôn tồn tại từ lúc khởi động,
+        // nhưng không làm thanh capture bar nằm lộ trên màn hình.
+        let _ = win.show();
+        let _ = win.minimize();
+        let _ = win.set_skip_taskbar(false);
+    }
     Ok(())
 }
 

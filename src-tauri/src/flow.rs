@@ -9,13 +9,34 @@ use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 fn hide_bar(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("capture-bar") {
-        let _ = win.hide();
+        #[cfg(target_os = "windows")]
+        {
+            // Giữ cửa sổ tồn tại trên taskbar (app-level anchor) thay vì
+            // hidden hoàn toàn như trước.
+            let _ = win.minimize();
+            let _ = win.set_skip_taskbar(false);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = win.hide();
+        }
     }
 }
 
 fn bar_is_visible(app: &AppHandle) -> bool {
     app.get_webview_window("capture-bar")
-        .map(|w| w.is_visible().unwrap_or(false))
+        .map(|w| {
+            let visible = w.is_visible().unwrap_or(false);
+            #[cfg(target_os = "windows")]
+            {
+                let minimized = w.is_minimized().unwrap_or(false);
+                visible && !minimized
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                visible
+            }
+        })
         .unwrap_or(false)
 }
 
