@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ipc, type AudioSource, type CaptureMode, type OutputMode } from "../../lib/ipc";
 
 type RecordMode = "full" | "window" | "region";
@@ -84,6 +86,9 @@ const AUDIO_OPTIONS: { id: AudioSource; label: string }[] = [
   { id: "system", label: "Âm thanh hệ thống" },
 ];
 
+const CAPTURE_BAR_BOTTOM_PADDING = 12;
+const CAPTURE_BAR_POPOVER_GAP = 6;
+
 export default function CaptureBar() {
   const [photoMode, setPhotoMode] = useState<CaptureMode>("region");
   const [videoMode, setVideoMode] = useState<RecordMode>("full");
@@ -94,6 +99,8 @@ export default function CaptureBar() {
   // 2 nút đó cũng không bao giờ cùng hiện (đổi theo activeGroup).
   const [showPopover, setShowPopover] = useState(false);
   const optionWrapRef = useRef<HTMLDivElement>(null);
+  const barRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
   // Dùng ref để tránh setOutput ghi đè khi user đang chủ động chọn output
   // trong cùng một session (selectOutput đã lưu settings rồi → event sẽ fire
   // lại đúng giá trị đó, không gây loop).
@@ -249,12 +256,39 @@ export default function CaptureBar() {
   const currentAudio = AUDIO_OPTIONS.find((a) => a.id === audioSource);
   const isPhoto = activeGroup === "photo";
 
+  useLayoutEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    const syncWindowFrame = async () => {
+      const windowApi = getCurrentWebviewWindow();
+      const currentSize = await windowApi.innerSize();
+      const currentPosition = await windowApi.outerPosition();
+      const barHeight = barRef.current?.getBoundingClientRect().height ?? 0;
+      const popoverHeight = showPopover ? (popoverRef.current?.getBoundingClientRect().height ?? 0) : 0;
+      const nextHeight = Math.ceil(
+        barHeight
+        + CAPTURE_BAR_BOTTOM_PADDING
+        + (showPopover ? popoverHeight + CAPTURE_BAR_POPOVER_GAP : 0),
+      );
+
+      if (nextHeight <= 0) return;
+
+      const heightDelta = nextHeight - currentSize.height;
+      await windowApi.setSize(new PhysicalSize(currentSize.width, nextHeight));
+      if (heightDelta !== 0) {
+        await windowApi.setPosition(new PhysicalPosition(currentPosition.x, currentPosition.y - heightDelta));
+      }
+    };
+
+    void syncWindowFrame();
+  }, [showPopover, output, audioSource]);
+
   return (
     // Wrap toàn bộ height, flex-end để bar nằm đáy — popover có không gian phía trên
     <div style={wrap}>
       <div style={container}>
         {/* Bar nằm đáy */}
-        <div style={bar}>
+        <div ref={barRef} style={bar}>
           {/* Khu vực 1: chế độ CHỤP ẢNH */}
           <div style={modeGroup}>
             {/* Chụp nhanh — hành động chạy NGAY (không phải chế độ để chọn):
@@ -315,7 +349,7 @@ export default function CaptureBar() {
               <span style={{ fontSize: 10, opacity: 0.5 }}>{showPopover ? "▴" : "▾"}</span>
             </button>
             {showPopover && (
-              <div style={popover} onClick={(e) => e.stopPropagation()}>
+              <div ref={popoverRef} style={popover} onClick={(e) => e.stopPropagation()}>
                 {isPhoto
                   ? OUTPUTS.map((o) => (
                       <button key={o.id} style={popItem(output === o.id)} onClick={() => selectOutput(o.id)}>
