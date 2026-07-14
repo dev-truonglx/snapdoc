@@ -284,7 +284,13 @@ pub fn prewarm_capture_bar(app: &AppHandle) -> Result<(), String> {
 /// nguồn gây nháy khi resize nhanh (mở/đóng popover liên tục) dù JS đã tính
 /// đúng chiều cao và đúng thứ tự gọi.
 ///
-/// Windows/Linux: không có API atomic tương đương, fallback về set_size +
+/// Windows: gọi thẳng Win32 `SetWindowPos` — MỘT lệnh atomic set cả size lẫn
+/// position cùng lúc (tương đương `setFrame:display:` bên macOS). Windows
+/// dùng gốc toạ độ TRÊN-TRÁI (khác AppKit) nên vẫn cần tự tính `y` mới để
+/// giữ cạnh đáy đứng yên, nhưng việc đó + set đều gói trong 1 lệnh Win32 duy
+/// nhất — không tách thành 2 lệnh (set_size rồi set_position) như Tauri.
+///
+/// Linux (fallback chung): không có API atomic tương đương, dùng set_size +
 /// set_position của Tauri — nhưng vẫn gộp việc đo + tính + set vào 1 lệnh
 /// Rust duy nhất (trước đây JS phải gọi 4 round-trip IPC riêng: innerSize/
 /// outerPosition/setSize/setPosition), giảm hẳn độ trễ giữa các bước.
@@ -296,26 +302,31 @@ pub fn resize_capture_bar(app: AppHandle, height: f64) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        // AppKit chỉ an toàn khi gọi từ main thread — #[tauri::command] chạy
-        // trên thread pool riêng của Tauri, không phải main thread.
-        // `run_on_main_thread` chỉ ĐƯA công việc vào hàng đợi của main thread
-        // rồi trả về NGAY (fire-and-forget) — nếu không chờ, lệnh command này
-        // sẽ trả `Ok` cho JS TRƯỚC KHI NSWindow thực sự được resize, phá vỡ
-        // đúng thứ tự "resize xong rồi mới hiện popover" mà `CaptureBar.tsx`
-        // dựa vào để tránh nháy. Dùng channel để đợi main thread báo đã xong.
-        let (tx, rx) = std::sync::mpsc::channel();
-        let win_main = win.clone();
-        app
-            .run_on_main_thread(move || {
-                resize_capture_bar_ns_window_main_thread(&win_main, height);
-                let _ = tx.send(());
-            })
-            .map_err(|e| e.to_string())?;
-        let _ = rx.recv_timeout(std::time::Duration::from_millis(500));
+        // #[tauri::command] đồng bộ (không async) chạy NGAY TRÊN thread nhận
+        // IPC — trên macOS đó CHÍNH LÀ main thread (WKScriptMessageHandler
+        // của WebKit luôn callback trên main thread, không có thread pool nào
+        // ở giữa). Vì vậy gọi thẳng AppKit ở đây là AN TOÀN, không cần
+        // `run_on_main_thread`.
+        //
+        // TRƯỚC ĐÂY code này dùng `run_on_main_thread` + channel để "chắc ăn"
+        // — nhưng đó chính là BUG gây "nháy": `run_on_main_thread` chỉ ĐƯA
+        // closure vào hàng đợi của main thread rồi trả về ngay (không tự
+        // chạy), trong khi ta đang ĐỨNG NGAY TRÊN main thread và tự chặn nó
+        // bằng `rx.recv_timeout` — closure không bao giờ được xử lý cho tới
+        // khi hàm này return (giải phóng main thread), nên lúc nào cũng phải
+        // đợi hết timeout (500ms) mới "release" được: bar bị kẹt ở kích thước
+        // cũ suốt 500ms rồi mới "nháy" snap về đúng kích thước — deadlock tự
+        // gây ra, không phải do AppKit hay do JS.
+        resize_capture_bar_ns_window_main_thread(&win, height);
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        resize_capture_bar_win32(&win, height)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let scale = win.scale_factor().map_err(|e| e.to_string())?;
         let current_size = win.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
@@ -336,8 +347,9 @@ pub fn resize_capture_bar(app: AppHandle, height: f64) -> Result<(), String> {
     }
 }
 
-/// SAFETY: BẮT BUỘC chạy trên main thread — caller đảm bảo qua
-/// `run_on_main_thread` ở `resize_capture_bar` phía trên.
+/// SAFETY: BẮT BUỘC chạy trên main thread — được đảm bảo bởi caller duy nhất
+/// (`resize_capture_bar`, một `#[tauri::command]` đồng bộ, luôn chạy ngay
+/// trên thread nhận IPC — main thread trên macOS).
 #[cfg(target_os = "macos")]
 fn resize_capture_bar_ns_window_main_thread(win: &tauri::WebviewWindow, height: f64) {
     let ptr = match win.ns_window() {
@@ -357,6 +369,52 @@ fn resize_capture_bar_ns_window_main_thread(win: &tauri::WebviewWindow, height: 
         frame.size.height = height;
         ns_win.setFrame_display(frame, true);
     }
+}
+
+/// `height` (logic/CSS px, từ `getBoundingClientRect` bên JS) được quy đổi
+/// sang PHYSICAL px qua `scale_factor()` vì `GetWindowRect`/`SetWindowPos`
+/// của Win32 luôn làm việc ở physical px (app Tauri per-monitor-DPI-aware).
+#[cfg(target_os = "windows")]
+fn resize_capture_bar_win32(win: &tauri::WebviewWindow, height: f64) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+
+    let hwnd = win.hwnd().map_err(|e| e.to_string())?.0;
+    let scale = win.scale_factor().map_err(|e| e.to_string())?;
+    let height_physical = (height * scale).round() as i32;
+
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    // SAFETY: hwnd còn sống trong scope (giữ bởi `win`); rect là output hợp lệ.
+    let ok = unsafe { GetWindowRect(hwnd, &mut rect) };
+    if ok == 0 {
+        return Err("GetWindowRect thất bại".to_string());
+    }
+
+    let width = rect.right - rect.left;
+    let current_height = rect.bottom - rect.top;
+    let height_delta = height_physical - current_height;
+    // Win32: gốc toạ độ TRÊN-TRÁI, y tăng xuống dưới → phải bù `top` lên
+    // đúng bằng phần chiều cao tăng thêm để giữ cạnh đáy đứng yên (khác
+    // AppKit, nơi giữ nguyên origin là đủ).
+    let new_top = rect.top - height_delta;
+
+    // SAFETY: hwnd hợp lệ (Tauri giữ); SWP_NOZORDER nên hwndinsertafter (null)
+    // bị bỏ qua.
+    let ok = unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            rect.left,
+            new_top,
+            width,
+            height_physical,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
+    if ok == 0 {
+        return Err("SetWindowPos thất bại".to_string());
+    }
+    Ok(())
 }
 
 /// Bảng điều khiển chụp cuộn (scrolling capture).

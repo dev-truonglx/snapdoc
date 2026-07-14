@@ -85,7 +85,6 @@ const AUDIO_OPTIONS: { id: AudioSource; label: string }[] = [
 ];
 
 const CAPTURE_BAR_BOTTOM_PADDING = 12;
-const CAPTURE_BAR_POPOVER_GAP = 6;
 
 export default function CaptureBar() {
   const [photoMode, setPhotoMode] = useState<CaptureMode>("region");
@@ -253,13 +252,27 @@ export default function CaptureBar() {
   // const currentOutput = OUTPUTS.find((o) => o.id === output);
   // const currentAudio = AUDIO_OPTIONS.find((a) => a.id === audioSource);
 
-  /** Đo chiều cao bar/popover hiện tại. popover luôn được mount trong DOM
-   * (ẩn bằng `visibility`, xem JSX) nên đo được kích thước thật của nó bất
-   * kể đang hiện hay ẩn — không còn phải đợi 1 nhịp render sau khi mount. */
-  const measureHeights = () => ({
-    barHeight: barRef.current?.getBoundingClientRect().height ?? 0,
-    popoverHeight: popoverRef.current?.getBoundingClientRect().height ?? 0,
-  });
+  /** Chiều cao cần cho cửa sổ khi popover ĐÓNG — chỉ cần đủ chứa bar. */
+  const computeClosedHeight = () => {
+    const barHeight = barRef.current?.getBoundingClientRect().height ?? 0;
+    return Math.ceil(barHeight + CAPTURE_BAR_BOTTOM_PADDING);
+  };
+
+  /** Chiều cao cần cho cửa sổ khi popover MỞ — đo TRỰC TIẾP khoảng cách từ
+   * đáy bar lên đỉnh popover qua `getBoundingClientRect` (popover luôn mount
+   * sẵn trong DOM, ẩn bằng `visibility`, nên đo được bất kể đang ẩn hay hiện).
+   * KHÔNG dùng công thức `barHeight + popoverHeight + gap cố định` — nút
+   * "Options" (nơi popover neo `bottom: calc(100% + 6px)`) thấp hơn cả thanh
+   * bar vì bị canh giữa dọc (`alignItems: center` ở `bar`), nên khoảng cách
+   * thật giữa đáy bar và đỉnh popover NHỎ HƠN công thức cộng dồn tới ~17px
+   * (đúng bằng nửa chênh lệch chiều cao bar/nút Options) — đo trực tiếp qua
+   * rect loại bỏ hẳn sai số này, đúng bất kể CSS neo popover thay đổi sau này. */
+  const computeOpenHeight = () => {
+    const barRect = barRef.current?.getBoundingClientRect();
+    const popoverRect = popoverRef.current?.getBoundingClientRect();
+    if (!barRect || !popoverRect) return 0;
+    return Math.ceil(barRect.bottom - popoverRect.top + CAPTURE_BAR_BOTTOM_PADDING);
+  };
 
   // Resize thật sự chạy ở Rust (`windows::resize_capture_bar`) — trên macOS
   // gọi thẳng NSWindow.setFrame:display: (1 lệnh AppKit atomic set cả
@@ -282,16 +295,11 @@ export default function CaptureBar() {
     if (next === showPopoverRef.current) return;
 
     if (next) {
-      const { barHeight, popoverHeight } = measureHeights();
-      const targetHeight = Math.ceil(
-        barHeight + CAPTURE_BAR_BOTTOM_PADDING + popoverHeight + CAPTURE_BAR_POPOVER_GAP,
-      );
-      await resizeWindowTo(targetHeight);
+      await resizeWindowTo(computeOpenHeight());
       setShowPopover(true);
     } else {
       setShowPopover(false);
-      const { barHeight } = measureHeights();
-      await resizeWindowTo(Math.ceil(barHeight + CAPTURE_BAR_BOTTOM_PADDING));
+      await resizeWindowTo(computeClosedHeight());
     }
   };
 
@@ -302,13 +310,7 @@ export default function CaptureBar() {
     if (!("__TAURI_INTERNALS__" in window)) return;
 
     const syncBarHeightOnly = () => {
-      const { barHeight, popoverHeight } = measureHeights();
-      const nextHeight = Math.ceil(
-        barHeight
-        + CAPTURE_BAR_BOTTOM_PADDING
-        + (showPopoverRef.current ? popoverHeight + CAPTURE_BAR_POPOVER_GAP : 0),
-      );
-      void resizeWindowTo(nextHeight);
+      void resizeWindowTo(showPopoverRef.current ? computeOpenHeight() : computeClosedHeight());
     };
 
     let firstFrame = 0;
