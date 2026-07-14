@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ipc, type AudioSource, type CaptureMode, type OutputMode } from "../../lib/ipc";
 
 type RecordMode = "full" | "window" | "region";
@@ -85,15 +87,7 @@ const AUDIO_OPTIONS: { id: AudioSource; label: string }[] = [
 ];
 
 const CAPTURE_BAR_BOTTOM_PADDING = 12;
-
-// Sàn an toàn cho chiều cao cửa sổ — chặn trường hợp `getBoundingClientRect()`
-// đo phải 0 (race lúc mount: cửa sổ prewarm còn ẩn, layout webview có thể
-// chưa flush kịp trước khi effect đo, dễ gặp hơn trên máy render nhanh như
-// MacBook Retina), khiến cửa sổ bị resize xuống còn vài px và KẸT vĩnh viễn ở
-// đó (ResizeObserver chỉ bắn lại khi kích thước bar THẬT SỰ đổi, không tự
-// sửa nếu phép đo ban đầu sai). Thấp hơn hẳn chiều cao bar thật (~60-70px) nên
-// không ảnh hưởng phép đo hợp lệ, chỉ chặn giá trị suy biến gần 0.
-const CAPTURE_BAR_MIN_HEIGHT = 40;
+const CAPTURE_BAR_POPOVER_GAP = 6;
 
 export default function CaptureBar() {
   const [photoMode, setPhotoMode] = useState<CaptureMode>("region");
@@ -107,6 +101,7 @@ export default function CaptureBar() {
   const optionWrapRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const syncWindowFrameRef = useRef<(() => Promise<void>) | null>(null);
   // Dùng ref để tránh setOutput ghi đè khi user đang chủ động chọn output
   // trong cùng một session (selectOutput đã lưu settings rồi → event sẽ fire
   // lại đúng giá trị đó, không gây loop).
@@ -152,11 +147,11 @@ export default function CaptureBar() {
 
     // Listen to native Tauri blur event to close popover when clicking outside the window
     const unlistenBlur = listen("tauri://blur", () => {
-      void setPopoverOpen(false);
+      setShowPopover(false);
     });
 
     const unlistenHidePopover = listen("hide-popover", () => {
-      void setPopoverOpen(false);
+      setShowPopover(false);
     });
 
     // `run_record_picker`/`finalize_region`/`finalize_window` (flow.rs) emit
@@ -170,7 +165,7 @@ export default function CaptureBar() {
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (showPopoverRef.current) { void setPopoverOpen(false); return; }
+        if (showPopoverRef.current) { setShowPopover(false); return; }
         ipc.closeSelf();
       }
       if (e.key === "Enter") {
@@ -194,7 +189,7 @@ export default function CaptureBar() {
 
     const onClickOutside = (e: MouseEvent) => {
       if (optionWrapRef.current && !optionWrapRef.current.contains(e.target as Node)) {
-        void setPopoverOpen(false);
+        setShowPopover(false);
       }
     };
     window.addEventListener("mousedown", onClickOutside);
@@ -216,7 +211,7 @@ export default function CaptureBar() {
   const selectOutput = (o: OutputMode) => {
     userPickedRef.current = true;
     setOutput(o);
-    void setPopoverOpen(false);
+    setShowPopover(false);
     ipc.getSettings().then((s) => {
       if (s) ipc.setSettings({ ...s, defaultOutput: o }).catch(() => {});
     }).catch(() => {}).finally(() => {
@@ -229,7 +224,7 @@ export default function CaptureBar() {
    * Cùng key settings với Settings.tsx nên đổi ở đâu cũng đồng bộ 2 chỗ. */
   const selectAudioSource = (a: AudioSource) => {
     setAudioSource(a);
-    void setPopoverOpen(false);
+    setShowPopover(false);
     ipc.getSettings().then((s) => {
       if (s) ipc.setSettings({ ...s, recordAudioSource: a }).catch(() => {});
     }).catch(() => {});
@@ -261,107 +256,67 @@ export default function CaptureBar() {
   // const currentOutput = OUTPUTS.find((o) => o.id === output);
   // const currentAudio = AUDIO_OPTIONS.find((a) => a.id === audioSource);
 
-  /** Chiều cao cần cho cửa sổ khi popover ĐÓNG — chỉ cần đủ chứa bar. */
-  const computeClosedHeight = () => {
+  syncWindowFrameRef.current = async () => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    const windowApi = getCurrentWebviewWindow();
+    // `innerSize()`/`outerPosition()` của Tauri LUÔN trả PHYSICAL px, bất kể
+    // đơn vị mình định dùng sau đó — trong khi `getBoundingClientRect()` (JS)
+    // luôn trả LOGICAL/CSS px, KHÔNG phụ thuộc scale màn hình. Bug thật đã gặp
+    // (che mất phần lớn capture bar trên màn Retina): trộn 2 đơn vị này rồi
+    // đóng gói thẳng vào `PhysicalSize`/`PhysicalPosition` — trên máy scale=2,
+    // 1 giá trị logical (vd 70) bị hiểu nhầm thành 70 physical px, tức chỉ 35
+    // điểm thật trên màn hình, làm cửa sổ co lại còn ~nửa chiều cao cần có.
+    // Quy hết về LOGICAL ngay từ đầu (qua `.toLogical(scaleFactor)`) rồi dùng
+    // `LogicalSize`/`LogicalPosition` khi set lại — Tauri tự quy đổi đúng theo
+    // scale HIỆN TẠI của cửa sổ lúc áp dụng, không còn lẫn đơn vị nữa.
+    const scaleFactor = await windowApi.scaleFactor();
+    const currentSize = (await windowApi.innerSize()).toLogical(scaleFactor);
+    const currentPosition = (await windowApi.outerPosition()).toLogical(scaleFactor);
     const barHeight = barRef.current?.getBoundingClientRect().height ?? 0;
-    return Math.ceil(barHeight + CAPTURE_BAR_BOTTOM_PADDING);
-  };
+    const popoverHeight = showPopover ? (popoverRef.current?.getBoundingClientRect().height ?? 0) : 0;
+    const nextHeight = Math.ceil(
+      barHeight
+      + CAPTURE_BAR_BOTTOM_PADDING
+      + (showPopover ? popoverHeight + CAPTURE_BAR_POPOVER_GAP : 0),
+    );
 
-  /** Chiều cao cần cho cửa sổ khi popover MỞ — đo TRỰC TIẾP khoảng cách từ
-   * đáy bar lên đỉnh popover qua `getBoundingClientRect` (popover luôn mount
-   * sẵn trong DOM, ẩn bằng `visibility`, nên đo được bất kể đang ẩn hay hiện).
-   * KHÔNG dùng công thức `barHeight + popoverHeight + gap cố định` — nút
-   * "Options" (nơi popover neo `bottom: calc(100% + 6px)`) thấp hơn cả thanh
-   * bar vì bị canh giữa dọc (`alignItems: center` ở `bar`), nên khoảng cách
-   * thật giữa đáy bar và đỉnh popover NHỎ HƠN công thức cộng dồn tới ~17px
-   * (đúng bằng nửa chênh lệch chiều cao bar/nút Options) — đo trực tiếp qua
-   * rect loại bỏ hẳn sai số này, đúng bất kể CSS neo popover thay đổi sau này. */
-  const computeOpenHeight = () => {
-    const barRect = barRef.current?.getBoundingClientRect();
-    const popoverRect = popoverRef.current?.getBoundingClientRect();
-    if (!barRect || !popoverRect) return 0;
-    return Math.ceil(barRect.bottom - popoverRect.top + CAPTURE_BAR_BOTTOM_PADDING);
-  };
+    if (nextHeight <= 0) return;
 
-  // Resize thật sự chạy ở Rust (`windows::resize_capture_bar`) — trên macOS
-  // gọi thẳng NSWindow.setFrame:display: (1 lệnh AppKit atomic set cả
-  // size+position cùng lúc, không thể lộ khung hình trung gian sai như khi
-  // JS tự gọi setSize rồi setPosition riêng lẻ qua 2 IPC round-trip). Lệnh
-  // Rust CHỜ đến khi main thread áp xong frame mới rồi mới trả về cho JS.
-  const resizeWindowTo = (nextHeight: number) => {
-    if (!("__TAURI_INTERNALS__" in window)) return Promise.resolve();
-    if (!Number.isFinite(nextHeight) || nextHeight <= 0) return Promise.resolve();
-    // Math.max với CAPTURE_BAR_MIN_HEIGHT: chặn giá trị suy biến gần 0 (xem
-    // giải thích ở khai báo hằng số) mà không ảnh hưởng phép đo hợp lệ nào
-    // (cả 2 trạng thái đóng/mở đều cao hơn hẳn sàn này trong điều kiện bình thường).
-    return ipc.resizeCaptureBar(Math.max(nextHeight, CAPTURE_BAR_MIN_HEIGHT)).catch(() => {});
-  };
-
-  /** Bật/tắt popover mà không bị nháy:
-   * - Mở: resize cửa sổ CHO TRỌN popover TRƯỚC, rồi mới hiện popover ra —
-   *   tránh cảnh popover đã render nhưng cửa sổ OS chưa kịp lớn (bị cắt/chớp).
-   * - Đóng: ẩn popover ngay (phản hồi tức thì), rồi mới thu nhỏ cửa sổ lại —
-   *   thứ tự này không tạo ra artifact vì popover đã biến mất trước khi cửa
-   *   sổ co lại. */
-  const setPopoverOpen = async (next: boolean) => {
-    if (next === showPopoverRef.current) return;
-
-    if (next) {
-      await resizeWindowTo(computeOpenHeight());
-      setShowPopover(true);
-    } else {
-      setShowPopover(false);
-      await resizeWindowTo(computeClosedHeight());
+    const heightDelta = nextHeight - currentSize.height;
+    await windowApi.setSize(new LogicalSize(currentSize.width, nextHeight));
+    if (heightDelta !== 0) {
+      await windowApi.setPosition(new LogicalPosition(currentPosition.x, currentPosition.y - heightDelta));
     }
   };
 
-  // Lưới an toàn: chỉ bắt các thay đổi kích thước TỰ THÂN của bar (vd: font
-  // load xong làm bar giãn nhẹ ở lần vẽ đầu) — không liên quan đến việc
-  // mở/đóng popover (đã xử lý riêng ở `setPopoverOpen` để tránh nháy).
+  useLayoutEffect(() => {
+    void syncWindowFrameRef.current?.();
+  }, [showPopover, output, audioSource]);
+
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
 
-    const syncBarHeightOnly = () => {
-      void resizeWindowTo(showPopoverRef.current ? computeOpenHeight() : computeClosedHeight());
-    };
-
     let firstFrame = 0;
     let secondFrame = 0;
-    const observer = new ResizeObserver(syncBarHeightOnly);
+    const observer = new ResizeObserver(() => {
+      void syncWindowFrameRef.current?.();
+    });
 
     if (barRef.current) {
       observer.observe(barRef.current);
     }
 
     firstFrame = window.requestAnimationFrame(() => {
-      secondFrame = window.requestAnimationFrame(syncBarHeightOnly);
+      secondFrame = window.requestAnimationFrame(() => {
+        void syncWindowFrameRef.current?.();
+      });
     });
 
     return () => {
       observer.disconnect();
       window.cancelAnimationFrame(firstFrame);
       window.cancelAnimationFrame(secondFrame);
-    };
-  }, []);
-
-  // Đồng bộ lại chiều cao MỖI LẦN cửa sổ được focus (đúng lúc `open_capture_bar`
-  // ở Rust show + focus lại cửa sổ prewarm, kể cả những lần sau — không chỉ
-  // lần mount đầu). Capture-bar không bao giờ bị destroy (chỉ ẩn/minimize —
-  // xem `windows::prewarm_capture_bar`), nên phép đo lúc mount ở effect trên
-  // là LẦN DUY NHẤT hình dạng thật của bar được đo trong khi cửa sổ còn ẩn —
-  // nếu phép đo đó lỡ sai (vd: webview chưa flush xong layout khi vẫn ẩn, dễ
-  // gặp hơn trên máy render nhanh), kích thước sai đó kẹt vĩnh viễn vì không
-  // còn dịp nào khác kích hoạt lại ResizeObserver (nội dung bar không đổi
-  // kích thước ở các lần mở sau). Focus lại là tín hiệu đáng tin cậy nhất cho
-  // "user đang thực sự nhìn thấy bar" — đo lại ở đây coi như lưới an toàn thứ
-  // 2, rẻ và vô hại nếu kích thước đã đúng sẵn.
-  useEffect(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return;
-    const unlistenFocus = listen("tauri://focus", () => {
-      void resizeWindowTo(showPopoverRef.current ? computeOpenHeight() : computeClosedHeight());
-    });
-    return () => {
-      unlistenFocus.then((f) => f());
     };
   }, []);
 
@@ -425,38 +380,35 @@ export default function CaptureBar() {
           <div ref={optionWrapRef} style={{ position: "relative" }}>
             <button
               style={optBtn}
-              onClick={(e) => { e.stopPropagation(); void setPopoverOpen(!showPopover); }}
+              onClick={(e) => { e.stopPropagation(); setShowPopover((v) => !v); }}
             >
               <span style={optBtnSection}>
                 Options
               </span>
               <span style={{ fontSize: 10, opacity: 0.5, marginLeft: 2 }}>{showPopover ? "▴" : "▾"}</span>
             </button>
-            {/* Luôn mount (kể cả khi đóng) để đo được chiều cao thật TRƯỚC khi
-                mở — cửa sổ OS được resize xong rồi mới hiện popover, tránh nháy
-                (xem `setPopoverOpen`). Ẩn bằng visibility (không phải display)
-                vì visibility:hidden vẫn giữ layout để đo, và tự chặn pointer
-                events nên phần tử phía sau vẫn thao tác được khi popover đóng. */}
-            <div ref={popoverRef} style={popoverStyle(showPopover)} onClick={(e) => e.stopPropagation()}>
-              {/* Section 1: Output chụp ảnh */}
-              <div style={popSectionLabel}>Chụp ảnh</div>
-              {OUTPUTS.map((o) => (
-                <button key={o.id} style={popItem(output === o.id)} onClick={() => selectOutput(o.id)}>
-                  <span style={{ flex: 1 }}>{o.label}</span>
-                  {output === o.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
-                </button>
-              ))}
-              {/* Divider */}
-              <div style={popDivider} />
-              {/* Section 2: Nguồn audio quay */}
-              <div style={popSectionLabel}>Quay màn hình</div>
-              {AUDIO_OPTIONS.map((a) => (
-                <button key={a.id} style={popItem(audioSource === a.id)} onClick={() => selectAudioSource(a.id)}>
-                  <span style={{ flex: 1 }}>{a.label}</span>
-                  {audioSource === a.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
-                </button>
-              ))}
-            </div>
+            {showPopover && (
+              <div ref={popoverRef} style={popover} onClick={(e) => e.stopPropagation()}>
+                {/* Section 1: Output chụp ảnh */}
+                <div style={popSectionLabel}>Chụp ảnh</div>
+                {OUTPUTS.map((o) => (
+                  <button key={o.id} style={popItem(output === o.id)} onClick={() => selectOutput(o.id)}>
+                    <span style={{ flex: 1 }}>{o.label}</span>
+                    {output === o.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
+                  </button>
+                ))}
+                {/* Divider */}
+                <div style={popDivider} />
+                {/* Section 2: Nguồn audio quay */}
+                <div style={popSectionLabel}>Quay màn hình</div>
+                {AUDIO_OPTIONS.map((a) => (
+                  <button key={a.id} style={popItem(audioSource === a.id)} onClick={() => selectAudioSource(a.id)}>
+                    <span style={{ flex: 1 }}>{a.label}</span>
+                    {audioSource === a.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Close */}
@@ -603,16 +555,6 @@ const popover: React.CSSProperties = {
   zIndex: 100,
   whiteSpace: "nowrap",
 };
-
-// popover luôn mount trong DOM — ẩn qua visibility (giữ layout để đo được
-// chiều cao thật bất kể đang mở hay đóng) thay vì display/conditional render.
-function popoverStyle(open: boolean): React.CSSProperties {
-  return {
-    ...popover,
-    visibility: open ? "visible" : "hidden",
-    pointerEvents: open ? "auto" : "none",
-  };
-}
 
 const popSectionLabel: React.CSSProperties = {
   padding: "5px 12px 3px",
