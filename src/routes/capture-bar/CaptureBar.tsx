@@ -253,9 +253,8 @@ export default function CaptureBar() {
     ipc.startRecordPicker(m).catch((e) => alert(String(e)));
   };
 
-  const currentOutput = OUTPUTS.find((o) => o.id === output);
-  const currentAudio = AUDIO_OPTIONS.find((a) => a.id === audioSource);
-  const isPhoto = activeGroup === "photo";
+  // const currentOutput = OUTPUTS.find((o) => o.id === output);
+  // const currentAudio = AUDIO_OPTIONS.find((a) => a.id === audioSource);
 
   syncWindowFrameRef.current = async () => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -365,31 +364,38 @@ export default function CaptureBar() {
 
           <div style={divider} />
 
-          {/* Option — đổi giữa Output (ảnh) / Nguồn audio (video), CÙNG 1
-              kiểu dáng nút+popover cho đồng nhất trải nghiệm. */}
+          {/* Option — 1 nút mở popover gộp cả Output (chụp) + Nguồn audio (quay)
+              thành 2 section riêng trong cùng 1 dropdown. */}
           <div ref={optionWrapRef} style={{ position: "relative" }}>
             <button
               style={optBtn}
               onClick={(e) => { e.stopPropagation(); setShowPopover((v) => !v); }}
             >
-              <span>{isPhoto ? (currentOutput?.label ?? "Hành vi") : (currentAudio?.label ?? "Âm thanh")}</span>
-              <span style={{ fontSize: 10, opacity: 0.5 }}>{showPopover ? "▴" : "▾"}</span>
+              <span style={optBtnSection}>
+                Options
+              </span>
+              <span style={{ fontSize: 10, opacity: 0.5, marginLeft: 2 }}>{showPopover ? "▴" : "▾"}</span>
             </button>
             {showPopover && (
               <div ref={popoverRef} style={popover} onClick={(e) => e.stopPropagation()}>
-                {isPhoto
-                  ? OUTPUTS.map((o) => (
-                      <button key={o.id} style={popItem(output === o.id)} onClick={() => selectOutput(o.id)}>
-                        <span style={{ flex: 1 }}>{o.label}</span>
-                        {output === o.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
-                      </button>
-                    ))
-                  : AUDIO_OPTIONS.map((a) => (
-                      <button key={a.id} style={popItem(audioSource === a.id)} onClick={() => selectAudioSource(a.id)}>
-                        <span style={{ flex: 1 }}>{a.label}</span>
-                        {audioSource === a.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
-                      </button>
-                    ))}
+                {/* Section 1: Output chụp ảnh */}
+                <div style={popSectionLabel}>Chụp ảnh</div>
+                {OUTPUTS.map((o) => (
+                  <button key={o.id} style={popItem(output === o.id)} onClick={() => selectOutput(o.id)}>
+                    <span style={{ flex: 1 }}>{o.label}</span>
+                    {output === o.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
+                  </button>
+                ))}
+                {/* Divider */}
+                <div style={popDivider} />
+                {/* Section 2: Nguồn audio quay */}
+                <div style={popSectionLabel}>Quay màn hình</div>
+                {AUDIO_OPTIONS.map((a) => (
+                  <button key={a.id} style={popItem(audioSource === a.id)} onClick={() => selectAudioSource(a.id)}>
+                    <span style={{ flex: 1 }}>{a.label}</span>
+                    {audioSource === a.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
+                  </button>
+                ))}
               </div>
             )}
           </div>
@@ -429,6 +435,7 @@ const bar: React.CSSProperties = {
   background: "rgba(32,32,38,0.97)",
   borderRadius: 12,
   padding: "7px 10px",
+  width: "max-content",  // tự giãn theo nội dung, không bị cap bởi window width
 };
 
 const modeGroup: React.CSSProperties = {
@@ -524,7 +531,7 @@ const closeBtn: React.CSSProperties = {
 
 const popover: React.CSSProperties = {
   position: "absolute",
-  bottom: "calc(100% + 6px)",  // ngay trên nút, cách 6px
+  bottom: "calc(100% + 6px)",
   right: 0,
   background: "rgba(30,30,36,0.99)",
   border: "1px solid rgba(255,255,255,0.12)",
@@ -537,6 +544,41 @@ const popover: React.CSSProperties = {
   zIndex: 100,
   whiteSpace: "nowrap",
 };
+
+const popSectionLabel: React.CSSProperties = {
+  padding: "5px 12px 3px",
+  fontSize: 10,
+  fontWeight: 600,
+  letterSpacing: "0.06em",
+  textTransform: "uppercase",
+  color: "var(--text-dim)",
+  opacity: 0.6,
+  userSelect: "none",
+};
+
+const popDivider: React.CSSProperties = {
+  height: 1,
+  background: "rgba(255,255,255,0.08)",
+  margin: "4px 4px",
+};
+
+// Nút trigger: mỗi section (chụp / quay) hiện label riêng ngăn cách bằng dấu ·
+const optBtnSection: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 4,
+};
+
+// const optBtnIcon: React.CSSProperties = {
+//   fontSize: 12,
+//   lineHeight: 1,
+// };
+
+// const optBtnSep: React.CSSProperties = {
+//   opacity: 0.3,
+//   fontSize: 14,
+//   margin: "0 2px",
+// };
 
 function popItem(active: boolean): React.CSSProperties {
   return {
