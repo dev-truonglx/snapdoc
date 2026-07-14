@@ -26,6 +26,16 @@ export async function promptSavePath(defaultPath: string): Promise<string | null
 }
 
 /**
+ * Mở dialog lưu file video với đường dẫn mặc định cụ thể.
+ * Không ép filter PNG để tránh thêm nhầm đuôi `.png` vào file quay.
+ */
+export async function promptSaveVideoPath(defaultPath: string): Promise<string | null> {
+  return await save({
+    defaultPath,
+  });
+}
+
+/**
  * Tự động lưu vào saveDir từ settings (không mở dialog).
  * Dùng cho output mode "save" và "save_copy" từ editor toolbar.
  */

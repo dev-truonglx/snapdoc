@@ -3,7 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ipc, type PendingRecording } from "../../lib/ipc";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
-import { promptSavePath } from "../../features/output/useOutput";
+import { promptSaveVideoPath } from "../../features/output/useOutput";
 
 /** Thư mục chứa file (hỗ trợ cả `/` và `\` — mp4 quay trên Windows dùng `\`). */
 function dirnameOf(path: string): string {
@@ -118,7 +118,7 @@ export default function RecordReview() {
     setShowSaveMenu(false);
     if (!pending) return;
     const defaultPath = currentSaveTarget ?? pending.path;
-    const path = await promptSavePath(defaultPath);
+    const path = await promptSaveVideoPath(defaultPath);
     if (!path) return;
     setCustomSaveTarget(path);
     doApplyAndSave(path);
