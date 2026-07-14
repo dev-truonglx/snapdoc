@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ipc, type AudioSource, type CaptureMode, type OutputMode } from "../../lib/ipc";
 
@@ -260,8 +260,19 @@ export default function CaptureBar() {
     if (!("__TAURI_INTERNALS__" in window)) return;
 
     const windowApi = getCurrentWebviewWindow();
-    const currentSize = await windowApi.innerSize();
-    const currentPosition = await windowApi.outerPosition();
+    // `innerSize()`/`outerPosition()` của Tauri LUÔN trả PHYSICAL px, bất kể
+    // đơn vị mình định dùng sau đó — trong khi `getBoundingClientRect()` (JS)
+    // luôn trả LOGICAL/CSS px, KHÔNG phụ thuộc scale màn hình. Bug thật đã gặp
+    // (che mất phần lớn capture bar trên màn Retina): trộn 2 đơn vị này rồi
+    // đóng gói thẳng vào `PhysicalSize`/`PhysicalPosition` — trên máy scale=2,
+    // 1 giá trị logical (vd 70) bị hiểu nhầm thành 70 physical px, tức chỉ 35
+    // điểm thật trên màn hình, làm cửa sổ co lại còn ~nửa chiều cao cần có.
+    // Quy hết về LOGICAL ngay từ đầu (qua `.toLogical(scaleFactor)`) rồi dùng
+    // `LogicalSize`/`LogicalPosition` khi set lại — Tauri tự quy đổi đúng theo
+    // scale HIỆN TẠI của cửa sổ lúc áp dụng, không còn lẫn đơn vị nữa.
+    const scaleFactor = await windowApi.scaleFactor();
+    const currentSize = (await windowApi.innerSize()).toLogical(scaleFactor);
+    const currentPosition = (await windowApi.outerPosition()).toLogical(scaleFactor);
     const barHeight = barRef.current?.getBoundingClientRect().height ?? 0;
     const popoverHeight = showPopover ? (popoverRef.current?.getBoundingClientRect().height ?? 0) : 0;
     const nextHeight = Math.ceil(
@@ -273,9 +284,9 @@ export default function CaptureBar() {
     if (nextHeight <= 0) return;
 
     const heightDelta = nextHeight - currentSize.height;
-    await windowApi.setSize(new PhysicalSize(currentSize.width, nextHeight));
+    await windowApi.setSize(new LogicalSize(currentSize.width, nextHeight));
     if (heightDelta !== 0) {
-      await windowApi.setPosition(new PhysicalPosition(currentPosition.x, currentPosition.y - heightDelta));
+      await windowApi.setPosition(new LogicalPosition(currentPosition.x, currentPosition.y - heightDelta));
     }
   };
 

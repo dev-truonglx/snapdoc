@@ -79,6 +79,12 @@ export interface Settings {
   /** Nguồn audio ghi kèm khi quay màn hình — chỉ 1 trong 3, mặc định "off". */
   recordAudioSource: AudioSource;
   shortcuts: Record<string, string>;
+  /** Thư mục lần cuối user chọn qua "Save As…" ở editor (ảnh) — dùng làm mặc
+   * định cho lần Save As kế tiếp, xem `useOutput.saveAsToFile`. */
+  lastImageSaveAsDir?: string;
+  /** Thư mục lần cuối user chọn qua "Lưu thành…" ở RecordReview (video) —
+   * dùng làm mặc định cho lần kế tiếp, xem `RecordReview.pickSaveTarget`. */
+  lastVideoSaveAsDir?: string;
 }
 
 export interface UpdateInfo {
@@ -116,6 +122,9 @@ export const ipc = {
     invoke<string>("save_and_copy", { path, data }),
   openCaptureBar: () => invoke<void>("open_capture_bar"),
   openCaptureBarForNew: () => invoke<void>("open_capture_bar_for_new"),
+  /** Resize capture-bar giữ nguyên cạnh đáy (xem `windows::resize_capture_bar`
+   * — macOS dùng NSWindow.setFrame atomic để không nháy). */
+  resizeCaptureBar: (height: number) => invoke<void>("resize_capture_bar", { height }),
   openEditor: () => invoke<void>("open_editor"),
   openSettings: () => invoke<void>("open_settings"),
   closeSelf: () => invoke<void>("close_self"),

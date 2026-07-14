@@ -104,6 +104,11 @@ windows-sys = { version = "0.59", features = [
     # trước khi frame đầu tiên từ WGC tới.
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
+    # GetWindowRect/SetWindowPos — resize capture-bar bằng 1 lệnh Win32 atomic
+    # duy nhất (set cả size+position cùng lúc), tương đương NSWindow.setFrame
+    # bên macOS, tránh nháy do set_size/set_position riêng lẻ của Tauri là 2
+    # lệnh tách rời (xem `windows::resize_capture_bar`).
+    "Win32_UI_WindowsAndMessaging",
 ] }
 # Quay video liên tục qua Windows.Graphics.Capture (capture/windows_stream.rs)
 # — crate cấp cao ẩn phần COM/WinRT, tương đương vai trò

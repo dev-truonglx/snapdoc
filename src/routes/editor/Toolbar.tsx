@@ -639,13 +639,13 @@ export default function Toolbar({ onSave, onSaveAs, onCopy, onSaveCopy, onFlatte
                 style={saveMenuItem}
                 onClick={() => { setShowSaveMenu(false); onSaveAs(); }}
               >
-                Save As…
+                Save As… (Ctrl/Cmd+Shift+S)
               </button>
             </div>
           )}
         </div>
 
-        <button onClick={onSaveCopy} disabled={busy} style={newBtn} title="Lưu + Copy (Ctrl/Cmd+Shift+S)">
+        <button onClick={onSaveCopy} disabled={busy} style={newBtn} title="Lưu + Copy (Ctrl/Cmd+Alt+S)">
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
             <path d="M12 13.5H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L13 5v7.5a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.4"/>
             <path d="M4.5 2v3a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.4"/>
