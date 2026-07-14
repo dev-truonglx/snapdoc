@@ -196,6 +196,10 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     }
 
     if let Some(win) = app.get_webview_window("capture-bar") {
+        // .unminimize() cần cho trường hợp user vừa bấm "X" trên bar (nay chỉ
+        // minimize, xem `commands::close_self`) — .show() không tự khôi phục
+        // khỏi trạng thái minimize.
+        let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
         // Windows: hiển thị icon trên taskbar khi capture bar visible
@@ -211,7 +215,7 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
         // preview. Cửa sổ resizable(false) + body overflow:hidden nên rộng
         // hơn nội dung thật 1 chút để không bao giờ bị cắt, kể cả khi font
         // render rộng hơn 1 chút trên Windows.
-        .inner_size(850.0, 280.0)
+        .inner_size(730.0, 80.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -227,6 +231,48 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Tạo sẵn capture-bar (ẩn) NGAY lúc app khởi động — giữ icon Dock (macOS)/
+/// Taskbar (Windows) hiện diện xuyên suốt vòng đời app kể từ khi mở app, thay
+/// vì chỉ xuất hiện từ lần đầu user tự mở bar. Không show lên màn hình (không
+/// giật mình user mỗi lần mở app) — chỉ tạo sẵn + bật Regular/skip_taskbar
+/// ngay, để `open_capture_bar()` sau này chỉ cần show/focus lại đúng cửa sổ
+/// này (không phải build mới). Từ đây capture-bar không bao giờ bị destroy
+/// nữa (xem `commands::close_self` — bấm "X" chỉ minimize), nên `on_editor_closed`/
+/// `hide_editor` đều coi sự TỒN TẠI của nó là đủ để giữ Dock/taskbar icon mãi.
+pub fn prewarm_capture_bar(app: &AppHandle) -> Result<(), String> {
+    if app.get_webview_window("capture-bar").is_some() {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+    let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
+        .title("SnapDoc")
+        .inner_size(730.0, 80.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(false)
+        .shadow(false)
+        .visible(false)
+        .build()
+        .map_err(|e| format!("Không tạo được capture bar: {e}"))?;
+    place_bottom_center(app, &win);
+    #[cfg(target_os = "windows")]
+    {
+        // Windows chỉ giữ icon app trên taskbar khi có cửa sổ hiện diện.
+        // Prewarm theo kiểu hidden (`visible(false)`) sẽ rơi về tray-only.
+        // Show rồi minimize để taskbar icon luôn tồn tại từ lúc khởi động,
+        // nhưng không làm thanh capture bar nằm lộ trên màn hình.
+        let _ = win.show();
+        let _ = win.minimize();
+        let _ = win.set_skip_taskbar(false);
+    }
+    Ok(())
+}
 
 /// Bảng điều khiển chụp cuộn (scrolling capture).
 pub fn open_scroll_control(
@@ -493,46 +539,11 @@ fn place_top_center(app: &AppHandle, win: &tauri::WebviewWindow) {
     }
 }
 
-/// Mở capture bar và emit event `set-capture-mode` với lastMode từ Rust state.
-/// Chỉ sync chế độ chụp (mode), KHÔNG override output — capture bar tự giữ
-/// defaultOutput từ settings. Dùng cho nút "New" trong editor.
-pub fn open_capture_bar_with_last_mode(app: &AppHandle) -> Result<(), String> {
-    use crate::state::AppState;
-
-    let (mode, _output) = app.state::<AppState>().last_capture.get();
-    let is_new_window = app.get_webview_window("capture-bar").is_none();
-
-    open_capture_bar(app)?;
-
-    // Với window đã tồn tại: listener JS đã active → delay ngắn.
-    // Với window mới: cần đợi React mount + register listener → delay dài hơn.
-    // Chỉ emit mode, không emit output → capture bar tự load defaultOutput từ settings.
-    // Dùng async_runtime (Tokio) để emit an toàn từ async context.
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let first_delay = if is_new_window { 400 } else { 80 };
-        tokio::time::sleep(std::time::Duration::from_millis(first_delay)).await;
-        if let Some(win) = app.get_webview_window("capture-bar") {
-            let payload = serde_json::json!({ "mode": mode, "output": serde_json::Value::Null });
-            let _ = win.emit("set-capture-mode", payload.clone());
-            // Emit lần 2 cho window mới (đảm bảo listener đã mount)
-            if is_new_window {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                if let Some(win2) = app.get_webview_window("capture-bar") {
-                    let _ = win2.emit("set-capture-mode", payload);
-                }
-            }
-        }
-    });
-
-    Ok(())
-}
-
 /// Mở capture bar và emit event `set-record-mode` để chọn sẵn đúng phạm vi
 /// quay (`mode`: "full" | "window" | "region") ở khu vực QUAY MÀN HÌNH — dùng
-/// cho nút "Quay lại" ở `record-review` (xem `record::redo_recording`). Cùng
-/// cơ chế delay-emit với `open_capture_bar_with_last_mode` (window mới cần đợi
-/// React mount + đăng ký listener xong mới emit tới nơi).
+/// cho nút "Quay lại" ở `record-review` (xem `record::redo_recording`). Emit
+/// 2 lần cho window mới (delay ngắn rồi delay dài hơn) để đợi React mount +
+/// đăng ký listener xong mới chắc emit tới nơi.
 pub fn open_capture_bar_with_record_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
     let is_new_window = app.get_webview_window("capture-bar").is_none();
 
@@ -934,6 +945,10 @@ pub fn close_overlays_except(app: &AppHandle, keep_label: &str) {
 
 /// Ẩn editor và trả về Accessory policy (ẩn Dock) / ẩn icon khỏi taskbar (Windows).
 /// Dùng cho nút "New" trong editor — user muốn chụp mới mà không cần đóng editor.
+///
+/// KHÔNG được tắt Dock/taskbar icon nếu capture-bar vẫn còn tồn tại (từ
+/// `prewarm_capture_bar`, capture-bar sống suốt vòng đời app) — bản thân nó
+/// phải giữ icon hiện xuyên suốt, ẩn editor không được phép kéo theo mất icon.
 pub fn hide_editor(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("editor") {
         let _ = win.hide();
@@ -941,10 +956,12 @@ pub fn hide_editor(app: &AppHandle) {
         #[cfg(target_os = "windows")]
         let _ = win.set_skip_taskbar(true);
     }
-    #[cfg(target_os = "macos")]
-    {
-        use tauri::ActivationPolicy;
-        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+    if app.get_webview_window("capture-bar").is_none() {
+        #[cfg(target_os = "macos")]
+        {
+            use tauri::ActivationPolicy;
+            let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+        }
     }
 }
 
@@ -1191,16 +1208,25 @@ pub fn unprotect_product_windows(app: &AppHandle) {
 }
 
 /// Trả về Accessory policy (ẩn Dock) trên macOS hoặc ẩn taskbar icon trên Windows
-/// nếu không còn cửa sổ editor/settings/capture-bar/record-review/history-trim
-/// nào đang mở. Gọi từ on_window_event khi 1 trong các cửa sổ đó bị đóng.
+/// nếu không còn cửa sổ editor/settings/history/record-review/history-trim nào
+/// đang mở. Gọi từ on_window_event khi 1 trong các cửa sổ đó bị đóng.
+///
+/// KHÔNG bao giờ tắt Dock/taskbar icon nếu capture-bar còn tồn tại — từ
+/// `prewarm_capture_bar`, capture-bar sống suốt vòng đời app (bấm "X" chỉ
+/// minimize, không destroy — xem `commands::close_self`) và bản thân nó phải
+/// luôn giữ icon hiện, bất kể đang minimize/ẩn hay không.
 pub fn on_editor_closed(app: &AppHandle) {
+    if app.get_webview_window("capture-bar").is_some() {
+        return;
+    }
+
     // Kiểm tra còn cửa sổ "thật" nào đang mở không (editor, settings,
-    // capture-bar, record-review, history-trim — từ khi có titlebar thật, xem
+    // record-review, history-trim — từ khi có titlebar thật, xem
     // `open_record_review`/`open_history_trim`). Không tính overlay,
     // thumbnail, scroll-control vì chúng tạm thời/phụ trợ.
     let has_visible = app.webview_windows().values().any(|w| {
         let label = w.label();
-        (label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" || label == "history-trim")
+        (label.starts_with("editor") || label == "settings" || label == "history" || label == "record-review" || label == "history-trim")
             && w.is_visible().unwrap_or(false)
     });
 
@@ -1217,7 +1243,7 @@ pub fn on_editor_closed(app: &AppHandle) {
         // Windows: ẩn icon trên taskbar nếu không còn cửa sổ "thật" nào mở
         if !has_visible {
             for (label, win) in app.webview_windows() {
-                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" || label == "history-trim" {
+                if label.starts_with("editor") || label == "settings" || label == "history" || label == "record-review" || label == "history-trim" {
                     let _ = win.set_skip_taskbar(true);
                 }
             }

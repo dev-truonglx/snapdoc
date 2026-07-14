@@ -882,6 +882,47 @@ fn move_into_dir(src: &Path, dest_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+fn looks_like_file_path(path: &Path) -> bool {
+    path.extension().is_some() && !path.is_dir()
+}
+
+fn move_into_target(src: &Path, target: &Path, raw_variant: bool) -> Option<PathBuf> {
+    let dest = if looks_like_file_path(target) {
+        let parent = target.parent()?;
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("[SnapDoc][record] Không tạo được thư mục đích ({}): {e}", parent.display());
+            return None;
+        }
+
+        if raw_variant {
+            let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
+            let ext = target.extension().and_then(|s| s.to_str()).unwrap_or("mp4");
+            parent.join(format!("{stem}-raw.{ext}"))
+        } else {
+            target.to_path_buf()
+        }
+    } else {
+        let name = src.file_name()?;
+        target.join(name)
+    };
+
+    if std::fs::rename(src, &dest).is_ok() {
+        return Some(dest);
+    }
+    match std::fs::copy(src, &dest) {
+        Ok(_) => {
+            if let Err(e) = std::fs::remove_file(src) {
+                eprintln!("[SnapDoc][record] Đã copy sang vị trí mới nhưng không xoá được bản gốc: {e}");
+            }
+            Some(dest)
+        }
+        Err(e) => {
+            eprintln!("[SnapDoc][record] Không chuyển được file sang vị trí đã chọn ({}): {e}", dest.display());
+            None
+        }
+    }
+}
+
 /// Người dùng chọn "Lưu" ở `record-review`: ingest bản quay đang chờ vào
 /// History rồi đóng cửa sổ. Nếu đã từng cắt (có `raw_path`) thì ingest CẢ bản
 /// thô lẫn bản đã cắt — 2 item riêng trong History, giống hành vi cắt video
@@ -895,8 +936,10 @@ fn move_into_dir(src: &Path, dest_dir: &Path) -> Option<PathBuf> {
 ///
 /// `dest_dir`: nếu có giá trị (người dùng chọn "Lưu vào thư mục khác…" ở
 /// `record-review`), di chuyển file mp4 (+ bản thô nếu có) vào đó TRƯỚC khi
-/// ingest — để `asset_path` trong History trỏ đúng vị trí người dùng chọn,
-/// không phải `saveDir` mặc định lúc quay. `None`/rỗng → giữ nguyên vị trí cũ.
+/// ingest — để `asset_path` trong History trỏ đúng vị trí người dùng chọn.
+/// Hỗ trợ cả thư mục đích lẫn file đích cụ thể (ví dụ từ dialog Save As):
+/// nếu là file path thì video chính sẽ theo đúng tên đó, còn bản thô sẽ đổi
+/// sang `-raw` cùng stem. `None`/rỗng → giữ nguyên vị trí cũ.
 pub fn confirm_recording_save_to(app: &AppHandle, dest_dir: Option<String>) -> Result<(), String> {
     let mut pending = app
         .state::<PendingRecordingState>()
@@ -906,18 +949,29 @@ pub fn confirm_recording_save_to(app: &AppHandle, dest_dir: Option<String>) -> R
         .take()
         .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
 
-    if let Some(dir) = dest_dir.filter(|d| !d.is_empty()) {
-        let dir_path = Path::new(&dir);
-        if let Err(e) = std::fs::create_dir_all(dir_path) {
-            eprintln!("[SnapDoc][record] Không tạo được thư mục đã chọn, giữ nguyên vị trí cũ: {e}");
-        } else {
+    if let Some(target) = dest_dir.filter(|d| !d.is_empty()) {
+        let target_path = Path::new(&target);
+        if looks_like_file_path(target_path) {
             if let Some(raw_path) = &pending.raw_path {
-                if let Some(new_raw) = move_into_dir(raw_path, dir_path) {
+                if let Some(new_raw) = move_into_target(raw_path, target_path, true) {
                     pending.raw_path = Some(new_raw);
                 }
             }
-            if let Some(new_path) = move_into_dir(Path::new(&pending.path), dir_path) {
+            if let Some(new_path) = move_into_target(Path::new(&pending.path), target_path, false) {
                 pending.path = new_path.to_string_lossy().to_string();
+            }
+        } else {
+            if let Err(e) = std::fs::create_dir_all(target_path) {
+                eprintln!("[SnapDoc][record] Không tạo được thư mục đã chọn, giữ nguyên vị trí cũ: {e}");
+            } else {
+                if let Some(raw_path) = &pending.raw_path {
+                    if let Some(new_raw) = move_into_dir(raw_path, target_path) {
+                        pending.raw_path = Some(new_raw);
+                    }
+                }
+                if let Some(new_path) = move_into_dir(Path::new(&pending.path), target_path) {
+                    pending.path = new_path.to_string_lossy().to_string();
+                }
             }
         }
     }

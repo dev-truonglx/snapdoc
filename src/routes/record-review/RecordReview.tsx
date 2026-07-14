@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
 import { ipc, type PendingRecording } from "../../lib/ipc";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
+import { promptSaveVideoPath } from "../../features/output/useOutput";
 
 /** Thư mục chứa file (hỗ trợ cả `/` và `\` — mp4 quay trên Windows dùng `\`). */
 function dirnameOf(path: string): string {
@@ -35,7 +35,7 @@ export default function RecordReview() {
   // (saveDir trong Settings, nơi file mp4 đã nằm sẵn từ lúc quay xong). Chỉ là
   // lựa chọn tạm thời của phiên xem lại này, không ghi đè `saveDir` trong
   // Settings (xem `record::confirm_recording_save_to`).
-  const [customSaveDir, setCustomSaveDir] = useState<string | null>(null);
+  const [customSaveTarget, setCustomSaveTarget] = useState<string | null>(null);
   const [showSaveMenu, setShowSaveMenu] = useState(false);
   const saveMenuRef = useRef<HTMLDivElement>(null);
 
@@ -84,11 +84,11 @@ export default function RecordReview() {
   // cần cập nhật lại `pending`/reload video sau khi cắt như bản cũ — cửa sổ
   // đóng ngay sau khi lưu thành công, không ai còn xem lại video trong này
   // nữa (xem `confirmRecordingSave` → đóng cửa sổ ở backend).
-  // `destDirOverride`: dùng khi gọi thẳng từ `pickSaveDir` (chọn thư mục xong
-  // là lưu luôn ngay, không đợi bấm thêm nút Lưu) — ưu tiên hơn `customSaveDir`
-  // đã lưu trong state vì state đó có thể chưa kịp cập nhật (setState bất đồng
-  // bộ) tại thời điểm gọi hàm này trong cùng 1 handler.
-  const doApplyAndSave = async (destDirOverride?: string) => {
+  // `destTargetOverride`: dùng khi gọi thẳng từ `pickSaveTarget` (chọn xong
+  // là lưu luôn ngay, không đợi bấm thêm nút Lưu) — ưu tiên hơn
+  // `customSaveTarget` đã lưu trong state vì state đó có thể chưa kịp cập
+  // nhật (setState bất đồng bộ) tại thời điểm gọi hàm này trong cùng 1 handler.
+  const doApplyAndSave = async (destTargetOverride?: string) => {
     if (busy || !pending) return;
     setBusy(true);
     try {
@@ -99,7 +99,7 @@ export default function RecordReview() {
         // (ingest vào History không có tiến độ %, xem `confirmRecordingSave`).
         setTrimProgress(null);
       }
-      await ipc.confirmRecordingSave(destDirOverride ?? customSaveDir ?? undefined);
+      await ipc.confirmRecordingSave(destTargetOverride ?? customSaveTarget ?? undefined);
     } catch (e) {
       alert(String(e));
       setBusy(false);
@@ -107,19 +107,21 @@ export default function RecordReview() {
     }
   };
 
-  // Thư mục SẼ lưu vào nếu bấm "Lưu" ngay bây giờ — ưu tiên lựa chọn tuỳ ý
-  // (`customSaveDir`), rơi về thư mục file mp4 đang nằm sẵn (mặc định) nếu
-  // chưa chọn gì khác.
-  const currentSaveDir = customSaveDir ?? (pending ? dirnameOf(pending.path) : null);
+  // Đường dẫn lưu SẼ dùng nếu bấm "Lưu" ngay bây giờ — ưu tiên lựa chọn tuỳ ý
+  // (`customSaveTarget`), rơi về file mp4 đang nằm sẵn (mặc định) nếu chưa
+  // chọn gì khác.
+  const currentSaveTarget = customSaveTarget ?? (pending ? pending.path : null);
+  const currentSaveDir = currentSaveTarget ? dirnameOf(currentSaveTarget) : null;
 
-  /** Mở dialog chọn thư mục — chọn xong LƯU LUÔN vào đó ngay (như bấm "Lưu"),
-   * không đợi thêm 1 cú bấm nữa, không đổi cấu hình saveDir chung của app. */
-  const pickSaveDir = async () => {
+  /** Mở dialog lưu file — cho phép đổi cả thư mục lẫn tên file, rồi lưu ngay. */
+  const pickSaveTarget = async () => {
     setShowSaveMenu(false);
-    const dir = await open({ directory: true });
-    if (typeof dir !== "string") return;
-    setCustomSaveDir(dir);
-    doApplyAndSave(dir);
+    if (!pending) return;
+    const defaultPath = currentSaveTarget ?? pending.path;
+    const path = await promptSaveVideoPath(defaultPath);
+    if (!path) return;
+    setCustomSaveTarget(path);
+    doApplyAndSave(path);
   };
 
   const doDiscard = async () => {
@@ -218,13 +220,13 @@ export default function RecordReview() {
             </button>
             {showSaveMenu && (
               <div style={saveMenuPopover}>
-                <button style={saveMenuItem} onClick={pickSaveDir}>Chọn thư mục khác…</button>
-                {customSaveDir && (
+                <button style={saveMenuItem} onClick={pickSaveTarget}>Lưu thành…</button>
+                {customSaveTarget && (
                   <button
                     style={saveMenuItem}
-                    onClick={() => { setCustomSaveDir(null); setShowSaveMenu(false); }}
+                    onClick={() => { setCustomSaveTarget(null); setShowSaveMenu(false); }}
                   >
-                    Dùng thư mục mặc định
+                    Dùng file mặc định
                   </button>
                 )}
               </div>

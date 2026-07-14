@@ -77,14 +77,21 @@ function findFileRecursive(dir, name) {
 }
 
 async function downloadFile(url, dest) {
-  const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok) {
-    throw new Error(`Tải thất bại (HTTP ${res.status}): ${url}`);
-  }
-  const buf = Buffer.from(await res.arrayBuffer());
   mkdirSync(dirname(dest), { recursive: true });
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(dest, buf);
+  try {
+    const res = await fetch(url, { redirect: "follow" });
+    if (!res.ok) {
+      throw new Error(`Tải thất bại (HTTP ${res.status}): ${url}`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(dest, buf);
+    return;
+  } catch (err) {
+    warn(`fetch() thất bại, thử curl fallback cho ${url}: ${err.message}`);
+  }
+
+  execFileSync("curl", ["-L", "--fail", "--silent", "--show-error", "--output", dest, url]);
 }
 
 // `tar` trên Windows (bsdtar, có sẵn từ 10 1803+) và macOS (cũng bsdtar) tự
@@ -181,10 +188,6 @@ async function fetchMacIntelViaEvermeet(dest) {
 // (Xcode Command Line Tools).
 function ensureMacUniversal() {
   const dest = destPathFor("universal-apple-darwin");
-  if (existsSync(dest)) {
-    log(`Đã có sẵn: ${dest}`);
-    return;
-  }
   const arm = destPathFor("aarch64-apple-darwin");
   const intel = destPathFor("x86_64-apple-darwin");
   if (!existsSync(arm) || !existsSync(intel)) {
@@ -193,6 +196,7 @@ function ensureMacUniversal() {
   }
   log("Đang gộp ffmpeg universal binary (lipo)...");
   try {
+    rmSync(dest, { force: true });
     execFileSync("lipo", ["-create", "-output", dest, arm, intel]);
     chmodSync(dest, 0o755);
     log(`Đã sẵn sàng: ${dest}`);

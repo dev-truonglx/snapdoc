@@ -77,11 +77,29 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const scale = fitScale * zoom;
   const [box, setBox] = useState({ w: 0, h: 0 });
 
+  // Quy đổi toạ độ con trỏ THẬT (clientX/clientY, toàn cửa sổ) sang toạ độ
+  // ảnh — dùng thay cho `stage.getPointerPosition()` khi cần tiếp tục nhận
+  // toạ độ cả lúc con trỏ đã rời khỏi vùng <canvas> (kéo/resize crop sát mép
+  // ảnh): getPointerPosition() trả về null ngay khi con trỏ ra khỏi canvas,
+  // khiến thao tác kéo bị "dính" tại mép thay vì bám theo chuột.
+  const clientToImg = (clientX: number, clientY: number) => {
+    const rect = stageRef.current?.container().getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return { x: (clientX - rect.left) / scale, y: (clientY - rect.top) / scale };
+  };
+
   // Ref luôn trỏ đến giá trị mới nhất — dùng trong wheel handler (closure cũ)
   const fitScaleRef = useRef(fitScale);
   const docRef = useRef(doc);
   useEffect(() => { fitScaleRef.current = fitScale; }, [fitScale]);
   useEffect(() => { docRef.current = doc; }, [doc]);
+
+  // true = zoom đang ở mức mặc định tự động theo rule (ảnh nhỏ hơn khung →
+  // 100% thật, ảnh lớn hơn khung → fit vừa khung) và phải tự cập nhật lại mỗi
+  // khi khung Editor đổi kích thước (resize/full màn) — xem effect đo
+  // `fitScale` bên dưới. Tắt (false) ngay khi user tự tay đổi zoom (wheel,
+  // nút +/-, Fit, Actual size) để không ghi đè lựa chọn thủ công của họ.
+  const autoZoomRef = useRef(true);
 
   // Scroll cần apply sau khi React render canvas ở scale mới
   const pendingScrollRef = useRef<{ x: number; y: number } | null>(null);
@@ -106,11 +124,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   // Theo dõi khi đang resize crop rect bằng handle hoặc move crop
   const [resizingCropHandle, setResizingCropHandle] = useState<string | null>(null);
   const [cropHoverHandle, setCropHoverHandle] = useState<string | null>(null);
-  const cropResizeStartRef = useRef<{ 
-    cropX: number; cropY: number; cropW: number; cropH: number;
-    startX: number; startY: number;
-    isMove?: boolean;
-  } | null>(null);
 
   // Focus tường minh ô nhập chữ khi bắt đầu sửa. `autoFocus` không đáng tin
   // trong webview (Tauri) khi phần tử được tạo ngay trong handler mousedown —
@@ -175,9 +188,12 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     el.onload = () => setImg(el);
   }, [doc?.image]);
 
-  // Tính fitScale để ảnh vừa container, đặt zoom mặc định khi tải ảnh mới.
+  // Tính fitScale để ảnh vừa container, đặt zoom mặc định khi tải ảnh mới —
+  // và tính lại MỖI LẦN khung Editor đổi kích thước (resize/full màn), không
+  // chỉ lúc tải ảnh, miễn user chưa tự tay chỉnh zoom (xem `autoZoomRef`).
   useLayoutEffect(() => {
     if (!doc) return;
+    autoZoomRef.current = true; // ảnh mới → về lại chế độ zoom mặc định tự động
     const measure = () => {
       // Đo trên `outerRef` (KHÔNG có overflow:auto) — xem giải thích ở khai
       // báo `outerRef`. Đo trên `containerRef` (vùng cuộn thật) sẽ gây vòng
@@ -194,16 +210,19 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       // Không giới hạn max — ảnh nhỏ hơn window sẽ hiển thị 1:1 hoặc lớn hơn
       const s = Math.max(0.05, Math.min(cw / doc.imgW, ch / doc.imgH));
       setFitScale(s);
-      return s;
+      // Zoom mặc định tuỳ mode đã chụp ra ảnh (`doc.captureMode`, xem model.ts):
+      // "region" (vùng chọn) → ảnh NHỎ hơn khung Editor (fitScale s ≥ 1, tức
+      // không cần thu nhỏ mới vừa) thì hiện đúng 100% THẬT (1px ảnh = 1px màn
+      // hình, zoom = 1/s ⇒ scale = 1); ảnh LỚN hơn khung (s < 1) thì tự fit vừa
+      // khung (zoom = 1 ⇒ scale = fitScale) thay vì luôn ép 100% khiến ảnh to
+      // tràn ra ngoài tầm nhìn. Mọi mode khác → luôn fit như trước. Chỉ áp
+      // dụng khi còn ở chế độ auto (`autoZoomRef`) — nếu không, resize sẽ ghi
+      // đè zoom user vừa tự chỉnh tay.
+      if (autoZoomRef.current) {
+        setZoom(doc.captureMode === "region" && s ? (s < 1 ? 1 : clampZoom(1 / s)) : 1);
+      }
     };
-    const s = measure();
-    // Zoom mặc định tuỳ mode đã chụp ra ảnh (`doc.captureMode`, xem model.ts):
-    // "region" (vùng chọn) → ảnh NHỎ hơn khung Editor (fitScale s ≥ 1, tức
-    // không cần thu nhỏ mới vừa) thì hiện đúng 100% THẬT (1px ảnh = 1px màn
-    // hình, zoom = 1/s ⇒ scale = 1); ảnh LỚN hơn khung (s < 1) thì tự fit vừa
-    // khung (zoom = 1 ⇒ scale = fitScale) thay vì luôn ép 100% khiến ảnh to
-    // tràn ra ngoài tầm nhìn. Mọi mode khác → luôn fit như trước.
-    setZoom(doc.captureMode === "region" && s ? (s < 1 ? 1 : clampZoom(1 / s)) : 1);
+    measure();
     const ro = new ResizeObserver(measure);
     if (outerRef.current) ro.observe(outerRef.current);
     return () => ro.disconnect();
@@ -237,6 +256,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const zoomAround = (vx: number, vy: number, opts: { factor?: number; target?: number }) => {
     const el = containerRef.current;
     if (!el) return;
+    autoZoomRef.current = false; // user tự chỉnh zoom → thôi tự động tính lại khi resize
     setZoom((oldZoom) => {
       const fs = fitScaleRef.current;
       const d = docRef.current;
@@ -416,6 +436,72 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!doc]);
 
+  // Bắt đầu vẽ vùng crop mới bằng native mousedown trên SCROLL CONTAINER (to
+  // hơn hẳn khung <canvas> của Konva) — không chỉ Stage — để: (1) cho phép
+  // bấm bắt đầu ngay sát/hơi ngoài mép ảnh vài chục pixel (Stage chỉ rộng
+  // đúng bằng ảnh nên bấm trượt ra ngoài 1px là không ăn); (2) tiếp tục nhận
+  // mousemove/mouseup qua `window` thay vì qua canvas — khi kéo ra khỏi canvas
+  // (rất dễ xảy ra khi kéo tới sát mép ảnh), Konva NGỪNG nhận mousemove (canvas
+  // không còn dưới con trỏ) khiến khung crop bị "dính" tại mép rồi giật khi
+  // chuột quay lại. `beginCropPointerDrag` (bên dưới, sau khi có `doc`) dùng
+  // kỹ thuật tương tự để resize/move khung crop đã có.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      if (isPanModeRef.current) return;
+      if (tool !== "crop" || cropRect) return;
+      const d = docRef.current;
+      if (!d) return;
+      const rect = stageRef.current?.container().getBoundingClientRect();
+      if (!rect) return;
+      const margin = 24; // dung sai (px) quanh mép ảnh để dễ bắt đầu kéo
+      if (
+        e.clientX < rect.left - margin || e.clientX > rect.right + margin ||
+        e.clientY < rect.top - margin || e.clientY > rect.bottom + margin
+      ) {
+        return;
+      }
+      e.preventDefault();
+      const clamp = (v: number, max: number) => Math.max(0, Math.min(v, max));
+      const start = clientToImg(e.clientX, e.clientY);
+      const startX = clamp(start.x, d.imgW);
+      const startY = clamp(start.y, d.imgH);
+      setDraft({ type: "crop", x: startX, y: startY, width: 0, height: 0 });
+
+      const onMove = (me: MouseEvent) => {
+        const p = clientToImg(me.clientX, me.clientY);
+        const x = clamp(p.x, d.imgW);
+        const y = clamp(p.y, d.imgH);
+        setDraft({ type: "crop", x: startX, y: startY, width: x - startX, height: y - startY });
+      };
+      const onUp = (ue: MouseEvent) => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        const p = clientToImg(ue.clientX, ue.clientY);
+        const x = clamp(p.x, d.imgW);
+        const y = clamp(p.y, d.imgH);
+        setDraft(null);
+        const nx = Math.min(startX, x);
+        const ny = Math.min(startY, y);
+        const w = Math.abs(x - startX);
+        const h = Math.abs(y - startY);
+        if (w < 4 || h < 4) return;
+        const newCrop: Draft = { type: "crop", x: nx, y: ny, width: w, height: h };
+        setCropRect(newCrop);
+        setCropHistory((prev) => [...prev.slice(-9), newCrop]);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    };
+
+    el.addEventListener("mousedown", onMouseDown);
+    return () => el.removeEventListener("mousedown", onMouseDown);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool, cropRect, scale]);
+
   // Apply scroll sau khi React render xong canvas ở scale mới
   useLayoutEffect(() => {
     const el = containerRef.current;
@@ -430,7 +516,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const doZoomOut = () => zoomCenter({ factor: 1 / ZOOM_STEP });
   // Fit: zoom=1 ⇒ scale=fitScale (ảnh vừa khung). Canvas ≤ container nên flex tự
   // canh giữa, không cần bù scroll.
-  const doZoomFit = () => { pendingScrollRef.current = null; setZoom(1); };
+  const doZoomFit = () => { autoZoomRef.current = false; pendingScrollRef.current = null; setZoom(1); };
   // Actual size 1:1 pixel: scale=1 ⇒ zoom = 1/fitScale. Neo tâm viewport.
   const doZoomActual = () => zoomCenter({ target: 1 / fitScaleRef.current });
   // Toggle nhanh giữa Fit và 100% khi bấm vào ô phần trăm.
@@ -480,6 +566,72 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     setCropHistory(prev => [...prev.slice(-9), crop]); // Giữ tối đa 10 trạng thái
   };
 
+  // Bắt đầu resize (theo 1 trong 8 handle) hoặc move (kéo cả khung) crop rect
+  // đã có. Dùng `window` mousemove/mouseup (giống `beginCropDraft` ở effect
+  // phía trên) thay vì Konva Stage onMouseMove/onMouseUp — tránh bị "dính" khi
+  // kéo handle/khung ra sát mép ảnh (Stage chỉ rộng đúng bằng ảnh nên con trỏ
+  // rời khỏi đó là Konva ngừng nhận mousemove).
+  const beginCropPointerDrag = (handleId: string, clientX: number, clientY: number) => {
+    if (!cropRect || !doc) return;
+    const start = clientToImg(clientX, clientY);
+    const startSnap = {
+      cropX: cropRect.x, cropY: cropRect.y, cropW: cropRect.width, cropH: cropRect.height,
+      startX: start.x, startY: start.y, isMove: handleId === "move",
+    };
+    setResizingCropHandle(handleId);
+    let latestCrop: Draft = cropRect;
+
+    const onMove = (e: MouseEvent) => {
+      const p = clientToImg(e.clientX, e.clientY);
+      const dx = p.x - startSnap.startX;
+      const dy = p.y - startSnap.startY;
+
+      if (startSnap.isMove) {
+        const newX = Math.max(0, Math.min(startSnap.cropX + dx, doc.imgW - startSnap.cropW));
+        const newY = Math.max(0, Math.min(startSnap.cropY + dy, doc.imgH - startSnap.cropH));
+        latestCrop = { type: "crop", x: newX, y: newY, width: startSnap.cropW, height: startSnap.cropH };
+        setCropRect(latestCrop);
+        return;
+      }
+
+      let newX = startSnap.cropX;
+      let newY = startSnap.cropY;
+      let newW = startSnap.cropW;
+      let newH = startSnap.cropH;
+
+      if (handleId.includes("top")) {
+        newY = Math.min(startSnap.cropY + dy, startSnap.cropY + startSnap.cropH - 8);
+        newH = startSnap.cropH - dy;
+      }
+      if (handleId.includes("bottom")) {
+        newH = Math.max(startSnap.cropH + dy, 8);
+      }
+      if (handleId.includes("left")) {
+        newX = Math.min(startSnap.cropX + dx, startSnap.cropX + startSnap.cropW - 8);
+        newW = startSnap.cropW - dx;
+      }
+      if (handleId.includes("right")) {
+        newW = Math.max(startSnap.cropW + dx, 8);
+      }
+
+      newX = Math.max(0, Math.min(newX, doc.imgW - 8));
+      newY = Math.max(0, Math.min(newY, doc.imgH - 8));
+      newW = Math.min(newW, doc.imgW - newX);
+      newH = Math.min(newH, doc.imgH - newY);
+
+      latestCrop = { type: "crop", x: newX, y: newY, width: newW, height: newH };
+      setCropRect(latestCrop);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setResizingCropHandle(null);
+      saveCropToHistory(latestCrop);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   // Undo crop
   const undoCrop = () => {
     if (cropHistory.length === 0) return;
@@ -497,6 +649,10 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const onStageMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     // Pan mode (Space giữ) hoặc middle-button → nhường cho pointer handler
     if (isPanModeRef.current || e.evt.button === 1) return;
+    // Crop: bắt đầu vẽ/resize/move được xử lý riêng qua native mousedown trên
+    // containerRef (effect ở trên) + window mousemove/mouseup, để không bị
+    // "dính/giật" khi kéo sát mép ảnh — xem effect ngay sau phần pan ở trên.
+    if (tool === "crop") return;
     const stage = stageRef.current;
     if (!stage) return;
     const pos = stage.getPointerPosition();
@@ -507,13 +663,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       if (e.target === stage || e.target.id() === "bg") useEditor.getState().select(null);
       return;
     }
-    
-    // Nếu đang ở crop mode (cropRect đã tồn tại), không tạo draft mới
-    if (tool === "crop" && cropRect) {
-      return;
-    }
-    
-    if (tool === "rect" || tool === "ellipse" || tool === "crop" || tool === "highlight" || tool === "blur") {
+
+    if (tool === "rect" || tool === "ellipse" || tool === "highlight" || tool === "blur") {
       setDraft({ type: tool, x, y, width: 0, height: 0 });
       return;
     }
@@ -564,61 +715,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   };
 
   const onStageMouseMove = () => {
+    // Resize/move crop rect được xử lý riêng qua `beginCropPointerDrag`
+    // (native window mousemove/mouseup) — xem effect đó để biết lý do.
     const stage = stageRef.current;
     const pos = stage?.getPointerPosition();
     if (!pos) return;
     const { x, y } = toImg(pos);
-    
-    // Resize hoặc move crop rect
-    if (resizingCropHandle && cropResizeStartRef.current && cropRect) {
-      const start = cropResizeStartRef.current;
-      const dx = x - start.startX;
-      const dy = y - start.startY;
-      
-      // Move mode: kéo toàn bộ crop rect
-      if (start.isMove) {
-        let newX = start.cropX + dx;
-        let newY = start.cropY + dy;
-        // Clamp trong bounds ảnh
-        newX = Math.max(0, Math.min(newX, doc!.imgW - cropRect.width));
-        newY = Math.max(0, Math.min(newY, doc!.imgH - cropRect.height));
-        setCropRect({ type: "crop", x: newX, y: newY, width: cropRect.width, height: cropRect.height });
-        return;
-      }
-      
-      // Resize mode
-      let newX = start.cropX;
-      let newY = start.cropY;
-      let newW = start.cropW;
-      let newH = start.cropH;
-      
-      const handle = resizingCropHandle;
-      // Resize từ các corners và edges
-      if (handle.includes("top")) {
-        newY = Math.min(start.cropY + dy, start.cropY + start.cropH - 8);
-        newH = start.cropH - dy;
-      }
-      if (handle.includes("bottom")) {
-        newH = Math.max(start.cropH + dy, 8);
-      }
-      if (handle.includes("left")) {
-        newX = Math.min(start.cropX + dx, start.cropX + start.cropW - 8);
-        newW = start.cropW - dx;
-      }
-      if (handle.includes("right")) {
-        newW = Math.max(start.cropW + dx, 8);
-      }
-      
-      // Clamp trong bounds ảnh
-      newX = Math.max(0, Math.min(newX, doc!.imgW - 8));
-      newY = Math.max(0, Math.min(newY, doc!.imgH - 8));
-      newW = Math.min(newW, doc!.imgW - newX);
-      newH = Math.min(newH, doc!.imgH - newY);
-      
-      setCropRect({ type: "crop", x: newX, y: newY, width: newW, height: newH });
-      return;
-    }
-    
+
     if (draft) {
       setDraft({ ...draft, width: x - draft.x, height: y - draft.y });
     }
@@ -628,17 +731,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   };
 
   const onStageMouseUp = () => {
-    // Kết thúc resize/move crop handle
-    if (resizingCropHandle) {
-      setResizingCropHandle(null);
-      cropResizeStartRef.current = null;
-      // Lưu vào history sau khi resize/move xong
-      if (cropRect) {
-        saveCropToHistory(cropRect);
-      }
-      return;
-    }
-    
+    // Resize/move crop rect: xử lý + kết thúc trong `beginCropPointerDrag`.
     if (arrowDraft) {
       const dx = arrowDraft.x2 - arrowDraft.x;
       const dy = arrowDraft.y2 - arrowDraft.y;
@@ -679,12 +772,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     setDraft(null);
     if (width < 4 || height < 4) return;
 
-    if (draft.type === "crop") {
-      const newCrop = { type: "crop" as const, x, y, width, height };
-      setCropRect(newCrop);
-      saveCropToHistory(newCrop); // Lưu crop đầu tiên vào history
-      return;
-    }
     if (draft.type === "highlight") {
       useEditor.getState().addAnnotation({
         id: uid(), type: "highlight",
@@ -1183,11 +1270,15 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               />
             ) : draft && draft.type === "crop" ? (
               <>
-                {/* Overlay xám cho vùng ngoài crop khi đang kéo */}
-                <Rect x={Math.min(draft.x, draft.x + draft.width)} y={0} width={Math.abs(draft.width)} height={Math.min(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
+                {/* Overlay xám cho vùng ngoài crop khi đang kéo — dải trên/dưới
+                    phải trải HẾT chiều ngang ảnh (x=0, width=doc.imgW), không
+                    chỉ theo chiều rộng vùng chọn, nếu không 4 góc ảnh (ngoài
+                    dải trên/dưới) sẽ không bị phủ mờ, để lộ vùng sáng ở góc
+                    đối diện vùng đang chọn. */}
+                <Rect x={0} y={0} width={doc.imgW} height={Math.min(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
                 <Rect x={0} y={Math.min(draft.y, draft.y + draft.height)} width={Math.min(draft.x, draft.x + draft.width)} height={Math.abs(draft.height)} fill="#000000" opacity={0.5} listening={false} />
                 <Rect x={Math.max(draft.x, draft.x + draft.width)} y={Math.min(draft.y, draft.y + draft.height)} width={doc.imgW - Math.max(draft.x, draft.x + draft.width)} height={Math.abs(draft.height)} fill="#000000" opacity={0.5} listening={false} />
-                <Rect x={Math.min(draft.x, draft.x + draft.width)} y={Math.max(draft.y, draft.y + draft.height)} width={Math.abs(draft.width)} height={doc.imgH - Math.max(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
+                <Rect x={0} y={Math.max(draft.y, draft.y + draft.height)} width={doc.imgW} height={doc.imgH - Math.max(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
                 
                 {/* Khung crop sáng */}
                 <Rect
@@ -1301,21 +1392,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                   onMouseDown={(e) => {
                     e.evt.preventDefault();
                     e.cancelBubble = true; // Ngăn event lan xuống stage
-                    const stage = stageRef.current;
-                    if (!stage) return;
-                    const pos = stage.getPointerPosition();
-                    if (!pos) return;
-                    const { x, y } = toImg(pos);
-                    cropResizeStartRef.current = {
-                      cropX: cropRect.x,
-                      cropY: cropRect.y,
-                      cropW: cropRect.width,
-                      cropH: cropRect.height,
-                      startX: x,
-                      startY: y,
-                      isMove: true,
-                    };
-                    setResizingCropHandle("move");
+                    beginCropPointerDrag("move", e.evt.clientX, e.evt.clientY);
                   }}
                   onMouseEnter={() => setCropHoverHandle("move")}
                   onMouseLeave={() => {
@@ -1358,21 +1435,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                     onMouseDown={(e) => {
                       e.evt.preventDefault();
                       e.cancelBubble = true; // Ngăn event lan xuống stage
-                      const stage = stageRef.current;
-                      if (!stage) return;
-                      const pos = stage.getPointerPosition();
-                      if (!pos) return;
-                      const { x, y } = toImg(pos);
-                      cropResizeStartRef.current = {
-                        cropX: cropRect.x,
-                        cropY: cropRect.y,
-                        cropW: cropRect.width,
-                        cropH: cropRect.height,
-                        startX: x,
-                        startY: y,
-                        isMove: false,
-                      };
-                      setResizingCropHandle(handle.id);
+                      beginCropPointerDrag(handle.id, e.evt.clientX, e.evt.clientY);
                     }}
                     onMouseEnter={() => setCropHoverHandle(handle.id)}
                     onMouseLeave={() => {

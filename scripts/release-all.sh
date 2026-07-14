@@ -80,6 +80,14 @@ echo "==> [2/6] Building macOS universal bundle (a few minutes)"
 export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-SnapDoc Dev}"
 bash scripts/macos-codesign.sh --ensure-only
 
+# Release-only: a stale ffmpeg sidecar under src-tauri/binaries can survive
+# across local rebuilds even when `beforeBuildCommand` exists. Purge the macOS
+# binaries here so this release always rebuilds them from the current fetch
+# script instead of reusing whatever is already on this machine.
+rm -f src-tauri/binaries/ffmpeg-aarch64-apple-darwin \
+  src-tauri/binaries/ffmpeg-x86_64-apple-darwin \
+  src-tauri/binaries/ffmpeg-universal-apple-darwin
+
 # Tauri's bundler can reuse a stale `externalBin` sidecar (e.g. ffmpeg) copied
 # into a PREVIOUS bundle output — confirmed by hand in this exact repo (see
 # same sweep in dev-mac.sh/build-mac.sh): after fixing a broken ffmpeg in

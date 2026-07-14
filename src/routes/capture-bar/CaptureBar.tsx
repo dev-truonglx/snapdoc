@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ipc, type AudioSource, type CaptureMode, type OutputMode } from "../../lib/ipc";
 
 type RecordMode = "full" | "window" | "region";
 /** "photo" = đang thao tác nhóm chụp ảnh, "video" = đang thao tác nhóm quay
- * màn hình — quyết định cặp (option + nút hành động) nào hiện ở cuối thanh
- * (xem `ActionArea`). Chỉ 1 trong 2 nhóm "active" tại 1 thời điểm, giống
- * cách thanh chụp màn hình gốc của macOS (Cmd+Shift+5) chỉ có 1 lựa chọn
- * được bôi sáng trong toàn bộ dải icon dù chia làm 2 cụm. */
+ * màn hình — quyết định popover option nào (Output ảnh / Nguồn audio) hiện ở
+ * cuối thanh. Chỉ 1 trong 2 nhóm "active" tại 1 thời điểm, giống cách thanh
+ * chụp màn hình gốc của macOS (Cmd+Shift+5) chỉ có 1 lựa chọn được bôi sáng
+ * trong toàn bộ dải icon dù chia làm 2 cụm. */
 type ActiveGroup = "photo" | "video";
 
 // Icon dùng chung cho "phạm vi" (Full/Window/Region) — cả nhóm chụp ảnh lẫn
@@ -61,9 +63,9 @@ const PHOTO_MODES: { id: CaptureMode; label: string; icon: React.ReactNode }[] =
 ];
 
 // Khu vực 2: chế độ QUAY MÀN HÌNH — đúng 3 phạm vi, dùng chung icon phạm vi
-// với nhóm chụp ảnh nhưng tô đỏ khi active (xem `scopeBtn`) để phân biệt rõ
-// đây là quay video, không phải chụp ảnh — cùng ngôn ngữ hình khối, khác
-// "công cụ" đang chọn, giống cách thanh Cmd+Shift+5 của macOS chia 2 cụm.
+// với nhóm chụp ảnh nhưng gắn thêm chấm đỏ nhỏ (xem `recordDotBadge`) để phân
+// biệt rõ đây là quay video, không phải chụp ảnh — cùng ngôn ngữ hình khối,
+// khác nhóm hành động, giống cách thanh Cmd+Shift+5 của macOS chia 2 cụm.
 const RECORD_MODES: { id: RecordMode; label: string }[] = [
   { id: "full", label: "Full" },
   { id: "window", label: "Window" },
@@ -84,6 +86,9 @@ const AUDIO_OPTIONS: { id: AudioSource; label: string }[] = [
   { id: "system", label: "Âm thanh hệ thống" },
 ];
 
+const CAPTURE_BAR_BOTTOM_PADDING = 12;
+const CAPTURE_BAR_POPOVER_GAP = 6;
+
 export default function CaptureBar() {
   const [photoMode, setPhotoMode] = useState<CaptureMode>("region");
   const [videoMode, setVideoMode] = useState<RecordMode>("full");
@@ -94,6 +99,9 @@ export default function CaptureBar() {
   // 2 nút đó cũng không bao giờ cùng hiện (đổi theo activeGroup).
   const [showPopover, setShowPopover] = useState(false);
   const optionWrapRef = useRef<HTMLDivElement>(null);
+  const barRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const syncWindowFrameRef = useRef<(() => Promise<void>) | null>(null);
   // Dùng ref để tránh setOutput ghi đè khi user đang chủ động chọn output
   // trong cùng một session (selectOutput đã lưu settings rồi → event sẽ fire
   // lại đúng giá trị đó, không gây loop).
@@ -118,10 +126,6 @@ export default function CaptureBar() {
       if (s?.recordAudioSource) setAudioSource(s.recordAudioSource);
     }).catch(() => {});
 
-    ipc.getLastCaptureMode().then(([m]) => {
-      if (m) setPhotoMode(m as CaptureMode);
-    }).catch(() => {});
-
     // Sync output/audio khi Settings thay đổi từ cửa sổ Settings. Output chỉ
     // áp dụng khi user KHÔNG đang chủ động chọn trong capture bar; audio thì
     // luôn áp dụng (không có input debounce nào tranh chấp ở đây).
@@ -134,30 +138,12 @@ export default function CaptureBar() {
       }
     });
 
-    const unlisten = listen<{ mode: string; output: string | null }>("set-capture-mode", (e) => {
-      setPhotoMode(e.payload.mode as CaptureMode);
-      setActiveGroup("photo");
-      // set-capture-mode từ editor "New" truyền output=null để chỉ sync mode,
-      // giữ nguyên defaultOutput từ settings. Chỉ override output khi có giá trị thực.
-      if (e.payload.output) {
-        setOutput(e.payload.output as OutputMode);
-      }
-    });
-
-    // Nút "Quay lại" ở `record-review` (xem `record::redo_recording`) — sync
-    // đúng phạm vi quay vừa xoá sang khu vực QUAY MÀN HÌNH, y hệt hành vi bấm
-    // tay vào nút phạm vi đó (xem `selectVideoMode`: "region" cần mở luôn
-    // khung chọn/chỉnh vùng, "full"/"window" thì chỉ chọn mode chờ bấm "Quay").
+    // Nút "Quay lại" ở `record-review` (xem `record::redo_recording`) — mở
+    // lại đúng phạm vi quay vừa xoá, y hệt hành vi bấm tay vào nút phạm vi đó
+    // (xem `selectVideoMode`).
     const unlistenRecordMode = listen<{ mode: string }>("set-record-mode", (e) => {
       selectVideoMode(e.payload.mode as RecordMode);
     });
-
-    const onFocus = () => {
-      ipc.getLastCaptureMode().then(([m]) => {
-        if (m) setPhotoMode(m as CaptureMode);
-      }).catch(() => {});
-    };
-    window.addEventListener("focus", onFocus);
 
     // Listen to native Tauri blur event to close popover when clicking outside the window
     const unlistenBlur = listen("tauri://blur", () => {
@@ -185,8 +171,8 @@ export default function CaptureBar() {
       if (e.key === "Enter") {
         if (activeGroupRef.current === "video") {
           // "Vùng chọn": khung chọn/chỉnh vùng đã mở sẵn từ lúc chọn mode
-          // (xem `selectVideoMode`) — Enter ở đây cũng phải tương đương bấm
-          // "Bắt đầu quay" ngay tại khung, giống hệt nút "Quay" (`doRecord`).
+          // (xem `selectVideoMode`) — Enter ở đây tương đương bấm "Bắt đầu
+          // quay" ngay tại khung, KHÔNG mở lại phiên chọn vùng mới.
           if (videoModeRef.current === "region") {
             ipc.confirmRegionRecordStart().catch((err) => alert(String(err)));
           } else {
@@ -210,9 +196,7 @@ export default function CaptureBar() {
 
     return () => {
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("focus", onFocus);
       window.removeEventListener("mousedown", onClickOutside);
-      unlisten.then((fn) => fn());
       unlistenRecordMode.then((fn) => fn());
       unlistenSettings.then((fn) => fn());
       unlistenBlur.then((fn) => fn());
@@ -246,52 +230,91 @@ export default function CaptureBar() {
     }).catch(() => {});
   };
 
+  // Chọn mode = thực hiện NGAY (không còn nút "Chụp" riêng để bấm thêm 1 lần
+  // nữa) — mọi mode ("all"/"full"/"window"/"region"/"scroll") đều chỉ MỞ một
+  // luồng tương tác (overlay chọn màn hình/cửa sổ/vùng, hoặc phiên cuộn), việc
+  // "chụp" thật sự luôn xảy ra ở bước sau đó (thả chuột trên overlay) nên bấm
+  // là chạy luôn không mất đi bước xác nhận nào.
   const selectPhotoMode = (m: CaptureMode) => {
     setPhotoMode(m);
     setActiveGroup("photo");
+    if (m === "all") {
+      ipc.captureAllScreens(output).catch((e) => alert(String(e)));
+    } else {
+      ipc.captureNow(m, output).catch((e) => alert(String(e)));
+    }
   };
+  // Tương tự cho quay màn hình — "region" đã mở luôn khung chọn/chỉnh vùng từ
+  // trước (không cần bấm "Quay" mới mở), giờ "full"/"window" cũng mở overlay
+  // chọn màn hình/cửa sổ ngay khi chọn, đồng nhất với hành vi "chọn = chạy".
   const selectVideoMode = (m: RecordMode) => {
     setVideoMode(m);
     setActiveGroup("video");
-    // "Vùng chọn": mở luôn khung chọn/chỉnh vùng NGAY khi chọn mode này (hiện
-    // vùng đã quay lần gần nhất, hoặc chờ kéo vùng mới nếu chưa có) — không
-    // cần bấm "Quay" trước nữa. "Toàn màn hình"/"Cửa sổ" giữ nguyên hành vi cũ
-    // (chọn-là-chụp/quay ngay khi bấm "Quay", không có bước chỉnh sửa nào).
-    if (m === "region") {
-      ipc.startRecordPicker("region").catch((e) => alert(String(e)));
+    ipc.startRecordPicker(m).catch((e) => alert(String(e)));
+  };
+
+  // const currentOutput = OUTPUTS.find((o) => o.id === output);
+  // const currentAudio = AUDIO_OPTIONS.find((a) => a.id === audioSource);
+
+  syncWindowFrameRef.current = async () => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    const windowApi = getCurrentWebviewWindow();
+    const currentSize = await windowApi.innerSize();
+    const currentPosition = await windowApi.outerPosition();
+    const barHeight = barRef.current?.getBoundingClientRect().height ?? 0;
+    const popoverHeight = showPopover ? (popoverRef.current?.getBoundingClientRect().height ?? 0) : 0;
+    const nextHeight = Math.ceil(
+      barHeight
+      + CAPTURE_BAR_BOTTOM_PADDING
+      + (showPopover ? popoverHeight + CAPTURE_BAR_POPOVER_GAP : 0),
+    );
+
+    if (nextHeight <= 0) return;
+
+    const heightDelta = nextHeight - currentSize.height;
+    await windowApi.setSize(new PhysicalSize(currentSize.width, nextHeight));
+    if (heightDelta !== 0) {
+      await windowApi.setPosition(new PhysicalPosition(currentPosition.x, currentPosition.y - heightDelta));
     }
   };
 
-  const doCapture = () => {
-    if (photoMode === "all") {
-      ipc.captureAllScreens(output).catch((e) => alert(String(e)));
-    } else {
-      ipc.captureNow(photoMode, output).catch((e) => alert(String(e)));
-    }
-  };
+  useLayoutEffect(() => {
+    void syncWindowFrameRef.current?.();
+  }, [showPopover, output, audioSource]);
 
-  const doRecord = () => {
-    // "Vùng chọn": khung chọn/chỉnh vùng đã mở sẵn từ lúc chọn mode (xem
-    // `selectVideoMode`) — bấm "Quay" ở đây giờ tương đương bấm "Bắt đầu
-    // quay" ngay tại khung đó, KHÔNG mở lại 1 phiên chọn vùng mới (sẽ làm mất
-    // vùng user vừa kéo/chỉnh dở).
-    if (videoMode === "region") {
-      ipc.confirmRegionRecordStart().catch((e) => alert(String(e)));
-      return;
-    }
-    ipc.startRecordPicker(videoMode).catch((e) => alert(String(e)));
-  };
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
 
-  const currentOutput = OUTPUTS.find((o) => o.id === output);
-  const currentAudio = AUDIO_OPTIONS.find((a) => a.id === audioSource);
-  const isPhoto = activeGroup === "photo";
+    let firstFrame = 0;
+    let secondFrame = 0;
+    const observer = new ResizeObserver(() => {
+      void syncWindowFrameRef.current?.();
+    });
+
+    if (barRef.current) {
+      observer.observe(barRef.current);
+    }
+
+    firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        void syncWindowFrameRef.current?.();
+      });
+    });
+
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, []);
 
   return (
     // Wrap toàn bộ height, flex-end để bar nằm đáy — popover có không gian phía trên
     <div style={wrap}>
       <div style={container}>
         {/* Bar nằm đáy */}
-        <div style={bar}>
+        <div ref={barRef} style={bar}>
           {/* Khu vực 1: chế độ CHỤP ẢNH */}
           <div style={modeGroup}>
             {/* Chụp nhanh — hành động chạy NGAY (không phải chế độ để chọn):
@@ -304,13 +327,13 @@ export default function CaptureBar() {
               <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
                 <path d="M11 2 3 12h6l-1 6 8-10h-6l1-6Z" fill="currentColor" />
               </svg>
-              <span style={{ fontSize: 11, lineHeight: 1 }}>Nhanh</span>
+              <span style={{ fontSize: 11, lineHeight: 1 }}>Quick</span>
             </button>
             {PHOTO_MODES.map((m) => (
               <button
                 key={m.id}
                 onClick={() => selectPhotoMode(m.id)}
-                style={scopeBtn(isPhoto && photoMode === m.id, "photo")}
+                style={scopeBtn}
                 title={m.label}
               >
                 {m.icon}
@@ -321,14 +344,13 @@ export default function CaptureBar() {
 
           <div style={divider} />
 
-          {/* Khu vực 2: chế độ QUAY MÀN HÌNH — luôn hiện đủ 3 lựa chọn, tô đỏ
-              khi active để phân biệt với khu vực chụp ảnh phía trên. */}
+          {/* Khu vực 2: chế độ QUAY MÀN HÌNH — luôn hiện đủ 3 lựa chọn. */}
           <div style={modeGroup}>
             {RECORD_MODES.map((r) => (
               <button
                 key={r.id}
                 onClick={() => selectVideoMode(r.id)}
-                style={scopeBtn(!isPhoto && videoMode === r.id, "video")}
+                style={scopeBtn}
                 title={`Quay ${r.label.toLowerCase()}`}
               >
                 <span style={recordIconWrap}>
@@ -342,46 +364,41 @@ export default function CaptureBar() {
 
           <div style={divider} />
 
-          {/* Option — đổi giữa Output (ảnh) / Nguồn audio (video), CÙNG 1
-              kiểu dáng nút+popover cho đồng nhất trải nghiệm. */}
+          {/* Option — 1 nút mở popover gộp cả Output (chụp) + Nguồn audio (quay)
+              thành 2 section riêng trong cùng 1 dropdown. */}
           <div ref={optionWrapRef} style={{ position: "relative" }}>
             <button
               style={optBtn}
               onClick={(e) => { e.stopPropagation(); setShowPopover((v) => !v); }}
             >
-              <span>{isPhoto ? (currentOutput?.label ?? "Hành vi") : (currentAudio?.label ?? "Âm thanh")}</span>
-              <span style={{ fontSize: 10, opacity: 0.5 }}>{showPopover ? "▴" : "▾"}</span>
+              <span style={optBtnSection}>
+                Options
+              </span>
+              <span style={{ fontSize: 10, opacity: 0.5, marginLeft: 2 }}>{showPopover ? "▴" : "▾"}</span>
             </button>
             {showPopover && (
-              <div style={popover} onClick={(e) => e.stopPropagation()}>
-                {isPhoto
-                  ? OUTPUTS.map((o) => (
-                      <button key={o.id} style={popItem(output === o.id)} onClick={() => selectOutput(o.id)}>
-                        <span style={{ flex: 1 }}>{o.label}</span>
-                        {output === o.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
-                      </button>
-                    ))
-                  : AUDIO_OPTIONS.map((a) => (
-                      <button key={a.id} style={popItem(audioSource === a.id)} onClick={() => selectAudioSource(a.id)}>
-                        <span style={{ flex: 1 }}>{a.label}</span>
-                        {audioSource === a.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
-                      </button>
-                    ))}
+              <div ref={popoverRef} style={popover} onClick={(e) => e.stopPropagation()}>
+                {/* Section 1: Output chụp ảnh */}
+                <div style={popSectionLabel}>Chụp ảnh</div>
+                {OUTPUTS.map((o) => (
+                  <button key={o.id} style={popItem(output === o.id)} onClick={() => selectOutput(o.id)}>
+                    <span style={{ flex: 1 }}>{o.label}</span>
+                    {output === o.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
+                  </button>
+                ))}
+                {/* Divider */}
+                <div style={popDivider} />
+                {/* Section 2: Nguồn audio quay */}
+                <div style={popSectionLabel}>Quay màn hình</div>
+                {AUDIO_OPTIONS.map((a) => (
+                  <button key={a.id} style={popItem(audioSource === a.id)} onClick={() => selectAudioSource(a.id)}>
+                    <span style={{ flex: 1 }}>{a.label}</span>
+                    {audioSource === a.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
+                  </button>
+                ))}
               </div>
             )}
           </div>
-
-          {/* Nút hành động — Chụp (ảnh) hoặc Quay (video), đổi theo activeGroup. */}
-          {isPhoto ? (
-            <button style={shootBtn} onClick={doCapture}>
-              Chụp
-            </button>
-          ) : (
-            <button style={recordBtn} onClick={doRecord} title="Quay video đúng phạm vi đang chọn">
-              <span style={recordDot} aria-hidden />
-              Quay
-            </button>
-          )}
 
           {/* Close */}
           <button aria-label="Đóng" style={closeBtn} onClick={() => ipc.closeSelf()}>
@@ -418,6 +435,7 @@ const bar: React.CSSProperties = {
   background: "rgba(32,32,38,0.97)",
   borderRadius: 12,
   padding: "7px 10px",
+  width: "max-content",  // tự giãn theo nội dung, không bị cap bởi window width
 };
 
 const modeGroup: React.CSSProperties = {
@@ -428,23 +446,20 @@ const modeGroup: React.CSSProperties = {
   padding: 2,
 };
 
-// Nút phạm vi (Full/Window/Region…) dùng chung cho cả 2 khu vực — chỉ khác
-// màu khi active: xanh (accent) cho chụp ảnh, đỏ (danger) cho quay màn hình,
-// giúp phân biệt "đang ở công cụ nào" chỉ bằng màu sắc.
-function scopeBtn(active: boolean, kind: "photo" | "video"): React.CSSProperties {
-  return {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: 3,
-    width: 56,
-    padding: "6px 4px",
-    borderRadius: 6,
-    background: active ? (kind === "video" ? "var(--danger)" : "var(--accent)") : "transparent",
-    color: active ? "#fff" : "var(--text-dim)",
-    transition: "background 0.12s",
-  };
-}
+// Nút phạm vi (Full/Window/Region…) dùng chung cho cả 2 khu vực — mỗi bấm là
+// 1 hành động chạy ngay nên không còn trạng thái "đang chọn" để tô màu; phân
+// biệt chụp ảnh/quay màn hình qua icon + chấm đỏ (`recordDotBadge`), không
+// qua màu nền nút nữa.
+const scopeBtn: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 3,
+  width: 56,
+  padding: "6px 4px",
+  borderRadius: 6,
+  color: "var(--text-dim)",
+};
 
 const divider: React.CSSProperties = {
   width: 1,
@@ -467,8 +482,9 @@ const optBtn: React.CSSProperties = {
   cursor: "pointer",
 };
 
-// Nút "Chụp nhanh" trong cụm chế độ: cùng khối với mode buttons nhưng nhấn
-// nhấn accent (vàng) để phân biệt đây là hành động chạy ngay, không phải chế độ.
+// Nút "Chụp nhanh" trong cụm chế độ: cùng khối với mode buttons nhưng tô vàng
+// để phân biệt — nó không thuộc `photoMode`/`activeGroup` (không có trạng
+// thái "đang chọn" để nhớ lại như các mode khác), chỉ là 1 hành động rời.
 const quickModeBtn: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
@@ -499,42 +515,6 @@ const recordDotBadge: React.CSSProperties = {
   background: "var(--danger)",
 };
 
-// Nút "Quay" — pill tông đỏ, giữ nguyên hình dạng như "Chụp" để 2 nút hành
-// động luôn chiếm đúng 1 vị trí, không làm bar giật kích thước khi đổi nhóm.
-const recordBtn: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "7px 16px",
-  borderRadius: 8,
-  background: "rgba(239,68,68,0.16)",
-  color: "var(--danger)",
-  fontWeight: 600,
-  fontSize: 13,
-  border: "none",
-  cursor: "pointer",
-  whiteSpace: "nowrap",
-};
-
-const recordDot: React.CSSProperties = {
-  width: 8,
-  height: 8,
-  borderRadius: "50%",
-  background: "var(--danger)",
-  display: "inline-block",
-};
-
-const shootBtn: React.CSSProperties = {
-  padding: "7px 18px",
-  borderRadius: 8,
-  background: "var(--accent)",
-  color: "#fff",
-  fontWeight: 600,
-  fontSize: 13,
-  border: "none",
-  cursor: "pointer",
-};
-
 const closeBtn: React.CSSProperties = {
   width: 32,
   height: 32,
@@ -551,7 +531,7 @@ const closeBtn: React.CSSProperties = {
 
 const popover: React.CSSProperties = {
   position: "absolute",
-  bottom: "calc(100% + 6px)",  // ngay trên nút, cách 6px
+  bottom: "calc(100% + 6px)",
   right: 0,
   background: "rgba(30,30,36,0.99)",
   border: "1px solid rgba(255,255,255,0.12)",
@@ -564,6 +544,41 @@ const popover: React.CSSProperties = {
   zIndex: 100,
   whiteSpace: "nowrap",
 };
+
+const popSectionLabel: React.CSSProperties = {
+  padding: "5px 12px 3px",
+  fontSize: 10,
+  fontWeight: 600,
+  letterSpacing: "0.06em",
+  textTransform: "uppercase",
+  color: "var(--text-dim)",
+  opacity: 0.6,
+  userSelect: "none",
+};
+
+const popDivider: React.CSSProperties = {
+  height: 1,
+  background: "rgba(255,255,255,0.08)",
+  margin: "4px 4px",
+};
+
+// Nút trigger: mỗi section (chụp / quay) hiện label riêng ngăn cách bằng dấu ·
+const optBtnSection: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 4,
+};
+
+// const optBtnIcon: React.CSSProperties = {
+//   fontSize: 12,
+//   lineHeight: 1,
+// };
+
+// const optBtnSep: React.CSSProperties = {
+//   opacity: 0.3,
+//   fontSize: 14,
+//   margin: "0 2px",
+// };
 
 function popItem(active: boolean): React.CSSProperties {
   return {

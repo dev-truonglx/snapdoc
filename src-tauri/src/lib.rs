@@ -104,7 +104,6 @@ pub fn run() {
             commands::reload_shortcuts,
             commands::suspend_shortcuts,
             commands::resume_shortcuts,
-            commands::get_last_capture_mode,
             commands::get_hotkey_warning,
             commands::get_autostart,
             commands::set_autostart,
@@ -226,10 +225,10 @@ pub fn run() {
             // tiên hiện tức thì, không chờ tải webview mới.
             let _ = windows::prewarm_stop_control(&handle);
 
-            // macOS: app sống ở menu bar, ẩn khỏi Dock lúc khởi động.
-            // Khi editor mở sẽ chuyển sang Regular (xem windows::open_editor).
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            // Pre-warm capture-bar (ẩn) NGAY khi app khởi động — giữ icon Dock
+            // (macOS)/Taskbar (Windows) hiện diện xuyên suốt vòng đời app kể
+            // từ lúc mở app, không còn im lặng ở tray như trước.
+            let _ = windows::prewarm_capture_bar(&handle);
 
             // Lần đầu chạy sau khi cài: tự động bật "khởi động cùng hệ thống".
             // Phát hiện "lần đầu" bằng việc FILE settings.json đã tồn tại
