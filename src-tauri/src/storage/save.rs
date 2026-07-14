@@ -26,14 +26,29 @@ fn dedupe(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Ghi base64 PNG ra đúng `path`. Trả về đường dẫn thực tế đã ghi.
+/// Ghi base64 PNG ra `path`, tự thêm hậu tố `_1`, `_2`... nếu đã tồn tại
+/// (qua `dedupe`). Dùng cho các luồng auto-save im lặng (hotkey chụp nhanh,
+/// Quick Capture) — không có bước xác nhận nào của người dùng trước đó nên
+/// không được phép ghi đè file có sẵn. Trả về đường dẫn thực tế đã ghi.
 pub fn write_png(path: &str, data: &str) -> Result<String, String> {
+    write_png_to(dedupe(PathBuf::from(path)), data)
+}
+
+/// Ghi base64 PNG ra ĐÚNG `path` được truyền vào, KHÔNG qua `dedupe`. Dùng
+/// cho Save/Save As thủ công (`save_image`/`save_and_copy`): path này đến từ
+/// dialog Save gốc OS, dialog đã tự hỏi "Replace existing file?" và người
+/// dùng đã xác nhận ghi đè — nếu vẫn dedupe sẽ âm thầm tạo `ten-file_1.png`
+/// bên cạnh thay vì ghi đè đúng file đã chọn.
+pub fn write_png_exact(path: &str, data: &str) -> Result<String, String> {
+    write_png_to(PathBuf::from(path), data)
+}
+
+fn write_png_to(target: PathBuf, data: &str) -> Result<String, String> {
     let b64 = data.split(',').next_back().unwrap_or(data);
     let bytes = STANDARD
         .decode(b64.trim())
         .map_err(|e| format!("Base64 không hợp lệ: {e}"))?;
 
-    let target = dedupe(PathBuf::from(path));
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).ok();
     }

@@ -5,7 +5,7 @@ import Toolbar from "./Toolbar";
 import HistoryStrip from "./HistoryStrip";
 import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
 import { useEditor } from "../../features/annotation/store";
-import { copyToClipboard, saveToFile } from "../../features/output/useOutput";
+import { copyToClipboard, saveToFile, saveAsToFile } from "../../features/output/useOutput";
 import { ipc, type Pending } from "../../lib/ipc";
 import { editorToolFromKey } from "../../lib/toolShortcuts";
 import StitchDialog from "../../features/annotation/compose/StitchDialog";
@@ -136,7 +136,7 @@ export default function Editor() {
     if (!url) return;
     setBusy(true);
     try {
-      const saved = await saveToFile(url, false);
+      const saved = await saveAsToFile(url);
       if (saved) {
         ipc.closeSelf();
       }
@@ -172,8 +172,13 @@ export default function Editor() {
         e.preventDefault();
         e.shiftKey ? s.redo() : s.undo();
       } else if (mod && e.key.toLowerCase() === "s") {
+        // Ctrl/Cmd+S = Save; Ctrl/Cmd+Shift+S = Save As (chuẩn ngành, giống
+        // Photoshop/Office/Sketch); Ctrl/Cmd+Alt+S = Save+Copy (dời từ
+        // Shift+S cũ để nhường chỗ cho Save As).
         e.preventDefault();
-        doSave(e.shiftKey);
+        if (e.shiftKey) doSaveAs();
+        else if (e.altKey) doSave(true);
+        else doSave(false);
       } else if (mod && e.key.toLowerCase() === "o") {
         e.preventDefault();
         doOpen();

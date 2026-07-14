@@ -14,6 +14,16 @@ export async function copyToClipboard(dataUrl: string): Promise<void> {
   await ipc.copyImage(dataUrl);
 }
 
+/** Thư mục chứa file từ đường dẫn đầy đủ (hỗ trợ cả `/` và `\` — path Windows dùng `\`). */
+export function dirnameOf(path: string): string {
+  return path.replace(/[\\/][^\\/]*$/, "");
+}
+
+/** Tên file (không kèm thư mục) từ đường dẫn đầy đủ. */
+export function basenameOf(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
 /**
  * Mở dialog lưu file với đường dẫn mặc định cụ thể.
  * Dùng chung cho Save As ở editor và các flow muốn đổi cả thư mục lẫn tên file.
@@ -58,4 +68,21 @@ export async function saveToFile(dataUrl: string, alsoCopy = false): Promise<str
   const path = await promptSavePath(dir ? `${dir}/${stampName()}.png` : `${stampName()}.png`);
   if (!path) return null;
   return alsoCopy ? await ipc.saveAndCopy(path, dataUrl) : await ipc.saveImage(path, dataUrl);
+}
+
+/**
+ * "Save As…" ảnh ở editor — LUÔN mở dialog, ưu tiên thư mục LẦN CUỐI user
+ * từng chọn qua Save As (`lastImageSaveAsDir`) làm mặc định thay vì luôn quay
+ * về `saveDir`, để lần Save As kế tiếp không phải tự điều hướng lại từ đầu.
+ * Lưu xong ghi nhớ luôn thư mục vừa chọn cho lần sau.
+ */
+export async function saveAsToFile(dataUrl: string): Promise<string | null> {
+  const settings = await ipc.getSettings().catch(() => null);
+  const dir = settings?.lastImageSaveAsDir || settings?.saveDir || (await ipc.defaultSaveDir());
+  const path = await promptSavePath(dir ? `${dir}/${stampName()}.png` : `${stampName()}.png`);
+  if (!path) return null;
+  if (settings) {
+    ipc.setSettings({ ...settings, lastImageSaveAsDir: dirnameOf(path) }).catch(() => {});
+  }
+  return await ipc.saveImage(path, dataUrl);
 }

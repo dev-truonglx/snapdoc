@@ -79,6 +79,12 @@ export interface Settings {
   /** Nguồn audio ghi kèm khi quay màn hình — chỉ 1 trong 3, mặc định "off". */
   recordAudioSource: AudioSource;
   shortcuts: Record<string, string>;
+  /** Thư mục lần cuối user chọn qua "Save As…" ở editor (ảnh) — dùng làm mặc
+   * định cho lần Save As kế tiếp, xem `useOutput.saveAsToFile`. */
+  lastImageSaveAsDir?: string;
+  /** Thư mục lần cuối user chọn qua "Lưu thành…" ở RecordReview (video) —
+   * dùng làm mặc định cho lần kế tiếp, xem `RecordReview.pickSaveTarget`. */
+  lastVideoSaveAsDir?: string;
 }
 
 export interface UpdateInfo {

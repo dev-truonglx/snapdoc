@@ -86,6 +86,15 @@ const AUDIO_OPTIONS: { id: AudioSource; label: string }[] = [
 
 const CAPTURE_BAR_BOTTOM_PADDING = 12;
 
+// Sàn an toàn cho chiều cao cửa sổ — chặn trường hợp `getBoundingClientRect()`
+// đo phải 0 (race lúc mount: cửa sổ prewarm còn ẩn, layout webview có thể
+// chưa flush kịp trước khi effect đo, dễ gặp hơn trên máy render nhanh như
+// MacBook Retina), khiến cửa sổ bị resize xuống còn vài px và KẸT vĩnh viễn ở
+// đó (ResizeObserver chỉ bắn lại khi kích thước bar THẬT SỰ đổi, không tự
+// sửa nếu phép đo ban đầu sai). Thấp hơn hẳn chiều cao bar thật (~60-70px) nên
+// không ảnh hưởng phép đo hợp lệ, chỉ chặn giá trị suy biến gần 0.
+const CAPTURE_BAR_MIN_HEIGHT = 40;
+
 export default function CaptureBar() {
   const [photoMode, setPhotoMode] = useState<CaptureMode>("region");
   const [videoMode, setVideoMode] = useState<RecordMode>("full");
@@ -281,8 +290,11 @@ export default function CaptureBar() {
   // Rust CHỜ đến khi main thread áp xong frame mới rồi mới trả về cho JS.
   const resizeWindowTo = (nextHeight: number) => {
     if (!("__TAURI_INTERNALS__" in window)) return Promise.resolve();
-    if (nextHeight <= 0) return Promise.resolve();
-    return ipc.resizeCaptureBar(nextHeight).catch(() => {});
+    if (!Number.isFinite(nextHeight) || nextHeight <= 0) return Promise.resolve();
+    // Math.max với CAPTURE_BAR_MIN_HEIGHT: chặn giá trị suy biến gần 0 (xem
+    // giải thích ở khai báo hằng số) mà không ảnh hưởng phép đo hợp lệ nào
+    // (cả 2 trạng thái đóng/mở đều cao hơn hẳn sàn này trong điều kiện bình thường).
+    return ipc.resizeCaptureBar(Math.max(nextHeight, CAPTURE_BAR_MIN_HEIGHT)).catch(() => {});
   };
 
   /** Bật/tắt popover mà không bị nháy:
@@ -329,6 +341,27 @@ export default function CaptureBar() {
       observer.disconnect();
       window.cancelAnimationFrame(firstFrame);
       window.cancelAnimationFrame(secondFrame);
+    };
+  }, []);
+
+  // Đồng bộ lại chiều cao MỖI LẦN cửa sổ được focus (đúng lúc `open_capture_bar`
+  // ở Rust show + focus lại cửa sổ prewarm, kể cả những lần sau — không chỉ
+  // lần mount đầu). Capture-bar không bao giờ bị destroy (chỉ ẩn/minimize —
+  // xem `windows::prewarm_capture_bar`), nên phép đo lúc mount ở effect trên
+  // là LẦN DUY NHẤT hình dạng thật của bar được đo trong khi cửa sổ còn ẩn —
+  // nếu phép đo đó lỡ sai (vd: webview chưa flush xong layout khi vẫn ẩn, dễ
+  // gặp hơn trên máy render nhanh), kích thước sai đó kẹt vĩnh viễn vì không
+  // còn dịp nào khác kích hoạt lại ResizeObserver (nội dung bar không đổi
+  // kích thước ở các lần mở sau). Focus lại là tín hiệu đáng tin cậy nhất cho
+  // "user đang thực sự nhìn thấy bar" — đo lại ở đây coi như lưới an toàn thứ
+  // 2, rẻ và vô hại nếu kích thước đã đúng sẵn.
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const unlistenFocus = listen("tauri://focus", () => {
+      void resizeWindowTo(showPopoverRef.current ? computeOpenHeight() : computeClosedHeight());
+    });
+    return () => {
+      unlistenFocus.then((f) => f());
     };
   }, []);
 

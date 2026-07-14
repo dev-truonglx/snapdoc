@@ -3,12 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ipc, type PendingRecording } from "../../lib/ipc";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
-import { promptSaveVideoPath } from "../../features/output/useOutput";
-
-/** Thư mục chứa file (hỗ trợ cả `/` và `\` — mp4 quay trên Windows dùng `\`). */
-function dirnameOf(path: string): string {
-  return path.replace(/[\\/][^\\/]*$/, "");
-}
+import { promptSaveVideoPath, dirnameOf, basenameOf } from "../../features/output/useOutput";
 
 /** Cửa sổ bắt buộc xác nhận NGAY sau khi dừng quay (xem
  * `record::stop_recording` — không ingest vào History tự động nữa, chờ
@@ -113,13 +108,24 @@ export default function RecordReview() {
   const currentSaveTarget = customSaveTarget ?? (pending ? pending.path : null);
   const currentSaveDir = currentSaveTarget ? dirnameOf(currentSaveTarget) : null;
 
-  /** Mở dialog lưu file — cho phép đổi cả thư mục lẫn tên file, rồi lưu ngay. */
+  /** Mở dialog lưu file — cho phép đổi cả thư mục lẫn tên file, rồi lưu ngay.
+   * Ưu tiên thư mục LẦN CUỐI user từng chọn qua "Lưu thành…" (`lastVideoSaveAsDir`)
+   * làm mặc định (giữ nguyên tên file gốc), thay vì luôn quay về vị trí file
+   * đang nằm sẵn — để lần "Lưu thành…" kế tiếp không phải tự điều hướng lại.
+   * Lưu xong ghi nhớ luôn thư mục vừa chọn cho lần sau. */
   const pickSaveTarget = async () => {
     setShowSaveMenu(false);
     if (!pending) return;
-    const defaultPath = currentSaveTarget ?? pending.path;
+    const settings = await ipc.getSettings().catch(() => null);
+    const lastDir = settings?.lastVideoSaveAsDir;
+    const defaultPath = lastDir
+      ? `${lastDir}/${basenameOf(pending.path)}`
+      : currentSaveTarget ?? pending.path;
     const path = await promptSaveVideoPath(defaultPath);
     if (!path) return;
+    if (settings) {
+      ipc.setSettings({ ...settings, lastVideoSaveAsDir: dirnameOf(path) }).catch(() => {});
+    }
     setCustomSaveTarget(path);
     doApplyAndSave(path);
   };

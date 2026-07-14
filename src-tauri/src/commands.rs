@@ -161,13 +161,15 @@ pub fn copy_image(data: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn save_image(path: String, data: String) -> Result<String, String> {
-    storage::save::write_png(&path, &data)
+    // `path` đến từ dialog Save/Save As gốc OS — dialog đã tự hỏi "Replace
+    // existing file?" nên ghi đúng path, không dedupe (xem `write_png_exact`).
+    storage::save::write_png_exact(&path, &data)
 }
 
 #[tauri::command]
 pub fn save_and_copy(path: String, data: String) -> Result<String, String> {
     clipboard::copy_png(&data)?;
-    storage::save::write_png(&path, &data)
+    storage::save::write_png_exact(&path, &data)
 }
 
 #[tauri::command]
