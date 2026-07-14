@@ -77,14 +77,21 @@ function findFileRecursive(dir, name) {
 }
 
 async function downloadFile(url, dest) {
-  const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok) {
-    throw new Error(`Tải thất bại (HTTP ${res.status}): ${url}`);
-  }
-  const buf = Buffer.from(await res.arrayBuffer());
   mkdirSync(dirname(dest), { recursive: true });
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(dest, buf);
+  try {
+    const res = await fetch(url, { redirect: "follow" });
+    if (!res.ok) {
+      throw new Error(`Tải thất bại (HTTP ${res.status}): ${url}`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(dest, buf);
+    return;
+  } catch (err) {
+    warn(`fetch() thất bại, thử curl fallback cho ${url}: ${err.message}`);
+  }
+
+  execFileSync("curl", ["-L", "--fail", "--silent", "--show-error", "--output", dest, url]);
 }
 
 // `tar` trên Windows (bsdtar, có sẵn từ 10 1803+) và macOS (cũng bsdtar) tự
