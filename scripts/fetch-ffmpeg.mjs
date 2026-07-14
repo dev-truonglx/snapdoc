@@ -181,10 +181,6 @@ async function fetchMacIntelViaEvermeet(dest) {
 // (Xcode Command Line Tools).
 function ensureMacUniversal() {
   const dest = destPathFor("universal-apple-darwin");
-  if (existsSync(dest)) {
-    log(`Đã có sẵn: ${dest}`);
-    return;
-  }
   const arm = destPathFor("aarch64-apple-darwin");
   const intel = destPathFor("x86_64-apple-darwin");
   if (!existsSync(arm) || !existsSync(intel)) {
@@ -193,6 +189,7 @@ function ensureMacUniversal() {
   }
   log("Đang gộp ffmpeg universal binary (lipo)...");
   try {
+    rmSync(dest, { force: true });
     execFileSync("lipo", ["-create", "-output", dest, arm, intel]);
     chmodSync(dest, 0o755);
     log(`Đã sẵn sàng: ${dest}`);
