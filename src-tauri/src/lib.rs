@@ -87,6 +87,7 @@ pub fn run() {
             commands::save_and_copy,
             commands::open_capture_bar,
             commands::open_capture_bar_for_new,
+            windows::resize_capture_bar,
             commands::open_editor,
             commands::open_settings,
             commands::close_self,

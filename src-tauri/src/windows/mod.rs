@@ -274,6 +274,91 @@ pub fn prewarm_capture_bar(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Resize capture-bar giữ NGUYÊN cạnh đáy (bar luôn "mọc" lên trên khi mở
+/// popover, xem `CaptureBar.tsx`) mà KHÔNG nháy.
+///
+/// macOS: gọi thẳng `NSWindow.setFrame:display:` — MỘT lệnh AppKit atomic
+/// set cả kích thước lẫn vị trí cùng lúc. Khác với `set_size` + `set_position`
+/// riêng lẻ của Tauri (2 lệnh OS tách rời), atomic frame không thể lộ ra 1
+/// khung hình trung gian sai kích thước/vị trí giữa 2 bước — đây chính là
+/// nguồn gây nháy khi resize nhanh (mở/đóng popover liên tục) dù JS đã tính
+/// đúng chiều cao và đúng thứ tự gọi.
+///
+/// Windows/Linux: không có API atomic tương đương, fallback về set_size +
+/// set_position của Tauri — nhưng vẫn gộp việc đo + tính + set vào 1 lệnh
+/// Rust duy nhất (trước đây JS phải gọi 4 round-trip IPC riêng: innerSize/
+/// outerPosition/setSize/setPosition), giảm hẳn độ trễ giữa các bước.
+#[tauri::command]
+pub fn resize_capture_bar(app: AppHandle, height: f64) -> Result<(), String> {
+    let win = app
+        .get_webview_window("capture-bar")
+        .ok_or("capture-bar không tồn tại")?;
+
+    #[cfg(target_os = "macos")]
+    {
+        // AppKit chỉ an toàn khi gọi từ main thread — #[tauri::command] chạy
+        // trên thread pool riêng của Tauri, không phải main thread.
+        // `run_on_main_thread` chỉ ĐƯA công việc vào hàng đợi của main thread
+        // rồi trả về NGAY (fire-and-forget) — nếu không chờ, lệnh command này
+        // sẽ trả `Ok` cho JS TRƯỚC KHI NSWindow thực sự được resize, phá vỡ
+        // đúng thứ tự "resize xong rồi mới hiện popover" mà `CaptureBar.tsx`
+        // dựa vào để tránh nháy. Dùng channel để đợi main thread báo đã xong.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let win_main = win.clone();
+        app
+            .run_on_main_thread(move || {
+                resize_capture_bar_ns_window_main_thread(&win_main, height);
+                let _ = tx.send(());
+            })
+            .map_err(|e| e.to_string())?;
+        let _ = rx.recv_timeout(std::time::Duration::from_millis(500));
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let scale = win.scale_factor().map_err(|e| e.to_string())?;
+        let current_size = win.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
+        let current_position = win.outer_position().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
+        let height_delta = height - current_size.height;
+        win
+            .set_size(tauri::LogicalSize::new(current_size.width, height))
+            .map_err(|e| e.to_string())?;
+        if height_delta.abs() > 0.5 {
+            win
+                .set_position(tauri::LogicalPosition::new(
+                    current_position.x,
+                    current_position.y - height_delta,
+                ))
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+/// SAFETY: BẮT BUỘC chạy trên main thread — caller đảm bảo qua
+/// `run_on_main_thread` ở `resize_capture_bar` phía trên.
+#[cfg(target_os = "macos")]
+fn resize_capture_bar_ns_window_main_thread(win: &tauri::WebviewWindow, height: f64) {
+    let ptr = match win.ns_window() {
+        Ok(p) => p as *mut objc2_app_kit::NSWindow,
+        Err(_) => return,
+    };
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: con trỏ NSWindow do Tauri giữ, còn sống trong scope.
+    unsafe {
+        let ns_win: &objc2_app_kit::NSWindow = &*ptr;
+        let mut frame = ns_win.frame();
+        // AppKit: origin là góc DƯỚI-TRÁI của màn hình → giữ nguyên origin,
+        // chỉ đổi height là cửa sổ tự "mọc" lên TRÊN (đáy đứng yên), không
+        // cần tính bù vị trí thủ công như set_size/set_position riêng lẻ.
+        frame.size.height = height;
+        ns_win.setFrame_display(frame, true);
+    }
+}
+
 /// Bảng điều khiển chụp cuộn (scrolling capture).
 pub fn open_scroll_control(
     app: &AppHandle,

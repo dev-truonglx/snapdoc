@@ -116,6 +116,9 @@ export const ipc = {
     invoke<string>("save_and_copy", { path, data }),
   openCaptureBar: () => invoke<void>("open_capture_bar"),
   openCaptureBarForNew: () => invoke<void>("open_capture_bar_for_new"),
+  /** Resize capture-bar giữ nguyên cạnh đáy (xem `windows::resize_capture_bar`
+   * — macOS dùng NSWindow.setFrame atomic để không nháy). */
+  resizeCaptureBar: (height: number) => invoke<void>("resize_capture_bar", { height }),
   openEditor: () => invoke<void>("open_editor"),
   openSettings: () => invoke<void>("open_settings"),
   closeSelf: () => invoke<void>("close_self"),
