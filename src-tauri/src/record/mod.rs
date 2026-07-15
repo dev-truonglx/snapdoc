@@ -816,13 +816,29 @@ pub fn trim_pending_recording(app: &AppHandle, keep_ranges_ms: &[(i64, i64)]) ->
 
     // `rename` (không `copy`) — tránh nhân đôi I/O với file video có thể vài
     // trăm MB, chỉ đổi tên/entry thư mục nên gần như tức thời trên cùng ổ đĩa.
+    // Bản thô luôn được lưu vào `{saveDir}/records/` — không phụ thuộc vào
+    // nơi user chọn Save As — để tách biệt khỏi file đã cắt.
     let new_raw: Option<(PathBuf, i64)> = if has_raw {
         None
     } else {
-        let raw_path = input_path.with_file_name(format!(
-            "{}-raw.mp4",
-            input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording"),
-        ));
+        // Thư mục records nằm trong saveDir mặc định (settings), không theo
+        // folder Save As mà user chọn sau.
+        let base_dir = resolve_save_dir(app)
+            .unwrap_or_else(|_| input_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf());
+        let records_dir = base_dir.join("records");
+        let raw_path = match std::fs::create_dir_all(&records_dir) {
+            Ok(_) => {
+                let stem = input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
+                records_dir.join(format!("{stem}-raw.mp4"))
+            }
+            Err(e) => {
+                eprintln!("[SnapDoc][record] Không tạo được thư mục records ({e}), fallback về cùng thư mục");
+                let stem = input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
+                input_path.with_file_name(format!("{stem}-raw.mp4"))
+            }
+        };
+        // Mở asset scope cho thư mục records để video player đọc được bản thô
+        allow_asset_scope(app, raw_path.parent().unwrap_or(&records_dir));
         std::fs::rename(&input_path, &raw_path)
             .map_err(|e| format!("Không sao lưu được bản thô: {e}"))?;
         Some((raw_path, current_duration_ms))
@@ -882,8 +898,26 @@ fn move_into_dir(src: &Path, dest_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Trả về `true` nếu `path` nên được coi là đường dẫn đến một FILE đích
+/// (người dùng muốn lưu video với tên cụ thể đó), `false` nếu là thư mục đích
+/// (video giữ nguyên tên gốc, chỉ chuyển vào thư mục đó).
+///
+/// Logic: nếu path **đang tồn tại và là thư mục** → đây là thư mục đích.
+/// Mọi trường hợp còn lại (chưa tồn tại, hoặc tồn tại là file) → coi là file
+/// đích — bao gồm cả trường hợp tên không có extension (ví dụ `my_video` gõ
+/// từ dialog Save As trên Windows), vì native save dialog luôn trả về file path.
+///
+/// **Lưu ý quan trọng**: `path.extension().is_some()` KHÔNG đủ để phân biệt
+/// file/thư mục — người dùng hoàn toàn có thể gõ tên không có extension trong
+/// dialog, lúc đó path chưa tồn tại trên đĩa nên không thể dùng `is_dir()` mà
+/// phải coi mặc định là file path (mục đích tạo file mới).
 fn looks_like_file_path(path: &Path) -> bool {
-    path.extension().is_some() && !path.is_dir()
+    // Nếu path đã tồn tại và thực sự là thư mục → không phải file path
+    if path.is_dir() {
+        return false;
+    }
+    // Path chưa tồn tại hoặc là file → coi là file đích (bao gồm tên không có extension)
+    true
 }
 
 fn move_into_target(src: &Path, target: &Path, raw_variant: bool) -> Option<PathBuf> {
@@ -935,11 +969,12 @@ fn move_into_target(src: &Path, target: &Path, raw_variant: bool) -> Option<Path
 /// hiện tại (vẫn còn ít nhất 1 bản trong History thay vì mất trắng cả 2).
 ///
 /// `dest_dir`: nếu có giá trị (người dùng chọn "Lưu vào thư mục khác…" ở
-/// `record-review`), di chuyển file mp4 (+ bản thô nếu có) vào đó TRƯỚC khi
-/// ingest — để `asset_path` trong History trỏ đúng vị trí người dùng chọn.
+/// `record-review`), CHỈ di chuyển file đã cắt vào đó TRƯỚC khi ingest.
+/// Bản thô (`raw_path`) KHÔNG bị di chuyển — nó đã nằm sẵn trong
+/// `{saveDir}/records/` từ bước `trim_pending_recording` và ở lại đó.
 /// Hỗ trợ cả thư mục đích lẫn file đích cụ thể (ví dụ từ dialog Save As):
-/// nếu là file path thì video chính sẽ theo đúng tên đó, còn bản thô sẽ đổi
-/// sang `-raw` cùng stem. `None`/rỗng → giữ nguyên vị trí cũ.
+/// nếu là file path thì video chính sẽ theo đúng tên đó.
+/// `None`/rỗng → giữ nguyên vị trí cũ.
 pub fn confirm_recording_save_to(app: &AppHandle, dest_dir: Option<String>) -> Result<(), String> {
     let mut pending = app
         .state::<PendingRecordingState>()
@@ -950,13 +985,32 @@ pub fn confirm_recording_save_to(app: &AppHandle, dest_dir: Option<String>) -> R
         .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
 
     if let Some(target) = dest_dir.filter(|d| !d.is_empty()) {
-        let target_path = Path::new(&target);
-        if looks_like_file_path(target_path) {
-            if let Some(raw_path) = &pending.raw_path {
-                if let Some(new_raw) = move_into_target(raw_path, target_path, true) {
-                    pending.raw_path = Some(new_raw);
-                }
+        // Nếu người dùng nhập tên không có extension (ví dụ "my_video" thay vì
+        // "my_video.mp4"), tự động thêm extension lấy từ file gốc đang pending.
+        // Chỉ áp dụng khi target chưa có extension và không phải thư mục đang
+        // tồn tại (tức là đây là file path mới sẽ tạo ra).
+        let target_with_ext: String;
+        let effective_target = {
+            let p = Path::new(&target);
+            if !p.is_dir() && p.extension().is_none() {
+                // Lấy extension từ file nguồn (pending.path), fallback về "mp4"
+                let src_ext = Path::new(&pending.path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("mp4");
+                target_with_ext = format!("{}.{}", target, src_ext);
+                target_with_ext.as_str()
+            } else {
+                target.as_str()
             }
+        };
+
+        // Chỉ di chuyển file đã cắt (pending.path) — bản thô (raw_path) đã
+        // nằm trong {saveDir}/records/ từ bước trim và KHÔNG bị di chuyển theo.
+        // Sau khi biết tên file cuối cùng user chọn, đổi tên raw thành
+        // `raw_<tên_user_chọn>` để dễ nhận diện.
+        let target_path = Path::new(effective_target);
+        if looks_like_file_path(target_path) {
             if let Some(new_path) = move_into_target(Path::new(&pending.path), target_path, false) {
                 pending.path = new_path.to_string_lossy().to_string();
             }
@@ -964,13 +1018,29 @@ pub fn confirm_recording_save_to(app: &AppHandle, dest_dir: Option<String>) -> R
             if let Err(e) = std::fs::create_dir_all(target_path) {
                 eprintln!("[SnapDoc][record] Không tạo được thư mục đã chọn, giữ nguyên vị trí cũ: {e}");
             } else {
-                if let Some(raw_path) = &pending.raw_path {
-                    if let Some(new_raw) = move_into_dir(raw_path, target_path) {
-                        pending.raw_path = Some(new_raw);
-                    }
-                }
                 if let Some(new_path) = move_into_dir(Path::new(&pending.path), target_path) {
                     pending.path = new_path.to_string_lossy().to_string();
+                }
+            }
+        }
+
+        // Đổi tên raw theo tên file đã cắt vừa được xác định — ví dụ user lưu
+        // thành "my_video.mp4" thì raw sẽ thành "raw_my_video.mp4" trong records/.
+        if let Some(raw_path) = &pending.raw_path {
+            let final_stem = Path::new(&pending.path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("recording");
+            let new_raw_name = format!("raw_{final_stem}.mp4");
+            let new_raw_path = raw_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join(&new_raw_name);
+            if new_raw_path != *raw_path {
+                if std::fs::rename(raw_path, &new_raw_path).is_ok() {
+                    pending.raw_path = Some(new_raw_path);
+                } else {
+                    eprintln!("[SnapDoc][record] Không đổi tên được file raw, giữ nguyên tên cũ");
                 }
             }
         }
