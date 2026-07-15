@@ -59,7 +59,18 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "history" => {
                 let _ = windows::open_history(app);
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                // Đang quay mà thoát ngay sẽ giết ffmpeg giữa chừng → mp4
+                // thiếu moov atom, KHÔNG phát được (mất trắng bản quay).
+                // Dừng sạch trước (đóng stdin ffmpeg + ghép audio nếu có —
+                // thường dưới vài giây) rồi mới thoát; chạy trên thread riêng
+                // để không chặn event loop của tray trong lúc chờ mux.
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    crate::record::finalize_on_exit(&app);
+                    app.exit(0);
+                });
+            }
             _ => {}
         })
         .build(app)?;

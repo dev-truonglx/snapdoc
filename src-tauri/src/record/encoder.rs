@@ -50,9 +50,46 @@ pub(crate) fn sidecar_path(name: &str) -> Result<PathBuf, String> {
 
 /// Tiến trình ffmpeg đang encode — ghi frame qua `write_frame`, kết thúc
 /// bằng `finish()` (đóng stdin, đợi ffmpeg mux xong).
+///
+/// `stderr_thread` bọc `Option` để cả `finish()` lẫn `Drop` đều join được —
+/// `Drop` là lưới an toàn cho nhánh LỖI (vd `write_frame` gặp broken pipe và
+/// closure của writer thread return sớm bằng `?`): không có nó, `Child` bị
+/// drop mà không `kill()`/`wait()` → tiến trình ffmpeg thành zombie (Unix
+/// không tự reap con), mỗi lần quay lỗi rò thêm 1 process.
 pub struct Encoder {
     child: Child,
-    stderr_thread: std::thread::JoinHandle<()>,
+    stderr_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        // `finish()` đã chạy trọn vẹn (stdin + stderr_thread đều đã take) →
+        // không còn gì để dọn.
+        if self.child.stdin.is_none() && self.stderr_thread.is_none() {
+            return;
+        }
+        // Đóng stdin để ffmpeg thấy EOF → flush encoder + ghi moov atom; chờ
+        // tối đa 3s cho nó tự thoát sạch (file mp4 có thể vẫn phát được),
+        // quá hạn thì kill để không rò process.
+        drop(self.child.stdin.take());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                _ => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    break;
+                }
+            }
+        }
+        if let Some(t) = self.stderr_thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 impl Encoder {
@@ -126,7 +163,7 @@ impl Encoder {
             }
         });
 
-        Ok(Self { child, stderr_thread })
+        Ok(Self { child, stderr_thread: Some(stderr_thread) })
     }
 
     /// Ghi 1 frame BGRA thô (đúng `width*height*4` byte) vào stdin ffmpeg.
@@ -149,7 +186,9 @@ impl Encoder {
             .child
             .wait()
             .map_err(|e| format!("Lỗi đợi ffmpeg kết thúc: {e}"))?;
-        let _ = self.stderr_thread.join();
+        if let Some(t) = self.stderr_thread.take() {
+            let _ = t.join();
+        }
         if !status.success() {
             return Err(format!("ffmpeg thoát với lỗi: {status}"));
         }

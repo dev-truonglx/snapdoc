@@ -125,6 +125,25 @@ const HOVER_FETCH_DEBOUNCE_MS = 60;
  * đúng mốc đó ở 160px sẽ "chặn" hover không bao giờ fetch lại bản nét hơn. */
 const HOVER_PREVIEW_SCALE_W = 480;
 
+/** Trần số frame giữ trong cache filmstrip/hover — 2 Map này trước đây CHỈ
+ * `set`, không bao giờ evict: tua/zoom qua lại 1 video dài trong phiên trim
+ * kéo dài tích luỹ data-URL không giới hạn (hover 480px có thể ~50-100KB/
+ * frame). Khi vượt trần, xoá mốc CŨ NHẤT theo thứ tự insert của Map — mốc bị
+ * xoá nếu cần lại sẽ tự được fetch lại qua cơ chế "missing" sẵn có. */
+const FRAMES_CACHE_MAX = 1000;
+const HOVER_CACHE_MAX = 100;
+
+function capFrameCache(m: Map<number, string>, max: number): Map<number, string> {
+  if (m.size <= max) return m;
+  const keys = m.keys();
+  while (m.size > max) {
+    const k = keys.next();
+    if (k.done) break;
+    m.delete(k.value);
+  }
+  return m;
+}
+
 /** Timeline cắt video dùng chung cho RecordReview (trước khi Lưu) và
  * HistoryPreviewPanel (video đã lưu) — mô hình "nhiều đoạn giữ lại" kiểu
  * CapCut: chia nhỏ / xoá đoạn đã chọn / cắt đầu-cuối theo playhead, có
@@ -335,14 +354,17 @@ export default function VideoTrimmer({
     };
   }, [segments]);
 
-  // Phím tắt Undo/Redo/Xoá/Chia/Cắt đầu-cuối — không dep array (chạy lại mỗi
-  // render) để closure luôn thấy `segments`/`past`/`future`/`selectedSegmentId`
-  // mới nhất, tránh lớp bug "stale closure" hay gặp với listener gắn 1 lần
-  // trên window. Q/W không có modifier (giống quy ước hotkey dựng phim) nên
-  // chỉ nhận khi KHÔNG bấm cùng Ctrl/Cmd/Shift/Alt — tránh đè lên tổ hợp hệ
-  // thống (ví dụ Cmd+Q thoát app).
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
+  // Phím tắt Undo/Redo/Xoá/Chia/Cắt đầu-cuối — handler ghi vào ref MỖI render
+  // (luôn thấy `segments`/`past`/`future`/`selectedSegmentId` mới nhất, không
+  // stale closure) nhưng listener trên window chỉ đăng ký ĐÚNG 1 LẦN qua
+  // effect `[]` bên dưới — bản cũ dùng effect không dep array nên add/remove
+  // listener lại mỗi render, mà component re-render theo từng `timeupdate`
+  // lúc phát + từng mousemove lúc hover-scrub (hàng chục lần/giây). Cùng
+  // pattern `zoomRef` phía trên. Q/W không có modifier (giống quy ước hotkey
+  // dựng phim) nên chỉ nhận khi KHÔNG bấm cùng Ctrl/Cmd/Shift/Alt — tránh đè
+  // lên tổ hợp hệ thống (ví dụ Cmd+Q thoát app).
+  const onKeyDownRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  onKeyDownRef.current = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
       const mod = e.ctrlKey || e.metaKey;
@@ -370,10 +392,12 @@ export default function VideoTrimmer({
         e.preventDefault();
         togglePlay();
       }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  });
+  };
+  useEffect(() => {
+    const listener = (e: KeyboardEvent) => onKeyDownRef.current(e);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
 
   useEffect(() => {
     const onFullscreenChange = () => setIsFullscreen(document.fullscreenElement === wrapRef.current);
@@ -491,7 +515,7 @@ export default function VideoTrimmer({
               changed = true;
             }
           });
-          return changed ? next : prev;
+          return changed ? capFrameCache(next, FRAMES_CACHE_MAX) : prev;
         });
       })
       .catch(() => {})
@@ -552,7 +576,7 @@ export default function VideoTrimmer({
           setHoverFrames((prev) => {
             const next = new Map(prev);
             next.set(target, url);
-            return next;
+            return capFrameCache(next, HOVER_CACHE_MAX);
           });
         })
         .catch(() => {})

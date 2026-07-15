@@ -392,9 +392,12 @@ pub fn finalize_region(
     #[cfg(not(target_os = "macos"))]
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    // Step 4: capture the region on this thread (caller must be an OS thread
-    // with COM initialized -- see commands.rs where finalize_region is spawned
-    // via std::thread::spawn instead of being invoked on a Tokio worker).
+    // Step 4: capture the region on this thread. LƯU Ý: commands.rs hiện
+    // spawn hàm này qua `tauri::async_runtime::spawn_blocking` (thread pool
+    // blocking của Tokio, KHÔNG phải `std::thread::spawn` như comment cũ
+    // từng nói) — xcap trên Windows tự init COM per-call nếu cần; nếu tương
+    // lai gặp lỗi CoInitialize trên Windows, chuyển caller về
+    // `std::thread::spawn` với COM apartment riêng.
     // Tỉ lệ pixel-vật-lý/CSS-px của bitmap vừa chụp — lưu vào PendingCapture để
     // Editor hiển thị badge HiDPI đúng. Linux: xcap trả đúng số pixel yêu cầu
     // (không nhân scale) → 1.0; macOS/Windows: bitmap ở physical px → s.scale.

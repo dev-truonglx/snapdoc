@@ -11,7 +11,15 @@ pub fn capture_region_raw(m: &Monitor, x: u32, y: u32, w: u32, h: u32) -> Result
     {
         let mx = m.x().map_err(|e| format!("Lỗi đọc màn hình: {e}"))? as f64;
         let my = m.y().map_err(|e| format!("Lỗi đọc màn hình: {e}"))? as f64;
-        let img = super::mac_sck::capture_rect(mx + x as f64, my + y as f64, w as f64, h as f64)?;
+        // Kẹp w/h vào biên màn hình (cùng tinh thần nhánh non-macOS bên
+        // dưới) — vùng chọn tràn biên nếu đưa thẳng cho SCK sẽ ra ảnh có dải
+        // đen/kích thước phình to. Chỉ thu NHỎ khi thực sự tràn, không đổi
+        // hệ toạ độ.
+        let mw = m.width().map_err(|e| format!("Không đọc được width màn hình: {e}"))? as f64;
+        let mh = m.height().map_err(|e| format!("Không đọc được height màn hình: {e}"))? as f64;
+        let cw = (w as f64).min((mw - x as f64).max(1.0));
+        let ch = (h as f64).min((mh - y as f64).max(1.0));
+        let img = super::mac_sck::capture_rect(mx + x as f64, my + y as f64, cw, ch)?;
         return Ok(img);
     }
 

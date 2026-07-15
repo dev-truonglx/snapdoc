@@ -1,8 +1,21 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 fn settings_path(config_dir: &PathBuf) -> PathBuf {
     config_dir.join("settings.json")
+}
+
+/// Cache RAM của settings.json — các hot path (MỖI lần nhấn hotkey qua
+/// `hotkey::handle`, rebuild tray menu, bắt đầu quay/chụp...) đều gọi
+/// `load()`; đọc + parse file đồng bộ từ đĩa mỗi lần là I/O thừa. Mọi thao
+/// tác GHI đều đi qua `save()` của chính module này nên invalidate tại đó là
+/// đủ; sửa file bằng tay từ ngoài khi app đang chạy không được hỗ trợ (cần
+/// restart). Key theo path để test (mỗi test 1 thư mục riêng) không dẫm nhau.
+static CACHE: OnceLock<Mutex<Option<(PathBuf, Value)>>> = OnceLock::new();
+
+fn cache() -> &'static Mutex<Option<(PathBuf, Value)>> {
+    CACHE.get_or_init(|| Mutex::new(None))
 }
 
 /// Giá trị mặc định khi chưa có file settings.
@@ -40,10 +53,21 @@ pub fn exists(config_dir: &PathBuf) -> bool {
 
 pub fn load(config_dir: &PathBuf) -> Value {
     let path = settings_path(config_dir);
-    match std::fs::read_to_string(&path) {
+    if let Ok(guard) = cache().lock() {
+        if let Some((cached_path, value)) = guard.as_ref() {
+            if cached_path == &path {
+                return value.clone();
+            }
+        }
+    }
+    let value = match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| defaults()),
         Err(_) => defaults(),
+    };
+    if let Ok(mut guard) = cache().lock() {
+        *guard = Some((path, value.clone()));
     }
+    value
 }
 
 pub fn save(config_dir: &PathBuf, value: &Value) -> Result<(), String> {
@@ -52,6 +76,9 @@ pub fn save(config_dir: &PathBuf, value: &Value) -> Result<(), String> {
     let content =
         serde_json::to_string_pretty(value).map_err(|e| format!("Lỗi serialize: {e}"))?;
     std::fs::write(&path, content).map_err(|e| format!("Lỗi ghi settings: {e}"))?;
+    if let Ok(mut guard) = cache().lock() {
+        *guard = Some((path, value.clone()));
+    }
     Ok(())
 }
 

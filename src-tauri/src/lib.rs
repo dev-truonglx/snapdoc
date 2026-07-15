@@ -209,6 +209,13 @@ pub fn run() {
             // chỉ cho phép $APPDATA/SnapDoc/library, không phải saveDir).
             record::allow_asset_scope_at_startup(&handle);
 
+            // Dọn rác tạm phiên trước (crash/quit giữa lúc quay/trim) — thread
+            // riêng, không chặn khởi động.
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || record::cleanup_stale_temp(&h));
+            }
+
             tray::build(&handle)?;
             if let Err(e) = hotkey::register_all(&handle) {
                 eprintln!("[SnapDoc] {e}");
@@ -311,6 +318,17 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = _event {
                 use tauri::Manager;
                 let label = _window.label();
+                // Settings đóng ngay GIỮA lúc đang ghi phím tắt mới:
+                // `suspendShortcuts()` (unregister-all) đã chạy nhưng webview
+                // bị huỷ trước khi `resumeShortcuts()` kịp gọi → toàn bộ
+                // hotkey toàn cục chết cho tới khi restart app. Reload từ
+                // settings ở đây là idempotent (unregister-all + register-all)
+                // và rẻ nên chạy vô điều kiện mỗi lần đóng Settings.
+                if label == "settings" {
+                    if let Err(e) = hotkey::reload(_window.app_handle()) {
+                        eprintln!("[SnapDoc][hotkey] reload sau khi đóng Settings thất bại: {e}");
+                    }
+                }
                 // "editor" (capture) lẫn "editor-ow-N" ("Open with") + "settings"
                 // + "capture-bar" + "record-review" + "history-trim" = cửa sổ
                 // thật → khi đóng, cân nhắc trả về Accessory policy (macOS)

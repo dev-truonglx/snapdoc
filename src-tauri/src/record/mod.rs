@@ -28,10 +28,52 @@ mod audio_mic;
 mod audio_wasapi;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 use std::time::Instant;
 use tauri::{AppHandle, Manager};
+
+/// Cảnh báo người dùng về sự cố KHÔNG làm hỏng cả phiên quay (mic lỗi, drop
+/// frame, ghép audio thất bại...) — trước đây chỉ `eprintln!` (vô hình trong
+/// bản đóng gói), giờ emit thêm qua kênh lỗi chung (`CaptureBar.tsx` lắng
+/// `snapdoc-error`) để người dùng biết bản quay của mình có vấn đề gì.
+fn notify_warning(app: &AppHandle, msg: &str) {
+    use tauri::Emitter;
+    eprintln!("[SnapDoc][record] {msg}");
+    let _ = app.emit("snapdoc-error", msg.to_string());
+}
+
+/// Cổng chống 2 lệnh bắt đầu quay chạy ĐUA nhau (vd hotkey + nút bấm gần như
+/// đồng thời — mỗi command spawn thread riêng, xem `commands.rs`).
+/// `guard_can_start_recording` check xong thì NHẢ lock, còn việc ghi
+/// `RecordingState` chỉ xảy ra SAU khi stream/encoder đã dựng xong (vài trăm
+/// ms) — không có gate, 2 lệnh cùng lọt qua guard sẽ tạo 2 phiên capture,
+/// phiên sau ghi đè phiên trước mà không `stop()` (rò stream OS + ffmpeg).
+/// Gate giữ từ TRƯỚC lúc check tới SAU khi ghi state, tự nhả cả trên đường
+/// lỗi (RAII qua `Drop`).
+static START_GATE: AtomicBool = AtomicBool::new(false);
+
+struct StartGate;
+
+impl StartGate {
+    fn acquire() -> Result<Self, String> {
+        if START_GATE
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            Ok(StartGate)
+        } else {
+            Err("Đang khởi động 1 phiên quay khác — thử lại sau giây lát".to_string())
+        }
+    }
+}
+
+impl Drop for StartGate {
+    fn drop(&mut self) {
+        START_GATE.store(false, Ordering::SeqCst);
+    }
+}
 
 /// fps cố định cho v1 — đủ mượt cho demo/hướng dẫn, giữ CPU/dung lượng thấp.
 pub const FPS: u32 = 30;
@@ -172,7 +214,11 @@ pub(crate) fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
     // (record-review + History video player) mới đọc được, nếu không trình
     // duyệt sẽ chặn request và video không tài phát được (404/blocked).
     allow_asset_scope(app, &dir);
-    Ok(dir.join(format!("{}.mp4", crate::flow::stamp_filename("Recording"))))
+    // dedupe: 2 bản quay bắt đầu trong cùng 1 giây (timestamp trùng) không
+    // được ghi đè nhau — thêm hậu tố `_1`, `_2`... như luồng auto-save ảnh.
+    Ok(crate::storage::save::dedupe(
+        dir.join(format!("{}.mp4", crate::flow::stamp_filename("Recording"))),
+    ))
 }
 
 /// Mở scope asset-protocol cho 1 thư mục lưu video — gọi lúc quay (phòng
@@ -189,6 +235,35 @@ fn allow_asset_scope(app: &AppHandle, dir: &std::path::Path) {
 pub fn allow_asset_scope_at_startup(app: &AppHandle) {
     if let Ok(dir) = resolve_save_dir(app) {
         allow_asset_scope(app, &dir);
+    }
+}
+
+/// Dọn rác tạm của các phiên TRƯỚC bị bỏ lại do crash/quit giữa chừng — gọi
+/// 1 lần lúc khởi động (app là single-instance nên không phiên nào khác đang
+/// dùng các file này): thư mục `snapdoc-rec-audio-*` (audio PCM + video tạm,
+/// bình thường dọn sau khi mux; bị bỏ lại khi mux lỗi/discard/crash),
+/// `snapdoc-trim-*` (segment tạm của trim, bị bỏ lại khi crash giữa trim)
+/// trong temp dir, và `*.trimtmp.mp4` trong saveDir (file trung gian giữa
+/// bước encode và bước rename đè của `trim_pending_recording`).
+pub fn cleanup_stale_temp(app: &AppHandle) {
+    let tmp = std::env::temp_dir();
+    if let Ok(entries) = std::fs::read_dir(&tmp) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("snapdoc-rec-audio-") || name.starts_with("snapdoc-trim-") {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    if let Ok(dir) = resolve_save_dir(app) {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".trimtmp.mp4") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
     }
 }
 
@@ -282,6 +357,8 @@ fn guard_can_start_recording(app: &AppHandle) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::RecordTarget) -> Result<(), String> {
+    // Giữ gate suốt hàm (tới sau khi ghi RecordingState) — xem `StartGate`.
+    let _gate = StartGate::acquire()?;
     guard_can_start_recording(app)?;
     let state = app.state::<RecordingState>();
 
@@ -305,7 +382,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
         match audio_mic::start() {
             Ok(m) => Some(m),
             Err(e) => {
-                eprintln!("[SnapDoc][record] Không ghi được mic (vẫn tiếp tục quay không audio): {e}");
+                notify_warning(app, &format!("Không ghi được mic — vẫn tiếp tục quay KHÔNG có tiếng: {e}"));
                 None
             }
         }
@@ -491,6 +568,8 @@ pub fn start_recording_window(app: &AppHandle, window_id: u32) -> Result<(), Str
 
 #[cfg(target_os = "windows")]
 fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::RecordTarget) -> Result<(), String> {
+    // Giữ gate suốt hàm (tới sau khi ghi RecordingState) — xem `StartGate`.
+    let _gate = StartGate::acquire()?;
     guard_can_start_recording(app)?;
     let state = app.state::<RecordingState>();
 
@@ -530,7 +609,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
                 Some(AudioProducer { rx, sample_rate, channels: channels as u16, capture: AudioCapture::Mic(mic) })
             }
             Err(e) => {
-                eprintln!("[SnapDoc][record] Không ghi được mic (vẫn tiếp tục quay không audio): {e}");
+                notify_warning(app, &format!("Không ghi được mic — vẫn tiếp tục quay KHÔNG có tiếng: {e}"));
                 None
             }
         },
@@ -539,7 +618,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
                 Some(AudioProducer { rx, sample_rate, channels, capture: AudioCapture::System(sys) })
             }
             Err(e) => {
-                eprintln!("[SnapDoc][record] Không ghi được audio hệ thống (vẫn tiếp tục quay không audio): {e}");
+                notify_warning(app, &format!("Không ghi được audio hệ thống — vẫn tiếp tục quay KHÔNG có tiếng: {e}"));
                 None
             }
         },
@@ -688,13 +767,43 @@ pub fn start_recording_window(_app: &AppHandle, _window_id: u32) -> Result<(), S
 /// `confirm_recording_discard` mới thực sự ingest/xoá file). Trả về đường
 /// dẫn file mp4 cuối cùng (vẫn hữu ích cho log/test).
 pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
+    stop_recording_impl(app, true)
+}
+
+/// Gọi TRƯỚC khi thoát app (tray "Quit") — nếu đang quay, dừng SẠCH để file
+/// mp4 phát được (đóng stdin ffmpeg → flush + moov atom, ghép audio nếu có)
+/// và ingest thẳng vào History (không mở cửa sổ xem lại vì app sắp thoát —
+/// bản quay sẽ nằm sẵn trong Library ở lần mở sau). No-op nếu không quay.
+/// Trước đây thoát giữa lúc quay giết ffmpeg giữa chừng → mp4 hỏng, mất trắng.
+pub fn finalize_on_exit(app: &AppHandle) {
+    if status(app).is_none() {
+        return;
+    }
+    match stop_recording_impl(app, false) {
+        Ok(p) if !p.is_empty() => {
+            eprintln!("[SnapDoc][record] Đã lưu bản quay trước khi thoát: {p}");
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[SnapDoc][record] Không dừng sạch được phiên quay trước khi thoát: {e}"),
+    }
+}
+
+/// Lõi dùng chung của `stop_recording` (mở cửa sổ xem lại) và
+/// `finalize_on_exit` (`open_review=false`: ingest thẳng vào History).
+fn stop_recording_impl(app: &AppHandle, open_review: bool) -> Result<String, String> {
     let state = app.state::<RecordingState>();
-    let active = state
+    // Dừng có thể được kích hoạt gần-như-đồng-thời từ nhiều nơi (tray icon,
+    // hotkey, thanh "Dừng quay", indicator, ticker phát hiện dừng ngoài) —
+    // caller "thua cuộc" (state đã bị caller khác `take`) coi là NO-OP thay
+    // vì lỗi, tránh alert giả "Không có phiên quay nào đang chạy".
+    let Some(active) = state
         .0
         .lock()
         .map_err(|_| "Lock RecordingState lỗi".to_string())?
         .take()
-        .ok_or_else(|| "Không có phiên quay nào đang chạy".to_string())?;
+    else {
+        return Ok(String::new());
+    };
 
     // Thời lượng thật của video = đúng khoảng thời gian SCStream đã chạy —
     // tính TRƯỚC khi `stream.stop()` tiêu thụ field `stream` (partial move).
@@ -714,6 +823,11 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
         }
         a
     });
+
+    // Clone cờ drop-frame TRƯỚC khi `stop()` tiêu thụ (move) field `stream`
+    // — để còn cảnh báo người dùng sau khi dừng xong (xem `notify_warning`).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let dropped_flag = active.stream.dropped_flag();
 
     #[cfg(target_os = "macos")]
     active.stream.stop()?;
@@ -756,7 +870,13 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
                     active.output_path
                 }
                 Err(e) => {
-                    eprintln!("[SnapDoc][record] Ghép audio thất bại, dùng video không tiếng: {e}");
+                    notify_warning(app, &format!("Ghép audio thất bại — video được giữ lại KHÔNG có tiếng: {e}"));
+                    // Video tạm nằm trong thư mục temp — mở asset scope cho
+                    // nó để cửa sổ xem lại còn phát được (scope chỉ mở sẵn
+                    // cho saveDir, không có thư mục temp này).
+                    if let Some(parent) = active.video_path.parent() {
+                        allow_asset_scope(app, parent);
+                    }
                     active.video_path
                 }
             }
@@ -764,23 +884,46 @@ pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
         None => active.output_path,
     };
 
-    let path = output_path.to_string_lossy().to_string();
-    {
-        let pending = app.state::<PendingRecordingState>();
-        let mut guard = pending.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
-        *guard = Some(PendingRecording {
-            path: path.clone(),
-            width: active.width,
-            height: active.height,
-            duration_ms,
-            capture_mode: active.capture_mode.to_string(),
-            raw_path: None,
-            raw_duration_ms: None,
-        });
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if dropped_flag.load(Ordering::Relaxed) {
+        notify_warning(
+            app,
+            "Một số khung hình đã bị bỏ qua vì máy không theo kịp tốc độ quay — video có thể bị giật nhẹ",
+        );
     }
 
-    if let Err(e) = crate::windows::open_record_review(app) {
-        eprintln!("[SnapDoc][record] Không mở được cửa sổ xem lại bản quay: {e}");
+    let path = output_path.to_string_lossy().to_string();
+    if open_review {
+        {
+            let pending = app.state::<PendingRecordingState>();
+            let mut guard = pending.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
+            *guard = Some(PendingRecording {
+                path: path.clone(),
+                width: active.width,
+                height: active.height,
+                duration_ms,
+                capture_mode: active.capture_mode.to_string(),
+                raw_path: None,
+                raw_duration_ms: None,
+            });
+        }
+
+        if let Err(e) = crate::windows::open_record_review(app) {
+            eprintln!("[SnapDoc][record] Không mở được cửa sổ xem lại bản quay: {e}");
+        }
+    } else {
+        // Đường thoát app: không mở review — ingest thẳng vào History để bản
+        // quay không "biến mất" với người dùng ở lần mở app sau.
+        if let Err(e) = crate::history::ingest_video(
+            app,
+            std::path::Path::new(&path),
+            active.width,
+            active.height,
+            duration_ms,
+            active.capture_mode,
+        ) {
+            eprintln!("[SnapDoc][record] Ingest bản quay vào History trước khi thoát thất bại (file vẫn còn trên đĩa): {e}");
+        }
     }
 
     Ok(path)

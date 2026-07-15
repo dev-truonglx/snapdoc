@@ -140,6 +140,14 @@ impl GraphicsCaptureApiHandler for Capturer {
         // row_pitch` byte (không có API đọc row_pitch trực tiếp).
         let raw = buffer.as_raw_buffer();
         let row_pitch = if src_height == 0 { (src_width as usize) * 4 } else { raw.len() / src_height as usize };
+        // Guard: `row_pitch` suy ra bằng phép chia SÀN — nếu `raw.len()`
+        // không chia hết cho `src_height` (hoặc WGC báo kích thước lệch với
+        // buffer thật), slice `raw[src_off..]` bên dưới có thể vượt biên →
+        // panic NGAY TRONG callback FFI (unwind qua biên C++ = UB/abort cả
+        // app). Bỏ frame lệch còn hơn sập giữa phiên quay.
+        if row_pitch < (src_width as usize) * 4 || raw.len() < (src_height as usize) * row_pitch {
+            return Ok(());
+        }
 
         // Luôn crop/pad về ĐÚNG (target_width, target_height) đã khai với
         // encoder, bắt đầu từ (crop_x, crop_y) — vừa xử lý việc làm tròn chẵn
@@ -161,7 +169,11 @@ impl GraphicsCaptureApiHandler for Capturer {
             bgra[dst_off..dst_off + copy_row_bytes].copy_from_slice(&raw[src_off..src_off + copy_row_bytes]);
         }
 
-        *self.latest.lock().unwrap() =
+        // `unwrap_or_else(into_inner)`: 1 lần panic ở holder khác làm poison
+        // mutex — `unwrap()` ở đây sẽ panic DÂY CHUYỀN trong callback FFI
+        // (abort). Dữ liệu chỉ là "frame mới nhất", ghi đè an toàn kể cả sau
+        // poison.
+        *self.latest.lock().unwrap_or_else(|p| p.into_inner()) =
             Some(Frame { bgra, width: self.target_width, height: self.target_height });
         Ok(())
     }
@@ -205,7 +217,7 @@ fn spawn_ticker(
             }
             frame_index += 1;
 
-            let frame = latest.lock().unwrap().clone();
+            let frame = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(frame) = frame {
                 // try_send: nếu channel đầy (encoder chậm hơn tốc độ quay),
                 // DROP frame này thay vì chặn ticker — giống hệt lý do ở
@@ -229,17 +241,51 @@ fn spawn_ticker(
 /// đối chiếu theo toạ độ/kích thước màn hình thay vì theo vị trí index).
 fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
     let xcap_monitors = xcap::Monitor::all().map_err(|e| format!("Không liệt kê được màn hình: {e}"))?;
-    let index = xcap_monitors
+    let target = xcap_monitors
         .iter()
-        .position(|m| m.id().map(|i| i == display_id).unwrap_or(false));
+        .enumerate()
+        .find(|(_, m)| m.id().map(|i| i == display_id).unwrap_or(false));
 
-    if let Some(index) = index {
+    if let Some((index, xcap_m)) = target {
+        // Kích thước của màn hình cần quay theo xcap — dùng để XÁC MINH ứng
+        // viên WGC, vì thứ tự liệt kê giữa 2 crate KHÔNG được đảm bảo giống
+        // nhau: cùng dựa trên EnumDisplayMonitors nhưng khác phiên bản/filter
+        // có thể lệch → quay nhầm màn hình trên setup nhiều màn hình.
+        let want_w = xcap_m.width().unwrap_or(0);
+        let want_h = xcap_m.height().unwrap_or(0);
         let wgc_monitors = WgcMonitor::enumerate().map_err(|e| format!("Không liệt kê được màn hình (WGC): {e}"))?;
+
+        // Ưu tiên 1: đúng index VÀ khớp kích thước (trường hợp bình thường).
+        // Ưu tiên 2: bất kỳ monitor WGC nào khớp kích thước duy nhất — cứu
+        // được trường hợp 2 danh sách lệch thứ tự (miễn các màn hình không
+        // trùng độ phân giải). Cuối cùng mới rơi về đúng index bất kể kích
+        // thước (hành vi cũ), rồi primary.
+        let size_of = |m: &WgcMonitor| -> (u32, u32) {
+            (m.width().unwrap_or(0), m.height().unwrap_or(0))
+        };
+        let by_index_ok = wgc_monitors
+            .get(index)
+            .map(|m| want_w > 0 && size_of(m) == (want_w, want_h))
+            .unwrap_or(false);
+        if by_index_ok {
+            return Ok(wgc_monitors.into_iter().nth(index).unwrap());
+        }
+        if want_w > 0 {
+            let matches: Vec<usize> = wgc_monitors
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| size_of(m) == (want_w, want_h))
+                .map(|(i, _)| i)
+                .collect();
+            if matches.len() == 1 {
+                return Ok(wgc_monitors.into_iter().nth(matches[0]).unwrap());
+            }
+        }
         if let Some(m) = wgc_monitors.into_iter().nth(index) {
             return Ok(m);
         }
     }
-    // Không khớp được theo index — quay màn hình chính còn hơn báo lỗi hẳn.
+    // Không khớp được — quay màn hình chính còn hơn báo lỗi hẳn.
     WgcMonitor::primary().map_err(|e| format!("Không tìm thấy màn hình để quay: {e}"))
 }
 
@@ -251,7 +297,20 @@ fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
 /// sang đối chiếu qua `WgcWindow::enumerate()` + `title()`/`process_id()`
 /// thay vì ép kiểu thẳng.
 fn resolve_window(window_id: u32) -> Result<WgcWindow, String> {
-    let hwnd = window_id as isize as *mut std::ffi::c_void;
+    // Ưu tiên đối chiếu qua danh sách cửa sổ THẬT của WGC: tìm cửa sổ có HWND
+    // (truncate về u32 — handle Win32 theo spec tương thích 32-bit) khớp id —
+    // tránh tự dựng lại HWND từ u32 với rủi ro sign-extension/truncation sai.
+    if let Ok(windows) = WgcWindow::enumerate() {
+        if let Some(w) = windows
+            .into_iter()
+            .find(|w| (w.as_raw_hwnd() as usize as u32) == window_id)
+        {
+            return Ok(w);
+        }
+    }
+    // Fallback hành vi cũ: dựng HWND trực tiếp từ id (đúng khi
+    // `xcap::Window::id()` chính là giá trị HWND).
+    let hwnd = window_id as usize as *mut std::ffi::c_void;
     let window = WgcWindow::from_raw_hwnd(hwnd);
     if !window.is_valid() {
         return Err("Cửa sổ không còn hợp lệ để quay (có thể đã đóng hoặc bị thu nhỏ)".to_string());
@@ -290,8 +349,13 @@ fn window_capture_size(hwnd: *mut std::ffi::c_void) -> Result<(u32, u32), String
 /// Phiên quay đang chạy — giữ `CaptureControl` (thread nền của WGC, xem
 /// `start_free_threaded`) + `ticker_thread` (nhịp đẩy frame ra encoder) cho
 /// tới khi `stop()`. Vai trò tương đương `mac_stream::RecordingHandle`.
+///
+/// `control` bọc `Option` để CẢ `stop()` (đường chủ động) lẫn `Drop` (lưới an
+/// toàn cho nhánh lỗi của `start_with_target` — các bước fallible sau khi
+/// stream đã chạy) đều lấy ra dừng được — không có `Drop`, handle bị bỏ rơi
+/// để lại phiên WGC chạy mồ côi + ticker thread loop vô hạn.
 pub struct RecordingHandle {
-    control: CaptureControl<Capturer, Box<dyn std::error::Error + Send + Sync>>,
+    control: Option<CaptureControl<Capturer, Box<dyn std::error::Error + Send + Sync>>>,
     ticker_stop: Arc<AtomicBool>,
     ticker_thread: Option<JoinHandle<()>>,
     dropped: Arc<AtomicBool>,
@@ -307,6 +371,13 @@ impl RecordingHandle {
         self.stopped_externally.load(Ordering::SeqCst)
     }
 
+    /// Cờ "đã có frame bị drop" dùng chung với ticker — caller (`record::mod`)
+    /// clone Arc này TRƯỚC khi `stop()` tiêu thụ handle để còn đọc được sau
+    /// khi dừng mà cảnh báo người dùng.
+    pub fn dropped_flag(&self) -> Arc<AtomicBool> {
+        self.dropped.clone()
+    }
+
     /// Dừng quay: dừng ticker TRƯỚC (đóng `frame_tx`, kết thúc writer thread
     /// bên `record/mod.rs`), rồi mới dừng phiên WGC qua `CaptureControl::stop()`.
     pub fn stop(mut self) -> Result<(), String> {
@@ -315,17 +386,35 @@ impl RecordingHandle {
             let _ = t.join();
         }
 
+        let control = self.control.take();
         if self.stopped_externally.load(Ordering::SeqCst) {
             if self.dropped.load(Ordering::Relaxed) {
                 eprintln!("[SnapDoc][record] Một số frame đã bị drop do encoder/consumer chậm hơn tốc độ quay");
             }
             return Ok(());
         }
-        self.control.stop().map_err(|e| format!("Lỗi dừng quay: {e}"))?;
+        if let Some(control) = control {
+            control.stop().map_err(|e| format!("Lỗi dừng quay: {e}"))?;
+        }
         if self.dropped.load(Ordering::Relaxed) {
             eprintln!("[SnapDoc][record] Một số frame đã bị drop do encoder/consumer chậm hơn tốc độ quay");
         }
         Ok(())
+    }
+}
+
+impl Drop for RecordingHandle {
+    fn drop(&mut self) {
+        // `stop()` đã lấy control ra (`take`) → không còn gì để dọn.
+        let Some(control) = self.control.take() else { return };
+        self.ticker_stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.ticker_thread.take() {
+            let _ = t.join();
+        }
+        if !self.stopped_externally.load(Ordering::SeqCst) {
+            eprintln!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng WGC khẩn cấp");
+            let _ = control.stop();
+        }
     }
 }
 
@@ -448,7 +537,7 @@ pub fn start(
 
     Ok((
         RecordingHandle {
-            control,
+            control: Some(control),
             ticker_stop,
             ticker_thread: Some(ticker_thread),
             dropped,

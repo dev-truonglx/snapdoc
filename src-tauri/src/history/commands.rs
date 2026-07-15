@@ -65,6 +65,27 @@ fn list_history_sync(app: &AppHandle, filter: HistoryFilter) -> Result<HistoryPa
         items.push(row.map_err(|e| e.to_string())?);
     }
 
+    // Video KHÔNG copy vào Library nội bộ — `asset_path` trỏ thẳng vào
+    // saveDir tại thời điểm quay. Scope asset-protocol chỉ được mở cho
+    // saveDir HIỆN TẠI (startup + lúc quay); video quay ở saveDir cũ (user
+    // đã đổi thư mục lưu) sẽ bị chặn `convertFileSrc` (404) khi phát trong
+    // History. Mở scope cho thư mục cha của từng video trong trang kết quả.
+    {
+        let mut seen = std::collections::HashSet::new();
+        for item in items.iter().filter(|i| i.media_type == "video") {
+            if let Some(parent) = std::path::Path::new(&item.asset_path).parent() {
+                if seen.insert(parent.to_path_buf()) {
+                    if let Err(e) = app.asset_protocol_scope().allow_directory(parent, true) {
+                        eprintln!(
+                            "[SnapDoc][history] Không mở được asset scope cho {}: {e}",
+                            parent.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     Ok(HistoryPage { items, total })
 }
 
@@ -96,8 +117,16 @@ fn restore_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
 
 fn permanently_delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let rec = get_history_item_sync(app, id)?;
-    let _ = std::fs::remove_file(&rec.asset_path);
-    let _ = std::fs::remove_file(&rec.thumb_path);
+    // Lỗi xoá file (đang bị app khác giữ, quyền...) KHÔNG chặn xoá row DB —
+    // giữ row sẽ làm thùng rác không bao giờ dọn được — nhưng phải log lại:
+    // trước đây nuốt im lặng, file mồ côi nằm lại trên đĩa mà không dấu vết.
+    for path in [&rec.asset_path, &rec.thumb_path] {
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("[SnapDoc][history] Không xoá được file {path} (file sẽ mồ côi trên đĩa): {e}");
+            }
+        }
+    }
     let st = state(app)?;
     let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
     conn.execute("DELETE FROM history WHERE id = ?1", [id])
