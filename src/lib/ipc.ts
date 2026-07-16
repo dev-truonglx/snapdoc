@@ -116,6 +116,9 @@ export const ipc = {
   finalizeMonitor: () => invoke<void>("finalize_monitor"),
   listWindows: () => invoke<WindowInfo[]>("list_windows"),
   cancelOverlay: () => invoke<void>("cancel_overlay"),
+  // Chụp nhanh "Mở trong Editor": giữ SnapDoc frontmost (không trả focus về
+  // app cũ). Gọi TRƯỚC openEditor. Xem `flow::keep_capture_focus`.
+  keepCaptureFocus: () => invoke<void>("keep_capture_focus"),
   copyImage: (data: string) => invoke<void>("copy_image", { data }),
   saveImage: (path: string, data: string) => invoke<string>("save_image", { path, data }),
   saveAndCopy: (path: string, data: string) =>

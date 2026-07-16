@@ -458,6 +458,62 @@ pub fn cancel_overlay(app: &AppHandle) {
     // phạm vi quay.
     *app.state::<AppState>().pending_record.lock().unwrap() = false;
     windows::close_overlays(app);
+
+    // macOS: dọn dẹp trạng thái focus/ẩn của phiên Chụp nhanh (no-op nếu
+    // phiên này không phải Chụp nhanh — cả 2 field chỉ được set trong
+    // `start_quick`). THỨ TỰ BẮT BUỘC: trả frontmost về app cũ TRƯỚC (nếu
+    // copy/save/hủy — `restore_front_pid` còn Some; mở Editor đã clear nó qua
+    // `keep_capture_focus`), RỒI MỚI phục hồi (orderFront, không focus) các
+    // cửa sổ đã ẩn — phục hồi TRƯỚC khi SnapDoc kịp mất frontmost sẽ khiến
+    // chúng nháy lên lại đúng vấn đề đang tránh (xem
+    // `windows::restore_hidden_product_windows`). Chạy nền sau 1 nhịp ngắn
+    // để overlay đóng hẳn, không chặn caller.
+    #[cfg(target_os = "macos")]
+    {
+        let pid = app
+            .state::<AppState>()
+            .restore_front_pid
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        let hidden = app
+            .state::<AppState>()
+            .hidden_for_capture
+            .lock()
+            .ok()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default();
+        if pid.is_some() || !hidden.is_empty() {
+            let app2 = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                if let Some(pid) = pid {
+                    windows::reactivate_app_pid(&app2, pid);
+                    // Chờ thêm để việc activate app cũ chạy xong hẳn trên
+                    // main thread trước khi orderFront lại các cửa sổ đã ẩn.
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                }
+                if !hidden.is_empty() {
+                    windows::restore_hidden_product_windows(&app2, &hidden);
+                }
+            });
+        }
+    }
+}
+
+/// Chụp nhanh: người dùng chọn "Mở trong Editor" — huỷ việc trả focus về app
+/// cũ (`cancel_overlay` chạy sau đó trong `finally` của frontend sẽ thấy
+/// `restore_front_pid` = None) vì lúc này ta CHỦ ĐỘNG muốn SnapDoc frontmost
+/// để hiển thị Editor. Xem `AppState::restore_front_pid`.
+pub fn keep_capture_focus(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(mut g) = app.state::<AppState>().restore_front_pid.lock() {
+            *g = None;
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
 }
 
 /// Chụp tất cả màn hình ghép ngang, không cần overlay.
@@ -483,10 +539,35 @@ pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> 
 /// đúng vùng nhỏ đã chọn (nhanh), rồi ghép chú thích. Đúng yêu cầu "vẽ khung
 /// xong chưa chụp, di chuyển được, tới lúc lưu/copy mới chụp".
 pub fn start_quick(app: &AppHandle) {
-    // Xem comment ở `run()` — snapshot TRƯỚC hide_bar/open_overlays, vì bản
-    // thân open_overlays() có thể tự kích hoạt app (set_focus) và đẩy cửa sổ
-    // ẩn lên trước ngay từ bước này.
-    snapshot_product_windows(app);
+    // KHÔNG còn gọi `snapshot_product_windows` ở đây (khác `run()`/
+    // `capture_all_screens`): cơ chế content-protection (`with_product_windows_protected`)
+    // dựa vào nó chỉ là lưới an toàn YẾU cho hiện tượng "cửa sổ occluded bị hệ
+    // thống đẩy lên khi activate app" — `hide_occluded_product_windows` ngay
+    // dưới đây ẩn THẬT SỰ (orderOut) các cửa sổ đó xuyên suốt CẢ phiên Chụp
+    // nhanh (từ đây tới lúc `cancel_overlay` phục hồi), nên khi
+    // `capture_quick_region` chụp pixel sau này, không còn cửa sổ occluded
+    // nào để mà lộ vào ảnh nữa — xem đó để hiểu vì sao không cần bọc
+    // `with_product_windows_protected` quanh bước chụp pixel như trước.
+    // macOS: nhớ app đang frontmost (khác SnapDoc) TRƯỚC khi open_overlays
+    // kích hoạt SnapDoc — để `cancel_overlay` trả lại focus cho nó sau khi
+    // copy/save/hủy xong (xem `AppState::restore_front_pid`). ĐỒNG THỜI ẩn
+    // THẬT SỰ (orderOut) các cửa sổ sản phẩm đang bị app khác che — set_focus
+    // sắp chạy activate app NGAY LẬP TỨC (đồng bộ), nếu không ẩn trước thì
+    // macOS tự đưa chúng lên TRÊN app hiện tại NGAY TRONG lúc activate, hiện
+    // ra 1-2 khung hình rồi mới bị ẩn lại dù ta phản ứng nhanh cỡ nào sau đó
+    // — đây chính là nguyên nhân "hiện lên xong rồi mới ẩn" (xem
+    // `windows::hide_occluded_product_windows`).
+    #[cfg(target_os = "macos")]
+    {
+        let pid = windows::frontmost_other_app_pid(app);
+        if let Ok(mut g) = app.state::<AppState>().restore_front_pid.lock() {
+            *g = pid;
+        }
+        let hidden = windows::hide_occluded_product_windows(app);
+        if let Ok(mut g) = app.state::<AppState>().hidden_for_capture.lock() {
+            *g = hidden;
+        }
+    }
     let result: Result<(), String> = (|| {
         if bar_is_visible(app) {
             hide_bar(app);
@@ -543,15 +624,15 @@ pub fn capture_quick_region(
     #[cfg(not(target_os = "macos"))]
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    // Loại editor/settings/history/record-review/history-trim khỏi ảnh trong
-    // đúng khoảnh khắc chụp — TRỪ những cửa sổ đã thật sự hiển thị từ lúc mở
-    // overlay (`start_quick` → `snapshot_product_windows`, ý user đang muốn
-    // tự chụp chính nó). Bảo vệ những cửa sổ còn lại phòng trường hợp bị hệ
-    // thống tự đưa lên trước ngay lúc xử lý phím tắt Copy/Save (quan sát thấy
-    // trên macOS). Luôn gỡ lại ngay sau, kể cả khi capture lỗi.
-    let cap = with_product_windows_protected(app, || {
-        capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)
-    })?;
+    // KHÔNG bọc `with_product_windows_protected` ở đây nữa (khác
+    // `finalize_region`/`finalize_window`/`finalize_monitor`/`capture_all_screens`,
+    // nơi cơ chế đó vẫn là tuyến phòng thủ DUY NHẤT): mọi cửa sổ sản phẩm
+    // đang bị app khác che đã bị `hide_occluded_product_windows` ẩn THẬT SỰ
+    // từ lúc `start_quick` mở overlay, xuyên suốt tới tận đây — không còn gì
+    // để mà lộ vào ảnh. Cửa sổ đang thật sự hiển thị (user chủ ý xem, kể cả
+    // trên màn khác) thì trước giờ vẫn KHÔNG được loại khỏi ảnh (giữ đúng
+    // hành vi cũ: "ý user đang muốn tự chụp chính nó").
+    let cap = capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)?;
     Ok(cap.base64)
 }
 

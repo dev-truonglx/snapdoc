@@ -102,4 +102,28 @@ pub struct AppState {
     /// `windows::snapshot_visible_product_windows`/`windows::protect_product_windows`.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub visible_product_windows: Mutex<HashSet<String>>,
+    /// macOS: PID của app đang frontmost (KHÁC SnapDoc) ngay TRƯỚC khi mở
+    /// overlay Chụp nhanh. `open_overlays` gọi `set_focus()` → macOS kích hoạt
+    /// cả app SnapDoc; sau khi copy/save xong (không mở cửa sổ nào của mình)
+    /// ta activate lại app này để trả frontmost về đúng chỗ cũ. `None` khi
+    /// SnapDoc vốn đang frontmost hoặc đã khôi phục xong (xem
+    /// `flow::start_quick`/`flow::cancel_overlay`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub restore_front_pid: Mutex<Option<i32>>,
+    /// macOS: nhãn các cửa sổ sản phẩm (history/settings/preview…) đã bị
+    /// `.hide()` THẬT SỰ (orderOut) tạm thời trước khi mở overlay Chụp nhanh.
+    /// Lý do cần ẩn thật thay vì chỉ trả focus SAU: `set_focus()` lúc mở
+    /// overlay activate cả app SnapDoc ngay lập tức (đồng bộ) — nếu 1 cửa sổ
+    /// sản phẩm đang "visible" nhưng bị 1 app khác che (không phải user chủ ý
+    /// ẩn), macOS sẽ tự đưa nó lên TRÊN app đó NGAY TRONG THỜI ĐIỂM activate,
+    /// tức là TRƯỚC KHI code Rust kịp phản ứng gì — chỉ trả focus về app cũ
+    /// SAU đó (dù có delay ngắn cỡ nào) vẫn để lộ ra đúng 1-2 khung hình cửa
+    /// sổ đó "nháy" lên rồi mới ẩn lại, đúng hiện tượng UX không hợp lý đã
+    /// quan sát được. Ẩn THẬT (orderOut) trước khi activate thì không còn gì
+    /// để mà nháy lên nữa. `close_overlays`/`cancel_overlay` phục hồi
+    /// (orderFront, KHÔNG makeKey/focus) các cửa sổ này SAU KHI đã trả
+    /// frontmost về app trước đó — xem `windows::hide_occluded_product_windows`/
+    /// `windows::restore_hidden_product_windows`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub hidden_for_capture: Mutex<Vec<String>>,
 }

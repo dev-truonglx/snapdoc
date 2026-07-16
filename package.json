@@ -1,6 +1,6 @@
 {
   "name": "snapdoc",
-  "version": "1.0.2",
+  "version": "2.0.2",
   "description": "SnapDoc — fast screenshot + annotation app for Windows & macOS",
   "type": "module",
   "scripts": {

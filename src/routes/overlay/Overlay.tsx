@@ -680,7 +680,17 @@ function QuickAnnotate() {
   };
   const doOpenEditor = async () => {
     setBusy(true);
-    try { const r = await doExport(); if (r) { await ipc.setPendingImage(r.url, r.w, r.h); await ipc.openEditor(); } }
+    try {
+      const r = await doExport();
+      if (r) {
+        // Giữ SnapDoc frontmost để hiện Editor — huỷ việc `cancelOverlay`
+        // (chạy trong finally) trả focus về app cũ (chỉ áp dụng cho
+        // copy/save/hủy). Xem `flow::keep_capture_focus`.
+        await ipc.keepCaptureFocus();
+        await ipc.setPendingImage(r.url, r.w, r.h);
+        await ipc.openEditor();
+      }
+    }
     finally { ipc.cancelOverlay(); }
   };
   // Đóng TẤT CẢ overlay (mọi màn hình) — không chỉ overlay hiện tại.

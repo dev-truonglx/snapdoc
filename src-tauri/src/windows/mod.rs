@@ -83,6 +83,59 @@ fn configure_overlay_ns_window_main_thread(win: &tauri::WebviewWindow, display_i
 #[allow(dead_code)]
 fn configure_overlay_ns_window_main_thread(_win: &tauri::WebviewWindow, _display_id: u32) {}
 
+/// macOS: PID của app đang frontmost NGAY LÚC GỌI, CHỈ KHI đó KHÔNG phải
+/// chính SnapDoc — dùng để trả lại focus cho app đó sau khi Chụp nhanh
+/// copy/save/hủy xong, tránh kéo các cửa sổ ẩn của SnapDoc lên trước (xem
+/// `AppState::restore_front_pid`). `None` nếu SnapDoc đang frontmost (người
+/// dùng chủ động ở trong app) hoặc không đọc được. Đọc `NSWorkspace` trên
+/// main thread cho an toàn (chạy đồng bộ qua channel, có timeout).
+#[cfg(target_os = "macos")]
+pub fn frontmost_other_app_pid(app: &AppHandle) -> Option<i32> {
+    use objc2::{class, msg_send, runtime::AnyObject};
+    let ours = std::process::id() as i32;
+    let (tx, rx) = std::sync::mpsc::channel::<Option<i32>>();
+    if app
+        .run_on_main_thread(move || {
+            let pid = unsafe {
+                let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+                if ws.is_null() {
+                    None
+                } else {
+                    let front: *mut AnyObject = msg_send![ws, frontmostApplication];
+                    if front.is_null() {
+                        None
+                    } else {
+                        let pid: i32 = msg_send![front, processIdentifier];
+                        if pid > 0 && pid != ours { Some(pid) } else { None }
+                    }
+                }
+            };
+            let _ = tx.send(pid);
+        })
+        .is_err()
+    {
+        return None;
+    }
+    rx.recv_timeout(std::time::Duration::from_millis(300)).ok().flatten()
+}
+
+/// macOS: đưa app có `pid` trở lại frontmost (nếu còn chạy) — SnapDoc mất
+/// frontmost nên các cửa sổ vừa bị `set_focus` overlay kéo lên sẽ chìm lại
+/// phía sau. No-op nếu app đó đã thoát. Xem `frontmost_other_app_pid`.
+#[cfg(target_os = "macos")]
+pub fn reactivate_app_pid(app: &AppHandle, pid: i32) {
+    use objc2::{class, msg_send, runtime::AnyObject};
+    let _ = app.run_on_main_thread(move || unsafe {
+        let running: *mut AnyObject =
+            msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
+        if !running.is_null() {
+            // options = 0: chỉ đưa app lên frontmost, không ép mọi cửa sổ của
+            // nó lên (NSApplicationActivateAllWindows).
+            let _: bool = msg_send![running, activateWithOptions: 0usize];
+        }
+    });
+}
+
 fn url(win: &str) -> WebviewUrl {
     WebviewUrl::App(format!("index.html?win={win}").into())
 }
@@ -1348,6 +1401,64 @@ pub fn unprotect_product_windows(app: &AppHandle) {
             }
         }
     });
+}
+
+/// Ẩn THẬT SỰ (`orderOut` qua `.hide()`, không chỉ occluded) các cửa sổ sản
+/// phẩm đang "visible" nhưng KHÔNG được user thật sự nhìn thấy lúc này (bị 1
+/// app khác che — `is_occlusion_visible() == false`). Cửa sổ đang thật sự
+/// hiển thị (user chủ ý đang xem, kể cả trên màn hình khác) được GIỮ NGUYÊN.
+///
+/// Gọi TRƯỚC khi mở overlay Chụp nhanh — TRƯỚC bước sẽ `set_focus()` (activate
+/// app). Lý do phải ẩn THẬT thay vì chỉ trả focus về app cũ SAU đó (cách đã
+/// thử trước, không đủ): `set_focus()` activate app ĐỒNG BỘ ngay trong lệnh
+/// gọi đó — thời điểm activate xảy ra, macOS coi MỌI cửa sổ "visible" của app
+/// (kể cả đang bị 1 app khác che, không phải đã `.hide()`) là cần đưa lên
+/// TRÊN app vừa mất frontmost. Việc này xảy ra TRƯỚC KHI code Rust/JS kịp
+/// chạy bất kỳ dòng nào để phản ứng — dù sau đó có trả focus về app cũ nhanh
+/// đến đâu, vẫn đã có 1-2 khung hình cửa sổ đó hiện ra rồi mới ẩn lại (đúng
+/// hiện tượng "hiện lên xong rồi mới ẩn"). Ẩn thật (orderOut) trước thì không
+/// còn gì để mà bị đưa lên nữa. Trả về nhãn các cửa sổ đã ẩn để
+/// `restore_hidden_product_windows` phục hồi đúng chúng sau đó.
+#[cfg(target_os = "macos")]
+pub fn hide_occluded_product_windows(app: &AppHandle) -> Vec<String> {
+    let mut hidden = Vec::new();
+    for (label, win) in app.webview_windows() {
+        if is_product_window(&label) && win.is_visible().unwrap_or(false) && !is_occlusion_visible(&win) {
+            if win.hide().is_ok() {
+                hidden.push(label);
+            }
+        }
+    }
+    hidden
+}
+
+/// Phục hồi các cửa sổ đã ẩn bởi `hide_occluded_product_windows`. Dùng
+/// `orderFront:` gọi TRỰC TIẾP qua Objective-C (KHÔNG `.show()`/`set_focus()`
+/// của Tauri — cả 2 đều đi qua `makeKeyAndOrderFront:`, có thể tự activate
+/// lại app) để chỉ đưa cửa sổ trở lại đúng vị trí "đang mở nhưng bị app khác
+/// che" như trước khi ẩn, không cướp lại frontmost.
+///
+/// **BẮT BUỘC gọi SAU KHI** app trước đó đã được activate lại (xem
+/// `reactivate_app_pid`) — gọi trong lúc SnapDoc còn là app frontmost sẽ làm
+/// cửa sổ nháy lên lại y hệt vấn đề ta đang tránh, chỉ là bị trễ ra thêm 1
+/// bước thay vì được ngăn hẳn.
+#[cfg(target_os = "macos")]
+pub fn restore_hidden_product_windows(app: &AppHandle, labels: &[String]) {
+    use objc2::{msg_send, runtime::AnyObject};
+    for label in labels {
+        let Some(win) = app.get_webview_window(label) else { continue };
+        let _ = app.run_on_main_thread(move || {
+            if let Ok(ptr) = win.ns_window() {
+                let ptr = ptr as *mut objc2_app_kit::NSWindow;
+                if !ptr.is_null() {
+                    unsafe {
+                        let ns_win: &objc2_app_kit::NSWindow = &*ptr;
+                        let _: () = msg_send![ns_win, orderFront: Option::<&AnyObject>::None];
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Trả về Accessory policy (ẩn Dock) trên macOS hoặc ẩn taskbar icon trên Windows

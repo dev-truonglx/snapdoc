@@ -82,6 +82,7 @@ pub fn run() {
             commands::finalize_monitor,
             commands::list_windows,
             commands::cancel_overlay,
+            commands::keep_capture_focus,
             commands::copy_image,
             commands::save_image,
             commands::save_and_copy,

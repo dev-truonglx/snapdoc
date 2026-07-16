@@ -144,6 +144,14 @@ pub fn cancel_overlay(app: AppHandle) {
     flow::cancel_overlay(&app);
 }
 
+/// Chụp nhanh "Mở trong Editor": báo Rust GIỮ SnapDoc frontmost (không trả
+/// focus về app cũ như copy/save/hủy) — gọi TRƯỚC `open_editor` + `cancel_overlay`.
+/// Xem `flow::keep_capture_focus` / `AppState::restore_front_pid`.
+#[tauri::command]
+pub fn keep_capture_focus(app: AppHandle) {
+    flow::keep_capture_focus(&app);
+}
+
 /// Chụp tất cả màn hình ghép ngang — không cần chọn, không cần overlay.
 #[tauri::command]
 pub async fn capture_all_screens(app: AppHandle, output: String) -> Result<(), String> {
