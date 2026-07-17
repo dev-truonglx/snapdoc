@@ -785,14 +785,229 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
 /// query string (`px/py/pw/ph`, đã đổi sang CSS px cục bộ của màn đó); preset
 /// không khớp màn nào hiện tại (đổi cấu hình màn hình) hoặc vượt biên thì bị
 /// bỏ qua lặng lẽ, coi như chưa từng có.
+/// Query string cho 1 overlay ở monitor `snap` (idx `i`) — tách riêng khỏi
+/// `open_overlays_ex` để `prewarm_overlays`/`try_reuse_prewarmed_overlays`
+/// dùng chung, không lặp lại logic tính preset/scale.
+fn build_overlay_query(
+    mode: &str,
+    i: usize,
+    snap: &MonitorSnap,
+    record: bool,
+    preset: Option<(u32, f64, f64, f64, f64)>,
+) -> String {
+    // scale: cần cho mode "quick" (Chụp nhanh) để canvas chú thích render
+    // đúng độ phân giải vật lý; các mode khác bỏ qua tham số này.
+    let mut query = format!("win=overlay&mode={mode}&idx={i}&scale={}", snap.scale);
+    if record {
+        query.push_str("&record=1");
+    }
+    if let Some((preset_display, px, py, pw, ph)) = preset {
+        if preset_display == snap.id {
+            #[cfg(target_os = "windows")]
+            let scale_conv = snap.scale.max(0.0001);
+            #[cfg(not(target_os = "windows"))]
+            let scale_conv = 1.0_f64;
+            let (cx, cy, cw, ch) = (px / scale_conv, py / scale_conv, pw / scale_conv, ph / scale_conv);
+            let (snap_w_css, snap_h_css) = (snap.w / scale_conv, snap.h / scale_conv);
+            let fits = cw >= 1.0 && ch >= 1.0 && cx >= 0.0 && cy >= 0.0
+                && cx + cw <= snap_w_css + 0.5 && cy + ch <= snap_h_css + 0.5;
+            if fits {
+                query.push_str(&format!("&px={cx}&py={cy}&pw={cw}&ph={ch}"));
+            }
+        }
+    }
+    query
+}
+
+/// Định vị 1 overlay đúng khung `snap` rồi show() — tách riêng khỏi
+/// `open_overlays_ex` để dùng chung cho cả nhánh build() mới lẫn nhánh
+/// navigate() tái sử dụng cửa sổ đã pre-warm (xem `try_reuse_prewarmed_overlays`).
+fn show_overlay_positioned(app: &AppHandle, win: &tauri::WebviewWindow, snap: &MonitorSnap) {
+    #[cfg(target_os = "macos")]
+    {
+        // Đặt frame qua NSScreen (points, native) trên main thread.
+        let win_main = win.clone();
+        let did = snap.id;
+        let _ = app.run_on_main_thread(move || {
+            configure_overlay_ns_window_main_thread(&win_main, did);
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Windows/Linux: snapshot ở physical pixels → đặt trực tiếp.
+        let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
+        let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
+    }
+
+    let _ = win.show();
+
+    #[cfg(target_os = "macos")]
+    {
+        // Lặp lại setFrame SAU show: NSWindow borderless đôi khi chỉ áp
+        // đúng frame sau khi đã order-front.
+        let win_main = win.clone();
+        let did = snap.id;
+        let _ = app.run_on_main_thread(move || {
+            configure_overlay_ns_window_main_thread(&win_main, did);
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Windows: áp lại SAU show. Khi set_position chuyển cửa sổ sang màn
+        // đích khác DPI, Windows gửi WM_DPICHANGED và tự rescale kích thước →
+        // lần set trước show có thể bị ghi đè/bỏ qua. Đặt position TRƯỚC (để
+        // DPI ổn định ở màn đích) rồi set_size để phủ trọn vẹn toàn màn hình.
+        let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
+        let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
+    }
+}
+
+/// Tạo sẵn (ẩn) 1 cửa sổ overlay cho mỗi màn hình hiện có — gọi lúc khởi
+/// động app và sau mỗi lần `close_overlays` (xem đó) — để lần
+/// `open_overlays_ex` TIẾP THEO chỉ cần `navigate()` cửa sổ đã có sẵn thay vì
+/// phải `build()` mới hoàn toàn N cửa sổ webview. Trên máy nhiều màn hình, N
+/// lần build() TUẦN TỰ (mỗi lần tạo native window + webview từ đầu) là nguồn
+/// trễ chính khiến overlay không hiện "tức thì" khi bấm phím tắt chụp — build()
+/// một lần duy nhất/1 cửa sổ (editor/thumbnail/capture-bar) vốn đã prewarm
+/// theo đúng cách này, ở đây áp dụng lại cho N cửa sổ overlay.
+///
+/// Query đặt tạm mode=region làm placeholder — không ai nhìn thấy (cửa sổ
+/// đang ẩn); `try_reuse_prewarmed_overlays` sẽ `navigate()` ghi đè đúng
+/// mode/scale/record/preset thật ngay trước khi show(). Không đụng vào
+/// overlay-{i} đã tồn tại (dù đang ẩn/idle hay đang LIVE của 1 phiên khác) —
+/// chỉ tạo bù cho những index còn thiếu.
+pub fn prewarm_overlays(app: &AppHandle) {
+    let xmons = match xcap::Monitor::all() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[SnapDoc] prewarm_overlays: không liệt kê được màn hình: {e}");
+            return;
+        }
+    };
+    for (i, m) in xmons.iter().enumerate() {
+        let label = format!("overlay-{i}");
+        if app.get_webview_window(&label).is_some() {
+            continue;
+        }
+        let snap = MonitorSnap {
+            id: m.id().unwrap_or(0),
+            x: m.x().unwrap_or(0) as f64,
+            y: m.y().unwrap_or(0) as f64,
+            w: m.width().unwrap_or(0) as f64,
+            h: m.height().unwrap_or(0) as f64,
+            scale: m.scale_factor().unwrap_or(1.0).max(1.0) as f64,
+        };
+        let query = build_overlay_query("region", i, &snap, false, None);
+        let win = match WebviewWindowBuilder::new(
+            app,
+            &label,
+            WebviewUrl::App(format!("index.html?{query}").into()),
+        )
+        .title("SnapDoc")
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .shadow(false)
+        .build()
+        {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[SnapDoc] prewarm_overlays: không tạo được overlay-{i}: {e}");
+                continue;
+            }
+        };
+        let _ = win.set_content_protected(true);
+        // Định vị đúng ngay từ lúc prewarm (dù đang ẩn) — tránh 1 nhịp "nhảy
+        // vị trí" nếu lỡ bị show() trước khi kịp navigate() lần dùng thật.
+        #[cfg(target_os = "macos")]
+        {
+            let win_main = win.clone();
+            let did = snap.id;
+            let _ = app.run_on_main_thread(move || {
+                configure_overlay_ns_window_main_thread(&win_main, did);
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
+            let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
+        }
+    }
+}
+
+/// Thử tái sử dụng pool overlay đã pre-warm (ẩn, idle) thay vì `close_overlays`
+/// + `build()` lại từ đầu (xem `prewarm_overlays`). Chỉ reuse khi TOÀN BỘ N
+/// cửa sổ overlay-{0..N-1} đã tồn tại, đang ẨN (`is_visible() == false` — nếu
+/// đang hiện tức là phiên khác đang chạy thật, TUYỆT ĐỐI không đụng vào) và
+/// không có label overlay-* nào thừa (topology màn hình đổi khác lúc
+/// prewarm). Bất kỳ điều kiện nào không khớp → trả `false`, caller tự
+/// fallback về nhánh build() cũ — an toàn tuyệt đối, không đổi hành vi trong
+/// các trường hợp đó (kể cả khi navigate() lỗi giữa chừng: các cửa sổ đã
+/// navigate xong trong vòng lặp này sẽ bị `close_overlays` ở nhánh fallback
+/// dọn sạch cùng phần còn lại, không để lại state lệch).
+///
+/// Dùng `WebviewWindow::navigate()` (điều hướng lại TRANG trên cửa sổ có sẵn,
+/// KHÔNG tạo native window mới) để đổi mode/scale/record/preset — tương
+/// đương 1 lần "reload", `Overlay.tsx` đọc lại `window.location.search` từ
+/// đầu nên toàn bộ state module-level (MODE/MY_IDX/SCALE/RECORD/PRESET) tự
+/// đúng, KHÔNG cần sửa gì ở phía frontend.
+fn try_reuse_prewarmed_overlays(
+    app: &AppHandle,
+    mode: &str,
+    record: bool,
+    preset: Option<(u32, f64, f64, f64, f64)>,
+    snaps: &[MonitorSnap],
+    cursor_idx: usize,
+) -> bool {
+    let windows = app.webview_windows();
+    let has_extra = windows.keys().any(|l| {
+        l.starts_with("overlay-")
+            && l.strip_prefix("overlay-")
+                .and_then(|s| s.parse::<usize>().ok())
+                .map(|idx| idx >= snaps.len())
+                .unwrap_or(true)
+    });
+    if has_extra {
+        return false;
+    }
+
+    let mut wins = Vec::with_capacity(snaps.len());
+    for i in 0..snaps.len() {
+        match windows.get(&format!("overlay-{i}")) {
+            Some(w) => wins.push(w.clone()),
+            None => return false,
+        }
+    }
+    if wins.iter().any(|w| w.is_visible().unwrap_or(true)) {
+        return false;
+    }
+
+    for (i, (snap, win)) in snaps.iter().zip(wins.iter()).enumerate() {
+        let query = build_overlay_query(mode, i, snap, record, preset);
+        let navigated = win.url().ok().and_then(|mut u| {
+            u.set_query(Some(&query));
+            win.navigate(u).ok()
+        });
+        if navigated.is_none() {
+            eprintln!("[SnapDoc] Tái sử dụng overlay pre-warm thất bại — để build() dựng lại từ đầu");
+            return false;
+        }
+        show_overlay_positioned(app, win, snap);
+        if i == cursor_idx {
+            let _ = win.set_focus();
+        }
+    }
+    true
+}
+
 pub fn open_overlays_ex(
     app: &AppHandle,
     mode: &str,
     record: bool,
     preset: Option<(u32, f64, f64, f64, f64)>,
 ) -> Result<(), String> {
-    close_overlays(app);
-
     // Snapshot từ xcap: trên macOS = POINTS (CGDisplayBounds) + CGDirectDisplayID;
     // trên Windows/Linux = physical pixels.
     let xmons = xcap::Monitor::all().map_err(|e| format!("Không liệt kê được màn hình: {e}"))?;
@@ -832,89 +1047,36 @@ pub fn open_overlays_ex(
         }
     };
 
-    for (i, snap) in snaps.iter().enumerate() {
-        let label = format!("overlay-{i}");
-        // scale: cần cho mode "quick" (Chụp nhanh) để canvas chú thích render
-        // đúng độ phân giải vật lý; các mode khác bỏ qua tham số này.
-        let mut query = format!("win=overlay&mode={mode}&idx={i}&scale={}", snap.scale);
-        if record {
-            query.push_str("&record=1");
-        }
-        if let Some((preset_display, px, py, pw, ph)) = preset {
-            if preset_display == snap.id {
-                #[cfg(target_os = "windows")]
-                let scale_conv = snap.scale.max(0.0001);
-                #[cfg(not(target_os = "windows"))]
-                let scale_conv = 1.0_f64;
-                let (cx, cy, cw, ch) = (px / scale_conv, py / scale_conv, pw / scale_conv, ph / scale_conv);
-                let (snap_w_css, snap_h_css) = (snap.w / scale_conv, snap.h / scale_conv);
-                let fits = cw >= 1.0 && ch >= 1.0 && cx >= 0.0 && cy >= 0.0
-                    && cx + cw <= snap_w_css + 0.5 && cy + ch <= snap_h_css + 0.5;
-                if fits {
-                    query.push_str(&format!("&px={cx}&py={cy}&pw={cw}&ph={ch}"));
-                }
+    // P8: thử tái sử dụng pool overlay đã pre-warm trước khi đóng+build lại
+    // từ đầu — xem `try_reuse_prewarmed_overlays`/`prewarm_overlays`.
+    if !try_reuse_prewarmed_overlays(app, mode, record, preset, &snaps, cursor_idx) {
+        close_overlays(app);
+        for (i, snap) in snaps.iter().enumerate() {
+            let label = format!("overlay-{i}");
+            let query = build_overlay_query(mode, i, snap, record, preset);
+            let win = WebviewWindowBuilder::new(
+                app,
+                &label,
+                WebviewUrl::App(format!("index.html?{query}").into()),
+            )
+            .title("SnapDoc")
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            // Windows: tắt DWM drop-shadow để set_position khớp chính xác pixel
+            // gốc màn hình. Shadow DWM làm nội dung lệch phải/xuống một khoảng
+            // bằng shadow margin (~8 px ở 100% DPI, tự scale theo DPI).
+            .shadow(false)
+            .build()
+            .map_err(|e| format!("Không tạo được overlay: {e}"))?;
+
+            let _ = win.set_content_protected(true);
+            show_overlay_positioned(app, &win, snap);
+            if i == cursor_idx {
+                let _ = win.set_focus();
             }
-        }
-        let win = WebviewWindowBuilder::new(
-            app,
-            &label,
-            WebviewUrl::App(format!("index.html?{query}").into()),
-        )
-        .title("SnapDoc")
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .visible(false)
-        // Windows: tắt DWM drop-shadow để set_position khớp chính xác pixel
-        // gốc màn hình. Shadow DWM làm nội dung lệch phải/xuống một khoảng
-        // bằng shadow margin (~8 px ở 100% DPI, tự scale theo DPI).
-        .shadow(false)
-        .build()
-        .map_err(|e| format!("Không tạo được overlay: {e}"))?;
-
-        let _ = win.set_content_protected(true);
-
-        #[cfg(target_os = "macos")]
-        {
-            // Đặt frame qua NSScreen (points, native) trên main thread.
-            let win_main = win.clone();
-            let did = snap.id;
-            let _ = app.run_on_main_thread(move || {
-                configure_overlay_ns_window_main_thread(&win_main, did);
-            });
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            // Windows/Linux: snapshot ở physical pixels → đặt trực tiếp.
-            let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
-            let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
-        }
-
-        let _ = win.show();
-
-        #[cfg(target_os = "macos")]
-        {
-            // Lặp lại setFrame SAU show: NSWindow borderless đôi khi chỉ áp
-            // đúng frame sau khi đã order-front.
-            let win_main = win.clone();
-            let did = snap.id;
-            let _ = app.run_on_main_thread(move || {
-                configure_overlay_ns_window_main_thread(&win_main, did);
-            });
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            // Windows: áp lại SAU show. Khi set_position chuyển cửa sổ sang màn
-            // đích khác DPI, Windows gửi WM_DPICHANGED và tự rescale kích thước →
-            // lần set trước show có thể bị ghi đè/bỏ qua. Đặt position TRƯỚC (để
-            // DPI ổn định ở màn đích) rồi set_size để phủ trọn vẹn toàn màn hình.
-            let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
-            let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
-        }
-
-        if i == cursor_idx {
-            let _ = win.set_focus();
         }
     }
 
@@ -1120,6 +1282,17 @@ pub fn close_overlays(app: &AppHandle) {
         }
     }
     // KHÔNG poll ở đây — xem comment trên.
+
+    // Dựng lại pool overlay ẩn cho lần mở TIẾP THEO (xem `prewarm_overlays`) —
+    // chạy nền, không chặn return (giữ đúng tính chất "gửi rồi return ngay"
+    // đã ghi ở trên). Sleep 300ms trước khi build lại: cùng lý do timing đã
+    // ghi ở trên (win.close() là async trên Windows — build() label trùng 1
+    // cửa sổ vừa đóng nhưng OS/DWM chưa xử lý xong dễ lỗi/không ổn định).
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        prewarm_overlays(&handle);
+    });
 }
 
 /// Như `close_overlays`, TRỪ 1 cửa sổ (`keep_label`) — dùng khi bắt đầu quay

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ipc } from "../../lib/ipc";
 
 /** `93500` → `"01:33"` — mm:ss, luôn 2 chữ số. */
@@ -11,26 +12,33 @@ function fmt(ms: number): string {
 
 /** Popup nổi "đang quay" trên Windows (xem `windows::open_recording_indicator`)
  * — thay cho vai trò của `NSStatusItem.title` bên macOS (hiện đồng hồ đếm
- * ngay cạnh icon tray), vì tray icon Win32 không có API tương đương. Poll
- * `recording_status` mỗi giây để hiện mm:ss; bấm vào bất kỳ đâu trên popup để
- * dừng quay ngay (`stop_recording`). Cửa sổ đã được content-protected ở phía
- * Rust nên popup này không lọt vào chính video đang quay. */
+ * ngay cạnh icon tray), vì tray icon Win32 không có API tương đương. Lắng
+ * nghe event `recording-tick` (do `record::spawn_tray_ticker` bắn mỗi giây —
+ * CÙNG 1 ticker Rust vốn đã phải tự poll để phát hiện WGC/SCStream tự dừng
+ * ngoài ý muốn, xem doc-comment ở đó) thay vì tự poll `recording_status`
+ * riêng 1 vòng lặp khác — gộp về đúng 1 timer, phản hồi ngay khi Rust tính
+ * xong thay vì lệch pha tới 1s giữa 2 poll độc lập. Chỉ gọi `recordingStatus`
+ * MỘT LẦN lúc mount để có giá trị hiển thị ngay (event tick đầu tiên có thể
+ * tới trễ tới 1s nếu cửa sổ mount không đúng lúc ticker vừa tick). Bấm vào
+ * bất kỳ đâu trên popup để dừng quay ngay (`stop_recording`). Cửa sổ đã được
+ * content-protected ở phía Rust nên popup này không lọt vào chính video đang
+ * quay. */
 export default function RecordingIndicator() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    const tick = () => {
-      ipc.recordingStatus().then((ms) => {
-        if (!cancelled && ms != null) setElapsedMs(ms);
-      }).catch(() => {});
-    };
-    tick();
-    const id = setInterval(tick, 1000);
+    ipc.recordingStatus().then((ms) => {
+      if (!cancelled && ms != null) setElapsedMs(ms);
+    }).catch(() => {});
+
+    const unlisten = listen<number>("recording-tick", (e) => {
+      if (!cancelled) setElapsedMs(e.payload);
+    });
     return () => {
       cancelled = true;
-      clearInterval(id);
+      unlisten.then((f) => f());
     };
   }, []);
 

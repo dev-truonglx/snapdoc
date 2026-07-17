@@ -495,8 +495,16 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
 /// mà không ai gọi `stop_recording()` của ta — nếu không phát hiện, phiên
 /// quay coi như "kẹt" mãi ở trạng thái đang chạy: `writer` thread chờ frame
 /// không bao giờ tới nữa, và icon "đang quay" không bao giờ bị ẩn.
+///
+/// Đây vẫn là 1 poll BẮT BUỘC (không có callback OS nào báo "SCStream tự
+/// dừng") — nhưng thay vì để `RecordingIndicator.tsx` tự poll `recording_status`
+/// THÊM 1 lần/giây riêng (IPC round-trip trùng lặp với đúng giá trị `ms` vừa
+/// tính ở đây), emit luôn `recording-tick` cho MỌI cửa sổ đang lắng nghe —
+/// gộp 2 vòng poll độc lập (Rust ticker + JS setInterval) thành 1 nguồn duy
+/// nhất, phản hồi ngay khi tính xong thay vì lệch pha tới 1s giữa 2 timer.
 #[cfg(target_os = "macos")]
 fn spawn_tray_ticker(app: AppHandle) {
+    use tauri::Emitter;
     std::thread::spawn(move || loop {
         if stopped_externally(&app) {
             if let Err(e) = stop_recording(&app) {
@@ -507,6 +515,7 @@ fn spawn_tray_ticker(app: AppHandle) {
         match status(&app) {
             Some(ms) => {
                 crate::tray::update_recording_time(ms);
+                let _ = app.emit("recording-tick", ms);
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
             None => break,
@@ -700,9 +709,12 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
 /// Cập nhật đồng hồ đếm cạnh icon "đang quay" mỗi giây — tự dừng khi
 /// `status()` trả `None`. Đồng thời poll `is_stopped_externally()` để phát
 /// hiện WGC tự dừng ngoài ý muốn, cùng vai trò với bản macOS (xem đó để hiểu
-/// đầy đủ lý do).
+/// đầy đủ lý do, kể cả lý do emit thêm `recording-tick` thay vì để
+/// `RecordingIndicator.tsx` tự poll riêng — quan trọng hơn trên Windows vì
+/// đây chính là nơi hiện popup "đang quay").
 #[cfg(target_os = "windows")]
 fn spawn_tray_ticker(app: AppHandle) {
+    use tauri::Emitter;
     std::thread::spawn(move || loop {
         if stopped_externally(&app) {
             if let Err(e) = stop_recording(&app) {
@@ -713,6 +725,7 @@ fn spawn_tray_ticker(app: AppHandle) {
         match status(&app) {
             Some(ms) => {
                 crate::tray::update_recording_time(ms);
+                let _ = app.emit("recording-tick", ms);
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
             None => break,

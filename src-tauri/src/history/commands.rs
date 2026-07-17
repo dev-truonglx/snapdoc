@@ -151,6 +151,35 @@ fn empty_trash_sync(app: &AppHandle) -> Result<u32, String> {
     Ok(count)
 }
 
+/// Thời gian giữ item trong Trash trước khi tự động xoá vĩnh viễn. Xem
+/// `STABILITY_RISKS.md` mục B.5/E.7: `library/assets`+`library/thumbs` từng
+/// lớn dần vô hạn vì Trash chỉ được dọn khi user tự bấm "Dọn thùng rác".
+const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Tự động xoá vĩnh viễn các item đã ở Trash quá `TRASH_RETENTION_MS` (30
+/// ngày) — user vẫn Restore được bình thường trong 30 ngày đó, chỉ mất
+/// quyền Restore sau khi đã bị dọn. Cùng logic với `empty_trash_sync`, chỉ
+/// khác điều kiện lọc theo `deleted_at`.
+pub fn purge_old_trash(app: &AppHandle) -> Result<u32, String> {
+    let cutoff = now_ms() - TRASH_RETENTION_MS;
+    let ids: Vec<String> = {
+        let st = state(app)?;
+        let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM history WHERE deleted_at IS NOT NULL AND deleted_at < ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([cutoff], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    let count = ids.len() as u32;
+    for id in ids {
+        let _ = permanently_delete_history_item_sync(app, &id);
+    }
+    Ok(count)
+}
+
 fn rename_history_item_sync(app: &AppHandle, id: &str, title: &str) -> Result<(), String> {
     let st = state(app)?;
     let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;

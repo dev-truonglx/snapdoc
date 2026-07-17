@@ -204,6 +204,22 @@ pub fn run() {
                 }
             }
 
+            // Tự động dọn Trash quá hạn 30 ngày — thread riêng, không chặn
+            // khởi động, cùng convention với cleanup_stale_temp bên dưới. Xem
+            // STABILITY_RISKS.md mục B.5/E.7: trước đây Trash chỉ được dọn
+            // khi user tự bấm "Dọn thùng rác", library/assets+thumbs lớn dần
+            // vô hạn.
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || match history::commands::purge_old_trash(&h) {
+                    Ok(n) if n > 0 => {
+                        eprintln!("[SnapDoc][history] Đã tự xoá {n} mục trong Trash quá hạn 30 ngày")
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[SnapDoc][history] Tự dọn Trash quá hạn thất bại: {e}"),
+                });
+            }
+
             // Mở scope asset-protocol cho thư mục lưu video hiện tại — nếu
             // không, `convertFileSrc` trong record-review/History sẽ bị chặn
             // đọc video đã quay ở phiên trước (scope tĩnh trong tauri.conf.json
@@ -233,6 +249,16 @@ pub fn run() {
             // Pre-warm thanh "Dừng quay" (ẩn) → lần bắt đầu quay vùng chọn đầu
             // tiên hiện tức thì, không chờ tải webview mới.
             let _ = windows::prewarm_stop_control(&handle);
+
+            // Pre-warm overlay (ẩn, 1 cửa sổ/màn hình) → lần chụp đầu trên máy
+            // nhiều màn hình không phải chờ build() tuần tự N cửa sổ webview
+            // (nguồn trễ chính khiến overlay không hiện "tức thì" — xem
+            // `windows::prewarm_overlays`). Chạy nền, không chặn khởi động vì
+            // `xcap::Monitor::all()` + build() N cửa sổ có thể mất vài chục ms.
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || windows::prewarm_overlays(&h));
+            }
 
             // Pre-warm capture-bar (ẩn) NGAY khi app khởi động — giữ icon Dock
             // (macOS)/Taskbar (Windows) hiện diện xuyên suốt vòng đời app kể
