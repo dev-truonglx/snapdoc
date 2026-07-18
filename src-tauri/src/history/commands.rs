@@ -250,7 +250,12 @@ fn update_history_asset_sync(app: &AppHandle, id: &str, data: &str) -> Result<Hi
 /// cơ mất bản gốc). File mới nằm ở `saveDir` giống video quay bình thường
 /// (`record::new_output_path`, KHÔNG copy vào `library/assets` — theo đúng
 /// quy ước hiện có cho video, xem `history::ingest_video`).
-fn trim_history_video_sync(app: &AppHandle, id: &str, keep_ranges_ms: &[(i64, i64)]) -> Result<HistoryRecord, String> {
+fn trim_history_video_sync(
+    app: &AppHandle,
+    id: &str,
+    keep_ranges_ms: &[(i64, i64)],
+    remove_audio: bool,
+) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type != "video" {
         return Err("Chỉ video mới cắt được".to_string());
@@ -261,7 +266,7 @@ fn trim_history_video_sync(app: &AppHandle, id: &str, keep_ranges_ms: &[(i64, i6
     // Báo tiến độ % cho cửa sổ `history-trim` qua event toàn app — xem
     // doc-comment `encoder::trim` + listener ở `HistoryTrim.tsx`.
     let progress_app = app.clone();
-    crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path, move |frac| {
+    crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path, remove_audio, move |frac| {
         use tauri::Emitter;
         let _ = progress_app.emit("trim-progress", frac);
     })?;
@@ -416,11 +421,14 @@ pub async fn trim_history_video(
     app: AppHandle,
     id: String,
     ranges: Vec<(i64, i64)>,
+    remove_audio: bool,
 ) -> Result<HistoryRecord, String> {
     let app_for_blocking = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || trim_history_video_sync(&app_for_blocking, &id, &ranges))
-        .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        trim_history_video_sync(&app_for_blocking, &id, &ranges, remove_audio)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
     use tauri::Emitter;
     let _ = app.emit("history:item-added", &result);
     Ok(result)

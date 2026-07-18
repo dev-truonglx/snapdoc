@@ -16,9 +16,10 @@ export default function HistoryTrim() {
   // Gương lại trạng thái chỉnh sửa của VideoTrimmer (nó ẩn nút "Áp dụng cắt"
   // riêng — xem `showApplyButton={false}` bên dưới) để nút ở đây biết có gì
   // để áp dụng không, cùng kỹ thuật `RecordReview.tsx`.
-  const [trimState, setTrimState] = useState<{ hasChanges: boolean; keepRanges: [number, number][] }>({
+  const [trimState, setTrimState] = useState<{ hasChanges: boolean; keepRanges: [number, number][]; removeAudio: boolean }>({
     hasChanges: false,
     keepRanges: [],
+    removeAudio: false,
   });
   // Tiến độ cắt (0..1) — cùng kỹ thuật `RecordReview.tsx`, backend emit %
   // thật từ ffmpeg qua event `trim-progress`, xem `encoder::trim`.
@@ -55,7 +56,7 @@ export default function HistoryTrim() {
     setBusy(true);
     setTrimProgress(0);
     try {
-      await ipc.trimHistoryVideo(item.id, trimState.keepRanges);
+      await ipc.trimHistoryVideo(item.id, trimState.keepRanges, trimState.removeAudio);
       await ipc.closeHistoryTrim();
     } catch (e) {
       alert(String(e));

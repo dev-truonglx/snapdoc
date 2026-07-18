@@ -275,6 +275,7 @@ pub fn trim(
     input_path: &Path,
     keep_ranges_ms: &[(i64, i64)],
     output_path: &Path,
+    remove_audio: bool,
     mut on_progress: impl FnMut(f64),
 ) -> Result<(), String> {
     if keep_ranges_ms.is_empty() {
@@ -305,9 +306,16 @@ pub fn trim(
                     "-ss", &start_s.to_string(),
                     "-t", &dur_s.to_string(),
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-b:a", "160k",
-                    "-progress", "pipe:1",
-                ])
+                ]);
+            // `-an` bỏ hẳn track âm thanh khi user bấm "Tách nhạc nền" — ngược
+            // lại encode audio AAC như cũ. Đặt SAU nhóm arg video ở trên (thứ
+            // tự option ffmpeg không quan trọng ở đây) để dễ đọc theo nhánh.
+            if remove_audio {
+                cmd.arg("-an");
+            } else {
+                cmd.args(["-c:a", "aac", "-b:a", "160k"]);
+            }
+            cmd.args(["-progress", "pipe:1"])
                 .arg(&seg_path)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -376,7 +384,13 @@ pub fn trim(
         cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0"])
             .arg("-i")
             .arg(&list_path)
-            .args(["-c:v", "copy", "-c:a", "copy", "-movflags", "+faststart"])
+            .args(["-c:v", "copy"]);
+        // Các đoạn không có track audio (đã `-an` ở bước encode trên) —
+        // `-c:a copy` sẽ lỗi nếu ép copy 1 track không tồn tại.
+        if !remove_audio {
+            cmd.args(["-c:a", "copy"]);
+        }
+        cmd.args(["-movflags", "+faststart"])
             .arg(output_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

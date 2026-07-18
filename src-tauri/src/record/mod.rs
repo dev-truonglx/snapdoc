@@ -956,7 +956,11 @@ pub fn peek_pending_recording(app: &AppHandle) -> Option<PendingRecording> {
 /// tiếp theo (đã có `raw_path` từ trước) KHÔNG dời lại — bản thô luôn là bản
 /// DUY NHẤT trước lần cắt đầu tiên, không phải "bản trước lần cắt gần nhất".
 /// `keep_ranges_ms`: danh sách đoạn GIỮ LẠI (ms), xem `encoder::trim`.
-pub fn trim_pending_recording(app: &AppHandle, keep_ranges_ms: &[(i64, i64)]) -> Result<PendingRecording, String> {
+pub fn trim_pending_recording(
+    app: &AppHandle,
+    keep_ranges_ms: &[(i64, i64)],
+    remove_audio: bool,
+) -> Result<PendingRecording, String> {
     let pending_state = app.state::<PendingRecordingState>();
     let (path, has_raw, current_duration_ms) = {
         let guard = pending_state.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
@@ -1008,7 +1012,7 @@ pub fn trim_pending_recording(app: &AppHandle, keep_ranges_ms: &[(i64, i64)]) ->
     // Báo tiến độ % cho `record-review` qua event toàn app (webview đang mở
     // sẽ tự lắng, xem `RecordReview.tsx`) — xem doc-comment `encoder::trim`.
     let progress_app = app.clone();
-    encoder::trim(trim_source, keep_ranges_ms, &tmp_output, move |frac| {
+    encoder::trim(trim_source, keep_ranges_ms, &tmp_output, remove_audio, move |frac| {
         use tauri::Emitter;
         let _ = progress_app.emit("trim-progress", frac);
     })?;

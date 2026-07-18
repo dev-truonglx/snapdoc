@@ -736,10 +736,13 @@ pub fn recording_status(app: AppHandle) -> Option<u64> {
 pub async fn trim_pending_recording(
     app: AppHandle,
     ranges: Vec<(i64, i64)>,
+    remove_audio: bool,
 ) -> Result<crate::record::PendingRecording, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::record::trim_pending_recording(&app, &ranges))
-        .await
-        .map_err(|e| format!("Task join error: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::record::trim_pending_recording(&app, &ranges, remove_audio)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[derive(serde::Deserialize)]

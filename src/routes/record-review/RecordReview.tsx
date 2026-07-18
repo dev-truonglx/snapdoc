@@ -17,9 +17,10 @@ export default function RecordReview() {
   // Gương lại trạng thái chỉnh sửa của VideoTrimmer (nó ẩn nút "Áp dụng cắt"
   // riêng — xem `showApplyButton={false}` bên dưới) để nút Lưu ở đây biết có
   // cần tự áp dụng cắt trước khi lưu không, xem `doApplyAndSave`.
-  const [trimState, setTrimState] = useState<{ hasChanges: boolean; keepRanges: [number, number][] }>({
+  const [trimState, setTrimState] = useState<{ hasChanges: boolean; keepRanges: [number, number][]; removeAudio: boolean }>({
     hasChanges: false,
     keepRanges: [],
+    removeAudio: false,
   });
   // Tiến độ cắt (0..1), `null` = không đang cắt (đang chờ khác/đã xong) — chỉ
   // có ý nghĩa trong lúc `trimPendingRecording` chạy, xem `doApplyAndSave`.
@@ -89,7 +90,7 @@ export default function RecordReview() {
     try {
       if (trimState.hasChanges) {
         setTrimProgress(0);
-        await ipc.trimPendingRecording(trimState.keepRanges);
+        await ipc.trimPendingRecording(trimState.keepRanges, trimState.removeAudio);
         // Xong bước cắt — quay về `null` để nhãn nút chuyển qua "Đang lưu…"
         // (ingest vào History không có tiến độ %, xem `confirmRecordingSave`).
         setTrimProgress(null);
