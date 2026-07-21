@@ -45,6 +45,14 @@ fn configure_overlay_ns_window_main_thread(win: &tauri::WebviewWindow, display_i
         let behavior: usize = 1 | (1 << 4) | (1 << 8);
         let _: () = msg_send![ns_win, setCollectionBehavior: behavior];
 
+        // Tắt animation mặc định của AppKit khi order-front/order-out
+        // (NSWindowAnimationBehaviorNone = 2). Không set thì macOS tự áp 1
+        // hiệu ứng zoom/fade nhẹ mỗi lần window lần đầu hiện ra — với overlay
+        // chứa ảnh freeze, hiệu ứng đó lộ ra như ảnh freeze bị "zoom" lúc mở.
+        // An toàn gọi lại nhiều lần (trước và sau show()).
+        let no_animation: i64 = 2;
+        let _: () = msg_send![ns_win, setAnimationBehavior: no_animation];
+
         // Đặt window level CAO HƠN menu bar của macOS để overlay phủ kín toàn
         // màn hình, bao gồm cả thanh menu (NSMenuBarWindowLevel ≈ 24).
         // NSScreenSaverWindowLevel = 1000 — đảm bảo phủ mọi thứ kể cả
@@ -1170,6 +1178,13 @@ pub fn open_overlays_ex(
             // gốc màn hình. Shadow DWM làm nội dung lệch phải/xuống một khoảng
             // bằng shadow margin (~8 px ở 100% DPI, tự scale theo DPI).
             .shadow(false)
+            // Không cho OS resize overlay (đồng bộ với `prewarm_overlays`) —
+            // toạ độ CSS/tính rect trong Overlay.tsx giả định cửa sổ luôn
+            // khớp CHÍNH XÁC `MonitorSnap`; thiếu dòng này ở nhánh fallback
+            // (khi tái dùng pool pre-warm thất bại) sẽ tái phát bug "lock
+            // resize" đã fix ở commit 9b16ba5, vì nhánh đó chỉ áp cho pool
+            // pre-warm, không áp cho window build() mới ở đây.
+            .resizable(false)
             .build()
             .map_err(|e| format!("Không tạo được overlay: {e}"))?;
 
