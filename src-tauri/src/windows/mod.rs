@@ -910,6 +910,7 @@ pub fn prewarm_overlays(app: &AppHandle) {
         .skip_taskbar(true)
         .visible(false)
         .shadow(false)
+        .resizable(false)
         .build()
         {
             Ok(w) => w,
