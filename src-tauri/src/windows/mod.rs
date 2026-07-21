@@ -794,10 +794,13 @@ fn build_overlay_query(
     snap: &MonitorSnap,
     record: bool,
     preset: Option<(u32, f64, f64, f64, f64)>,
+    gen: u64,
 ) -> String {
     // scale: cần cho mode "quick" (Chụp nhanh) để canvas chú thích render
     // đúng độ phân giải vật lý; các mode khác bỏ qua tham số này.
-    let mut query = format!("win=overlay&mode={mode}&idx={i}&scale={}", snap.scale);
+    // gen: overlay echo lại nguyên giá trị này khi báo "đã paint xong" (xem
+    // `wait_for_overlays_ready`) — để Rust lọc bỏ tín hiệu trễ từ phiên cũ.
+    let mut query = format!("win=overlay&mode={mode}&idx={i}&scale={}&gen={gen}", snap.scale);
     if record {
         query.push_str("&record=1");
     }
@@ -822,7 +825,10 @@ fn build_overlay_query(
 /// Định vị 1 overlay đúng khung `snap` rồi show() — tách riêng khỏi
 /// `open_overlays_ex` để dùng chung cho cả nhánh build() mới lẫn nhánh
 /// navigate() tái sử dụng cửa sổ đã pre-warm (xem `try_reuse_prewarmed_overlays`).
-fn show_overlay_positioned(app: &AppHandle, win: &tauri::WebviewWindow, snap: &MonitorSnap) {
+/// Đặt frame/level cho overlay TRƯỚC khi show() — cửa sổ vẫn ẩn, nhưng đã
+/// đúng vị trí/kích thước để frontend bắt đầu vẽ (fetch ảnh đóng băng) ngay,
+/// không phải chờ thêm một nhịp "nhảy vị trí" sau khi đã lên hình.
+fn position_overlay(app: &AppHandle, win: &tauri::WebviewWindow, snap: &MonitorSnap) {
     #[cfg(target_os = "macos")]
     {
         // Đặt frame qua NSScreen (points, native) trên main thread.
@@ -838,13 +844,20 @@ fn show_overlay_positioned(app: &AppHandle, win: &tauri::WebviewWindow, snap: &M
         let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
         let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
     }
+}
 
+/// order-front THẬT (win.show()) + áp lại frame sau show (NSWindow borderless
+/// đôi khi chỉ áp đúng frame sau khi đã order-front; Windows thì
+/// WM_DPICHANGED khi đổi màn đích DPI khác có thể ghi đè set_size gọi trước
+/// show()). CHỈ gọi hàm này SAU KHI `wait_for_overlays_ready` đã xác nhận (hoặc
+/// timeout) frontend paint xong ảnh đóng băng — để frame đầu tiên hiện ra đã
+/// có sẵn nội dung đúng, không có nhịp trống/nháy (cơ chế freeze mượt như
+/// Snagit: không bao giờ show() rồi mới paint sau).
+fn reveal_overlay(app: &AppHandle, win: &tauri::WebviewWindow, snap: &MonitorSnap) {
     let _ = win.show();
 
     #[cfg(target_os = "macos")]
     {
-        // Lặp lại setFrame SAU show: NSWindow borderless đôi khi chỉ áp
-        // đúng frame sau khi đã order-front.
         let win_main = win.clone();
         let did = snap.id;
         let _ = app.run_on_main_thread(move || {
@@ -859,6 +872,47 @@ fn show_overlay_positioned(app: &AppHandle, win: &tauri::WebviewWindow, snap: &M
         // DPI ổn định ở màn đích) rồi set_size để phủ trọn vẹn toàn màn hình.
         let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
         let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
+    }
+}
+
+/// Chờ frontend báo "đã paint xong ảnh đóng băng" cho từng overlay-{idx}
+/// (qua Tauri command `notify_overlay_ready`, xem `commands::notify_overlay_ready`
+/// và `useFrozenScreen` trong Overlay.tsx) trước khi `reveal_overlay` cho
+/// TẤT CẢ màn hình. Mục đích: tất cả overlay trồi lên compositor gần như
+/// cùng một nhịp, với nội dung đã đúng — không màn nào lộ ra chậm hơn màn
+/// khác, không có nhịp "trống" trước khi ảnh đóng băng kịp vẽ.
+///
+/// Có timeout an toàn (220ms) để một lỗi/độ trễ bất thường ở frontend không
+/// bao giờ treo cả phiên chụp — hết giờ thì vẫn tiến hành reveal như cũ
+/// (đúng hành vi trước khi có cơ chế chờ này).
+fn wait_for_overlays_ready(app: &AppHandle, gen: u64, expected: usize) {
+    use std::collections::HashSet;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    let (tx, rx) = mpsc::channel::<(u64, usize)>();
+    if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
+        *slot = Some(tx);
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(220);
+    let mut seen: HashSet<usize> = HashSet::with_capacity(expected);
+    while seen.len() < expected {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok((g, idx)) if g == gen => {
+                seen.insert(idx);
+            }
+            Ok(_) => {} // tín hiệu trễ từ phiên overlay cũ — bỏ qua
+            Err(_) => break, // timeout
+        }
+    }
+
+    if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
+        *slot = None;
     }
 }
 
@@ -897,7 +951,9 @@ pub fn prewarm_overlays(app: &AppHandle) {
             h: m.height().unwrap_or(0) as f64,
             scale: m.scale_factor().unwrap_or(1.0).max(1.0) as f64,
         };
-        let query = build_overlay_query("region", i, &snap, false, None);
+        // gen=0: cửa sổ pre-warm chưa thuộc phiên chụp thật nào — sẽ được
+        // navigate() lại với gen thật trước khi dùng (xem `try_reuse_prewarmed_overlays`).
+        let query = build_overlay_query("region", i, &snap, false, None, 0);
         let win = match WebviewWindowBuilder::new(
             app,
             &label,
@@ -961,6 +1017,7 @@ fn try_reuse_prewarmed_overlays(
     preset: Option<(u32, f64, f64, f64, f64)>,
     snaps: &[MonitorSnap],
     cursor_idx: usize,
+    gen: u64,
 ) -> bool {
     let windows = app.webview_windows();
     let has_extra = windows.keys().any(|l| {
@@ -986,7 +1043,7 @@ fn try_reuse_prewarmed_overlays(
     }
 
     for (i, (snap, win)) in snaps.iter().zip(wins.iter()).enumerate() {
-        let query = build_overlay_query(mode, i, snap, record, preset);
+        let query = build_overlay_query(mode, i, snap, record, preset, gen);
         let navigated = win.url().ok().and_then(|mut u| {
             u.set_query(Some(&query));
             win.navigate(u).ok()
@@ -995,7 +1052,17 @@ fn try_reuse_prewarmed_overlays(
             eprintln!("[SnapDoc] Tái sử dụng overlay pre-warm thất bại — để build() dựng lại từ đầu");
             return false;
         }
-        show_overlay_positioned(app, win, snap);
+        // Chỉ định vị (ẩn) — CHƯA show(). show() đồng loạt sau khi
+        // `wait_for_overlays_ready` xác nhận nội dung đã paint xong, xem đó.
+        position_overlay(app, win, snap);
+    }
+
+    // Chờ frontend từng overlay báo đã paint xong ảnh đóng băng, rồi mới
+    // order-front TẤT CẢ cùng lúc — tránh nhịp trống/nháy và tránh màn hình
+    // này lên hình trước màn hình khác.
+    wait_for_overlays_ready(app, gen, snaps.len());
+    for (i, win) in wins.iter().enumerate() {
+        reveal_overlay(app, win, &snaps[i]);
         if i == cursor_idx {
             let _ = win.set_focus();
         }
@@ -1009,6 +1076,21 @@ pub fn open_overlays_ex(
     record: bool,
     preset: Option<(u32, f64, f64, f64, f64)>,
 ) -> Result<(), String> {
+    // macOS: hạ về Accessory TRƯỚC khi show/focus overlay bên dưới. Verify
+    // thực nghiệm (2026-07-22, panel_test/testN.m): dưới Accessory policy, gọi
+    // `activateIgnoringOtherApps` + `makeKeyAndOrderFront` (đúng những gì
+    // `win.set_focus()` làm) vẫn cho overlay nhận bàn phím thật (Esc/Enter/gõ
+    // chú thích Chụp nhanh) NHƯNG KHÔNG đưa SnapDoc lên frontmost hệ thống —
+    // app đang active trước đó giữ nguyên menu bar suốt phiên overlay. Dưới
+    // Regular (chế độ mặc định vì `prewarm_capture_bar` cần Regular để giữ
+    // Dock icon) thì cùng lệnh đó chắc chắn cướp menu bar. Trả lại Regular ở
+    // `restore_regular_activation` khi phiên overlay/chụp/quay kết thúc.
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+    }
+
     // Snapshot từ xcap: trên macOS = POINTS (CGDisplayBounds) + CGDirectDisplayID;
     // trên Windows/Linux = physical pixels.
     let xmons = xcap::Monitor::all().map_err(|e| format!("Không liệt kê được màn hình: {e}"))?;
@@ -1048,13 +1130,23 @@ pub fn open_overlays_ex(
         }
     };
 
+    // Tính gen TRƯỚC khi mở overlay (không phải sau như trước): cần nhúng
+    // vào query string ngay từ navigate()/build() đầu tiên để frontend echo
+    // lại đúng giá trị khi báo "đã paint xong" (xem `wait_for_overlays_ready`).
+    let gen = app
+        .state::<AppState>()
+        .overlay_gen
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
+
     // P8: thử tái sử dụng pool overlay đã pre-warm trước khi đóng+build lại
     // từ đầu — xem `try_reuse_prewarmed_overlays`/`prewarm_overlays`.
-    if !try_reuse_prewarmed_overlays(app, mode, record, preset, &snaps, cursor_idx) {
+    if !try_reuse_prewarmed_overlays(app, mode, record, preset, &snaps, cursor_idx, gen) {
         close_overlays(app);
+        let mut wins = Vec::with_capacity(snaps.len());
         for (i, snap) in snaps.iter().enumerate() {
             let label = format!("overlay-{i}");
-            let query = build_overlay_query(mode, i, snap, record, preset);
+            let query = build_overlay_query(mode, i, snap, record, preset, gen);
             let win = WebviewWindowBuilder::new(
                 app,
                 &label,
@@ -1074,18 +1166,20 @@ pub fn open_overlays_ex(
             .map_err(|e| format!("Không tạo được overlay: {e}"))?;
 
             let _ = win.set_content_protected(true);
-            show_overlay_positioned(app, &win, snap);
+            // Chỉ định vị (ẩn) — CHƯA show(), giống nhánh reuse ở trên.
+            position_overlay(app, &win, snap);
+            wins.push(win);
+        }
+
+        wait_for_overlays_ready(app, gen, snaps.len());
+        for (i, win) in wins.iter().enumerate() {
+            reveal_overlay(app, win, &snaps[i]);
             if i == cursor_idx {
                 let _ = win.set_focus();
             }
         }
     }
 
-    let gen = app
-        .state::<AppState>()
-        .overlay_gen
-        .fetch_add(1, Ordering::SeqCst)
-        + 1;
     let handle = app.clone();
 
     std::thread::spawn(move || {
@@ -1256,6 +1350,7 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize) {
         let esc = crate::input::escape_down();
         if (right && !prev_right) || (esc && !prev_esc) {
             close_overlays(&app);
+            restore_regular_activation(&app);
             break;
         }
         prev_right = right;
@@ -1295,6 +1390,23 @@ pub fn close_overlays(app: &AppHandle) {
         prewarm_overlays(&handle);
     });
 }
+
+/// Trả `ActivationPolicy` về Regular sau khi phiên overlay (chụp ảnh/Chụp
+/// nhanh/quay) kết thúc thật sự — đối xứng với việc hạ xuống Accessory ở đầu
+/// `open_overlays_ex` (xem đó để biết lý do). BẮT BUỘC phải trả lại: capture-bar
+/// (`prewarm_capture_bar`) cần Regular để giữ Dock icon suốt vòng đời app.
+/// Gọi ở các điểm KẾT THÚC THẬT của phiên (`cancel_overlay`, bắt đầu quay,
+/// chuyển sang chế độ scroll, Esc/right-click trong `input_loop`) — KHÔNG gọi
+/// trong `close_overlays` dùng chung vì hàm đó còn được gọi GIỮA phiên (rebuild
+/// lại overlay khi pool pre-warm không tái dùng được, xem `open_overlays_ex`),
+/// trả Regular ở đó sẽ xoá mất đúng hiệu ứng Accessory vừa bật.
+#[cfg(target_os = "macos")]
+pub fn restore_regular_activation(app: &AppHandle) {
+    use tauri::ActivationPolicy;
+    let _ = app.set_activation_policy(ActivationPolicy::Regular);
+}
+#[cfg(not(target_os = "macos"))]
+pub fn restore_regular_activation(_app: &AppHandle) {}
 
 /// Như `close_overlays`, TRỪ 1 cửa sổ (`keep_label`) — dùng khi bắt đầu quay
 /// vùng chọn qua `RecordRegionSelect`: đóng overlay ở MỌI màn hình khác, giữ

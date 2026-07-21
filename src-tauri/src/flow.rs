@@ -263,6 +263,13 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
         hide_bar(app);
         #[cfg(target_os = "macos")]
         std::thread::sleep(std::time::Duration::from_millis(50));
+        // Windows: hide_bar() chỉ minimize() (async, có animation) thay vì
+        // ẩn thật ngay — không sleep ở đây thì take_frozen_screens() chụp
+        // frozen NGAY SAU ĐÓ có thể vẫn thấy capture-bar còn hiện (chưa kịp
+        // minimize xong), làm nó bị "đóng băng" luôn vào ảnh nền, trông như
+        // capture-bar hiện lên suốt phiên overlay dù cửa sổ thật đã minimize.
+        #[cfg(target_os = "windows")]
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
     take_frozen_screens(app);
     let result: Result<(), String> = (|| {
@@ -291,6 +298,10 @@ pub fn run_record_picker(app: &AppHandle, mode: &str) {
         hide_bar(app);
         #[cfg(target_os = "macos")]
         std::thread::sleep(std::time::Duration::from_millis(50));
+        // Windows: xem giải thích ở `run()` — minimize() async, cần đợi
+        // trước khi chụp frozen kẻo capture-bar bị "đóng băng" vào ảnh nền.
+        #[cfg(target_os = "windows")]
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
     take_frozen_screens(app);
     let result: Result<(), String> = (|| {
@@ -383,11 +394,13 @@ pub fn finalize_region(
     }
     if rw < 1.0 || rh < 1.0 {
         windows::close_overlays(app);
+        windows::restore_regular_activation(app);
         return Err("Vung chon khong hop le".to_string());
     }
 
     if take_pending_record(app) {
         windows::close_overlays_except(app, win.label());
+        windows::restore_regular_activation(app);
         let display_id = m.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
         save_last_region(app, display_id, rx, ry, rw, rh);
         crate::record::start_recording_region(app, display_id, rx, ry, rw, rh)?;
@@ -412,6 +425,7 @@ pub fn finalize_region(
     let (mode, _) = app.state::<AppState>().last_capture.get();
     if mode == "scroll" {
         windows::close_overlays(app);
+        windows::restore_regular_activation(app);
         windows::open_scroll_control(app, center_x, center_y, rx as u32, ry as u32, rw as u32, rh as u32)?;
         return Ok(());
     }
@@ -419,6 +433,8 @@ pub fn finalize_region(
     // Step 3: close overlays BEFORE capture.
     // KHÔNG poll sau close — deadlock risk (xem close_overlays). Sleep 200ms.
     windows::close_overlays(app);
+    // KHÔNG restore_regular_activation ở đây — xem lý do ngay trước lệnh
+    // chụp pixel ở dưới (menu bar bug).
     // Frozen screen không còn cần thiết sau khi overlay đóng.
     clear_frozen_screens(app);
     #[cfg(not(target_os = "macos"))]
@@ -438,9 +454,17 @@ pub fn finalize_region(
     #[cfg(not(target_os = "linux"))]
     let bitmap_scale: f64 = s.scale;
 
+    // Chụp pixel TRƯỚC khi trả `ActivationPolicy::Regular` — trả Regular
+    // trước lúc này khiến macOS coi SnapDoc là app active và hiện menu bar
+    // của chính SnapDoc lên, đè vào đúng vùng ảnh đang chụp (nếu vùng chọn
+    // chạm mép trên màn hình) thay vì menu bar của app đang thật sự hiển
+    // thị. Cùng cơ chế "Regular khiến 1 lệnh tương đương focus cướp menu
+    // bar" đã ghi ở comment `open_overlays_ex` — ở đây không có lệnh focus
+    // nào, nhưng chính bản thân việc đổi policy cũng đủ để kích hoạt lại.
     let cap = with_product_windows_protected(app, || {
         capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)
     })?;
+    windows::restore_regular_activation(app);
     let output = get_output(app);
     finish(app, cap, &output, bitmap_scale)
 }
@@ -450,6 +474,7 @@ pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
     clear_frozen_screens(app);
 
     if take_pending_record(app) {
+        windows::restore_regular_activation(app);
         return crate::record::start_recording_window(app, id);
     }
 
@@ -458,7 +483,10 @@ pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     std::thread::sleep(std::time::Duration::from_millis(200));
 
+    // Chụp TRƯỚC khi restore_regular_activation — xem lý do chi tiết ở
+    // `finalize_region` (bug menu bar của SnapDoc lọt vào ảnh chụp).
     let cap = capture::window::capture_by_id(id)?;
+    windows::restore_regular_activation(app);
     let output = get_output(app);
     finish(app, cap, &output, 1.0)
 }
@@ -472,6 +500,7 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
 
     if take_pending_record(app) {
         windows::close_overlays(app);
+        windows::restore_regular_activation(app);
         let display_id = m.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
         return crate::record::start_recording_monitor(app, display_id);
     }
@@ -481,7 +510,12 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
     clear_frozen_screens(app);
     #[cfg(not(target_os = "macos"))]
     std::thread::sleep(std::time::Duration::from_millis(200));
+    // Chụp TRƯỚC khi restore_regular_activation — xem lý do chi tiết ở
+    // `finalize_region` (bug menu bar của SnapDoc lọt vào ảnh chụp). Capture
+    // fullscreen/monitor LUÔN chạm mép trên màn hình nên đây là case dễ thấy
+    // bug nhất.
     let cap = with_product_windows_protected(app, || capture::fullscreen::capture_monitor(&m))?;
+    windows::restore_regular_activation(app);
     let output = get_output(app);
     finish(app, cap, &output, s.scale)
 }
@@ -494,6 +528,7 @@ pub fn cancel_overlay(app: &AppHandle) {
     // Giải phóng frozen screen data — không còn cần sau khi overlay đóng.
     clear_frozen_screens(app);
     windows::close_overlays(app);
+    windows::restore_regular_activation(app);
 
     // macOS: dọn dẹp trạng thái focus/ẩn của phiên Chụp nhanh (no-op nếu
     // phiên này không phải Chụp nhanh — cả 2 field chỉ được set trong
@@ -611,6 +646,10 @@ pub fn start_quick(app: &AppHandle) {
         hide_bar(app);
         #[cfg(target_os = "macos")]
         std::thread::sleep(std::time::Duration::from_millis(50));
+        // Windows: xem giải thích ở `run()` — minimize() async, cần đợi
+        // trước khi chụp frozen kẻo capture-bar bị "đóng băng" vào ảnh nền.
+        #[cfg(target_os = "windows")]
+        std::thread::sleep(std::time::Duration::from_millis(150));
     }
     take_frozen_screens(app);
     let result: Result<(), String> = (|| {

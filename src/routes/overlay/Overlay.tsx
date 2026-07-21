@@ -17,6 +17,14 @@ import QuickToolbar, { quickToolbarLayout } from "../quick-capture/QuickToolbar"
  *
  * Overlay giữ `visibility: hidden` cho đến khi ready=true, sau đó hiện ngay
  * với frozen image đã có → không có frame nào bị "trong suốt" lộ ra màn hình.
+ *
+ * Sau khi ready=true, báo ngược lại cho Rust (`notify_overlay_ready`) rằng
+ * overlay này đã paint xong — Rust (`windows::wait_for_overlays_ready`) chờ
+ * đủ tín hiệu từ mọi overlay rồi mới `show()` TẤT CẢ cùng lúc, để frame đầu
+ * tiên hiện ra trên màn hình đã có sẵn ảnh đúng (cơ chế freeze mượt như
+ * Snagit: không bao giờ show() window rồi mới paint nội dung vào sau).
+ * Double rAF: rAF đầu chờ trình duyệt schedule vẽ DOM mới (ready=true), rAF
+ * thứ hai chạy sau khi frame đó đã thực sự được composite.
  */
 function useFrozenScreen(): { url: string | null; ready: boolean } {
   const [state, setState] = useState<{ url: string | null; ready: boolean }>({
@@ -36,6 +44,21 @@ function useFrozenScreen(): { url: string | null; ready: boolean } {
       });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!state.ready) return;
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        ipc.notifyOverlayReady(MY_IDX, GEN).catch(() => {});
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
+  }, [state.ready]);
+
   return state;
 }
 
@@ -43,6 +66,9 @@ const params = new URLSearchParams(window.location.search);
 const MODE = params.get("mode") ?? "region";
 const MY_IDX = Number(params.get("idx") ?? "0");
 const SCALE = Number(params.get("scale") ?? "1") || 1;
+// Phiên overlay hiện tại (Rust gán, xem `windows::open_overlays_ex`) — echo
+// lại qua `notifyOverlayReady` để Rust lọc bỏ tín hiệu trễ từ phiên cũ.
+const GEN = Number(params.get("gen") ?? "0");
 // "record=1" = đang chọn phạm vi QUAY (không phải chụp ảnh) — chỉ MODE=="region"
 // quan tâm tới cờ này (window/monitor picker chọn tức thì, không cần bước
 // chỉnh vùng). "px/py/pw/ph" (nếu có) = vùng đã quay lần gần nhất, đề xuất lại

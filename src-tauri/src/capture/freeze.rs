@@ -25,12 +25,32 @@ pub fn capture_frozen_screens() -> HashMap<usize, String> {
         }
     };
 
-    let handles: Vec<_> = monitors
-        .into_iter()
+    // Chỉ lấy toạ độ (i32, Send) TRƯỚC khi spawn thread rồi move nguyên `Monitor`
+    // qua closure: trên Windows `Monitor` bọc `HMONITOR` (`*mut c_void`) nên
+    // KHÔNG phải `Send` → move vào `std::thread::spawn` gây lỗi biên dịch
+    // E0277 (chỉ lộ ra khi build cho Windows, macOS thì Monitor là Send nên
+    // không phát hiện được lúc dev trên máy Mac). Mỗi thread tự dựng lại
+    // Monitor bằng `Monitor::from_point` từ toạ độ top-left của chính màn đó.
+    let points: Vec<(usize, i32, i32)> = monitors
+        .iter()
         .enumerate()
-        .map(|(i, m)| {
+        .filter_map(|(i, m)| match (m.x(), m.y()) {
+            (Ok(x), Ok(y)) => Some((i, x, y)),
+            _ => {
+                eprintln!("[SnapDoc][freeze] Màn hình {i}: không đọc được toạ độ");
+                None
+            }
+        })
+        .collect();
+
+    let handles: Vec<_> = points
+        .into_iter()
+        .map(|(i, x, y)| {
             std::thread::spawn(move || -> (usize, Option<String>) {
-                match capture_one_jpeg(&m) {
+                let result = Monitor::from_point(x, y)
+                    .map_err(|e| format!("Không tìm lại được màn hình: {e}"))
+                    .and_then(|m| capture_one_jpeg(&m));
+                match result {
                     Ok(b64) => (i, Some(b64)),
                     Err(e) => {
                         eprintln!("[SnapDoc][freeze] Màn hình {i} lỗi: {e}");
