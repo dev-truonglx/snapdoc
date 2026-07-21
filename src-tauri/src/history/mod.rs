@@ -314,14 +314,21 @@ fn save_quick_auto(app: &AppHandle, data: &str) -> Result<(), String> {
         .unwrap_or("")
         .to_string();
     let dir = if dir.is_empty() {
+        // Fallback 2 lớp: `picture_dir()` có thể lỗi (sandbox/máy lạ) — bản
+        // cũ `unwrap_or_default()` ra chuỗi RỖNG, path thành "/Screenshot_…"
+        // ghi thẳng vào root filesystem. Lùi về app_data_dir thay vì root.
         app.path()
             .picture_dir()
-            .map(|p| p.join("SnapDoc").to_string_lossy().to_string())
-            .unwrap_or_default()
+            .map(|p| p.join("SnapDoc"))
+            .or_else(|_| app.path().app_data_dir().map(|p| p.join("SnapDoc")))
+            .map_err(|e| format!("Không tìm thấy thư mục lưu: {e}"))?
+            .to_string_lossy()
+            .to_string()
     } else {
         dir
     };
-    let path = format!("{dir}/{}.png", crate::flow::stamp_filename("Screenshot"));
-    crate::storage::save::write_png(&path, data)?;
+    let path = std::path::Path::new(&dir)
+        .join(format!("{}.png", crate::flow::stamp_filename("Screenshot")));
+    crate::storage::save::write_png(&path.to_string_lossy(), data)?;
     Ok(())
 }

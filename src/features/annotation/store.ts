@@ -4,6 +4,16 @@ import { HIGHLIGHT_COLORS } from "./model";
 
 const HISTORY_LIMIT = 30;
 
+/** Các key style được phép GỘP undo-entry khi đổi liên tiếp trên CÙNG 1
+ * annotation trong `COALESCE_WINDOW_MS` — kéo trong color picker của OS /
+ * bấm spinner cỡ chữ liên tục bắn ra hàng loạt `updateAnnotation`, mỗi lần
+ * từng push 1 history entry riêng → 1 thao tác chỉnh style cần cả chục lần
+ * Ctrl+Z để hoàn tác. Gộp: giữ nguyên `past`, undo về thẳng trạng thái TRƯỚC
+ * chuỗi chỉnh. CHỈ áp dụng cho key style — di chuyển/resize (x, y, width...)
+ * vẫn mỗi lần 1 entry như cũ. */
+const COALESCE_KEYS = new Set(["color", "strokeWidth", "fontSize", "blurMode", "solidColor", "blurRadius"]);
+const COALESCE_WINDOW_MS = 800;
+
 interface EditorState {
   doc: Doc | null;
   past: Doc[];
@@ -63,6 +73,10 @@ interface EditorState {
   nextStep: () => number;
   nextArrowStep: () => number;
 
+  /** Metadata gộp history (xem `COALESCE_KEYS`) — nội bộ, không render. */
+  _lastCommitKey: string | null;
+  _lastCommitAt: number;
+
   /** Đặt số sẽ gán cho badge "step" kế tiếp (>= 1). */
   setStepCounter: (n: number) => void;
   /** Đặt số sẽ gán cho "numbered-arrow" kế tiếp (>= 1). */
@@ -76,7 +90,10 @@ interface EditorState {
 function commit(state: EditorState, nextDoc: Doc): Partial<EditorState> {
   if (!state.doc) return {};
   const past = [...state.past, state.doc].slice(-HISTORY_LIMIT);
-  return { doc: nextDoc, past, future: [] };
+  // Reset metadata gộp: mutation KHÔNG-phải-style (thêm/xoá/crop...) chen vào
+  // giữa thì chuỗi style sau đó bắt đầu entry mới (updateAnnotation tự ghi đè
+  // 2 field này sau khi spread khi nó muốn tiếp tục chuỗi).
+  return { doc: nextDoc, past, future: [], _lastCommitKey: null, _lastCommitAt: 0 };
 }
 
 export const useEditor = create<EditorState>((set, get) => ({
@@ -95,6 +112,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   stepCounter: 1,
   arrowCounter: 1,
   editingTextId: null,
+  _lastCommitKey: null,
+  _lastCommitAt: 0,
 
   loadDoc: (doc) =>
     set({ doc, past: [], future: [], selectedId: null, stepCounter: 1, arrowCounter: 1, tool: "select", editingTextId: null }),
@@ -213,7 +232,20 @@ export const useEditor = create<EditorState>((set, get) => ({
           a.id === id ? ({ ...a, ...patch } as Annotation) : a,
         ),
       };
-      return commit(s, next);
+      const keys = Object.keys(patch);
+      const coalescible = keys.length > 0 && keys.every((k) => COALESCE_KEYS.has(k));
+      const key = coalescible ? `${id}|${keys.sort().join(",")}` : null;
+      const now = Date.now();
+      if (
+        key !== null &&
+        s._lastCommitKey === key &&
+        now - s._lastCommitAt < COALESCE_WINDOW_MS &&
+        s.past.length > 0
+      ) {
+        // Gộp vào entry trước: giữ nguyên `past` — xem `COALESCE_KEYS`.
+        return { doc: next, future: [], _lastCommitKey: key, _lastCommitAt: now };
+      }
+      return { ...commit(s, next), _lastCommitKey: key, _lastCommitAt: now };
     }),
 
   // Cập nhật KHÔNG đẩy history — dùng cho live preview khi kéo slider.
@@ -268,14 +300,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (!s.past.length || !s.doc) return {};
       const past = [...s.past];
       const prev = past.pop()!;
-      return { doc: prev, past, future: [s.doc, ...s.future], selectedId: null };
+      return { doc: prev, past, future: [s.doc, ...s.future], selectedId: null, _lastCommitKey: null };
     }),
 
   redo: () =>
     set((s) => {
       if (!s.future.length || !s.doc) return {};
       const [next, ...rest] = s.future;
-      return { doc: next, past: [...s.past, s.doc], future: rest, selectedId: null };
+      return { doc: next, past: [...s.past, s.doc], future: rest, selectedId: null, _lastCommitKey: null };
     }),
 
   canUndo: () => get().past.length > 0,

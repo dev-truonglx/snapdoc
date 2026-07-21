@@ -116,6 +116,9 @@ export const ipc = {
   finalizeMonitor: () => invoke<void>("finalize_monitor"),
   listWindows: () => invoke<WindowInfo[]>("list_windows"),
   cancelOverlay: () => invoke<void>("cancel_overlay"),
+  // Chụp nhanh "Mở trong Editor": giữ SnapDoc frontmost (không trả focus về
+  // app cũ). Gọi TRƯỚC openEditor. Xem `flow::keep_capture_focus`.
+  keepCaptureFocus: () => invoke<void>("keep_capture_focus"),
   copyImage: (data: string) => invoke<void>("copy_image", { data }),
   saveImage: (path: string, data: string) => invoke<string>("save_image", { path, data }),
   saveAndCopy: (path: string, data: string) =>
@@ -201,14 +204,16 @@ export const ipc = {
   stopRecording: () => invoke<string>("stop_recording"),
   /** Thời lượng đã quay (ms), `null` nếu không có phiên quay — popup "đang quay" poll mỗi giây. */
   recordingStatus: () => invoke<number | null>("recording_status"),
-  /** Cắt bản quay đang chờ xác nhận (trước khi Lưu) — `ranges` là các đoạn GIỮ LẠI (ms). */
-  trimPendingRecording: (ranges: [number, number][]) =>
-    invoke<PendingRecording>("trim_pending_recording", { ranges: roundRanges(ranges) }),
+  /** Cắt bản quay đang chờ xác nhận (trước khi Lưu) — `ranges` là các đoạn GIỮ
+   * LẠI (ms). `removeAudio`: tách/xoá hẳn track âm thanh khỏi file kết quả
+   * (nút "Tách nhạc nền" ở `VideoTrimmer`). */
+  trimPendingRecording: (ranges: [number, number][], removeAudio: boolean) =>
+    invoke<PendingRecording>("trim_pending_recording", { ranges: roundRanges(ranges), removeAudio }),
   /** Cắt 1 video ĐÃ LƯU trong History — KHÁC `trimPendingRecording` (ghi đè
    * tại chỗ): tạo 1 item MỚI cho bản đã cắt, giữ nguyên item gốc — trả về
    * item MỚI (id khác `id` truyền vào), không phải bản đã update tại chỗ. */
-  trimHistoryVideo: (id: string, ranges: [number, number][]) =>
-    invoke<HistoryItem>("trim_history_video", { id, ranges: roundRanges(ranges) }),
+  trimHistoryVideo: (id: string, ranges: [number, number][], removeAudio: boolean) =>
+    invoke<HistoryItem>("trim_history_video", { id, ranges: roundRanges(ranges), removeAudio }),
   /** Trích frame tại các mốc ms cho trước — trả data URL JPEG base64, `null`
    * cho mốc nào trích lỗi. `scaleW` là bề rộng đích (px): filmstrip zoom của
    * `VideoTrimmer` dùng nhỏ (160, nhiều tile), hover-scrub preview dùng lớn

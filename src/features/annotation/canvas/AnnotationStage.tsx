@@ -132,24 +132,12 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     // Đồng bộ trạng thái "đang gõ chữ" lên store để phím tắt công cụ
     // (v/r/o/t/n/c) không cướp ký tự dù focus chưa về textarea.
     useEditor.getState().setEditingText(editing?.id ?? null);
-    if (!editing) {
-      console.log("[text-input] kết thúc nhập (editing = null)");
-      return;
-    }
-    console.log("[text-input] bắt đầu nhập", { id: editing.id });
+    if (!editing) return;
     const id = window.setTimeout(() => {
       const ta = textareaRef.current;
-      console.log("[text-input] thử focus textarea", {
-        hasTextarea: !!ta,
-        activeBefore: document.activeElement?.tagName,
-      });
       if (ta) {
         ta.focus();
         ta.select();
-        console.log("[text-input] đã focus", {
-          activeAfter: document.activeElement?.tagName,
-          focused: document.activeElement === ta,
-        });
       }
     }, 0);
     return () => window.clearTimeout(id);
@@ -163,7 +151,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const handleOutsideClick = (e: PointerEvent) => {
       const container = textareaRef.current?.parentElement;
       if (container && !container.contains(e.target as Node)) {
-        console.log("[text-input] handleOutsideClick - committing text");
         // Cú click này CHỈ để kết thúc nhập → chặn mousedown ngay sau tạo ô mới.
         // Reset ở tick sau để click kế tiếp vẫn tạo được ô mới bình thường.
         suppressCreateRef.current = true;
@@ -180,12 +167,22 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     };
   }, [!!editing]);
 
-  // Tải ảnh nền
+  // Tải ảnh nền. Cờ `cancelled`: undo/redo/crop/stitch đổi `doc.image` liên
+  // tiếp — decode của ảnh CŨ (to hơn → chậm hơn) có thể resolve SAU ảnh mới
+  // và ghi đè `img` bằng ảnh sai; huỷ trong cleanup để chỉ lần load mới nhất
+  // được set (cùng pattern StitchDialog).
   useEffect(() => {
     if (!doc) return;
+    let cancelled = false;
     const el = new window.Image();
+    el.onload = () => {
+      if (!cancelled) setImg(el);
+    };
     el.src = doc.image;
-    el.onload = () => setImg(el);
+    return () => {
+      cancelled = true;
+      el.onload = null;
+    };
   }, [doc?.image]);
 
   // Tính fitScale để ảnh vừa container, đặt zoom mặc định khi tải ảnh mới —
@@ -699,7 +696,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       // (onBlur → commitText rỗng → annotation bị xoá trước khi gõ được chữ).
       e.evt.preventDefault();
       const id = uid();
-      console.log("[text-input] tạo text annotation", { id, x, y });
       useEditor.getState().addAnnotation({
         id,
         type: "text",
@@ -877,7 +873,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     setTextareaSize({ width: w, height: h });
     flushSync(() => setEditing({ id, value }));
     const ta = textareaRef.current;
-    console.log("[text-input] beginEdit focus đồng bộ", { id, hasTextarea: !!ta });
     if (ta) {
       ta.focus();
       ta.setSelectionRange(value.length, value.length);
@@ -920,7 +915,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const commitText = () => {
     if (!editing) return;
     const value = editing.value.trim();
-    console.log("[text-input] commit", { id: editing.id, value });
     if (!value) {
       useEditor.getState().select(editing.id);
       useEditor.getState().removeSelected();
@@ -932,7 +926,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
 
   const cancelText = () => {
     if (!editing) return;
-    console.log("[text-input] cancel", { id: editing.id });
     // Xóa annotation nếu là lần edit đầu tiên (text rỗng ban đầu)
     const ann = doc?.annotations.find((a) => a.id === editing.id);
     if (ann && ann.type === "text" && !ann.text) {
@@ -1481,11 +1474,9 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 autoFocus
                 value={editing.value}
                 onChange={(e) => {
-                  console.log("[text-input] onChange", { value: e.target.value });
                   setEditing({ ...editing, value: e.target.value });
                 }}
                 onBlur={() => {
-                  console.log("[text-input] onBlur - committing");
                   commitText();
                 }}
                 onKeyDown={(e) => {
@@ -1900,6 +1891,34 @@ function gaussianBlurCanvas(src: HTMLCanvasElement, radius: number): HTMLCanvasE
   return out;
 }
 
+/**
+ * Trần kích thước (cạnh dài, px) cho ảnh đưa vào `gaussianBlurCanvas` — blur
+ * là phép LÀM MẤT chi tiết nên không cần chạy trên độ phân giải gốc: thu nhỏ
+ * trước (radius thu cùng tỉ lệ) rồi phóng lại cho kết quả gần như y hệt mà
+ * nhanh hơn hàng chục lần trên vùng chọn lớn (ảnh Retina/5K) — blur thuần JS
+ * chạy ĐỒNG BỘ trên main thread, vùng lớn từng làm đơ hẳn editor khi kéo
+ * slider/resize vùng che.
+ */
+const BLUR_MAX_EDGE = 480;
+
+function gaussianBlurDownscaled(src: HTMLCanvasElement, radius: number): HTMLCanvasElement {
+  const maxEdge = Math.max(src.width, src.height);
+  if (maxEdge <= BLUR_MAX_EDGE) return gaussianBlurCanvas(src, radius);
+  const k = BLUR_MAX_EDGE / maxEdge;
+  const small = document.createElement("canvas");
+  small.width  = Math.max(1, Math.round(src.width  * k));
+  small.height = Math.max(1, Math.round(src.height * k));
+  small.getContext("2d")!.drawImage(src, 0, 0, small.width, small.height);
+  const blurred = gaussianBlurCanvas(small, Math.max(1, radius * k));
+  const out = document.createElement("canvas");
+  out.width  = src.width;
+  out.height = src.height;
+  const ctx = out.getContext("2d")!;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(blurred, 0, 0, src.width, src.height);
+  return out;
+}
+
 function BlurRect({ ann, img, draggable, onSelect, onDragEnd, onTransformEnd }: BlurRectProps) {
   const [processed, setProcessed] = useState<HTMLCanvasElement | null>(null);
 
@@ -1912,32 +1931,41 @@ function BlurRect({ ann, img, draggable, onSelect, onDragEnd, onTransformEnd }: 
     if (!img || !img.complete || ann.width < 2 || ann.height < 2) return;
 
     const { x, y, width, height, blurRadius, blurMode } = ann;
-    const outW = Math.max(1, Math.round(width));
-    const outH = Math.max(1, Math.round(height));
-    const iw   = img.naturalWidth  || img.width;
-    const ih   = img.naturalHeight || img.height;
 
-    // Cắt patch chính xác từ ảnh gốc
-    const src = document.createElement("canvas");
-    src.width  = outW;
-    src.height = outH;
-    const sc = src.getContext("2d")!;
-    sc.drawImage(img,
-      Math.max(0, x), Math.max(0, y),
-      Math.min(width,  iw - Math.max(0, x)),
-      Math.min(height, ih - Math.max(0, y)),
-      Math.max(0, -x), Math.max(0, -y),
-      Math.min(outW, iw - Math.max(0, x)),
-      Math.min(outH, ih - Math.max(0, y)),
-    );
+    // rAF-coalesce: kéo slider radius / drag-resize vùng che phát ra hàng
+    // loạt thay đổi liên tiếp — chỉ xử lý tối đa 1 lần mỗi frame, lượt chưa
+    // kịp chạy bị huỷ khi có thay đổi mới (hoặc unmount) thay vì tính blur
+    // đồng bộ cho TỪNG tick như trước.
+    const raf = requestAnimationFrame(() => {
+      const outW = Math.max(1, Math.round(width));
+      const outH = Math.max(1, Math.round(height));
+      const iw   = img.naturalWidth  || img.width;
+      const ih   = img.naturalHeight || img.height;
 
-    if (blurMode === "pixelate") {
-      setProcessed(pixelateCanvas(src, Math.max(2, blurRadius)));
-      return;
-    }
+      // Cắt patch chính xác từ ảnh gốc
+      const src = document.createElement("canvas");
+      src.width  = outW;
+      src.height = outH;
+      const sc = src.getContext("2d")!;
+      sc.drawImage(img,
+        Math.max(0, x), Math.max(0, y),
+        Math.min(width,  iw - Math.max(0, x)),
+        Math.min(height, ih - Math.max(0, y)),
+        Math.max(0, -x), Math.max(0, -y),
+        Math.min(outW, iw - Math.max(0, x)),
+        Math.min(outH, ih - Math.max(0, y)),
+      );
 
-    // blur mode — Gaussian blur thuần JS (CSS filter không đáng tin trong WKWebView)
-    setProcessed(gaussianBlurCanvas(src, blurRadius));
+      if (blurMode === "pixelate") {
+        setProcessed(pixelateCanvas(src, Math.max(2, blurRadius)));
+        return;
+      }
+
+      // blur mode — Gaussian blur thuần JS (CSS filter không đáng tin trong
+      // WKWebView), chạy trên bản thu nhỏ (xem `gaussianBlurDownscaled`).
+      setProcessed(gaussianBlurDownscaled(src, blurRadius));
+    });
+    return () => cancelAnimationFrame(raf);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [img, ann.x, ann.y, ann.width, ann.height, ann.blurRadius, ann.blurMode, ann.solidColor]);

@@ -65,6 +65,27 @@ fn list_history_sync(app: &AppHandle, filter: HistoryFilter) -> Result<HistoryPa
         items.push(row.map_err(|e| e.to_string())?);
     }
 
+    // Video KHÔNG copy vào Library nội bộ — `asset_path` trỏ thẳng vào
+    // saveDir tại thời điểm quay. Scope asset-protocol chỉ được mở cho
+    // saveDir HIỆN TẠI (startup + lúc quay); video quay ở saveDir cũ (user
+    // đã đổi thư mục lưu) sẽ bị chặn `convertFileSrc` (404) khi phát trong
+    // History. Mở scope cho thư mục cha của từng video trong trang kết quả.
+    {
+        let mut seen = std::collections::HashSet::new();
+        for item in items.iter().filter(|i| i.media_type == "video") {
+            if let Some(parent) = std::path::Path::new(&item.asset_path).parent() {
+                if seen.insert(parent.to_path_buf()) {
+                    if let Err(e) = app.asset_protocol_scope().allow_directory(parent, true) {
+                        eprintln!(
+                            "[SnapDoc][history] Không mở được asset scope cho {}: {e}",
+                            parent.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     Ok(HistoryPage { items, total })
 }
 
@@ -96,8 +117,16 @@ fn restore_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
 
 fn permanently_delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let rec = get_history_item_sync(app, id)?;
-    let _ = std::fs::remove_file(&rec.asset_path);
-    let _ = std::fs::remove_file(&rec.thumb_path);
+    // Lỗi xoá file (đang bị app khác giữ, quyền...) KHÔNG chặn xoá row DB —
+    // giữ row sẽ làm thùng rác không bao giờ dọn được — nhưng phải log lại:
+    // trước đây nuốt im lặng, file mồ côi nằm lại trên đĩa mà không dấu vết.
+    for path in [&rec.asset_path, &rec.thumb_path] {
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("[SnapDoc][history] Không xoá được file {path} (file sẽ mồ côi trên đĩa): {e}");
+            }
+        }
+    }
     let st = state(app)?;
     let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
     conn.execute("DELETE FROM history WHERE id = ?1", [id])
@@ -113,6 +142,35 @@ fn empty_trash_sync(app: &AppHandle) -> Result<u32, String> {
             .prepare("SELECT id FROM history WHERE deleted_at IS NOT NULL")
             .map_err(|e| e.to_string())?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    let count = ids.len() as u32;
+    for id in ids {
+        let _ = permanently_delete_history_item_sync(app, &id);
+    }
+    Ok(count)
+}
+
+/// Thời gian giữ item trong Trash trước khi tự động xoá vĩnh viễn. Xem
+/// `STABILITY_RISKS.md` mục B.5/E.7: `library/assets`+`library/thumbs` từng
+/// lớn dần vô hạn vì Trash chỉ được dọn khi user tự bấm "Dọn thùng rác".
+const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Tự động xoá vĩnh viễn các item đã ở Trash quá `TRASH_RETENTION_MS` (30
+/// ngày) — user vẫn Restore được bình thường trong 30 ngày đó, chỉ mất
+/// quyền Restore sau khi đã bị dọn. Cùng logic với `empty_trash_sync`, chỉ
+/// khác điều kiện lọc theo `deleted_at`.
+pub fn purge_old_trash(app: &AppHandle) -> Result<u32, String> {
+    let cutoff = now_ms() - TRASH_RETENTION_MS;
+    let ids: Vec<String> = {
+        let st = state(app)?;
+        let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM history WHERE deleted_at IS NOT NULL AND deleted_at < ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([cutoff], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
     };
     let count = ids.len() as u32;
@@ -192,7 +250,12 @@ fn update_history_asset_sync(app: &AppHandle, id: &str, data: &str) -> Result<Hi
 /// cơ mất bản gốc). File mới nằm ở `saveDir` giống video quay bình thường
 /// (`record::new_output_path`, KHÔNG copy vào `library/assets` — theo đúng
 /// quy ước hiện có cho video, xem `history::ingest_video`).
-fn trim_history_video_sync(app: &AppHandle, id: &str, keep_ranges_ms: &[(i64, i64)]) -> Result<HistoryRecord, String> {
+fn trim_history_video_sync(
+    app: &AppHandle,
+    id: &str,
+    keep_ranges_ms: &[(i64, i64)],
+    remove_audio: bool,
+) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type != "video" {
         return Err("Chỉ video mới cắt được".to_string());
@@ -203,7 +266,7 @@ fn trim_history_video_sync(app: &AppHandle, id: &str, keep_ranges_ms: &[(i64, i6
     // Báo tiến độ % cho cửa sổ `history-trim` qua event toàn app — xem
     // doc-comment `encoder::trim` + listener ở `HistoryTrim.tsx`.
     let progress_app = app.clone();
-    crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path, move |frac| {
+    crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path, remove_audio, move |frac| {
         use tauri::Emitter;
         let _ = progress_app.emit("trim-progress", frac);
     })?;
@@ -358,11 +421,14 @@ pub async fn trim_history_video(
     app: AppHandle,
     id: String,
     ranges: Vec<(i64, i64)>,
+    remove_audio: bool,
 ) -> Result<HistoryRecord, String> {
     let app_for_blocking = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || trim_history_video_sync(&app_for_blocking, &id, &ranges))
-        .await
-        .map_err(|e| format!("Task join error: {e}"))??;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        trim_history_video_sync(&app_for_blocking, &id, &ranges, remove_audio)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
     use tauri::Emitter;
     let _ = app.emit("history:item-added", &result);
     Ok(result)

@@ -120,7 +120,10 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
             controls
           />
         ) : (
-          <img src={convertFileSrc(item.assetPath)} alt="" style={previewImg} />
+          // `?v=` bust cache như HistoryItemCard: sửa ảnh từ Editor ghi đè
+          // TẠI CHỖ cùng asset_path — thiếu query này preview hiện bản cũ
+          // trong cache của webview.
+          <img src={`${convertFileSrc(item.assetPath)}?v=${item.updatedAt}`} alt="" style={previewImg} />
         )}
       </div>
 

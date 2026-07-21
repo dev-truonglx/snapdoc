@@ -144,6 +144,14 @@ pub fn cancel_overlay(app: AppHandle) {
     flow::cancel_overlay(&app);
 }
 
+/// Chụp nhanh "Mở trong Editor": báo Rust GIỮ SnapDoc frontmost (không trả
+/// focus về app cũ như copy/save/hủy) — gọi TRƯỚC `open_editor` + `cancel_overlay`.
+/// Xem `flow::keep_capture_focus` / `AppState::restore_front_pid`.
+#[tauri::command]
+pub fn keep_capture_focus(app: AppHandle) {
+    flow::keep_capture_focus(&app);
+}
+
 /// Chụp tất cả màn hình ghép ngang — không cần chọn, không cần overlay.
 #[tauri::command]
 pub async fn capture_all_screens(app: AppHandle, output: String) -> Result<(), String> {
@@ -534,6 +542,9 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
 /// installed and the user confirms via Settings or tray.
 #[tauri::command]
 pub fn restart_app(app: AppHandle) {
+    // Cùng lý do với tray "Quit": nếu đang quay, dừng sạch trước để không
+    // giết ffmpeg giữa chừng (mp4 hỏng) — xem `record::finalize_on_exit`.
+    crate::record::finalize_on_exit(&app);
     app.restart();
 }
 
@@ -579,13 +590,13 @@ pub async fn capture_scroll_slice(
     .await
     .map_err(|e| format!("Task join error: {e}"))??;
 
-    // Lưu vào bộ đệm slices
-    if let Ok(mut slices) = state.scroll_slices.lock() {
-        slices.push(raw_img.clone());
-    }
-
-    // Persist to base64 for frontend preview
+    // Encode preview TRƯỚC (persist chỉ borrow) rồi MOVE ảnh vào bộ đệm —
+    // tránh clone cả 1 RgbaImage full-res (~11MB ở 1920×1440) trên hot path
+    // của mỗi lát cuộn.
     let cap = crate::capture::persist(&raw_img)?;
+    if let Ok(mut slices) = state.scroll_slices.lock() {
+        slices.push(raw_img);
+    }
     Ok(cap.base64)
 }
 
@@ -725,10 +736,13 @@ pub fn recording_status(app: AppHandle) -> Option<u64> {
 pub async fn trim_pending_recording(
     app: AppHandle,
     ranges: Vec<(i64, i64)>,
+    remove_audio: bool,
 ) -> Result<crate::record::PendingRecording, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::record::trim_pending_recording(&app, &ranges))
-        .await
-        .map_err(|e| format!("Task join error: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::record::trim_pending_recording(&app, &ranges, remove_audio)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[derive(serde::Deserialize)]
@@ -891,21 +905,29 @@ pub async fn finalize_scroll_stitch(
                 (fixed_left, width.saturating_sub(fixed_right))
             };
 
-            for y in 0..inst.src_h {
-                let src_pixel_y = inst.src_y + y;
-                if src_pixel_y >= slice_h {
-                    continue;
-                }
-                let dest_pixel_y = current_y + y;
-                if dest_pixel_y >= total_height {
-                    continue;
-                }
-                for x in x_lo..x_hi {
-                    if x >= slice_w {
+            // Copy theo HÀNG bằng `copy_from_slice` trên buffer thô thay vì
+            // `get_pixel`/`put_pixel` từng điểm — ảnh ghép có thể cao hàng
+            // chục nghìn px (hàng trăm triệu pixel), per-pixel với bounds
+            // check mỗi call chậm hơn memcpy theo hàng rất nhiều. Offset tính
+            // bằng usize: ảnh ghép rất dài có thể vượt u32 khi nhân ra byte.
+            let x_hi_clamped = x_hi.min(slice_w).min(width);
+            if x_lo < x_hi_clamped {
+                let row_len = ((x_hi_clamped - x_lo) * 4) as usize;
+                let src_raw: &[u8] = slice.as_raw();
+                let dst_raw: &mut [u8] = &mut final_img;
+                for y in 0..inst.src_h {
+                    let src_pixel_y = inst.src_y + y;
+                    if src_pixel_y >= slice_h {
                         continue;
                     }
-                    let pixel = slice.get_pixel(x, src_pixel_y);
-                    final_img.put_pixel(x, dest_pixel_y, *pixel);
+                    let dest_pixel_y = current_y + y;
+                    if dest_pixel_y >= total_height {
+                        continue;
+                    }
+                    let src_off = (src_pixel_y as usize * slice_w as usize + x_lo as usize) * 4;
+                    let dst_off = (dest_pixel_y as usize * width as usize + x_lo as usize) * 4;
+                    dst_raw[dst_off..dst_off + row_len]
+                        .copy_from_slice(&src_raw[src_off..src_off + row_len]);
                 }
             }
 
@@ -916,15 +938,26 @@ pub async fn finalize_scroll_stitch(
         // ĐỔ bằng cách kéo dài hàng đáy của sidebar xuống hết chiều cao — nền sidebar
         // (thường màu đặc) trải liền mạch, nội dung sidebar chỉ hiện 1 lần ở trên.
         if (fixed_left > 0 || fixed_right > 0) && first_h > 0 && first_h <= total_height {
-            let anchor_y = first_h - 1;
-            for y in first_h..total_height {
-                for x in 0..fixed_left {
-                    let px = *final_img.get_pixel(x, anchor_y);
-                    final_img.put_pixel(x, y, px);
+            // Copy sẵn 2 dải anchor ra buffer riêng rồi đổ theo HÀNG — cùng
+            // lý do row-wise ở vòng ghép phía trên.
+            let anchor_y = (first_h - 1) as usize;
+            let row_px = width as usize;
+            let left_len = fixed_left as usize * 4;
+            let right_x = width.saturating_sub(fixed_right) as usize;
+            let right_len = fixed_right as usize * 4;
+            let dst_raw: &mut [u8] = &mut final_img;
+            let left_off = anchor_y * row_px * 4;
+            let left_src = dst_raw[left_off..left_off + left_len].to_vec();
+            let right_off = (anchor_y * row_px + right_x) * 4;
+            let right_src = dst_raw[right_off..right_off + right_len].to_vec();
+            for y in (first_h as usize)..(total_height as usize) {
+                if left_len > 0 {
+                    let off = y * row_px * 4;
+                    dst_raw[off..off + left_len].copy_from_slice(&left_src);
                 }
-                for x in (width - fixed_right)..width {
-                    let px = *final_img.get_pixel(x, anchor_y);
-                    final_img.put_pixel(x, y, px);
+                if right_len > 0 {
+                    let off = (y * row_px + right_x) * 4;
+                    dst_raw[off..off + right_len].copy_from_slice(&right_src);
                 }
             }
         }

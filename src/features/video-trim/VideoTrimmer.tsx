@@ -29,8 +29,9 @@ export interface VideoTrimmerProps {
   busy?: boolean;
   /** Gọi khi bấm nút "Áp dụng cắt" TRONG toolbar — chỉ cần khi
    * `showApplyButton` (mặc định `true`), bỏ qua khi màn hình cha tự gộp nút
-   * Áp dụng vào hành động của riêng nó (xem `showApplyButton`). */
-  onApply?: (keepRangesMs: [number, number][]) => void;
+   * Áp dụng vào hành động của riêng nó (xem `showApplyButton`). `removeAudio`:
+   * user đã bấm "Tách nhạc nền" (xoá hẳn track âm thanh khỏi file kết quả). */
+  onApply?: (keepRangesMs: [number, number][], removeAudio: boolean) => void;
   /** `false`: ẩn nút "Áp dụng cắt" khỏi toolbar — dùng khi màn hình cha (ví dụ
    * `RecordReview`) muốn GỘP hành động áp dụng cắt vào nút Lưu của riêng nó
    * (1 nút "Áp dụng cắt và lưu" duy nhất cho cả màn hình, thay vì 2 nút tách
@@ -40,7 +41,7 @@ export interface VideoTrimmerProps {
   showApplyButton?: boolean;
   /** Báo cho cha biết trạng thái chỉnh sửa hiện tại — chỉ hữu ích khi
    * `showApplyButton={false}` (xem trên); bỏ qua nếu cha không cần gộp nút. */
-  onStateChange?: (state: { hasChanges: boolean; keepRanges: [number, number][] }) => void;
+  onStateChange?: (state: { hasChanges: boolean; keepRanges: [number, number][]; removeAudio: boolean }) => void;
 }
 
 /** Chỉ giữ cạnh dài nhất chưa gộp, dùng lặp lại cho track/playhead math. */
@@ -125,6 +126,25 @@ const HOVER_FETCH_DEBOUNCE_MS = 60;
  * đúng mốc đó ở 160px sẽ "chặn" hover không bao giờ fetch lại bản nét hơn. */
 const HOVER_PREVIEW_SCALE_W = 480;
 
+/** Trần số frame giữ trong cache filmstrip/hover — 2 Map này trước đây CHỈ
+ * `set`, không bao giờ evict: tua/zoom qua lại 1 video dài trong phiên trim
+ * kéo dài tích luỹ data-URL không giới hạn (hover 480px có thể ~50-100KB/
+ * frame). Khi vượt trần, xoá mốc CŨ NHẤT theo thứ tự insert của Map — mốc bị
+ * xoá nếu cần lại sẽ tự được fetch lại qua cơ chế "missing" sẵn có. */
+const FRAMES_CACHE_MAX = 1000;
+const HOVER_CACHE_MAX = 100;
+
+function capFrameCache(m: Map<number, string>, max: number): Map<number, string> {
+  if (m.size <= max) return m;
+  const keys = m.keys();
+  while (m.size > max) {
+    const k = keys.next();
+    if (k.done) break;
+    m.delete(k.value);
+  }
+  return m;
+}
+
 /** Timeline cắt video dùng chung cho RecordReview (trước khi Lưu) và
  * HistoryPreviewPanel (video đã lưu) — mô hình "nhiều đoạn giữ lại" kiểu
  * CapCut: chia nhỏ / xoá đoạn đã chọn / cắt đầu-cuối theo playhead, có
@@ -169,23 +189,45 @@ export default function VideoTrimmer({
   // thay vì áp tuần tự — lỗi này đã tự bắt được khi test 2 cú redo liên tiếp.
   // Gộp vào 1 object + luôn dùng dạng updater `setEditState(st => ...)` thì
   // React đảm bảo áp lần lượt, mỗi lần tính trên đúng kết quả của lần trước.
+  /** 1 mốc lịch sử undo/redo — gộp CẢ `segments` LẪN `removeAudio` (không chỉ
+   * riêng `segments` như trước khi thêm nút "Tách nhạc nền") để Ctrl+Z hoàn
+   * tác đúng bất kể lần sửa gần nhất là cắt đoạn hay bật/tắt xoá âm thanh. */
+  interface HistorySnapshot {
+    segments: Segment[];
+    removeAudio: boolean;
+  }
   interface EditState {
     segments: Segment[];
-    past: Segment[][];
-    future: Segment[][];
+    removeAudio: boolean;
+    past: HistorySnapshot[];
+    future: HistorySnapshot[];
     selectedSegmentId: string | null;
   }
   const makeInitialEditState = (): EditState => ({
     segments: initialSegments(durationMs),
+    removeAudio: false,
     past: [],
     future: [],
     selectedSegmentId: null,
   });
   const [editState, setEditState] = useState<EditState>(makeInitialEditState);
-  const { segments, past, future, selectedSegmentId } = editState;
+  const { segments, removeAudio, past, future, selectedSegmentId } = editState;
   const [playheadMs, setPlayheadMs] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [isMuted, setIsMuted] = useState(false);
+  /** Thanh trượt âm lượng chỉ hiện khi hover vào cụm icon loa (kiểu
+   * YouTube/CapCut) — ẩn mặc định để hàng playbackRow gọn. `volumeDragging`
+   * giữ thanh mở khi đang kéo dù chuột đã rời khỏi cụm icon/thanh (ví dụ kéo
+   * ra ngoài rồi thả), tránh thanh biến mất giữa chừng lúc đang thao tác. */
+  const [volumeHover, setVolumeHover] = useState(false);
+  const [volumeDragging, setVolumeDragging] = useState(false);
+  const volumeTrackRef = useRef<HTMLDivElement>(null);
+  /** Cờ "đang giữ chuột" đọc qua ref (không phải state) trong
+   * `onVolumeTrackMove` — tránh stale closure/re-render mỗi lần kéo, cùng
+   * pattern `draggingRef` của timeline scrubber bên dưới. */
+  const volumeDraggingActiveRef = useRef(false);
 
   // ── Filmstrip zoom ──────────────────────────────────────────────────────
   const [zoom, setZoom] = useState(1);
@@ -335,14 +377,17 @@ export default function VideoTrimmer({
     };
   }, [segments]);
 
-  // Phím tắt Undo/Redo/Xoá/Chia/Cắt đầu-cuối — không dep array (chạy lại mỗi
-  // render) để closure luôn thấy `segments`/`past`/`future`/`selectedSegmentId`
-  // mới nhất, tránh lớp bug "stale closure" hay gặp với listener gắn 1 lần
-  // trên window. Q/W không có modifier (giống quy ước hotkey dựng phim) nên
-  // chỉ nhận khi KHÔNG bấm cùng Ctrl/Cmd/Shift/Alt — tránh đè lên tổ hợp hệ
-  // thống (ví dụ Cmd+Q thoát app).
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
+  // Phím tắt Undo/Redo/Xoá/Chia/Cắt đầu-cuối — handler ghi vào ref MỖI render
+  // (luôn thấy `segments`/`past`/`future`/`selectedSegmentId` mới nhất, không
+  // stale closure) nhưng listener trên window chỉ đăng ký ĐÚNG 1 LẦN qua
+  // effect `[]` bên dưới — bản cũ dùng effect không dep array nên add/remove
+  // listener lại mỗi render, mà component re-render theo từng `timeupdate`
+  // lúc phát + từng mousemove lúc hover-scrub (hàng chục lần/giây). Cùng
+  // pattern `zoomRef` phía trên. Q/W không có modifier (giống quy ước hotkey
+  // dựng phim) nên chỉ nhận khi KHÔNG bấm cùng Ctrl/Cmd/Shift/Alt — tránh đè
+  // lên tổ hợp hệ thống (ví dụ Cmd+Q thoát app).
+  const onKeyDownRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  onKeyDownRef.current = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
       const mod = e.ctrlKey || e.metaKey;
@@ -370,16 +415,28 @@ export default function VideoTrimmer({
         e.preventDefault();
         togglePlay();
       }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  });
+  };
+  useEffect(() => {
+    const listener = (e: KeyboardEvent) => onKeyDownRef.current(e);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
 
   useEffect(() => {
     const onFullscreenChange = () => setIsFullscreen(document.fullscreenElement === wrapRef.current);
     document.addEventListener("fullscreenchange", onFullscreenChange);
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
   }, []);
+
+  // Đồng bộ volume/muted với `<video>` — chạy cả lúc mount VÀ mỗi khi đổi
+  // `src` (video element bị remount do `key={src}`, xem JSX) để không bị mất
+  // âm lượng người dùng đã chọn khi chuyển sang xem 1 video khác.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.volume = volume;
+    v.muted = isMuted;
+  }, [volume, isMuted, src]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -491,7 +548,7 @@ export default function VideoTrimmer({
               changed = true;
             }
           });
-          return changed ? next : prev;
+          return changed ? capFrameCache(next, FRAMES_CACHE_MAX) : prev;
         });
       })
       .catch(() => {})
@@ -552,7 +609,7 @@ export default function VideoTrimmer({
           setHoverFrames((prev) => {
             const next = new Map(prev);
             next.set(target, url);
-            return next;
+            return capFrameCache(next, HOVER_CACHE_MAX);
           });
         })
         .catch(() => {})
@@ -625,6 +682,61 @@ export default function VideoTrimmer({
     if (v.paused) v.play();
     else v.pause();
   };
+
+  const toggleMute = () => setIsMuted((m) => !m);
+
+  /** Đặt `volume` theo vị trí X con trỏ trên track ngang (`volumeTrackRef`) —
+   * TRÁI = 0, PHẢI = 1. Tự bỏ mute khi kéo lên khỏi 0 (giống hành vi player
+   * thường gặp), tránh kẹt tưởng thanh không phản hồi. */
+  const applyVolumeFromClientX = (clientX: number) => {
+    const rect = volumeTrackRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0) return;
+    const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
+    setVolume(ratio);
+    if (ratio > 0 && isMuted) setIsMuted(false);
+  };
+
+  /** Track âm lượng tự vẽ (div + tính vị trí bằng tay) THAY VÌ
+   * `<input type="range">` — đã thử input xoay dọc bằng cả
+   * `-webkit-appearance: slider-vertical` lẫn CSS transform, cả 2 đều kéo
+   * KHÔNG ĂN khi popover đè lên vùng `<video>` phía dưới (test trực tiếp:
+   * cùng thao tác hoạt động bình thường khi đặt độc lập ở chỗ khác trên
+   * trang) — nghi WebView giành lấy sự kiện con trỏ theo lớp video tăng tốc
+   * phần cứng bất kể phần tử nào che nó. Dùng chính cơ chế
+   * `setPointerCapture` + tính toạ độ bằng tay đã hoạt động ổn định cho
+   * playhead ở timeline (`onTrackDown`/`onTrackMove` bên dưới) để chắc chắn
+   * kéo được xuyên suốt, không phụ thuộc hành vi kéo mặc định của input gốc
+   * hay việc popover đè lên vùng nào. */
+  const onVolumeTrackDown = (e: React.PointerEvent) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    volumeDraggingActiveRef.current = true;
+    setVolumeDragging(true);
+    applyVolumeFromClientX(e.clientX);
+  };
+  const onVolumeTrackMove = (e: React.PointerEvent) => {
+    if (!volumeDraggingActiveRef.current) return;
+    applyVolumeFromClientX(e.clientX);
+  };
+  const onVolumeTrackUp = (e: React.PointerEvent) => {
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    volumeDraggingActiveRef.current = false;
+    setVolumeDragging(false);
+  };
+
+  // Lưới an toàn: nếu vì lý do gì đó `pointerup` không tới được chính track
+  // (ví dụ thả chuột đúng lúc track vừa unmount) thì vẫn tự tắt cờ kéo qua
+  // listener trên `window` — tránh kẹt `volumeDraggingActiveRef` ở `true`
+  // mãi, khiến những lần rê chuột sau (dù không hề bấm) vẫn bị hiểu nhầm là
+  // đang kéo.
+  useEffect(() => {
+    if (!volumeDragging) return;
+    const onUp = () => {
+      volumeDraggingActiveRef.current = false;
+      setVolumeDragging(false);
+    };
+    window.addEventListener("pointerup", onUp);
+    return () => window.removeEventListener("pointerup", onUp);
+  }, [volumeDragging]);
 
   const seekTo = (timelineMs: number) => {
     const v = videoRef.current;
@@ -717,7 +829,8 @@ export default function VideoTrimmer({
       if (next === st.segments) return st;
       return {
         segments: next,
-        past: [...st.past, st.segments],
+        removeAudio: st.removeAudio,
+        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio }],
         future: [],
         selectedSegmentId: selectAfter ? selectAfter(next) : null,
       };
@@ -744,21 +857,41 @@ export default function VideoTrimmer({
       if (!st.selectedSegmentId || st.segments.length <= 1) return st;
       const next = deleteSegment(st.segments, st.selectedSegmentId);
       if (next === st.segments) return st;
-      return { segments: next, past: [...st.past, st.segments], future: [], selectedSegmentId: null };
+      return {
+        segments: next,
+        removeAudio: st.removeAudio,
+        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio }],
+        future: [],
+        selectedSegmentId: null,
+      };
     });
   };
 
   const doTrimHead = () => applyEdit((s) => trimHead(s, playheadMs));
   const doTrimTail = () => applyEdit((s) => trimTail(s, playheadMs));
 
+  /** Bật/tắt "Tách nhạc nền" (xoá hẳn track âm thanh khỏi file khi Áp dụng
+   * cắt) — đẩy vào CHUNG lịch sử undo/redo với các thao tác cắt đoạn, nên
+   * Ctrl+Z hoàn tác đúng bất kể đây là thao tác gần nhất hay không. */
+  const doToggleRemoveAudio = () => {
+    setEditState((st) => ({
+      segments: st.segments,
+      removeAudio: !st.removeAudio,
+      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio }],
+      future: [],
+      selectedSegmentId: st.selectedSegmentId,
+    }));
+  };
+
   const undo = () => {
     setEditState((st) => {
       if (st.past.length === 0) return st;
       const prev = st.past[st.past.length - 1];
       return {
-        segments: prev,
+        segments: prev.segments,
+        removeAudio: prev.removeAudio,
         past: st.past.slice(0, -1),
-        future: [st.segments, ...st.future],
+        future: [{ segments: st.segments, removeAudio: st.removeAudio }, ...st.future],
         selectedSegmentId: null,
       };
     });
@@ -769,8 +902,9 @@ export default function VideoTrimmer({
       if (st.future.length === 0) return st;
       const next = st.future[0];
       return {
-        segments: next,
-        past: [...st.past, st.segments],
+        segments: next.segments,
+        removeAudio: next.removeAudio,
+        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio }],
         future: st.future.slice(1),
         selectedSegmentId: null,
       };
@@ -791,9 +925,9 @@ export default function VideoTrimmer({
   // vào hành động riêng mới lắng (xem `showApplyButton`); vô hại nếu không ai
   // lắng (`onStateChange` optional).
   useEffect(() => {
-    onStateChange?.({ hasChanges, keepRanges });
+    onStateChange?.({ hasChanges, keepRanges, removeAudio });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasChanges, keepRanges]);
+  }, [hasChanges, keepRanges, removeAudio]);
 
   const pct = (ms: number) => (total <= 0 ? 0 : (clamp(ms, 0, total) / total) * 100);
 
@@ -815,6 +949,47 @@ export default function VideoTrimmer({
         <button style={playBtn} onClick={togglePlay} title={isPlaying ? "Tạm dừng" : "Phát"}>
           {isPlaying ? "❚❚" : "▶"}
         </button>
+        <div
+          style={volumeGroup}
+          onMouseEnter={() => setVolumeHover(true)}
+          onMouseLeave={() => setVolumeHover(false)}
+        >
+          <button style={iconToolBtn} onClick={toggleMute} title={isMuted || volume === 0 ? "Bật âm" : "Tắt âm"}>
+            {isMuted || volume === 0 ? <SpeakerMutedIcon /> : <SpeakerIcon />}
+          </button>
+          {/* Popover nổi DƯỚI icon (không nằm trong luồng layout của
+              `playbackRow`) — khác bản cũ co giãn `width` ngay trong hàng,
+              từng đẩy xê dịch `timeText`/`toolsGroup` bên phải mỗi lần
+              hiện/ẩn. Chỉ mount khi cần (hover/đang kéo) nên thanh trượt LUÔN
+              ở kích thước cuối cùng ngay khi xuất hiện.
+              `volumePopoverAnchor` áp SÁT icon (`top:100%`, KHÔNG có gap) —
+              khoảng cách nhìn thấy với card bên trong là `paddingTop` CỦA
+              CHÍNH anchor (không phải margin của card), nên toàn bộ khoảng
+              trống đó vẫn thuộc DOM của `volumeGroup` → di chuột từ icon
+              xuống card không hề rời khỏi phần tử đang lắng
+              `onMouseEnter`/`onMouseLeave`, không bị mất thanh giữa chừng
+              (nếu để card tự chừa margin-top thay vì anchor chừa padding-top,
+              khoảng trống đó nằm NGOÀI anchor nên di chuột qua sẽ trợt hover). */}
+          {(volumeHover || volumeDragging) && (
+            <div style={volumePopoverAnchor}>
+              <div style={volumePopoverCard}>
+                <div
+                  ref={volumeTrackRef}
+                  style={volumeTrackHit}
+                  onPointerDown={onVolumeTrackDown}
+                  onPointerMove={onVolumeTrackMove}
+                  onPointerUp={onVolumeTrackUp}
+                  title="Âm lượng"
+                >
+                  <div style={volumeTrackBar}>
+                    <div style={{ ...volumeTrackFill, width: `${(isMuted ? 0 : volume) * 100}%` }} />
+                    <div style={{ ...volumeThumb, left: `${(isMuted ? 0 : volume) * 100}%` }} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
         <span style={timeText}>{fmtDuration(playheadMs)} / {fmtDuration(total)}</span>
         <div style={toolsGroup}>
           <button style={toolBtn} onClick={zoomOut} disabled={zoom <= MIN_ZOOM} title="Thu nhỏ timeline">−</button>
@@ -842,6 +1017,17 @@ export default function VideoTrimmer({
         <button style={iconToolBtn} disabled={!canTrimTail(segments, playheadMs)} onClick={doTrimTail} title="Cắt từ vị trí đang dừng tới cuối (W)">
           <span style={bracketGlyph}>]</span>
         </button>
+        <div style={toolDivider} />
+        {/* Tách nhạc nền: xoá HẲN track âm thanh khỏi file khi Áp dụng cắt —
+            chỉ 1 click để bật/tắt, gộp chung lịch sử undo với các thao tác
+            cắt đoạn (xem `doToggleRemoveAudio`) nên Ctrl+Z hoàn tác đúng. */}
+        <button
+          style={{ ...iconToolBtn, ...(removeAudio ? iconToolBtnActive : null) }}
+          onClick={doToggleRemoveAudio}
+          title={removeAudio ? "Đã tách nhạc nền — bấm để giữ lại âm thanh" : "Tách nhạc nền (xoá âm thanh khỏi video)"}
+        >
+          <NoAudioIcon />
+        </button>
         {/* Đặt lại: đặt NGAY CẠNH nhóm icon cắt (chia/xoá/cắt đầu-cuối) —
             đây là hành động "bỏ hết" cho đúng nhóm công cụ này, đứng liền kề
             dễ liên tưởng hơn là gộp chung với Áp dụng cắt ở xa bên phải như
@@ -855,7 +1041,7 @@ export default function VideoTrimmer({
             `onStateChange`. */}
         {showApplyButton && (
           <div style={trimCommitGroup}>
-            <button style={applyBtn} disabled={!canApply} onClick={() => onApply?.(keepRanges)}>
+            <button style={applyBtn} disabled={!canApply} onClick={() => onApply?.(keepRanges, removeAudio)}>
               {busy ? "Đang cắt…" : "Áp dụng cắt"}
             </button>
           </div>
@@ -984,6 +1170,40 @@ function ScissorsIcon() {
   );
 }
 
+function SpeakerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 9v6h4l5 5V4L8 9H4z" />
+      <path d="M16.5 8.5a5 5 0 0 1 0 7" />
+      <path d="M19 6a8 8 0 0 1 0 12" />
+    </svg>
+  );
+}
+
+function SpeakerMutedIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 9v6h4l5 5V4L8 9H4z" />
+      <line x1="16" y1="9" x2="21" y2="14" />
+      <line x1="21" y1="9" x2="16" y2="14" />
+    </svg>
+  );
+}
+
+/** Nốt nhạc gạch chéo — dùng riêng cho nút "Tách nhạc nền" (xoá track âm
+ * thanh khỏi FILE khi Áp dụng cắt), phân biệt với `SpeakerIcon`/
+ * `SpeakerMutedIcon` (chỉ tắt tiếng lúc XEM TRƯỚC, không đụng vào file). */
+function NoAudioIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 16.5V5.5l9-2v11" />
+      <circle cx="7.5" cy="16.5" r="2.5" />
+      <circle cx="16.5" cy="14.5" r="2.5" />
+      <line x1="3.5" y1="3.5" x2="20.5" y2="20.5" />
+    </svg>
+  );
+}
+
 function TrashIcon() {
   return (
     <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
@@ -1051,6 +1271,92 @@ const toolsGroup: React.CSSProperties = {
   marginLeft: "auto",
 };
 
+/** `position:relative` làm mốc neo cho `volumePopoverAnchor` (absolute) —
+ * không có `gap`/gì khác ảnh hưởng layout hàng `playbackRow` vì popover không
+ * nằm trong luồng (xem comment ở JSX). */
+const volumeGroup: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  position: "relative",
+};
+
+/** Neo NGAY SÁT icon loa (`top:100%`, KHÔNG gap) — `position:absolute` nên
+ * không đẩy xê dịch `timeText`/`toolsGroup` đứng sau trong `playbackRow` dù
+ * hiện/ẩn liên tục lúc hover. Thả XUỐNG DƯỚI icon (đè lên vùng
+ * timeline/filmstrip) thay vì TRÊN icon (đè lên `<video>`) — lúc test kéo thử
+ * ở vị trí đè lên video, thao tác kéo bằng chuột bị "nuốt" mất giữa chừng
+ * (dừng đột ngột dù vẫn giữ chuột), tái hiện nhiều lần đúng tại vùng chồng
+ * lên `<video>`, không xảy ra khi đặt thử ở chỗ khác trên trang — nghi lớp
+ * video tăng tốc phần cứng ở 1 số WebView giành lấy sự kiện con trỏ dù phần
+ * tử che nó (`z-index` cao hơn) mới là đích thật. Đặt xuống dưới, đè lên
+ * track/filmstrip (chỉ gồm div thường) để né hẳn khả năng này thay vì chỉ
+ * dựa vào z-index.
+ * `paddingTop` (KHÔNG phải gap/margin) chừa khoảng cách nhìn thấy với card ở
+ * dưới — xem giải thích ở JSX (khoảng đệm này vẫn thuộc DOM của phần tử đang
+ * lắng hover, di chuột từ icon xuống card không bị mất thanh giữa chừng). */
+const volumePopoverAnchor: React.CSSProperties = {
+  position: "absolute",
+  top: "100%",
+  left: "50%",
+  transform: "translateX(-50%)",
+  paddingTop: 8,
+  zIndex: 20,
+};
+
+const volumePopoverCard: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "center",
+  padding: "9px 10px",
+  borderRadius: 8,
+  background: "var(--bg-elevated)",
+  border: "1px solid var(--border)",
+  boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
+};
+
+/** Vùng BẮT chuột của track âm lượng — CAO HƠN NHIỀU dải hiện (`volumeTrackBar`
+ * chỉ 4px) để dễ trúng/kéo, đặc biệt ở 2 đầu mút (đúng chỗ user báo không kéo
+ * hết được). `touchAction:"none"` cùng lý do với timeline track (`track` bên
+ * dưới) — chặn cuộn/pinch mặc định của trình duyệt đè lên thao tác kéo. */
+const volumeTrackHit: React.CSSProperties = {
+  width: 84,
+  height: 28,
+  display: "flex",
+  alignItems: "center",
+  cursor: "pointer",
+  touchAction: "none",
+};
+
+const volumeTrackBar: React.CSSProperties = {
+  position: "relative",
+  width: "100%",
+  height: 4,
+  borderRadius: 2,
+  background: "var(--border)",
+};
+
+/** Phần đã "đổ đầy" tính từ TRÁI sang — kéo sang phải = tăng âm, đúng thứ tự
+ * trái→phải quen thuộc của thanh trượt ngang (xem `applyVolumeFromClientX`). */
+const volumeTrackFill: React.CSSProperties = {
+  position: "absolute",
+  left: 0,
+  top: 0,
+  height: "100%",
+  borderRadius: 2,
+  background: "var(--accent)",
+};
+
+const volumeThumb: React.CSSProperties = {
+  position: "absolute",
+  top: "50%",
+  width: 12,
+  height: 12,
+  borderRadius: "50%",
+  background: "var(--accent)",
+  transform: "translate(-50%, -50%)",
+  boxShadow: "0 0 0 2px var(--bg-elevated)",
+  pointerEvents: "none",
+};
+
 const editToolbar: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -1095,6 +1401,15 @@ const iconToolBtn: React.CSSProperties = {
   ...toolBtn,
   width: 30,
   padding: 0,
+};
+
+/** Merge thêm vào `iconToolBtn` khi nút đang ở trạng thái BẬT (toggle) — hiện
+ * chỉ dùng cho "Tách nhạc nền" (`removeAudio`), khác các icon còn lại vốn là
+ * hành động một lần chứ không phải toggle bật/tắt. */
+const iconToolBtnActive: React.CSSProperties = {
+  background: "var(--accent)",
+  borderColor: "var(--accent)",
+  color: "var(--accent-text)",
 };
 
 const bracketGlyph: React.CSSProperties = {

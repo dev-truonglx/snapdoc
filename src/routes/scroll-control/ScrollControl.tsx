@@ -588,11 +588,16 @@ export default function ScrollControl() {
   };
 
   // Tự động bắt đầu chụp ngay khi cửa sổ mở (vẽ xong khung). startedRef chống
-  // gọi 2 lần do StrictMode double-invoke effect ở chế độ dev.
+  // gọi 2 lần do StrictMode double-invoke effect ở chế độ dev. Cleanup gọi
+  // stopLoop: unmount giữa chừng (cửa sổ bị đóng ngoài các đường
+  // finish/cancel) không được để interval sống tiếp — timer rò + setState
+  // sau unmount.
   useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    void startCapture();
+    if (!startedRef.current) {
+      startedRef.current = true;
+      void startCapture();
+    }
+    return () => stopLoop();
   }, []);
 
   const finishCapture = async () => {

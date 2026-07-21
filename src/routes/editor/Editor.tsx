@@ -158,12 +158,6 @@ export default function Editor() {
       // Guard 2 (theo state): đang có text annotation mở để gõ, kể cả khi
       // focus chưa kịp về textarea (hay gặp trong webview Tauri).
       if (tag === "INPUT" || tag === "TEXTAREA" || el?.isContentEditable || s.editingTextId) {
-        console.log("[text-input] keydown bỏ qua (đang nhập)", {
-          key: e.key,
-          tag,
-          editingTextId: s.editingTextId,
-          active: document.activeElement?.tagName,
-        });
         return;
       }
 

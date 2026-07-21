@@ -151,5 +151,7 @@ pub async fn install_pending(app: AppHandle) -> Result<(), String> {
             eprintln!("[SnapDoc][update] install failed: {e}");
             e.to_string()
         })?;
+    // Nếu đang quay, dừng sạch trước khi relaunch — xem `record::finalize_on_exit`.
+    crate::record::finalize_on_exit(&app);
     app.restart();
 }

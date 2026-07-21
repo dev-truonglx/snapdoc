@@ -160,8 +160,11 @@ define_class!(
                         // Chỉ ghi đè frame mới nhất — KHÔNG đẩy thẳng vào
                         // channel nữa (xem doc-comment `latest`/`spawn_ticker`).
                         // Lock rất ngắn (chỉ gán con trỏ) nên không lo chặn
-                        // callback queue của SCK.
-                        *self.ivars().latest.lock().unwrap() = Some(frame);
+                        // callback queue của SCK. `unwrap_or_else(into_inner)`:
+                        // không panic dây chuyền trong callback Objective-C
+                        // nếu mutex bị poison — dữ liệu chỉ là "frame mới
+                        // nhất", ghi đè an toàn.
+                        *self.ivars().latest.lock().unwrap_or_else(|p| p.into_inner()) = Some(frame);
                     }
                 }
                 SCStreamOutputType::Audio => {
@@ -247,7 +250,7 @@ fn spawn_ticker(
             }
             frame_index += 1;
 
-            let frame = latest.lock().unwrap().clone();
+            let frame = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(frame) = frame {
                 // try_send: nếu channel đầy (encoder chậm hơn tốc độ quay),
                 // DROP frame này thay vì chặn ticker.
@@ -495,11 +498,19 @@ fn find_window(window_id: u32) -> Result<Retained<SCWindow>, String> {
 }
 
 /// Stream đang chạy — giữ sống `SCStream` + delegate (ARC) cho tới khi
-/// `stop()`. Drop mà chưa gọi `stop()` sẽ để stream chạy "mồ côi" (không ai
-/// đọc frame nữa) nên luôn phải gọi `stop()` tường minh.
+/// `stop()`. `Drop` là lưới an toàn cho nhánh LỖI: `start_with_target`
+/// (record/mod.rs) còn nhiều bước fallible SAU khi stream đã chạy
+/// (`create_dir_all`, `new_output_path`, `Encoder::start`) — nếu 1 bước lỗi,
+/// handle bị drop mà không ai gọi `stop()`, để lại phiên capture của OS chạy
+/// mồ côi (đèn "đang ghi màn hình" của macOS sáng mãi) + ticker thread loop
+/// vô hạn. Đường dừng CHỦ ĐỘNG vẫn là `stop()` (có chờ xác nhận + timeout);
+/// `Drop` chỉ dừng fire-and-forget, không chặn.
 pub struct RecordingHandle {
     stream: Retained<SCStream>,
     _handler: Retained<StreamOutputHandler>,
+    /// `stop()` đã được gọi tường minh — `Drop` không cần (và không được)
+    /// dừng lại lần nữa.
+    stopped: bool,
     /// Cờ dừng cho `spawn_ticker` + handle thread của nó — phải dừng/join
     /// TRƯỚC khi coi phiên quay là kết thúc (xem `stop()`), vì `frame_tx` giờ
     /// do ticker giữ (không phải `_handler` như trước), đóng nó là cách duy
@@ -531,8 +542,18 @@ impl RecordingHandle {
         self.stopped_externally.load(Ordering::SeqCst)
     }
 
+    /// Cờ "đã có frame bị drop" dùng chung với ticker/callback — caller
+    /// (`record::mod`) clone Arc này TRƯỚC khi `stop()` tiêu thụ handle để
+    /// còn đọc được sau khi dừng mà cảnh báo người dùng.
+    pub fn dropped_flag(&self) -> Arc<AtomicBool> {
+        self.dropped.clone()
+    }
+
     /// Dừng quay, đợi SCStream xác nhận đã dừng hẳn (có timeout).
     pub fn stop(mut self) -> Result<(), String> {
+        // Đánh dấu NGAY từ đầu — kể cả khi các bước dưới lỗi/timeout, Drop
+        // cũng không được lặp lại việc dừng (yêu cầu dừng đã được gửi đi).
+        self.stopped = true;
         // Dừng ticker TRƯỚC (đóng `frame_tx` nó đang giữ, kết thúc writer
         // thread bên `record/mod.rs`) — cùng thứ tự với
         // `windows_stream.rs::RecordingHandle::stop`. Phải làm bước này ở CẢ
@@ -573,6 +594,25 @@ impl RecordingHandle {
             eprintln!("[SnapDoc][record] Một số frame đã bị drop do encoder/consumer chậm hơn tốc độ quay");
         }
         result
+    }
+}
+
+impl Drop for RecordingHandle {
+    fn drop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        // Nhánh lỗi (chưa ai gọi `stop()`): dừng ticker + join để nó không
+        // loop vô hạn, rồi yêu cầu SCK dừng fire-and-forget (không chờ
+        // completion — Drop không được chặn thread hiện tại tới 10s).
+        self.ticker_stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.ticker_thread.take() {
+            let _ = t.join();
+        }
+        if !self.stopped_externally.load(Ordering::SeqCst) {
+            eprintln!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng SCStream khẩn cấp");
+            unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
+        }
     }
 }
 
@@ -757,6 +797,7 @@ pub fn start(
         RecordingHandle {
             stream,
             _handler: handler_obj,
+            stopped: false,
             ticker_stop,
             ticker_thread: Some(ticker_thread),
             dropped,

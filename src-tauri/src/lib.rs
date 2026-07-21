@@ -82,6 +82,7 @@ pub fn run() {
             commands::finalize_monitor,
             commands::list_windows,
             commands::cancel_overlay,
+            commands::keep_capture_focus,
             commands::copy_image,
             commands::save_image,
             commands::save_and_copy,
@@ -203,11 +204,34 @@ pub fn run() {
                 }
             }
 
+            // Tự động dọn Trash quá hạn 30 ngày — thread riêng, không chặn
+            // khởi động, cùng convention với cleanup_stale_temp bên dưới. Xem
+            // STABILITY_RISKS.md mục B.5/E.7: trước đây Trash chỉ được dọn
+            // khi user tự bấm "Dọn thùng rác", library/assets+thumbs lớn dần
+            // vô hạn.
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || match history::commands::purge_old_trash(&h) {
+                    Ok(n) if n > 0 => {
+                        eprintln!("[SnapDoc][history] Đã tự xoá {n} mục trong Trash quá hạn 30 ngày")
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[SnapDoc][history] Tự dọn Trash quá hạn thất bại: {e}"),
+                });
+            }
+
             // Mở scope asset-protocol cho thư mục lưu video hiện tại — nếu
             // không, `convertFileSrc` trong record-review/History sẽ bị chặn
             // đọc video đã quay ở phiên trước (scope tĩnh trong tauri.conf.json
             // chỉ cho phép $APPDATA/SnapDoc/library, không phải saveDir).
             record::allow_asset_scope_at_startup(&handle);
+
+            // Dọn rác tạm phiên trước (crash/quit giữa lúc quay/trim) — thread
+            // riêng, không chặn khởi động.
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || record::cleanup_stale_temp(&h));
+            }
 
             tray::build(&handle)?;
             if let Err(e) = hotkey::register_all(&handle) {
@@ -225,6 +249,16 @@ pub fn run() {
             // Pre-warm thanh "Dừng quay" (ẩn) → lần bắt đầu quay vùng chọn đầu
             // tiên hiện tức thì, không chờ tải webview mới.
             let _ = windows::prewarm_stop_control(&handle);
+
+            // Pre-warm overlay (ẩn, 1 cửa sổ/màn hình) → lần chụp đầu trên máy
+            // nhiều màn hình không phải chờ build() tuần tự N cửa sổ webview
+            // (nguồn trễ chính khiến overlay không hiện "tức thì" — xem
+            // `windows::prewarm_overlays`). Chạy nền, không chặn khởi động vì
+            // `xcap::Monitor::all()` + build() N cửa sổ có thể mất vài chục ms.
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || windows::prewarm_overlays(&h));
+            }
 
             // Pre-warm capture-bar (ẩn) NGAY khi app khởi động — giữ icon Dock
             // (macOS)/Taskbar (Windows) hiện diện xuyên suốt vòng đời app kể
@@ -311,6 +345,17 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = _event {
                 use tauri::Manager;
                 let label = _window.label();
+                // Settings đóng ngay GIỮA lúc đang ghi phím tắt mới:
+                // `suspendShortcuts()` (unregister-all) đã chạy nhưng webview
+                // bị huỷ trước khi `resumeShortcuts()` kịp gọi → toàn bộ
+                // hotkey toàn cục chết cho tới khi restart app. Reload từ
+                // settings ở đây là idempotent (unregister-all + register-all)
+                // và rẻ nên chạy vô điều kiện mỗi lần đóng Settings.
+                if label == "settings" {
+                    if let Err(e) = hotkey::reload(_window.app_handle()) {
+                        eprintln!("[SnapDoc][hotkey] reload sau khi đóng Settings thất bại: {e}");
+                    }
+                }
                 // "editor" (capture) lẫn "editor-ow-N" ("Open with") + "settings"
                 // + "capture-bar" + "record-review" + "history-trim" = cửa sổ
                 // thật → khi đóng, cân nhắc trả về Accessory policy (macOS)

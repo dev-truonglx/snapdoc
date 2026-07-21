@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { useState, useEffect, useRef } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useEditor } from "../../features/annotation/store";
 import { PRESET_COLORS, HIGHLIGHT_COLORS, STROKE_WIDTHS, SOLID_COLORS, type Tool } from "../../features/annotation/model";
 
@@ -265,6 +266,11 @@ function CustomColorButton({
 }
 
 export default function Toolbar({ onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy }: Props) {
+  // Selector + useShallow thay vì subscribe cả store: trước đây MỌI thay đổi
+  // store (mỗi tick kéo slider blur qua `updateAnnotationLive`, mỗi lần di
+  // chuyển annotation) đều re-render toàn bộ toolbar (hàng chục nút SVG).
+  // `selectedAnn` tính ngay trong selector — chỉ đổi khi CHÍNH annotation
+  // đang chọn đổi, không phải khi bất kỳ phần nào khác của doc đổi.
   const {
     tool, setTool,
     color, setColor,
@@ -279,8 +285,28 @@ export default function Toolbar({ onSave, onSaveAs, onCopy, onSaveCopy, onFlatte
     stepCounter, arrowCounter,
     setStepCounter, setArrowCounter,
     renumberSteps, renumberArrows,
-    doc,
-  } = useEditor();
+    selectedAnn,
+  } = useEditor(
+    useShallow((s) => ({
+      tool: s.tool, setTool: s.setTool,
+      color: s.color, setColor: s.setColor,
+      highlightColor: s.highlightColor, setHighlightColor: s.setHighlightColor,
+      strokeWidth: s.strokeWidth, setStrokeWidth: s.setStrokeWidth,
+      fontSize: s.fontSize, setFontSize: s.setFontSize,
+      blurRadius: s.blurRadius, setBlurRadius: s.setBlurRadius, commitBlurRadius: s.commitBlurRadius,
+      blurMode: s.blurMode, setBlurMode: s.setBlurMode,
+      blurSolidColor: s.blurSolidColor, setBlurSolidColor: s.setBlurSolidColor,
+      undo: s.undo, redo: s.redo, canUndo: s.canUndo, canRedo: s.canRedo,
+      removeSelected: s.removeSelected, selectedId: s.selectedId,
+      stepCounter: s.stepCounter, arrowCounter: s.arrowCounter,
+      setStepCounter: s.setStepCounter, setArrowCounter: s.setArrowCounter,
+      renumberSteps: s.renumberSteps, renumberArrows: s.renumberArrows,
+      selectedAnn:
+        s.selectedId && s.doc
+          ? s.doc.annotations.find((a) => a.id === s.selectedId) ?? null
+          : null,
+    })),
+  );
 
   const [customColor, setCustomColor] = useState("#ef4444");
   const [customHighlight, setCustomHighlight] = useState("#fbbf24");
@@ -319,11 +345,6 @@ export default function Toolbar({ onSave, onSaveAs, onCopy, onSaveCopy, onFlatte
       setCustomSolid(blurSolidColor);
     }
   }, [blurSolidColor]);
-
-  // Annotation đang được chọn (nếu có)
-  const selectedAnn = selectedId && doc
-    ? doc.annotations.find((a) => a.id === selectedId)
-    : null;
 
   const isHighlight = tool === "highlight";
   // Hiện blur controls khi: đang dùng tool blur HOẶC đang select một BlurAnn
