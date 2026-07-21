@@ -126,4 +126,10 @@ pub struct AppState {
     /// `windows::restore_hidden_product_windows`.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub hidden_for_capture: Mutex<Vec<String>>,
+    /// Ảnh "đóng băng" màn hình (JPEG base64, không có prefix data URL) chụp
+    /// ngay trước khi mở overlay chọn vùng — overlay dùng làm background tĩnh
+    /// để tránh tương tác với app đang chạy phía sau (như Snagit/Lightshot).
+    /// Key = chỉ số màn hình (khớp với `overlay-{i}`), value = JPEG base64.
+    /// Xoá sau khi overlay đóng (`close_overlays` / `cancel_overlay`).
+    pub frozen_screens: Mutex<HashMap<usize, String>>,
 }

@@ -71,6 +71,24 @@ fn save_last_region(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h:
     let _ = storage::settings::save(&config_dir, &settings);
 }
 
+/// Chụp "đóng băng" tất cả màn hình (JPEG) và lưu vào AppState — gọi TRƯỚC
+/// `open_overlays` để overlay có background tĩnh ngay khi hiện ra, tránh user
+/// tương tác nhầm với app phía sau (như Snagit/Lightshot). Chạy đồng bộ ở
+/// thread hiện tại (thường là `std::thread::spawn`), không block UI.
+fn take_frozen_screens(app: &AppHandle) {
+    let screens = capture::freeze::capture_frozen_screens();
+    if let Ok(mut g) = app.state::<AppState>().frozen_screens.lock() {
+        *g = screens;
+    }
+}
+
+/// Dọn dẹp frozen screens sau khi overlay đóng — giải phóng bộ nhớ.
+fn clear_frozen_screens(app: &AppHandle) {
+    if let Ok(mut g) = app.state::<AppState>().frozen_screens.lock() {
+        g.clear();
+    }
+}
+
 /// macOS: chụp lại "cửa sổ sản phẩm nào đang thật sự hiển thị" NGAY LÚC mở
 /// overlay chọn vùng/màn hình/Quick Capture — trước khi user có cơ hội bấm
 /// phím tắt Copy/Save (và trước khi hiện tượng cửa sổ tự bị đẩy lên có thể
@@ -238,15 +256,22 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
     // TỪ ĐÂY, tức là TRƯỚC khi user kịp bấm phím tắt Copy/Save. Nếu snapshot
     // sau open_overlays thì đã quá trễ — window đã bị đẩy lên rồi.
     snapshot_product_windows(app);
+    // Đóng băng màn hình: ẩn capture-bar TRƯỚC rồi mới chụp frozen — đảm bảo
+    // capture-bar không lọt vào ảnh frozen. Sau đó mở overlay với frozen
+    // image đã sẵn sàng trong AppState.
+    if bar_is_visible(app) {
+        hide_bar(app);
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    take_frozen_screens(app);
     let result: Result<(), String> = (|| {
-        if bar_is_visible(app) {
-            hide_bar(app);
-        }
         set_output(app, output);
         let overlay_mode = if mode == "full" { "monitor" } else { mode };
         windows::open_overlays(app, overlay_mode)
     })();
     if let Err(e) = result {
+        clear_frozen_screens(app);
         let _ = app.emit("snapdoc-error", e);
     }
 }
@@ -261,10 +286,14 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
 /// biết đường CHUYỂN HƯỚNG sang `record::start_recording_*` thay vì chụp ảnh
 /// + `finish()` như bình thường.
 pub fn run_record_picker(app: &AppHandle, mode: &str) {
+    // Đóng băng màn hình: ẩn capture-bar TRƯỚC rồi mới chụp frozen.
+    if bar_is_visible(app) {
+        hide_bar(app);
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    take_frozen_screens(app);
     let result: Result<(), String> = (|| {
-        if bar_is_visible(app) {
-            hide_bar(app);
-        }
         *app.state::<AppState>().pending_record.lock().unwrap() = true;
         let overlay_mode = if mode == "full" { "monitor" } else { mode };
         // "region": đề xuất lại vùng đã quay lần gần nhất (nếu có) — overlay
@@ -285,6 +314,7 @@ pub fn run_record_picker(app: &AppHandle, mode: &str) {
     })();
     if let Err(e) = result {
         *app.state::<AppState>().pending_record.lock().unwrap() = false;
+        clear_frozen_screens(app);
         let _ = app.emit("snapdoc-error", e);
     }
 }
@@ -389,6 +419,8 @@ pub fn finalize_region(
     // Step 3: close overlays BEFORE capture.
     // KHÔNG poll sau close — deadlock risk (xem close_overlays). Sleep 200ms.
     windows::close_overlays(app);
+    // Frozen screen không còn cần thiết sau khi overlay đóng.
+    clear_frozen_screens(app);
     #[cfg(not(target_os = "macos"))]
     std::thread::sleep(std::time::Duration::from_millis(200));
 
@@ -415,6 +447,7 @@ pub fn finalize_region(
 
 pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
     windows::close_overlays(app);
+    clear_frozen_screens(app);
 
     if take_pending_record(app) {
         return crate::record::start_recording_window(app, id);
@@ -445,6 +478,7 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
 
     // KHÔNG poll sau close — deadlock risk (xem close_overlays). Sleep 200ms.
     windows::close_overlays(app);
+    clear_frozen_screens(app);
     #[cfg(not(target_os = "macos"))]
     std::thread::sleep(std::time::Duration::from_millis(200));
     let cap = with_product_windows_protected(app, || capture::fullscreen::capture_monitor(&m))?;
@@ -457,6 +491,8 @@ pub fn cancel_overlay(app: &AppHandle) {
     // tiếp (vốn dành cho chụp ảnh) nếu người dùng bấm Esc giữa lúc đang chọn
     // phạm vi quay.
     *app.state::<AppState>().pending_record.lock().unwrap() = false;
+    // Giải phóng frozen screen data — không còn cần sau khi overlay đóng.
+    clear_frozen_screens(app);
     windows::close_overlays(app);
 
     // macOS: dọn dẹp trạng thái focus/ẩn của phiên Chụp nhanh (no-op nếu
@@ -568,10 +604,16 @@ pub fn start_quick(app: &AppHandle) {
             *g = hidden;
         }
     }
+    // Đóng băng màn hình: ẩn capture-bar TRƯỚC rồi mới chụp frozen — đảm bảo
+    // capture-bar không lọt vào ảnh frozen. Trên macOS cần sleep nhỏ để
+    // compositor cập nhật sau khi hide_bar (orderOut) trước khi SCK chụp.
+    if bar_is_visible(app) {
+        hide_bar(app);
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    take_frozen_screens(app);
     let result: Result<(), String> = (|| {
-        if bar_is_visible(app) {
-            hide_bar(app);
-        }
         windows::open_overlays(app, "quick")
     })();
     if let Err(e) = result {

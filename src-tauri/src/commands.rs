@@ -975,3 +975,16 @@ pub async fn finalize_scroll_stitch(
     let output = crate::flow::get_output(&app);
     crate::flow::finish(&app, cap, &output, 1.0)
 }
+
+/// Lấy ảnh "đóng băng màn hình" (JPEG base64 trần) cho overlay có chỉ số `idx`.
+/// Frontend gọi khi mount overlay để lấy background tĩnh thay vì nhìn xuyên
+/// qua overlay trong suốt vào app đang chạy phía sau.
+/// Trả `None` nếu chưa có dữ liệu (lỗi chụp, hoặc chưa gọi `take_frozen_screens`).
+#[tauri::command]
+pub fn get_frozen_screen(state: State<AppState>, idx: usize) -> Option<String> {
+    state
+        .frozen_screens
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&idx).cloned())
+}
