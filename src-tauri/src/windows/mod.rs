@@ -828,7 +828,11 @@ fn build_overlay_query(
 /// Đặt frame/level cho overlay TRƯỚC khi show() — cửa sổ vẫn ẩn, nhưng đã
 /// đúng vị trí/kích thước để frontend bắt đầu vẽ (fetch ảnh đóng băng) ngay,
 /// không phải chờ thêm một nhịp "nhảy vị trí" sau khi đã lên hình.
-fn position_overlay(app: &AppHandle, win: &tauri::WebviewWindow, snap: &MonitorSnap) {
+fn position_overlay(
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] app: &AppHandle,
+    win: &tauri::WebviewWindow,
+    snap: &MonitorSnap,
+) {
     #[cfg(target_os = "macos")]
     {
         // Đặt frame qua NSScreen (points, native) trên main thread.
@@ -853,7 +857,11 @@ fn position_overlay(app: &AppHandle, win: &tauri::WebviewWindow, snap: &MonitorS
 /// timeout) frontend paint xong ảnh đóng băng — để frame đầu tiên hiện ra đã
 /// có sẵn nội dung đúng, không có nhịp trống/nháy (cơ chế freeze mượt như
 /// Snagit: không bao giờ show() rồi mới paint sau).
-fn reveal_overlay(app: &AppHandle, win: &tauri::WebviewWindow, snap: &MonitorSnap) {
+fn reveal_overlay(
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] app: &AppHandle,
+    win: &tauri::WebviewWindow,
+    snap: &MonitorSnap,
+) {
     let _ = win.show();
 
     #[cfg(target_os = "macos")]
