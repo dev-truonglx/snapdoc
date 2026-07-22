@@ -349,6 +349,16 @@ fn set_dwm_transitions_disabled(hwnd: windows_sys::Win32::Foundation::HWND, disa
     }
 }
 
+/// Windows tương đương `NSWindowAnimationBehaviorNone` của macOS cho overlay.
+/// Cờ này chỉ áp dụng cho native overlay window, không thay đổi thiết lập hiệu
+/// ứng của hệ điều hành hay những cửa sổ khác của SnapDoc.
+#[cfg(target_os = "windows")]
+fn disable_overlay_transitions(win: &tauri::WebviewWindow) {
+    if let Ok(hwnd) = win.hwnd() {
+        let _ = set_dwm_transitions_disabled(hwnd.0, true);
+    }
+}
+
 /// Minimize đồng bộ HWND rồi xác nhận Windows đã chuyển sang trạng thái iconic.
 #[cfg(target_os = "windows")]
 fn minimize_hwnd_now(hwnd: windows_sys::Win32::Foundation::HWND) -> bool {
@@ -935,6 +945,11 @@ fn position_overlay(
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // Windows: tương đương NSWindowAnimationBehaviorNone trên macOS.
+        // Đặt cờ trước khi window được reveal để DWM không fade/transition
+        // ảnh freeze đã chuẩn bị sẵn lúc overlay xuất hiện.
+        #[cfg(target_os = "windows")]
+        disable_overlay_transitions(win);
         // Windows/Linux: snapshot ở physical pixels → đặt trực tiếp.
         let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
         let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
@@ -953,6 +968,12 @@ fn reveal_overlay(
     win: &tauri::WebviewWindow,
     snap: &MonitorSnap,
 ) {
+    // macOS đặt NSWindowAnimationBehaviorNone trong configure_overlay...;
+    // Windows dùng thuộc tính DWM tương đương và phải đặt TRƯỚC show() để
+    // frame đầu tiên của ảnh freeze không bị transition/fade.
+    #[cfg(target_os = "windows")]
+    disable_overlay_transitions(win);
+
     let _ = win.show();
 
     #[cfg(target_os = "macos")]
