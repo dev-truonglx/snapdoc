@@ -25,14 +25,14 @@ fn hide_bar(app: &AppHandle) {
 
 /// Ẩn capture bar rồi chờ compositor bỏ frame cũ trước khi lấy ảnh freeze.
 ///
-/// Trên Windows, nhánh freeze dùng `hide()` trực tiếp thay vì `minimize()`:
-/// minimize có animation bất đồng bộ nên từng cần chờ 150ms và vẫn có thể
-/// lọt capture bar vào frozen background. Nếu native hide thất bại, fallback
-/// về luồng minimize cũ với thời gian chờ cũ để không làm hỏng phiên chụp.
+/// Trên Windows, capture bar vẫn `minimize()` để icon taskbar luôn tồn tại,
+/// nhưng DWM transition của RIÊNG cửa sổ này bị tắt trước khi minimize. Nếu
+/// không tắt được DWM transition, fallback dùng thời gian chờ cũ để không làm
+/// hỏng phiên chụp.
 fn hide_bar_for_freeze(app: &AppHandle) {
     #[cfg(target_os = "windows")]
     {
-        if windows::hide_capture_bar_for_freeze(app) {
+        if windows::minimize_capture_bar_for_freeze(app) {
             std::thread::sleep(std::time::Duration::from_millis(50));
         } else {
             hide_bar(app);

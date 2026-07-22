@@ -257,6 +257,13 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     }
 
     if let Some(win) = app.get_webview_window("capture-bar") {
+        // Bỏ cờ chỉ dùng trong lúc freeze trước khi khôi phục bar. Cờ này
+        // được đặt lại ở lần freeze kế tiếp, nên một lần show thông thường
+        // vẫn giữ nguyên transition Windows mặc định.
+        #[cfg(target_os = "windows")]
+        if let Ok(hwnd) = win.hwnd() {
+            set_dwm_transitions_disabled(hwnd.0, false);
+        }
         // .unminimize() cần cho trường hợp user vừa bấm "X" trên bar (nay chỉ
         // minimize, xem `commands::close_self`) — .show() không tự khôi phục
         // khỏi trạng thái minimize.
@@ -292,19 +299,80 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Ẩn capture bar ngay trước khi chụp ảnh nền freeze trên Windows.
+/// Minimize capture bar ngay trước khi chụp ảnh nền freeze trên Windows.
 ///
-/// Không dùng `minimize()` ở đây: Windows có thể chạy hiệu ứng thu nhỏ của
-/// shell/DWM bất đồng bộ, nên frame đang có capture bar vẫn có thể bị WGC/GDI
-/// chụp lại. `hide()` chuyển thẳng cửa sổ sang trạng thái hidden (tương đương
-/// `ShowWindow(SW_HIDE)`), không có transition minimize. Khác với thao tác
-/// người dùng bấm đóng bar, việc này chỉ áp dụng trong đường freeze; bar vẫn
-/// được minimize ở các chỗ khác để giữ taskbar anchor như trước.
+/// Capture bar PHẢI luôn ở taskbar, nên không được `hide()`. Thay vào đó, tắt
+/// DWM transition cho RIÊNG HWND này rồi gọi trực tiếp `ShowWindow`: icon
+/// taskbar vẫn tồn tại, nhưng frame cũ không chạy animation thu nhỏ để bị
+/// WGC/GDI chụp vào frozen background.
 #[cfg(target_os = "windows")]
-pub fn hide_capture_bar_for_freeze(app: &AppHandle) -> bool {
-    app.get_webview_window("capture-bar")
-        .map(|win| win.hide().is_ok())
-        .unwrap_or(false)
+pub fn minimize_capture_bar_for_freeze(app: &AppHandle) -> bool {
+    let Some(win) = app.get_webview_window("capture-bar") else {
+        return false;
+    };
+    let Ok(hwnd) = win.hwnd() else {
+        return false;
+    };
+    let transitions_disabled = set_dwm_transitions_disabled(hwnd.0, true);
+    // `WebviewWindow::minimize()` đẩy yêu cầu vào event loop của Tauri, vì thế
+    // `DwmFlush` ngay sau nó vẫn có thể flush frame CŨ. Gọi ShowWindow trực
+    // tiếp cho HWND cùng process giúp trạng thái iconic được áp dụng trước khi
+    // đồng bộ với compositor.
+    let minimized = minimize_hwnd_now(hwnd.0);
+    let _ = win.set_skip_taskbar(false);
+    // Chờ tới frame Present tiếp theo của DWM. Điều này ngăn backend capture
+    // đọc lại frame compositor cũ, dù trạng thái minimized đã được Tauri trả
+    // về ngay sau khi gửi message cho Windows.
+    let compositor_flushed = flush_dwm().is_ok();
+    transitions_disabled && minimized && compositor_flushed
+}
+
+/// Bật/tắt transition DWM cho một cửa sổ mà không thay đổi thiết lập animation
+/// toàn hệ thống. `DWMWA_TRANSITIONS_FORCEDISABLED` nhận BOOL: TRUE để tắt,
+/// FALSE để bật lại.
+#[cfg(target_os = "windows")]
+fn set_dwm_transitions_disabled(hwnd: isize, disabled: bool) -> bool {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
+    };
+
+    let value: i32 = if disabled { 1 } else { 0 }; // Win32 BOOL
+    // SAFETY: HWND còn sống vì WebviewWindow được caller giữ; value là BOOL hợp lệ.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TRANSITIONS_FORCEDISABLED,
+            &value as *const i32 as *const c_void,
+            std::mem::size_of_val(&value) as u32,
+        ) >= 0
+    }
+}
+
+/// Minimize đồng bộ HWND rồi xác nhận Windows đã chuyển sang trạng thái iconic.
+#[cfg(target_os = "windows")]
+fn minimize_hwnd_now(hwnd: isize) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, ShowWindow, SW_MINIMIZE};
+
+    // SAFETY: HWND thuộc WebviewWindow còn sống. SW_MINIMIZE giữ taskbar button,
+    // khác SW_HIDE vốn làm mất app-level anchor.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_MINIMIZE);
+        IsIconic(hwnd) != 0
+    }
+}
+
+/// Chờ DWM present mọi thay đổi đang pending từ process này trước khi capture.
+#[cfg(target_os = "windows")]
+fn flush_dwm() -> Result<(), ()> {
+    use windows_sys::Win32::Graphics::Dwm::DwmFlush;
+
+    // SAFETY: DwmFlush không nhận pointer/handle và chỉ đồng bộ compositor.
+    if unsafe { DwmFlush() } >= 0 {
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 /// Tạo sẵn capture-bar (ẩn) NGAY lúc app khởi động — giữ icon Dock (macOS)/
