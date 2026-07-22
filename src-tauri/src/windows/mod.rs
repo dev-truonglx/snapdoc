@@ -1545,6 +1545,24 @@ pub fn close_overlays_except(app: &AppHandle, keep_label: &str) {
     app.state::<AppState>().overlay_gen.fetch_add(1, Ordering::SeqCst);
 }
 
+/// Kết thúc THẬT SỰ 1 phiên chụp cuộn (hoàn tất hoặc huỷ) — đóng overlay đang
+/// đóng vai khung viền (`close_overlays`), đồng thời:
+/// 1) bump `overlay_gen` — phòng hờ trường hợp (hiếm, phụ thuộc máy) vòng lặp
+///    `input_loop` của phiên chọn vùng gốc chưa kịp thoát: nếu để sót, nó có
+///    thể bắt nhầm 1 cú nhấn/thả chuột TOÀN CỤC về sau (vd user vẽ shape
+///    trong Editor) thành sự kiện chọn vùng trên overlay pre-warm ẩn, gọi lại
+///    `finalize_region`.
+/// 2) xoá `last_capture.mode` — NẾU (1) vẫn lọt lưới và 1 cú `finalize_region`
+///    lạc thật sự xảy ra, nó sẽ không còn thấy mode == "scroll" nữa nên không
+///    tự khởi động lại phiên chụp cuộn (đây là lớp phòng thủ THỨ HAI, độc lập
+///    với (1) — chặn đúng triệu chứng "chụp cuộn tự kích hoạt lại" dù nguyên
+///    nhân sâu xa là gì).
+pub fn end_scroll_session(app: &AppHandle) {
+    close_overlays(app);
+    app.state::<AppState>().overlay_gen.fetch_add(1, Ordering::SeqCst);
+    app.state::<AppState>().last_capture.clear_mode();
+}
+
 /// Ẩn editor và trả về Accessory policy (ẩn Dock) / ẩn icon khỏi taskbar (Windows).
 /// Dùng cho nút "New" trong editor — user muốn chụp mới mà không cần đóng editor.
 ///

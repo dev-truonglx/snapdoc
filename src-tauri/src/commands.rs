@@ -238,9 +238,10 @@ pub fn close_self(window: tauri::WebviewWindow) {
     let label = window.label();
     if label == "scroll-control" {
         // Khung viền chụp cuộn giờ chính là overlay tái sử dụng (xem
-        // `windows::open_scroll_control`), không còn cửa sổ "scroll-border"
-        // riêng — đóng nốt overlay đó qua `close_overlays`.
-        crate::windows::close_overlays(window.app_handle());
+        // `windows::open_scroll_control`) — đây là đường HUỶ (nút "Huỷ"/Esc
+        // trong ScrollControl), dùng `end_scroll_session` để đóng nốt overlay
+        // đó VÀ dọn state phòng "kích hoạt lại" (xem hàm đó).
+        crate::windows::end_scroll_session(window.app_handle());
     }
     // capture-bar không bao giờ bị destroy nữa — phải luôn tồn tại để giữ
     // Dock/taskbar icon xuyên suốt vòng đời app (xem `windows::prewarm_capture_bar`).
@@ -609,8 +610,10 @@ pub fn finalize_scroll_capture(
     height: u32,
 ) -> Result<(), String> {
     // Khung viền chụp cuộn giờ là overlay tái sử dụng (xem
-    // `windows::open_scroll_control`) — đóng qua `close_overlays`.
-    crate::windows::close_overlays(&app);
+    // `windows::open_scroll_control`) — phiên đã HOÀN TẤT, dùng
+    // `end_scroll_session` để đóng overlay đó VÀ dọn state phòng "kích hoạt
+    // lại" (xem hàm đó).
+    crate::windows::end_scroll_session(&app);
     let cap = crate::capture::Capture {
         base64,
         width,
@@ -966,8 +969,11 @@ pub async fn finalize_scroll_stitch(
     .map_err(|e| format!("Task join error: {e}"))??;
 
     // Khung viền chụp cuộn giờ là overlay tái sử dụng (xem
-    // `windows::open_scroll_control`) — đóng qua `close_overlays`.
-    crate::windows::close_overlays(&app);
+    // `windows::open_scroll_control`) — phiên đã HOÀN TẤT (đây là đường "Hoàn
+    // thành" chính, gọi TRƯỚC `close_self`/`finalize_scroll_capture`), dùng
+    // `end_scroll_session` để đóng overlay đó VÀ dọn state phòng "kích hoạt
+    // lại" (xem hàm đó).
+    crate::windows::end_scroll_session(&app);
 
     let output = crate::flow::get_output(&app);
     crate::flow::finish(&app, cap, &output, 1.0)
