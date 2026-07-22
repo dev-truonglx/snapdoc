@@ -53,45 +53,46 @@ export default function HistoryGrid({ onOpenEditor }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [virtualRows.map((r) => r.index).join(","), rowCount, hasMore, loading]);
 
-  if (items.length === 0 && !loading) {
-    return <div style={emptyState}>Chưa có capture nào trong khoảng lọc này.</div>;
-  }
-
   return (
     <div ref={parentRef} style={scrollArea}>
-      <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-        {virtualRows.map((vRow) => {
-          const start = vRow.index * columns;
-          const rowItems = items.slice(start, start + columns);
-          return (
-            <div
-              key={vRow.key}
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: "100%",
-                height: vRow.size,
-                transform: `translateY(${vRow.start}px)`,
-                display: "grid",
-                gridTemplateColumns: `repeat(${columns}, 1fr)`,
-                gap: CARD_GAP,
-                padding: `0 ${CARD_GAP}px`,
-              }}
-            >
-              {rowItems.map((item) => (
-                <HistoryItemCard
-                  key={item.id}
-                  item={item}
-                  selected={item.id === selectedId}
-                  onSelect={() => setSelected(item.id)}
-                  onOpenEditor={() => onOpenEditor(item.id)}
-                />
-              ))}
-            </div>
-          );
-        })}
-      </div>
+      {items.length === 0 && !loading ? (
+        <div style={emptyState}>Chưa có capture nào trong khoảng lọc này.</div>
+      ) : (
+        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+          {virtualRows.map((vRow) => {
+            const start = vRow.index * columns;
+            const rowItems = items.slice(start, start + columns);
+            return (
+              <div
+                key={vRow.key}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  height: vRow.size,
+                  transform: `translateY(${vRow.start}px)`,
+                  display: "grid",
+                  gridTemplateColumns: `repeat(${columns}, ${CARD_MIN_WIDTH}px)`,
+                  justifyContent: "center",
+                  gap: CARD_GAP,
+                  padding: `0 ${CARD_GAP}px`,
+                }}
+              >
+                {rowItems.map((item) => (
+                  <HistoryItemCard
+                    key={item.id}
+                    item={item}
+                    selected={item.id === selectedId}
+                    onSelect={() => setSelected(item.id)}
+                    onOpenEditor={() => onOpenEditor(item.id)}
+                  />
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      )}
       {loading && <div style={loadingRow}>Đang tải...</div>}
     </div>
   );

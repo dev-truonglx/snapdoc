@@ -277,15 +277,33 @@ pub fn run() {
             // chưa từng được đăng ký thật — chỉ có tác dụng sau khi user tự
             // tắt/bật lại (gọi `set_autostart`, xem `commands.rs`). Sau lần
             // đầu này, user có thể tắt từ Settings bất cứ lúc nào.
+            // Đồng bộ lại trạng thái autostart thật của OS với `launchAtLogin`
+            // trong settings.json ở MỌI lần khởi động (không chỉ lần đầu).
+            // Windows có thể tự xoá registry Run key đã đăng ký (SmartScreen/
+            // Defender gắn cờ app chưa ký số, hoặc bug đã biết của
+            // tauri-plugin-autostart — xem
+            // github.com/tauri-apps/plugins-workspace/issues/771) khiến
+            // settings.json vẫn ghi "true" nhưng OS thật ra KHÔNG còn tự khởi
+            // động app — Settings UI hiện "ON" nhưng thực tế sai. Gọi lại
+            // enable()/disable() mỗi lần app chạy để tự "chữa lành" trạng thái
+            // lệch này thay vì chỉ tin vào lần bật/tắt gần nhất của user.
             {
                 use tauri::Manager;
                 use tauri_plugin_autostart::ManagerExt;
                 let config_dir = handle.path().app_config_dir().unwrap_or_default();
-                if !storage::settings::exists(&config_dir) {
-                    let _ = handle.autolaunch().enable();
-                    let mut new_settings = storage::settings::load(&config_dir);
-                    new_settings["launchAtLogin"] = serde_json::Value::Bool(true);
-                    let _ = storage::settings::save(&config_dir, &new_settings);
+                let first_run = !storage::settings::exists(&config_dir);
+                let mut settings = storage::settings::load(&config_dir);
+                if first_run {
+                    settings["launchAtLogin"] = serde_json::Value::Bool(true);
+                    let _ = storage::settings::save(&config_dir, &settings);
+                }
+                let want_enabled = settings["launchAtLogin"].as_bool().unwrap_or(true);
+                let autolaunch = handle.autolaunch();
+                let is_enabled = autolaunch.is_enabled().unwrap_or(!want_enabled);
+                if want_enabled && !is_enabled {
+                    let _ = autolaunch.enable();
+                } else if !want_enabled && is_enabled {
+                    let _ = autolaunch.disable();
                 }
             }
 

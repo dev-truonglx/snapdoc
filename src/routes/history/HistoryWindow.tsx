@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import HistoryToolbar from "./HistoryToolbar";
 import HistoryGrid from "./HistoryGrid";
+import HistoryList from "./HistoryList";
 import HistoryPreviewPanel from "./HistoryPreviewPanel";
 import { useHistory } from "./useHistoryStore";
 import { ipc, type HistoryItem } from "../../lib/ipc";
@@ -9,6 +10,7 @@ import { ipc, type HistoryItem } from "../../lib/ipc";
 export default function HistoryWindow() {
   const reload = useHistory((s) => s.reload);
   const addItem = useHistory((s) => s.addItem);
+  const viewMode = useHistory((s) => s.viewMode);
 
   useEffect(() => {
     reload();
@@ -38,7 +40,11 @@ export default function HistoryWindow() {
     <div className="solid-bg" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <HistoryToolbar />
       <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-        <HistoryGrid onOpenEditor={openEditor} />
+        {viewMode === "grid" ? (
+          <HistoryGrid onOpenEditor={openEditor} />
+        ) : (
+          <HistoryList onOpenEditor={openEditor} />
+        )}
         <HistoryPreviewPanel onOpenEditor={openEditor} />
       </div>
     </div>

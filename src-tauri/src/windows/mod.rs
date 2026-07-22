@@ -1940,10 +1940,13 @@ pub fn open_history(app: &AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("history") {
         let _ = win.show();
         let _ = win.unminimize();
-        let _ = win.set_focus();
         place_center_on_monitor(app, &win);
         #[cfg(target_os = "windows")]
         let _ = win.set_skip_taskbar(false);
+        #[cfg(target_os = "macos")]
+        bring_settings_to_front(app, win);
+        #[cfg(not(target_os = "macos"))]
+        let _ = win.set_focus();
         return Ok(());
     }
     let win = WebviewWindowBuilder::new(app, "history", url("history"))
@@ -1956,6 +1959,10 @@ pub fn open_history(app: &AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| format!("Không tạo được cửa sổ History: {e}"))?;
     place_center_on_monitor(app, &win);
+    #[cfg(target_os = "macos")]
+    bring_settings_to_front(app, win);
+    #[cfg(not(target_os = "macos"))]
+    let _ = win.set_focus();
     Ok(())
 }
 

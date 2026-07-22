@@ -3,30 +3,10 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { ipc } from "../../lib/ipc";
 import { useHistory } from "./useHistoryStore";
 import { MODE_LABEL } from "./HistoryItemCard";
+import { fmtDateTime, fmtSize, fmtDuration } from "./formatUtils";
 
 interface Props {
   onOpenEditor: (id: string) => void;
-}
-
-function fmtDateTime(ms: number): string {
-  const d = new Date(ms);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
-function fmtSize(bytes: number | null): string {
-  if (bytes == null) return "—";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/** `93500` → `"1:34"` — mm:ss. */
-function fmtDuration(ms: number): string {
-  const totalSec = Math.round(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 export default function HistoryPreviewPanel({ onOpenEditor }: Props) {

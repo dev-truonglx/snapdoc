@@ -4,6 +4,8 @@ import { todayStartMs, ONE_DAY_MS } from "./dateUtils";
 
 const PAGE_SIZE = 60;
 
+export type ViewMode = "grid" | "list";
+
 interface HistoryState {
   items: HistoryItem[];
   filter: HistoryFilter;
@@ -11,6 +13,8 @@ interface HistoryState {
   loading: boolean;
   hasMore: boolean;
   error: string | null;
+  viewMode: ViewMode;
+  setViewMode: (mode: ViewMode) => void;
   /** Tăng mỗi lần filter đổi/reload — dùng để bỏ qua kết quả của request cũ
    * (setFilter) trả về sau khi user đã đổi sang filter khác, tránh trộn
    * nhầm kết quả của 2 filter khác nhau vào cùng danh sách hiển thị. */
@@ -49,6 +53,9 @@ export const useHistory = create<HistoryState>((set, get) => ({
   hasMore: true,
   error: null,
   generation: 0,
+  viewMode: "grid",
+
+  setViewMode: (mode) => set({ viewMode: mode }),
 
   setSelected: (id) => set({ selectedId: id }),
 

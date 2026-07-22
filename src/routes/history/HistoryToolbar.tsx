@@ -23,6 +23,8 @@ export default function HistoryToolbar() {
   const filter = useHistory((s) => s.filter);
   const setFilter = useHistory((s) => s.setFilter);
   const reload = useHistory((s) => s.reload);
+  const viewMode = useHistory((s) => s.viewMode);
+  const setViewMode = useHistory((s) => s.setViewMode);
   const [emptying, setEmptying] = useState(false);
 
   const onFromChange = (v: string) => {
@@ -84,6 +86,32 @@ export default function HistoryToolbar() {
 
       <div style={{ flex: 1 }} />
 
+      <div style={viewSwitch}>
+        <button
+          style={viewIconBtn(viewMode === "grid")}
+          title="Xem dạng lưới"
+          onClick={() => setViewMode("grid")}
+        >
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor">
+            <rect x="2" y="2" width="7" height="7" rx="1.5" />
+            <rect x="11" y="2" width="7" height="7" rx="1.5" />
+            <rect x="2" y="11" width="7" height="7" rx="1.5" />
+            <rect x="11" y="11" width="7" height="7" rx="1.5" />
+          </svg>
+        </button>
+        <button
+          style={viewIconBtn(viewMode === "list")}
+          title="Xem dạng danh sách"
+          onClick={() => setViewMode("list")}
+        >
+          <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor">
+            <rect x="2" y="3" width="16" height="3" rx="1" />
+            <rect x="2" y="8.5" width="16" height="3" rx="1" />
+            <rect x="2" y="14" width="16" height="3" rx="1" />
+          </svg>
+        </button>
+      </div>
+
       <button
         style={toggleBtn(!filter.trashOnly)}
         onClick={() => setFilter({ trashOnly: false })}
@@ -113,6 +141,28 @@ const bar: React.CSSProperties = {
   borderBottom: "1px solid var(--border)",
   background: "var(--bg-elevated)",
 };
+
+const viewSwitch: React.CSSProperties = {
+  display: "flex",
+  gap: 2,
+  padding: 2,
+  borderRadius: 7,
+  background: "var(--bg)",
+  border: "1px solid var(--border)",
+};
+
+function viewIconBtn(active: boolean): React.CSSProperties {
+  return {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 26,
+    height: 24,
+    borderRadius: 5,
+    background: active ? "var(--accent)" : "transparent",
+    color: active ? "var(--accent-text)" : "var(--text-dim)",
+  };
+}
 
 function toggleBtn(active: boolean): React.CSSProperties {
   return {
