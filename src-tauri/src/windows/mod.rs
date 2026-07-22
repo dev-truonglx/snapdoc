@@ -292,6 +292,21 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Ẩn capture bar ngay trước khi chụp ảnh nền freeze trên Windows.
+///
+/// Không dùng `minimize()` ở đây: Windows có thể chạy hiệu ứng thu nhỏ của
+/// shell/DWM bất đồng bộ, nên frame đang có capture bar vẫn có thể bị WGC/GDI
+/// chụp lại. `hide()` chuyển thẳng cửa sổ sang trạng thái hidden (tương đương
+/// `ShowWindow(SW_HIDE)`), không có transition minimize. Khác với thao tác
+/// người dùng bấm đóng bar, việc này chỉ áp dụng trong đường freeze; bar vẫn
+/// được minimize ở các chỗ khác để giữ taskbar anchor như trước.
+#[cfg(target_os = "windows")]
+pub fn hide_capture_bar_for_freeze(app: &AppHandle) -> bool {
+    app.get_webview_window("capture-bar")
+        .map(|win| win.hide().is_ok())
+        .unwrap_or(false)
+}
+
 /// Tạo sẵn capture-bar (ẩn) NGAY lúc app khởi động — giữ icon Dock (macOS)/
 /// Taskbar (Windows) hiện diện xuyên suốt vòng đời app kể từ khi mở app, thay
 /// vì chỉ xuất hiện từ lần đầu user tự mở bar. Không show lên màn hình (không

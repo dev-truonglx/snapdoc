@@ -23,6 +23,33 @@ fn hide_bar(app: &AppHandle) {
     }
 }
 
+/// Ẩn capture bar rồi chờ compositor bỏ frame cũ trước khi lấy ảnh freeze.
+///
+/// Trên Windows, nhánh freeze dùng `hide()` trực tiếp thay vì `minimize()`:
+/// minimize có animation bất đồng bộ nên từng cần chờ 150ms và vẫn có thể
+/// lọt capture bar vào frozen background. Nếu native hide thất bại, fallback
+/// về luồng minimize cũ với thời gian chờ cũ để không làm hỏng phiên chụp.
+fn hide_bar_for_freeze(app: &AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        if windows::hide_capture_bar_for_freeze(app) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        } else {
+            hide_bar(app);
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        hide_bar(app);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    hide_bar(app);
+}
+
 fn bar_is_visible(app: &AppHandle) -> bool {
     app.get_webview_window("capture-bar")
         .map(|w| {
@@ -260,16 +287,7 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
     // capture-bar không lọt vào ảnh frozen. Sau đó mở overlay với frozen
     // image đã sẵn sàng trong AppState.
     if bar_is_visible(app) {
-        hide_bar(app);
-        #[cfg(target_os = "macos")]
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        // Windows: hide_bar() chỉ minimize() (async, có animation) thay vì
-        // ẩn thật ngay — không sleep ở đây thì take_frozen_screens() chụp
-        // frozen NGAY SAU ĐÓ có thể vẫn thấy capture-bar còn hiện (chưa kịp
-        // minimize xong), làm nó bị "đóng băng" luôn vào ảnh nền, trông như
-        // capture-bar hiện lên suốt phiên overlay dù cửa sổ thật đã minimize.
-        #[cfg(target_os = "windows")]
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        hide_bar_for_freeze(app);
     }
     take_frozen_screens(app);
     let result: Result<(), String> = (|| {
@@ -295,13 +313,7 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
 pub fn run_record_picker(app: &AppHandle, mode: &str) {
     // Đóng băng màn hình: ẩn capture-bar TRƯỚC rồi mới chụp frozen.
     if bar_is_visible(app) {
-        hide_bar(app);
-        #[cfg(target_os = "macos")]
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        // Windows: xem giải thích ở `run()` — minimize() async, cần đợi
-        // trước khi chụp frozen kẻo capture-bar bị "đóng băng" vào ảnh nền.
-        #[cfg(target_os = "windows")]
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        hide_bar_for_freeze(app);
     }
     take_frozen_screens(app);
     let result: Result<(), String> = (|| {
@@ -592,8 +604,7 @@ pub fn keep_capture_focus(app: &AppHandle) {
 pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> {
     app.state::<AppState>().last_capture.set("all", output);
     if bar_is_visible(app) {
-        hide_bar(app);
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        hide_bar_for_freeze(app);
     }
     // Không có bước "mở overlay, chờ user bấm nút" ở flow này (chụp ngay lập
     // tức) nên snapshot ngay trước khi chụp là đủ — không có khoảng hở thời
@@ -643,13 +654,7 @@ pub fn start_quick(app: &AppHandle) {
     // capture-bar không lọt vào ảnh frozen. Trên macOS cần sleep nhỏ để
     // compositor cập nhật sau khi hide_bar (orderOut) trước khi SCK chụp.
     if bar_is_visible(app) {
-        hide_bar(app);
-        #[cfg(target_os = "macos")]
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        // Windows: xem giải thích ở `run()` — minimize() async, cần đợi
-        // trước khi chụp frozen kẻo capture-bar bị "đóng băng" vào ảnh nền.
-        #[cfg(target_os = "windows")]
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        hide_bar_for_freeze(app);
     }
     take_frozen_screens(app);
     let result: Result<(), String> = (|| {
