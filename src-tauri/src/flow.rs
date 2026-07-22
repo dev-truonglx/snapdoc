@@ -102,11 +102,40 @@ fn save_last_region(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h:
 /// `open_overlays` để overlay có background tĩnh ngay khi hiện ra, tránh user
 /// tương tác nhầm với app phía sau (như Snagit/Lightshot). Chạy đồng bộ ở
 /// thread hiện tại (thường là `std::thread::spawn`), không block UI.
+/// Bỏ qua màn hình chứa cửa sổ editor (nếu có mở) để không "đóng băng" editor.
 fn take_frozen_screens(app: &AppHandle) {
-    let screens = capture::freeze::capture_frozen_screens();
+    let exclude_ids = get_editor_window_monitor_ids(app);
+    let screens = capture::freeze::capture_frozen_screens_ex(&exclude_ids);
     if let Ok(mut g) = app.state::<AppState>().frozen_screens.lock() {
         *g = screens;
     }
+}
+
+/// Lấy danh sách monitor IDs của các cửa sổ editor đang mở.
+/// Dùng để loại bỏ khỏi frozen screens — editor không bị "đóng băng".
+fn get_editor_window_monitor_ids(app: &AppHandle) -> Vec<u32> {
+    let mut ids = Vec::new();
+    
+    // Kiểm tra tất cả cửa sổ webview
+    for (label, win) in app.webview_windows() {
+        // Chỉ quan tâm cửa sổ editor (editor, editor-ow-N)
+        if label.starts_with("editor") {
+            // Lấy vị trí cửa sổ để xác định monitor chứa nó
+            if let Ok(pos) = win.outer_position() {
+                // Dùng xcap để tìm monitor tại vị trí đó
+                if let Ok(monitor) = crate::capture::monitor::at_point(pos.x as i32, pos.y as i32) {
+                    if let Ok(id) = monitor.id() {
+                        if !ids.contains(&id) {
+                            ids.push(id);
+                            eprintln!("[SnapDoc] Loại bỏ editor (label={label}) khỏi frozen screens (monitor_id={id})");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    ids
 }
 
 /// Dọn dẹp frozen screens sau khi overlay đóng — giải phóng bộ nhớ.
