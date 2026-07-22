@@ -643,6 +643,126 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     }
   };
 
+  // Vẽ rect/ellipse/highlight/blur bằng window mousemove/mouseup (giống kỹ
+  // thuật `beginCropPointerDrag` ở trên) thay vì dựa vào Konva Stage
+  // onMouseMove/onMouseUp — Stage chỉ rộng đúng bằng ảnh nên khi kéo ra sát
+  // mép/ngoài ảnh, Konva ngừng nhận mousemove và (nếu thả chuột ở ngoài) không
+  // bao giờ nhận được mouseup, khiến khung vẽ bị "dính" và tiếp tục bám theo
+  // con trỏ ở lần kéo sau. Toạ độ luôn được clamp vào [0, imgW]/[0, imgH].
+  const beginShapeDraft = (
+    type: "rect" | "ellipse" | "highlight" | "blur",
+    startX: number,
+    startY: number,
+  ) => {
+    const d = docRef.current;
+    if (!d) return;
+    const clamp = (v: number, max: number) => Math.max(0, Math.min(v, max));
+    const sx = clamp(startX, d.imgW);
+    const sy = clamp(startY, d.imgH);
+    setDraft({ type, x: sx, y: sy, width: 0, height: 0 });
+
+    const onMove = (me: MouseEvent) => {
+      const p = clientToImg(me.clientX, me.clientY);
+      const x = clamp(p.x, d.imgW);
+      const y = clamp(p.y, d.imgH);
+      setDraft({ type, x: sx, y: sy, width: x - sx, height: y - sy });
+    };
+    const onUp = (ue: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      const p = clientToImg(ue.clientX, ue.clientY);
+      const x = clamp(p.x, d.imgW);
+      const y = clamp(p.y, d.imgH);
+      setDraft(null);
+      const nx = Math.min(sx, x);
+      const ny = Math.min(sy, y);
+      const width = Math.abs(x - sx);
+      const height = Math.abs(y - sy);
+      if (width < 4 || height < 4) return;
+      if (type === "highlight") {
+        useEditor.getState().addAnnotation({
+          id: uid(), type: "highlight",
+          x: nx, y: ny, width, height,
+          color: highlightColor, strokeWidth,
+        });
+        return;
+      }
+      if (type === "blur") {
+        useEditor.getState().addAnnotation({
+          id: uid(), type: "blur",
+          x: nx, y: ny, width, height,
+          color: "#000", strokeWidth,
+          blurRadius,
+          blurMode: useEditor.getState().blurMode,
+          solidColor: useEditor.getState().blurSolidColor,
+        });
+        return;
+      }
+      useEditor.getState().addAnnotation({
+        id: uid(), type,
+        x: nx, y: ny, width, height, color, strokeWidth,
+      });
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  // Tương tự `beginShapeDraft` nhưng cho arrow/line/numbered-arrow.
+  const beginArrowDraft = (
+    type: "arrow" | "line" | "numbered-arrow",
+    startX: number,
+    startY: number,
+  ) => {
+    const d = docRef.current;
+    if (!d) return;
+    const clamp = (v: number, max: number) => Math.max(0, Math.min(v, max));
+    const sx = clamp(startX, d.imgW);
+    const sy = clamp(startY, d.imgH);
+    setArrowDraft({ type, x: sx, y: sy, x2: sx, y2: sy });
+
+    const onMove = (me: MouseEvent) => {
+      const p = clientToImg(me.clientX, me.clientY);
+      const x2 = clamp(p.x, d.imgW);
+      const y2 = clamp(p.y, d.imgH);
+      setArrowDraft({ type, x: sx, y: sy, x2, y2 });
+    };
+    const onUp = (ue: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      const p = clientToImg(ue.clientX, ue.clientY);
+      const x2 = clamp(p.x, d.imgW);
+      const y2 = clamp(p.y, d.imgH);
+      setArrowDraft(null);
+      const dx = x2 - sx;
+      const dy = y2 - sy;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 8) return;
+      if (type === "line") {
+        useEditor.getState().addAnnotation({
+          id: uid(), type: "line",
+          x: sx, y: sy, x2, y2,
+          color, strokeWidth,
+        });
+      } else if (type === "arrow") {
+        useEditor.getState().addAnnotation({
+          id: uid(), type: "arrow",
+          x: sx, y: sy, x2, y2,
+          color, strokeWidth,
+        });
+      } else {
+        const value = useEditor.getState().nextArrowStep();
+        const radius = Math.max(strokeWidth * 4, 14);
+        useEditor.getState().addAnnotation({
+          id: uid(), type: "numbered-arrow",
+          x: sx, y: sy, x2, y2,
+          value, radius, color, strokeWidth,
+        });
+      }
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   const onStageMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     // Pan mode (Space giữ) hoặc middle-button → nhường cho pointer handler
     if (isPanModeRef.current || e.evt.button === 1) return;
@@ -662,11 +782,11 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     }
 
     if (tool === "rect" || tool === "ellipse" || tool === "highlight" || tool === "blur") {
-      setDraft({ type: tool, x, y, width: 0, height: 0 });
+      beginShapeDraft(tool, x, y);
       return;
     }
     if (tool === "arrow" || tool === "line" || tool === "numbered-arrow") {
-      setArrowDraft({ type: tool, x, y, x2: x, y2: y });
+      beginArrowDraft(tool, x, y);
       return;
     }
     if (tool === "step") {
@@ -710,88 +830,10 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     }
   };
 
-  const onStageMouseMove = () => {
-    // Resize/move crop rect được xử lý riêng qua `beginCropPointerDrag`
-    // (native window mousemove/mouseup) — xem effect đó để biết lý do.
-    const stage = stageRef.current;
-    const pos = stage?.getPointerPosition();
-    if (!pos) return;
-    const { x, y } = toImg(pos);
-
-    if (draft) {
-      setDraft({ ...draft, width: x - draft.x, height: y - draft.y });
-    }
-    if (arrowDraft) {
-      setArrowDraft({ ...arrowDraft, x2: x, y2: y });
-    }
-  };
-
-  const onStageMouseUp = () => {
-    // Resize/move crop rect: xử lý + kết thúc trong `beginCropPointerDrag`.
-    if (arrowDraft) {
-      const dx = arrowDraft.x2 - arrowDraft.x;
-      const dy = arrowDraft.y2 - arrowDraft.y;
-      const len = Math.sqrt(dx * dx + dy * dy);
-      setArrowDraft(null);
-      if (len < 8) return;
-      if (arrowDraft.type === "line") {
-        useEditor.getState().addAnnotation({
-          id: uid(), type: "line",
-          x: arrowDraft.x, y: arrowDraft.y,
-          x2: arrowDraft.x2, y2: arrowDraft.y2,
-          color, strokeWidth,
-        });
-      } else if (arrowDraft.type === "arrow") {
-        useEditor.getState().addAnnotation({
-          id: uid(), type: "arrow",
-          x: arrowDraft.x, y: arrowDraft.y,
-          x2: arrowDraft.x2, y2: arrowDraft.y2,
-          color, strokeWidth,
-        });
-      } else {
-        const value = useEditor.getState().nextArrowStep();
-        const radius = Math.max(strokeWidth * 4, 14);
-        useEditor.getState().addAnnotation({
-          id: uid(), type: "numbered-arrow",
-          x: arrowDraft.x, y: arrowDraft.y,
-          x2: arrowDraft.x2, y2: arrowDraft.y2,
-          value, radius, color, strokeWidth,
-        });
-      }
-      return;
-    }
-    if (!draft) return;
-    const x = Math.min(draft.x, draft.x + draft.width);
-    const y = Math.min(draft.y, draft.y + draft.height);
-    const width = Math.abs(draft.width);
-    const height = Math.abs(draft.height);
-    setDraft(null);
-    if (width < 4 || height < 4) return;
-
-    if (draft.type === "highlight") {
-      useEditor.getState().addAnnotation({
-        id: uid(), type: "highlight",
-        x, y, width, height,
-        color: highlightColor, strokeWidth,
-      });
-      return;
-    }
-    if (draft.type === "blur") {
-      useEditor.getState().addAnnotation({
-        id: uid(), type: "blur",
-        x, y, width, height,
-        color: "#000", strokeWidth,
-        blurRadius,
-        blurMode: useEditor.getState().blurMode,
-        solidColor: useEditor.getState().blurSolidColor,
-      });
-      return;
-    }
-    useEditor.getState().addAnnotation({
-      id: uid(), type: draft.type as "rect" | "ellipse",
-      x, y, width, height, color, strokeWidth,
-    });
-  };
+  // Vẽ rect/ellipse/highlight/blur/arrow/line/numbered-arrow giờ được kéo
+  // hoàn toàn qua `beginShapeDraft`/`beginArrowDraft` (window mousemove/
+  // mouseup) — xem 2 hàm đó ở trên, nên Stage không cần onMouseMove/onMouseUp
+  // riêng cho việc này nữa.
 
   const onDragEnd = (id: string, e: Konva.KonvaEventObject<DragEvent>) => {
     useEditor.getState().updateAnnotation(id, { x: e.target.x(), y: e.target.y() });
@@ -971,8 +1013,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
           width={box.w}
           height={box.h}
           onMouseDown={onStageMouseDown}
-          onMouseMove={onStageMouseMove}
-          onMouseUp={onStageMouseUp}
           style={{ 
             cursor: isPanMode 
               ? (isPanDrag ? "grabbing" : "grab") 
