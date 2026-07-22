@@ -571,9 +571,16 @@ fn resize_capture_bar_win32(win: &tauri::WebviewWindow, height: f64) -> Result<(
     Ok(())
 }
 
-/// Bảng điều khiển chụp cuộn (scrolling capture).
+/// Bảng điều khiển chụp cuộn (scrolling capture). `border_win` là chính
+/// overlay đang hiển thị khung xanh (đã đứng yên từ lúc user kéo/thả chuột
+/// chọn vùng, xem `flow::finalize_region` nhánh "scroll") — KHÔNG build cửa
+/// sổ "scroll-border" mới nữa: tái dùng nguyên nó làm khung viền trong lúc
+/// chụp cuộn, loại bỏ khoảng hở giữa 2 cửa sổ từng gây "nháy khung" lúc bắt
+/// đầu chụp cuộn (cùng kỹ thuật `open_stop_control`/`finalize_region` dùng
+/// cho quay vùng).
 pub fn open_scroll_control(
     app: &AppHandle,
+    border_win: &tauri::WebviewWindow,
     mx: i32,
     my: i32,
     rx: u32,
@@ -584,9 +591,19 @@ pub fn open_scroll_control(
     if let Some(win) = app.get_webview_window("scroll-control") {
         let _ = win.close();
     }
-    if let Some(win) = app.get_webview_window("scroll-border") {
-        let _ = win.close();
-    }
+
+    // Đặt click-through để chuột nhấn xuyên qua được khung xuống trang thật
+    // đang cuộn phía dưới.
+    let _ = border_win.set_ignore_cursor_events(true);
+    // Loại khung viền khỏi ảnh chụp (SCK trên macOS / WGC trên Windows bỏ qua
+    // cửa sổ content-protected) — tránh khung lọt vào lát cắt khi nó nằm đè
+    // lên vùng đang cuộn.
+    let _ = border_win.set_content_protected(true);
+    // Báo frontend (đang chạy sẵn NGAY TRONG cửa sổ này suốt từ lúc chọn
+    // vùng) tự chuyển từ hiển thị "khung xanh + backdrop mờ" (RegionSelect)
+    // sang khung viền nét đứt pulsing cho chụp cuộn — không cần truyền lại
+    // toạ độ vùng chọn vì component vẫn còn nguyên `sel` trong state.
+    let _ = border_win.emit("scroll-border-activate", ());
 
     let m = crate::capture::monitor::at_point(mx, my)?;
     let m_x = m.x().map_err(|e| e.to_string())? as f64;
@@ -595,14 +612,14 @@ pub fn open_scroll_control(
 
     // Chuyển toạ độ vùng chụp sang logical points để định vị cửa sổ
     #[cfg(target_os = "windows")]
-    let (lx, ly, lw, lh) = (
+    let (lx, ly, lw, _lh) = (
         rx as f64 / scale,
         ry as f64 / scale,
         rw as f64 / scale,
         rh as f64 / scale,
     );
     #[cfg(not(target_os = "windows"))]
-    let (lx, ly, lw, lh) = (
+    let (lx, ly, lw, _lh) = (
         rx as f64,
         ry as f64,
         rw as f64,
@@ -612,31 +629,7 @@ pub fn open_scroll_control(
     let global_x = m_x + lx;
     let global_y = m_y + ly;
 
-    // 1. Mở cửa sổ khung viền nét đứt bao quanh vùng chọn (kích thước lớn hơn vùng chọn 12px)
-    let border_win = WebviewWindowBuilder::new(
-        app,
-        "scroll-border",
-        WebviewUrl::App("index.html?win=scroll-border".into()),
-    )
-    .title("SnapDoc — Scroll Border")
-    .inner_size(lw + 12.0, lh + 12.0)
-    .position(global_x - 6.0, global_y - 6.0)
-    .decorations(false)
-    .transparent(true)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .shadow(false)
-    .build()
-    .map_err(|e| format!("Không tạo được khung viền scroll: {e}"))?;
-
-    // Đặt click-through để chuột nhấn xuyên qua được viền
-    let _ = border_win.set_ignore_cursor_events(true);
-    // Loại khung viền khỏi ảnh chụp (SCK trên macOS / WGC trên Windows bỏ qua
-    // cửa sổ content-protected) — tránh viền nét đứt lọt vào lát cắt khi nó
-    // nằm đè lên vùng đang cuộn.
-    let _ = border_win.set_content_protected(true);
-
-    // 2. Tính toán vị trí bảng điều khiển. Ưu tiên đặt NGOÀI vùng chọn bên phải;
+    // Tính toán vị trí bảng điều khiển. Ưu tiên đặt NGOÀI vùng chọn bên phải;
     //    nếu không đủ chỗ thì bên trái; nếu vùng chọn chiếm hết (cả hai bên đều
     //    không đủ) thì đặt TRONG vùng chọn, luôn SÁT MÉP PHẢI. Panel đã được
     //    content-protect nên không lọt vào ảnh chụp dù nằm đè lên vùng cuộn.
@@ -1550,6 +1543,24 @@ pub fn close_overlays_except(app: &AppHandle, keep_label: &str) {
     // + emit overlay-input/press/release cho overlay còn lại dù đã hết tác
     // dụng chọn vùng) — bump generation để lần kiểm tra tiếp theo tự thoát.
     app.state::<AppState>().overlay_gen.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Kết thúc THẬT SỰ 1 phiên chụp cuộn (hoàn tất hoặc huỷ) — đóng overlay đang
+/// đóng vai khung viền (`close_overlays`), đồng thời:
+/// 1) bump `overlay_gen` — phòng hờ trường hợp (hiếm, phụ thuộc máy) vòng lặp
+///    `input_loop` của phiên chọn vùng gốc chưa kịp thoát: nếu để sót, nó có
+///    thể bắt nhầm 1 cú nhấn/thả chuột TOÀN CỤC về sau (vd user vẽ shape
+///    trong Editor) thành sự kiện chọn vùng trên overlay pre-warm ẩn, gọi lại
+///    `finalize_region`.
+/// 2) xoá `last_capture.mode` — NẾU (1) vẫn lọt lưới và 1 cú `finalize_region`
+///    lạc thật sự xảy ra, nó sẽ không còn thấy mode == "scroll" nữa nên không
+///    tự khởi động lại phiên chụp cuộn (đây là lớp phòng thủ THỨ HAI, độc lập
+///    với (1) — chặn đúng triệu chứng "chụp cuộn tự kích hoạt lại" dù nguyên
+///    nhân sâu xa là gì).
+pub fn end_scroll_session(app: &AppHandle) {
+    close_overlays(app);
+    app.state::<AppState>().overlay_gen.fetch_add(1, Ordering::SeqCst);
+    app.state::<AppState>().last_capture.clear_mode();
 }
 
 /// Ẩn editor và trả về Accessory policy (ẩn Dock) / ẩn icon khỏi taskbar (Windows).

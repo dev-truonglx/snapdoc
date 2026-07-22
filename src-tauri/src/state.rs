@@ -62,6 +62,16 @@ impl LastCaptureMode {
         *self.mode.lock().unwrap() = mode.to_string();
         *self.output.lock().unwrap() = output.to_string();
     }
+
+    /// Xoá `mode` (giữ nguyên `output`) — gọi khi 1 phiên "có trạng thái đặc
+    /// biệt kéo dài" (hiện chỉ chụp cuộn) đã hoàn tất/huỷ THẬT SỰ. Nếu không
+    /// xoá, `mode` vẫn còn là "scroll" cho tới lần chụp chủ động TIẾP THEO —
+    /// một cú `finalize_region` LẠC (vd overlay pre-warm ẩn lỡ nhận nhầm sự
+    /// kiện chuột toàn cục nào đó, xem `windows::input_loop`) sẽ bị hiểu nhầm
+    /// là "vẫn đang chụp cuộn" và tự khởi động lại phiên, thay vì bị bỏ qua.
+    pub fn clear_mode(&self) {
+        *self.mode.lock().unwrap() = String::new();
+    }
 }
 
 #[derive(Default)]
