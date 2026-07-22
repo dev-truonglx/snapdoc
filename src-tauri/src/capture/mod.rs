@@ -1,3 +1,4 @@
+pub mod freeze;
 pub mod fullscreen;
 pub mod monitor;
 pub mod region;

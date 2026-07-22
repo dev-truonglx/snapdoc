@@ -975,3 +975,29 @@ pub async fn finalize_scroll_stitch(
     let output = crate::flow::get_output(&app);
     crate::flow::finish(&app, cap, &output, 1.0)
 }
+
+/// Lấy ảnh "đóng băng màn hình" (JPEG base64 trần) cho overlay có chỉ số `idx`.
+/// Frontend gọi khi mount overlay để lấy background tĩnh thay vì nhìn xuyên
+/// qua overlay trong suốt vào app đang chạy phía sau.
+/// Trả `None` nếu chưa có dữ liệu (lỗi chụp, hoặc chưa gọi `take_frozen_screens`).
+#[tauri::command]
+pub fn get_frozen_screen(state: State<AppState>, idx: usize) -> Option<String> {
+    state
+        .frozen_screens
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&idx).cloned())
+}
+
+/// Frontend gọi NGAY SAU KHI đã paint xong ảnh đóng băng (double rAF, xem
+/// `useFrozenScreen` trong Overlay.tsx) — báo cho `windows::wait_for_overlays_ready`
+/// biết overlay `idx` (thuộc phiên `gen`) đã sẵn sàng để `win.show()`.
+/// Không có Sender đang chờ (đã timeout hoặc phiên cũ) thì bỏ qua im lặng.
+#[tauri::command]
+pub fn notify_overlay_ready(state: State<AppState>, gen: u64, idx: usize) {
+    if let Ok(slot) = state.overlay_ready_tx.lock() {
+        if let Some(tx) = slot.as_ref() {
+            let _ = tx.send((gen, idx));
+        }
+    }
+}

@@ -126,4 +126,18 @@ pub struct AppState {
     /// `windows::restore_hidden_product_windows`.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub hidden_for_capture: Mutex<Vec<String>>,
+    /// Ảnh "đóng băng" màn hình (JPEG base64, không có prefix data URL) chụp
+    /// ngay trước khi mở overlay chọn vùng — overlay dùng làm background tĩnh
+    /// để tránh tương tác với app đang chạy phía sau (như Snagit/Lightshot).
+    /// Key = chỉ số màn hình (khớp với `overlay-{i}`), value = JPEG base64.
+    /// Xoá sau khi overlay đóng (`close_overlays` / `cancel_overlay`).
+    pub frozen_screens: Mutex<HashMap<usize, String>>,
+    /// Kênh báo "overlay-{idx} đã paint xong ảnh đóng băng" từ frontend, dùng
+    /// bởi `windows::wait_for_overlays_ready` để trì hoãn `win.show()` cho
+    /// tới khi frame đầu tiên hiện ra ĐÃ có sẵn nội dung đúng (tránh nhịp
+    /// trống/nháy khi show() rồi mới paint sau — xem cơ chế freeze mượt như
+    /// Snagit). Value gửi lên là `(gen, idx)`; gen dùng để lọc bỏ tín hiệu
+    /// trễ từ phiên overlay cũ. Được thay Sender mới mỗi lần mở overlay,
+    /// không cần dọn tay khi đóng overlay.
+    pub overlay_ready_tx: Mutex<Option<std::sync::mpsc::Sender<(u64, usize)>>>,
 }

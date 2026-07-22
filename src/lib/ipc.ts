@@ -94,6 +94,14 @@ export interface UpdateInfo {
 }
 
 export const ipc = {
+  /** Lấy ảnh "đóng băng màn hình" (JPEG base64 trần) cho overlay `idx` —
+   * frontend dùng làm background tĩnh khi kéo chọn vùng, tránh tương tác
+   * nhầm với app đang chạy phía sau (như Snagit/Lightshot). */
+  getFrozenScreen: (idx: number) => invoke<string | null>("get_frozen_screen", { idx }),
+  /** Báo cho Rust biết overlay `idx` (phiên `gen`) đã paint xong ảnh đóng
+   * băng — Rust chờ tín hiệu này (tất cả overlay) rồi mới show() đồng loạt,
+   * tránh nhịp trống/nháy khi show() rồi mới paint sau (xem `useFrozenScreen`). */
+  notifyOverlayReady: (idx: number, gen: number) => invoke<void>("notify_overlay_ready", { idx, gen }),
   peekPending: () => invoke<Pending | null>("peek_pending"),
   takePending: () => invoke<Pending | null>("take_pending"),
   /** Ghi đè ảnh đang chờ (output="editor") — dùng khi "Chụp nhanh" bàn giao ảnh đã annotate sang Editor. */

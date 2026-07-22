@@ -8,10 +8,67 @@ import { PRESET_COLORS, type Tool } from "../../features/annotation/model";
 import { quickToolFromKey } from "../../lib/toolShortcuts";
 import QuickToolbar, { quickToolbarLayout } from "../quick-capture/QuickToolbar";
 
+/**
+ * Lấy ảnh "đóng băng màn hình" từ Rust (JPEG base64) khi mount overlay.
+ * Trả { url, ready }:
+ *   - url: data URL để dùng làm CSS background-image (null khi chưa có)
+ *   - ready: true khi đã lấy xong (dù thành công hay thất bại) — overlay
+ *     dùng để quyết định có render hay không, tránh flash transparent.
+ *
+ * Overlay giữ `visibility: hidden` cho đến khi ready=true, sau đó hiện ngay
+ * với frozen image đã có → không có frame nào bị "trong suốt" lộ ra màn hình.
+ *
+ * Sau khi ready=true, báo ngược lại cho Rust (`notify_overlay_ready`) rằng
+ * overlay này đã paint xong — Rust (`windows::wait_for_overlays_ready`) chờ
+ * đủ tín hiệu từ mọi overlay rồi mới `show()` TẤT CẢ cùng lúc, để frame đầu
+ * tiên hiện ra trên màn hình đã có sẵn ảnh đúng (cơ chế freeze mượt như
+ * Snagit: không bao giờ show() window rồi mới paint nội dung vào sau).
+ * Double rAF: rAF đầu chờ trình duyệt schedule vẽ DOM mới (ready=true), rAF
+ * thứ hai chạy sau khi frame đó đã thực sự được composite.
+ */
+function useFrozenScreen(): { url: string | null; ready: boolean } {
+  const [state, setState] = useState<{ url: string | null; ready: boolean }>({
+    url: null,
+    ready: false,
+  });
+  useEffect(() => {
+    let cancelled = false;
+    ipc.getFrozenScreen(MY_IDX)
+      .then((b64) => {
+        if (!cancelled) {
+          setState({ url: b64 ? `data:image/jpeg;base64,${b64}` : null, ready: true });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setState({ url: null, ready: true });
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!state.ready) return;
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        ipc.notifyOverlayReady(MY_IDX, GEN).catch(() => {});
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
+  }, [state.ready]);
+
+  return state;
+}
+
 const params = new URLSearchParams(window.location.search);
 const MODE = params.get("mode") ?? "region";
 const MY_IDX = Number(params.get("idx") ?? "0");
 const SCALE = Number(params.get("scale") ?? "1") || 1;
+// Phiên overlay hiện tại (Rust gán, xem `windows::open_overlays_ex`) — echo
+// lại qua `notifyOverlayReady` để Rust lọc bỏ tín hiệu trễ từ phiên cũ.
+const GEN = Number(params.get("gen") ?? "0");
 // "record=1" = đang chọn phạm vi QUAY (không phải chụp ảnh) — chỉ MODE=="region"
 // quan tâm tới cờ này (window/monitor picker chọn tức thì, không cần bước
 // chỉnh vùng). "px/py/pw/ph" (nếu có) = vùng đã quay lần gần nhất, đề xuất lại
@@ -88,6 +145,7 @@ function rectFrom(sx: number, sy: number, x: number, y: number): Sel {
 }
 
 function RegionSelect() {
+  const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const startRef = useRef<Vec2 | null>(null);
   const [sel, setSel] = useState<Sel | null>(null);
 
@@ -110,8 +168,20 @@ function RegionSelect() {
     },
   );
 
+  const rootStyle: React.CSSProperties = {
+    ...root,
+    // Ẩn hoàn toàn cho đến khi frozen image load xong — tránh flash transparent.
+    visibility: frozenReady ? "visible" : "hidden",
+    ...(frozenUrl ? {
+      backgroundImage: `url("${frozenUrl}")`,
+      backgroundSize: "100% 100%",
+      backgroundRepeat: "no-repeat",
+    } : {}),
+    cursor: CROSSHAIR_CURSOR,
+  };
+
   return (
-    <div style={{ ...root, cursor: CROSSHAIR_CURSOR }}>
+    <div style={rootStyle}>
       {sel && sel.w > 0 ? (
         <div
           style={{
@@ -121,7 +191,7 @@ function RegionSelect() {
             width: sel.w,
             height: sel.h,
             border: "2px solid #3b82f6",
-            boxShadow: "0 0 0 9999px rgba(0,0,0,0.6)",
+            boxShadow: "0 0 0 9999px rgba(0,0,0,0.55)",
           }}
         >
           <span style={sizeLabel}>
@@ -129,7 +199,7 @@ function RegionSelect() {
           </span>
         </div>
       ) : (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)" }}>
+        <div style={{ position: "fixed", inset: 0, background: frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.5)" }}>
           <div style={banner}>Kéo để chọn vùng • Esc / chuột phải để huỷ</div>
         </div>
       )}
@@ -202,6 +272,7 @@ function isOverBoxOrBar(sel: Sel, winW: number, winH: number, x: number, y: numb
 }
 
 function RecordRegionSelect() {
+  const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const [phase, setPhase] = useState<RecPhase>(PRESET ? "adjusting" : "selecting");
   const [sel, setSel] = useState<Sel | null>(PRESET);
   const [busy, setBusy] = useState(false);
@@ -376,11 +447,14 @@ function RecordRegionSelect() {
       ref={rootRef}
       style={{
         ...root,
-        // "selecting": luôn crosshair (đang vẽ vùng). "adjusting": crosshair
-        // CHỈ khi hover trên nền trống (bấm/kéo ở đây = chọn lại vùng khác);
-        // trên khung/handle/thanh nút, cursor riêng của từng phần tử (move/
-        // resize/pointer) tự động thắng nhờ CSS specificity. "recording":
-        // không quan trọng nữa (cửa sổ đã click-through, không ai thấy).
+        visibility: frozenReady ? "visible" : "hidden",
+        // Khi đang quay: bỏ frozen background để màn hình thật hiện ra.
+        // 4 div nền xám bên dưới sẽ che phần ngoài vùng quay.
+        ...(!recording && frozenUrl ? {
+          backgroundImage: `url("${frozenUrl}")`,
+          backgroundSize: "100% 100%",
+          backgroundRepeat: "no-repeat",
+        } : {}),
         cursor: !recording && (phase === "selecting" || (phase === "adjusting" && bgHover)) ? CROSSHAIR_CURSOR : "default",
       }}
       onPointerDownCapture={onDownCapture}
@@ -389,36 +463,51 @@ function RecordRegionSelect() {
       onContextMenu={(e) => { e.preventDefault(); doCancel(); }}
     >
       {sel && sel.w > 0 ? (
-        <div
-          style={{
-            position: "fixed",
-            left: sel.x,
-            top: sel.y,
-            width: sel.w,
-            height: sel.h,
-            outline: "2px solid #ef4444",
-            boxShadow: "0 0 0 9999px rgba(0,0,0,0.6)",
-            cursor: !recording && phase === "adjusting" ? "move" : "default",
-          }}
-          onPointerDown={onMoveDown}
-        >
-          {!recording && phase === "selecting" && (
-            <span style={sizeLabel}>{Math.round(sel.w)} × {Math.round(sel.h)}</span>
+        <>
+          {/* Khi đang quay: 4 dải nền xám mờ che 4 phía ngoài vùng quay —
+              thay thế box-shadow (bị bỏ khi recording) để user phân biệt rõ
+              vùng đang quay với phần còn lại. Overlay đã click-through nên
+              các div này không chặn chuột. */}
+          {recording && (
+            <>
+              {/* Trên */}
+              <div style={{ position: "fixed", inset: 0, bottom: "auto", height: sel.y, background: "rgba(0,0,0,0.4)", pointerEvents: "none" }} />
+              {/* Dưới */}
+              <div style={{ position: "fixed", left: 0, top: sel.y + sel.h, right: 0, bottom: 0, background: "rgba(0,0,0,0.4)", pointerEvents: "none" }} />
+              {/* Trái (chỉ khoảng giữa trên-dưới) */}
+              <div style={{ position: "fixed", left: 0, top: sel.y, width: sel.x, height: sel.h, background: "rgba(0,0,0,0.4)", pointerEvents: "none" }} />
+              {/* Phải */}
+              <div style={{ position: "fixed", left: sel.x + sel.w, top: sel.y, right: 0, height: sel.h, background: "rgba(0,0,0,0.4)", pointerEvents: "none" }} />
+            </>
           )}
-          {/* "recording": bỏ handle + thanh nút — cửa sổ đã click-through,
-              không ai bấm được nữa; nút "Dừng quay" thật ở cửa sổ nhỏ riêng
-              (`record-stop-control`). Vẫn giữ NGUYÊN div khung ở trên (cùng
-              vị trí/kích thước, không remount) để không có khung hình nào
-              trông khác giữa lúc "adjusting" và lúc quay. */}
-          {!recording && phase === "adjusting" && REC_HANDLES.map((hd) => (
-            <div key={hd.id} onPointerDown={onResizeDown(hd.id)} style={quickHandleStyle(hd)} />
-          ))}
-          {!recording && phase === "adjusting" && (
-            <RecordRegionToolbar sel={sel} winW={winW} winH={winH} busy={busy} onStart={doStart} onCancel={doCancel} />
-          )}
-        </div>
+          <div
+            style={{
+              position: "fixed",
+              left: sel.x,
+              top: sel.y,
+              width: sel.w,
+              height: sel.h,
+              outline: "2px solid #ef4444",
+              // Khi chưa quay: dim phần ngoài bằng box-shadow.
+              // Khi đang quay: dùng 4 div riêng ở trên, box-shadow = none.
+              boxShadow: recording ? "none" : "0 0 0 9999px rgba(0,0,0,0.55)",
+              cursor: !recording && phase === "adjusting" ? "move" : "default",
+            }}
+            onPointerDown={onMoveDown}
+          >
+            {!recording && phase === "selecting" && (
+              <span style={sizeLabel}>{Math.round(sel.w)} × {Math.round(sel.h)}</span>
+            )}
+            {!recording && phase === "adjusting" && REC_HANDLES.map((hd) => (
+              <div key={hd.id} onPointerDown={onResizeDown(hd.id)} style={quickHandleStyle(hd)} />
+            ))}
+            {!recording && phase === "adjusting" && (
+              <RecordRegionToolbar sel={sel} winW={winW} winH={winH} busy={busy} onStart={doStart} onCancel={doCancel} />
+            )}
+          </div>
+        </>
       ) : (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)" }}>
+        <div style={{ position: "fixed", inset: 0, background: frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.5)" }}>
           <div style={banner}>Kéo để chọn vùng quay • Esc / chuột phải để huỷ</div>
         </div>
       )}
@@ -500,6 +589,7 @@ function loadImg(src: string): Promise<HTMLImageElement> {
 }
 
 function QuickAnnotate() {
+  const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const loadDoc = useEditor((s) => s.loadDoc);
   const setTool = useEditor((s) => s.setTool);
   const annCount = useEditor((s) => s.doc?.annotations.length ?? 0);
@@ -735,7 +825,17 @@ function QuickAnnotate() {
   return (
     <div
       ref={rootRef}
-      style={{ ...root, cursor: phase === "selecting" ? CROSSHAIR_CURSOR : "default" }}
+      style={{
+        ...root,
+        // Ẩn cho đến khi frozen image load xong — tránh flash transparent.
+        visibility: frozenReady ? "visible" : "hidden",
+        ...(frozenUrl ? {
+          backgroundImage: `url("${frozenUrl}")`,
+          backgroundSize: "100% 100%",
+          backgroundRepeat: "no-repeat",
+        } : {}),
+        cursor: phase === "selecting" ? CROSSHAIR_CURSOR : "default",
+      }}
       onPointerDownCapture={onDownCapture}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -746,7 +846,8 @@ function QuickAnnotate() {
           style={{
             position: "fixed", left: sel.x, top: sel.y, width: sel.w, height: sel.h,
             outline: "2px solid #3b82f6",
-            boxShadow: "0 0 0 9999px rgba(0,0,0,0.45)",
+            // Dim phần ngoài; frozen image vẫn hiện rõ bên trong qua background root.
+            boxShadow: "0 0 0 9999px rgba(0,0,0,0.55)",
             cursor: phase === "adjusting" ? "move" : "default",
           }}
           onPointerDown={onMoveDown}
@@ -760,12 +861,12 @@ function QuickAnnotate() {
           ))}
         </div>
       ) : (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)" }}>
+        <div style={{ position: "fixed", inset: 0, background: frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.45)" }}>
           <div style={banner}>Kéo để chọn vùng • Esc / chuột phải để huỷ</div>
         </div>
       )}
 
-      {/* Canvas chú thích phủ đúng khung (trong suốt → thấy màn hình thật) */}
+      {/* Canvas chú thích phủ đúng khung (trong suốt → thấy frozen image bên dưới) */}
       {phase === "annotating" && sel && (
         <div
           style={{ position: "fixed", left: sel.x - STAGE_PAD, top: sel.y - STAGE_PAD, width: sel.w + STAGE_PAD * 2, height: sel.h + STAGE_PAD * 2 }}
@@ -816,6 +917,7 @@ function quickHandleStyle(hd: { cx: number; cy: number; cur: string }): React.CS
 /* ───────────── Window: chọn cửa sổ (đa màn hình) ───────────── */
 
 function WindowPicker() {
+  const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const winsRef = useRef<WindowInfo[]>([]);
   const [hover, setHover] = useState<WindowInfo | null>(null);
 
@@ -839,8 +941,21 @@ function WindowPicker() {
     () => {},
   );
 
+  const rootStyle: React.CSSProperties = frozenUrl
+    ? {
+        ...root,
+        visibility: frozenReady ? "visible" : "hidden",
+        backgroundImage: `url("${frozenUrl}")`,
+        backgroundSize: "100% 100%",
+        backgroundRepeat: "no-repeat",
+        cursor: CAMERA_CURSOR,
+      }
+    : { ...root, visibility: frozenReady ? "visible" : "hidden", background: "rgba(0,0,0,0.28)", cursor: CAMERA_CURSOR };
+
   return (
-    <div style={{ ...root, background: "rgba(0,0,0,0.28)", cursor: CAMERA_CURSOR }}>
+    <div style={rootStyle}>
+      {/* Dim layer khi có frozen image */}
+      {frozenUrl && <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", pointerEvents: "none" }} />}
       {hover && (
         <div
           style={{
@@ -853,6 +968,7 @@ function WindowPicker() {
             background: "rgba(59,130,246,0.15)",
             boxSizing: "border-box",
             pointerEvents: "none",
+            zIndex: 1,
           }}
         >
           <span style={{ ...sizeLabel, top: 6, left: 6 }}>{hover.app || hover.title || "Cửa sổ"}</span>
@@ -866,6 +982,7 @@ function WindowPicker() {
 /* ───────────── Monitor: chọn cả màn hình (chế độ full) ───────────── */
 
 function MonitorPick() {
+  const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const [active, setActive] = useState(false);
 
   useInput(
@@ -874,16 +991,30 @@ function MonitorPick() {
     () => {},
   );
 
-  return (
-    <div
-      style={{
+  const rootStyle: React.CSSProperties = frozenUrl
+    ? {
         ...root,
+        visibility: frozenReady ? "visible" : "hidden",
+        backgroundImage: `url("${frozenUrl}")`,
+        backgroundSize: "100% 100%",
+        backgroundRepeat: "no-repeat",
+        cursor: CAMERA_CURSOR,
+        border: active ? "5px solid #3b82f6" : "5px solid transparent",
+        boxSizing: "border-box",
+      }
+    : {
+        ...root,
+        visibility: frozenReady ? "visible" : "hidden",
         cursor: CAMERA_CURSOR,
         background: active ? "rgba(59,130,246,0.12)" : "rgba(0,0,0,0.28)",
         border: active ? "5px solid #3b82f6" : "5px solid transparent",
         boxSizing: "border-box",
-      }}
-    >
+      };
+
+  return (
+    <div style={rootStyle}>
+      {/* Dim layer khi có frozen image */}
+      {frozenUrl && <div style={{ position: "fixed", inset: 0, background: active ? "rgba(59,130,246,0.12)" : "rgba(0,0,0,0.45)", pointerEvents: "none" }} />}
       <div style={banner}>Click để chụp toàn bộ màn hình này • Esc / chuột phải để huỷ</div>
     </div>
   );

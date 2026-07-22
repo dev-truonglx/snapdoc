@@ -119,6 +119,8 @@ pub fn run() {
             commands::start_scroll_session,
             commands::finalize_scroll_stitch,
             commands::start_recording,
+            commands::get_frozen_screen,
+            commands::notify_overlay_ready,
             commands::start_record_picker,
             commands::confirm_region_record_start,
             commands::peek_pending_recording,
