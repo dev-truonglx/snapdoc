@@ -177,6 +177,10 @@ export const ipc = {
   emptyTrash: () => invoke<number>("empty_trash"),
   renameHistoryItem: (id: string, title: string) => invoke<void>("rename_history_item", { id, title }),
   openHistoryItemInEditor: (id: string) => invoke<void>("open_history_item_in_editor", { id }),
+  /** Đọc raw bytes ảnh gốc (không base64) — dùng để đổi ảnh tại chỗ trong
+   * Editor (xem `HistoryStrip.tsx`), tránh chi phí base64+JSON của
+   * `openHistoryItemInEditor`. */
+  getHistoryAssetBytes: (id: string) => invoke<ArrayBuffer>("get_history_asset_bytes", { id }),
   updateHistoryAsset: (id: string, data: string) => invoke<HistoryItem>("update_history_asset", { id, data }),
   copyHistoryItem: (id: string) => invoke<void>("copy_history_item", { id }),
   revealHistoryItem: (id: string) => invoke<void>("reveal_history_item", { id }),

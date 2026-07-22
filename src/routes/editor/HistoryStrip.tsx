@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { ipc, type HistoryItem } from "../../lib/ipc";
@@ -15,7 +15,16 @@ interface Props {
 export default function HistoryStrip({ onFlash }: Props) {
   const [items, setItems] = useState<HistoryItem[]>([]);
   const [copyingId, setCopyingId] = useState<string | null>(null);
+  const [openingId, setOpeningId] = useState<string | null>(null);
   const currentHistoryId = useEditor((s) => s.doc?.historyId);
+  // URL blob của ảnh đang hiển thị trong Editor (nếu nạp qua đường tắt bên
+  // dưới) — cần revoke khi đổi ảnh khác để không rò rỉ memory.
+  const lastBlobUrlRef = useRef<string | null>(null);
+  // Id của lần bấm gần nhất — bấm nhanh 2 ảnh khác nhau trước khi ảnh đầu tải
+  // xong có thể khiến 2 promise resolve KHÔNG đúng thứ tự bấm; so khớp id
+  // này sau await để bỏ qua kết quả đã cũ, tránh hiện sai ảnh + gắn nhầm
+  // `historyId` (Save sẽ ghi đè nhầm record).
+  const latestRequestRef = useRef<string | null>(null);
 
   const load = useCallback(() => {
     if (!("__TAURI_INTERNALS__" in window)) return; // dev-mode ngoài Tauri: bỏ qua
@@ -36,10 +45,43 @@ export default function HistoryStrip({ onFlash }: Props) {
     };
   }, [load]);
 
+  useEffect(() => {
+    return () => {
+      if (lastBlobUrlRef.current) URL.revokeObjectURL(lastBlobUrlRef.current);
+    };
+  }, []);
+
   if (items.length === 0) return null;
 
-  const openInEditor = (id: string) => {
-    ipc.openHistoryItemInEditor(id).catch((e) => onFlash(String(e)));
+  // Đổi ảnh đang xem TẠI CHỖ trong Editor: nạp bytes gốc trực tiếp qua
+  // `getHistoryAssetBytes` (raw binary, không base64) rồi gọi `loadDoc` ngay
+  // trên store — KHÔNG đi qua `openHistoryItemInEditor` (round-trip
+  // PendingCapture/base64/JSON + show/focus/reposition lại chính cửa sổ
+  // Editor đang mở, vốn là nguồn gây lag/giật khi bấm chọn ảnh ở dải này).
+  const openInEditor = async (id: string) => {
+    if (id === currentHistoryId) return;
+    latestRequestRef.current = id;
+    setOpeningId(id);
+    try {
+      const [item, bytes] = await Promise.all([ipc.getHistoryItem(id), ipc.getHistoryAssetBytes(id)]);
+      if (latestRequestRef.current !== id) return; // đã bấm ảnh khác trong lúc chờ — bỏ kết quả này
+      const url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+      if (lastBlobUrlRef.current) URL.revokeObjectURL(lastBlobUrlRef.current);
+      lastBlobUrlRef.current = url;
+      useEditor.getState().loadDoc({
+        image: url,
+        imgW: item.width,
+        imgH: item.height,
+        scaleFactor: item.scaleFactor,
+        annotations: [],
+        historyId: item.id,
+        captureMode: item.captureMode,
+      });
+    } catch (e) {
+      if (latestRequestRef.current === id) onFlash(String(e));
+    } finally {
+      if (latestRequestRef.current === id) setOpeningId(null);
+    }
   };
 
   const quickCopy = async (e: React.MouseEvent, id: string) => {
@@ -62,11 +104,20 @@ export default function HistoryStrip({ onFlash }: Props) {
         {items.map((item) => (
           <div
             key={item.id}
-            style={{ ...thumbBtn, outline: item.id === currentHistoryId ? "2px solid var(--accent)" : "2px solid transparent" }}
+            style={{
+              ...thumbBtn,
+              outline: item.id === currentHistoryId ? "2px solid var(--accent)" : "2px solid transparent",
+              opacity: openingId === item.id ? 0.55 : 1,
+              // Chặn double-click gây race giữa 2 lần nạp ảnh trong lúc 1
+              // ảnh khác đang nạp — không chặn hover/click ảnh đang mở (item
+              // đó bấm lại chỉ no-op, xem `openInEditor`).
+              cursor: openingId ? "wait" : "pointer",
+            }}
             onClick={() => openInEditor(item.id)}
             title="Mở lại trong Editor"
           >
             <img src={convertFileSrc(item.thumbPath)} alt="" style={thumbImg} loading="lazy" />
+            {openingId === item.id && <div style={spinner}>···</div>}
             <button
               style={copyBtn}
               disabled={copyingId === item.id}
@@ -124,6 +175,16 @@ const thumbBtn: React.CSSProperties = {
   overflow: "hidden",
   cursor: "pointer",
   background: "#000",
+};
+
+const spinner: React.CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  color: "#fff",
+  fontSize: 10,
 };
 
 const thumbImg: React.CSSProperties = {

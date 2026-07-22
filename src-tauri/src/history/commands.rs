@@ -191,6 +191,24 @@ fn rename_history_item_sync(app: &AppHandle, id: &str, title: &str) -> Result<()
     Ok(())
 }
 
+/// Đọc bytes gốc (KHÔNG base64) của 1 history item — dùng bởi HistoryStrip
+/// trong Editor để đổi ảnh đang xem TẠI CHỖ (không đi qua PendingCapture/
+/// base64/window focus dance của `open_history_item_in_editor`, vì Editor đã
+/// đang mở sẵn). Trả về `tauri::ipc::Response` (raw bytes, không serialize
+/// JSON) để tránh chi phí base64 + JSON string cho ảnh gốc (có thể vài–vài
+/// chục MB với màn hình Retina) — nguyên nhân chính gây lag khi bấm chọn ảnh
+/// trong dải "Gần đây".
+fn read_history_asset_bytes_sync(app: &AppHandle, id: &str) -> Result<Vec<u8>, String> {
+    let rec = get_history_item_sync(app, id)?;
+    if rec.deleted_at.is_some() {
+        return Err("Không thể mở item đang ở Trash — hãy Restore trước".to_string());
+    }
+    if rec.media_type == "video" {
+        return Err("Video chưa hỗ trợ mở trong Editor".to_string());
+    }
+    std::fs::read(&rec.asset_path).map_err(|e| format!("Không đọc được asset: {e}"))
+}
+
 fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.deleted_at.is_some() {
@@ -396,6 +414,17 @@ pub async fn open_history_item_in_editor(app: AppHandle, id: String) -> Result<(
     tauri::async_runtime::spawn_blocking(move || open_history_item_in_editor_sync(&app, &id))
         .await
         .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Trả về bytes ảnh gốc (PNG) của 1 history item dưới dạng raw binary IPC
+/// response — xem doc-comment `read_history_asset_bytes_sync`.
+#[tauri::command]
+pub async fn get_history_asset_bytes(app: AppHandle, id: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        read_history_asset_bytes_sync(&app, &id).map(tauri::ipc::Response::new)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// Editor Save-in-place: ghi đè asset + thumbnail của đúng record, bump

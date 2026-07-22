@@ -139,6 +139,7 @@ pub fn run() {
             history::commands::empty_trash,
             history::commands::rename_history_item,
             history::commands::open_history_item_in_editor,
+            history::commands::get_history_asset_bytes,
             history::commands::update_history_asset,
             history::commands::trim_history_video,
             history::commands::copy_history_item,
