@@ -102,11 +102,40 @@ fn save_last_region(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h:
 /// `open_overlays` để overlay có background tĩnh ngay khi hiện ra, tránh user
 /// tương tác nhầm với app phía sau (như Snagit/Lightshot). Chạy đồng bộ ở
 /// thread hiện tại (thường là `std::thread::spawn`), không block UI.
+/// Bỏ qua màn hình chứa cửa sổ editor (nếu có mở) để không "đóng băng" editor.
 fn take_frozen_screens(app: &AppHandle) {
-    let screens = capture::freeze::capture_frozen_screens();
+    let exclude_ids = get_editor_window_monitor_ids(app);
+    let screens = capture::freeze::capture_frozen_screens_ex(&exclude_ids);
     if let Ok(mut g) = app.state::<AppState>().frozen_screens.lock() {
         *g = screens;
     }
+}
+
+/// Lấy danh sách monitor IDs của các cửa sổ editor đang mở.
+/// Dùng để loại bỏ khỏi frozen screens — editor không bị "đóng băng".
+fn get_editor_window_monitor_ids(app: &AppHandle) -> Vec<u32> {
+    let mut ids = Vec::new();
+    
+    // Kiểm tra tất cả cửa sổ webview
+    for (label, win) in app.webview_windows() {
+        // Chỉ quan tâm cửa sổ editor (editor, editor-ow-N)
+        if label.starts_with("editor") {
+            // Lấy vị trí cửa sổ để xác định monitor chứa nó
+            if let Ok(pos) = win.outer_position() {
+                // Dùng xcap để tìm monitor tại vị trí đó
+                if let Ok(monitor) = crate::capture::monitor::at_point(pos.x as i32, pos.y as i32) {
+                    if let Ok(id) = monitor.id() {
+                        if !ids.contains(&id) {
+                            ids.push(id);
+                            eprintln!("[SnapDoc] Loại bỏ editor (label={label}) khỏi frozen screens (monitor_id={id})");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    ids
 }
 
 /// Dọn dẹp frozen screens sau khi overlay đóng — giải phóng bộ nhớ.
@@ -277,6 +306,8 @@ fn overlay_snap(app: &AppHandle, win: &WebviewWindow) -> Option<MonitorSnap> {
 pub fn run(app: &AppHandle, mode: &str, output: &str) {
     // Lưu chế độ trước khi chụp (kể cả "full" → overlay monitor)
     app.state::<AppState>().last_capture.set(mode, output);
+    // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
+    windows::hide_editor(app);
     // Snapshot TRƯỚC KHI đụng tới bất kỳ cửa sổ/focus nào (kể cả hide_bar và
     // mở overlay) — vì bản thân open_overlays() cũng gọi set_focus() lên 1
     // cửa sổ của app, có thể tự kích hoạt app và đẩy cửa sổ ẩn lên trước NGAY
@@ -311,6 +342,8 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
 /// biết đường CHUYỂN HƯỚNG sang `record::start_recording_*` thay vì chụp ảnh
 /// + `finish()` như bình thường.
 pub fn run_record_picker(app: &AppHandle, mode: &str) {
+    // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
+    windows::hide_editor(app);
     // Đóng băng màn hình: ẩn capture-bar TRƯỚC rồi mới chụp frozen.
     if bar_is_visible(app) {
         hide_bar_for_freeze(app);
@@ -603,6 +636,8 @@ pub fn keep_capture_focus(app: &AppHandle) {
 /// Ẩn capture bar trước khi chụp để không lọt vào ảnh.
 pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> {
     app.state::<AppState>().last_capture.set("all", output);
+    // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
+    windows::hide_editor(app);
     if bar_is_visible(app) {
         hide_bar_for_freeze(app);
     }
@@ -621,6 +656,8 @@ pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> 
 /// đúng vùng nhỏ đã chọn (nhanh), rồi ghép chú thích. Đúng yêu cầu "vẽ khung
 /// xong chưa chụp, di chuyển được, tới lúc lưu/copy mới chụp".
 pub fn start_quick(app: &AppHandle) {
+    // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
+    windows::hide_editor(app);
     // KHÔNG còn gọi `snapshot_product_windows` ở đây (khác `run()`/
     // `capture_all_screens`): cơ chế content-protection (`with_product_windows_protected`)
     // dựa vào nó chỉ là lưới an toàn YẾU cho hiện tượng "cửa sổ occluded bị hệ

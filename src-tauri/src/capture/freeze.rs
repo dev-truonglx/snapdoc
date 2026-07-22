@@ -17,6 +17,12 @@ use xcap::Monitor;
 /// Lỗi trên một màn hình cụ thể được bỏ qua lặng lẽ (overlay vẫn mở, chỉ là
 /// không có frozen background cho màn đó) thay vì huỷ cả phiên.
 pub fn capture_frozen_screens() -> HashMap<usize, String> {
+    capture_frozen_screens_ex(&[])
+}
+
+/// Phiên bản nội bộ nhận danh sách monitor IDs cần exclude (để không chụp freeze).
+/// Được gọi từ `flow.rs` để loại bỏ editor/settings/history monitors.
+pub fn capture_frozen_screens_ex(exclude_monitor_ids: &[u32]) -> HashMap<usize, String> {
     let monitors = match Monitor::all() {
         Ok(m) => m,
         Err(e) => {
@@ -31,13 +37,20 @@ pub fn capture_frozen_screens() -> HashMap<usize, String> {
     // E0277 (chỉ lộ ra khi build cho Windows, macOS thì Monitor là Send nên
     // không phát hiện được lúc dev trên máy Mac). Mỗi thread tự dựng lại
     // Monitor bằng `Monitor::from_point` từ toạ độ top-left của chính màn đó.
-    let points: Vec<(usize, i32, i32)> = monitors
+    let points: Vec<(usize, i32, i32, u32)> = monitors
         .iter()
         .enumerate()
-        .filter_map(|(i, m)| match (m.x(), m.y()) {
-            (Ok(x), Ok(y)) => Some((i, x, y)),
+        .filter_map(|(i, m)| match (m.x(), m.y(), m.id()) {
+            (Ok(x), Ok(y), Ok(id)) => {
+                // Bỏ qua màn hình chứa editor/settings/history
+                if exclude_monitor_ids.contains(&id) {
+                    eprintln!("[SnapDoc][freeze] Bỏ qua màn hình {i} (display_id={id}) vì chứa cửa sổ editor");
+                    return None;
+                }
+                Some((i, x, y, id))
+            }
             _ => {
-                eprintln!("[SnapDoc][freeze] Màn hình {i}: không đọc được toạ độ");
+                eprintln!("[SnapDoc][freeze] Màn hình {i}: không đọc được toạ độ hoặc id");
                 None
             }
         })
@@ -45,7 +58,7 @@ pub fn capture_frozen_screens() -> HashMap<usize, String> {
 
     let handles: Vec<_> = points
         .into_iter()
-        .map(|(i, x, y)| {
+        .map(|(i, x, y, _id)| {
             std::thread::spawn(move || -> (usize, Option<String>) {
                 let result = Monitor::from_point(x, y)
                     .map_err(|e| format!("Không tìm lại được màn hình: {e}"))
