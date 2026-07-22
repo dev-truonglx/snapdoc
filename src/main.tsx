@@ -8,7 +8,6 @@ import Thumbnail from "./routes/thumbnail/Thumbnail";
 import Settings from "./routes/settings/Settings";
 import UpdateWindow from "./routes/update/UpdateWindow";
 import ScrollControl from "./routes/scroll-control/ScrollControl";
-import ScrollBorder from "./routes/scroll-border/ScrollBorder";
 import HistoryWindow from "./routes/history/HistoryWindow";
 import RecordReview from "./routes/record-review/RecordReview";
 import HistoryTrim from "./routes/history-trim/HistoryTrim";
@@ -25,7 +24,6 @@ const routes: Record<string, React.ComponentType> = {
   settings: Settings,
   update: UpdateWindow,
   "scroll-control": ScrollControl,
-  "scroll-border": ScrollBorder,
   history: HistoryWindow,
   "record-review": RecordReview,
   "history-trim": HistoryTrim,

@@ -237,10 +237,10 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
 pub fn close_self(window: tauri::WebviewWindow) {
     let label = window.label();
     if label == "scroll-control" {
-        use tauri::Manager;
-        if let Some(border) = window.app_handle().get_webview_window("scroll-border") {
-            let _ = border.close();
-        }
+        // Khung viền chụp cuộn giờ chính là overlay tái sử dụng (xem
+        // `windows::open_scroll_control`), không còn cửa sổ "scroll-border"
+        // riêng — đóng nốt overlay đó qua `close_overlays`.
+        crate::windows::close_overlays(window.app_handle());
     }
     // capture-bar không bao giờ bị destroy nữa — phải luôn tồn tại để giữ
     // Dock/taskbar icon xuyên suốt vòng đời app (xem `windows::prewarm_capture_bar`).
@@ -608,10 +608,9 @@ pub fn finalize_scroll_capture(
     width: u32,
     height: u32,
 ) -> Result<(), String> {
-    use tauri::Manager;
-    if let Some(border) = app.get_webview_window("scroll-border") {
-        let _ = border.close();
-    }
+    // Khung viền chụp cuộn giờ là overlay tái sử dụng (xem
+    // `windows::open_scroll_control`) — đóng qua `close_overlays`.
+    crate::windows::close_overlays(&app);
     let cap = crate::capture::Capture {
         base64,
         width,
@@ -856,8 +855,6 @@ pub async fn finalize_scroll_stitch(
     width: u32,
     instructions: Vec<StitchInstruction>,
 ) -> Result<(), String> {
-    use tauri::Manager;
-
     let slices = {
         let mut guard = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
         std::mem::take(&mut *guard)
@@ -968,9 +965,9 @@ pub async fn finalize_scroll_stitch(
     .await
     .map_err(|e| format!("Task join error: {e}"))??;
 
-    if let Some(border) = app.get_webview_window("scroll-border") {
-        let _ = border.close();
-    }
+    // Khung viền chụp cuộn giờ là overlay tái sử dụng (xem
+    // `windows::open_scroll_control`) — đóng qua `close_overlays`.
+    crate::windows::close_overlays(&app);
 
     let output = crate::flow::get_output(&app);
     crate::flow::finish(&app, cap, &output, 1.0)

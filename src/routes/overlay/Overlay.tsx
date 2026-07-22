@@ -144,29 +144,104 @@ function rectFrom(sx: number, sy: number, x: number, y: number): Sel {
   return { x: Math.min(sx, x), y: Math.min(sy, y), w: Math.abs(x - sx), h: Math.abs(y - sy) };
 }
 
+/*
+ * Chụp cuộn (scroll capture) dùng CHUNG overlay này (Rust mở overlay ở mode
+ * "region" bình thường, không phân biệt lúc mở — xem `flow::run`). Khác với
+ * chụp ảnh (thả chuột chụp NGAY, overlay đóng gần như tức thì): nếu backend
+ * xác định đây là phiên chụp cuộn (`flow::finalize_region`, nhánh "scroll"),
+ * nó KHÔNG đóng cửa sổ này — chỉ bật click-through rồi bắn sự kiện
+ * `scroll-border-activate` NGAY TRONG CHÍNH cửa sổ này (đã lắng nghe sẵn từ
+ * lúc mount). Component chuyển từ hiển thị "khung xanh + backdrop mờ" sang
+ * khung viền nét đứt pulsing (giao diện cũ của cửa sổ `scroll-border` rời,
+ * xem `ScrollBorder.tsx`) NGAY TẠI VỊ TRÍ đã đứng yên — không một cửa sổ nào
+ * bị đóng/tạo lại nên không có khoảng hở gây "nháy khung".
+ */
 function RegionSelect() {
   const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const startRef = useRef<Vec2 | null>(null);
   const [sel, setSel] = useState<Sel | null>(null);
+  // Vùng vừa chốt (mouseup) — giữ lại NGOÀI `sel` (bị xoá về null ngay khi thả
+  // chuột) để còn khung để vẽ nếu backend báo đây là phiên chụp cuộn.
+  const scrollRectRef = useRef<Sel | null>(null);
+  const [scrollRect, setScrollRect] = useState<Sel | null>(null);
+  const [pulse, setPulse] = useState(true);
+
+  useEffect(() => {
+    const un = listen("scroll-border-activate", () => {
+      setScrollRect(scrollRectRef.current);
+    });
+    return () => { un.then((f) => f()); };
+  }, []);
+
+  useEffect(() => {
+    if (!scrollRect) return;
+    const t = setInterval(() => setPulse((p) => !p), 1000);
+    return () => clearInterval(t);
+  }, [scrollRect]);
 
   useInput(
     (active, x, y) => {
-      if (!active || !startRef.current) return;
+      if (scrollRect || !active || !startRef.current) return;
       setSel(rectFrom(startRef.current[0], startRef.current[1], x, y));
     },
     (x, y) => {
+      if (scrollRect) return;
       startRef.current = [x, y];
       setSel({ x, y, w: 0, h: 0 });
     },
     (x, y) => {
+      if (scrollRect) return;
       const s = startRef.current;
       startRef.current = null;
       setSel(null);
       if (!s) return;
       const r = rectFrom(s[0], s[1], x, y);
-      if (r.w >= 3 && r.h >= 3) ipc.finalizeRegion(r.x, r.y, r.w, r.h).catch((e) => alert(String(e)));
+      if (r.w >= 3 && r.h >= 3) {
+        scrollRectRef.current = r;
+        ipc.finalizeRegion(r.x, r.y, r.w, r.h).catch((e) => {
+          scrollRectRef.current = null;
+          alert(String(e));
+        });
+      }
     },
   );
+
+  // Phiên chụp cuộn đã kích hoạt: khung viền nét đứt pulsing bao quanh vùng
+  // chọn (lớn hơn 12px mỗi chiều, cùng kích thước cửa sổ `scroll-border` cũ),
+  // click-through/content-protected đã được Rust bật ngay trên cửa sổ này.
+  // `key` KHÁC với root ở nhánh "đang kéo chọn" bên dưới — bắt buộc: cả hai
+  // đều là <div> ở cùng vị trí trong cây, nếu không có `key` riêng, React coi
+  // đây là CÙNG 1 node và chỉ cập nhật style — khiến `left/top` "nhảy" từ giá
+  // trị cũ (backdrop dùng `inset: 0`, tức góc trên-trái) sang vị trí khung
+  // thật, và vì có `transition: all` nên trình duyệt ANIMATE luôn cú nhảy đó
+  // (chính là hiện tượng "khung trôi từ góc trái ra vị trí vừa vẽ"). `key`
+  // khác buộc React unmount node cũ + mount node mới, loại bỏ hoàn toàn.
+  if (scrollRect) {
+    return (
+      <div key="scroll-active" style={{ ...root, background: "transparent" }}>
+        <div
+          style={{
+            position: "fixed",
+            left: scrollRect.x - 6,
+            top: scrollRect.y - 6,
+            width: scrollRect.w + 12,
+            height: scrollRect.h + 12,
+            boxSizing: "border-box",
+            border: pulse ? "2.5px dashed #3b82f6" : "2.5px dashed #60a5fa",
+            // Dim toàn bộ phần NGOÀI khung (giống backdrop lúc kéo chọn) để
+            // phân biệt rõ vùng đang chụp cuộn với phần còn lại — trước đây
+            // nền trong suốt khiến vùng chụp và phần ngoài trông giống hệt
+            // nhau, chỉ có nét đứt mảnh để nhận biết. An toàn với ảnh chụp:
+            // cửa sổ đã `content_protected(true)` nên toàn bộ overlay (kể cả
+            // lớp dim này) bị loại khỏi mọi lát cắt chụp cuộn.
+            boxShadow: "0 0 0 9999px rgba(0,0,0,0.45), inset 0 0 12px rgba(59, 130, 246, 0.25)",
+            transition: "border-color 0.5s ease-in-out",
+            pointerEvents: "none",
+          }}
+        />
+      </div>
+    );
+  }
 
   const rootStyle: React.CSSProperties = {
     ...root,
@@ -181,7 +256,7 @@ function RegionSelect() {
   };
 
   return (
-    <div style={rootStyle}>
+    <div key="drag" style={rootStyle}>
       {sel && sel.w > 0 ? (
         <div
           style={{
