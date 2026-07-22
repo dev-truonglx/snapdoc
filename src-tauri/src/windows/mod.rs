@@ -331,7 +331,7 @@ pub fn minimize_capture_bar_for_freeze(app: &AppHandle) -> bool {
 /// toàn hệ thống. `DWMWA_TRANSITIONS_FORCEDISABLED` nhận BOOL: TRUE để tắt,
 /// FALSE để bật lại.
 #[cfg(target_os = "windows")]
-fn set_dwm_transitions_disabled(hwnd: isize, disabled: bool) -> bool {
+fn set_dwm_transitions_disabled(hwnd: windows_sys::Win32::Foundation::HWND, disabled: bool) -> bool {
     use std::ffi::c_void;
     use windows_sys::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
@@ -342,7 +342,7 @@ fn set_dwm_transitions_disabled(hwnd: isize, disabled: bool) -> bool {
     unsafe {
         DwmSetWindowAttribute(
             hwnd,
-            DWMWA_TRANSITIONS_FORCEDISABLED,
+            DWMWA_TRANSITIONS_FORCEDISABLED as u32,
             &value as *const i32 as *const c_void,
             std::mem::size_of_val(&value) as u32,
         ) >= 0
@@ -351,7 +351,7 @@ fn set_dwm_transitions_disabled(hwnd: isize, disabled: bool) -> bool {
 
 /// Minimize đồng bộ HWND rồi xác nhận Windows đã chuyển sang trạng thái iconic.
 #[cfg(target_os = "windows")]
-fn minimize_hwnd_now(hwnd: isize) -> bool {
+fn minimize_hwnd_now(hwnd: windows_sys::Win32::Foundation::HWND) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, ShowWindow, SW_MINIMIZE};
 
     // SAFETY: HWND thuộc WebviewWindow còn sống. SW_MINIMIZE giữ taskbar button,
