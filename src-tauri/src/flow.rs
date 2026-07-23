@@ -145,6 +145,120 @@ fn clear_frozen_screens(app: &AppHandle) {
     }
 }
 
+/// Chỉ số overlay (`overlay-{i}`) từ label cửa sổ — cùng key với
+/// `frozen_screens`/`overlay_monitors`.
+fn overlay_index(win: &WebviewWindow) -> Option<usize> {
+    win.label().strip_prefix("overlay-")?.parse::<usize>().ok()
+}
+
+/// Crop ảnh cuối từ ẢNH FREEZE (grab A — chụp TRƯỚC khi overlay giành key
+/// window) thay vì chụp lại pixel live — giữ nguyên dropdown/menu native đang
+/// mở. Nguồn là ĐÚNG ảnh JPEG đang hiển thị làm nền overlay (`frozen_screens`),
+/// KHÔNG đụng gì tới luồng chụp/lưu freeze để không ảnh hưởng nền hiển thị.
+/// Trả `None` khi không có ảnh freeze cho màn `idx` (vd bị loại do editor mở,
+/// hoặc freeze lỗi) → caller tự fallback về chụp live.
+///
+/// `(rx,ry,rw,rh)` cùng hệ đơn vị mà `finalize_region`/`capture_quick_region`
+/// dùng cho `capture_region` (macOS/Linux = logical, Windows = physical px).
+/// Ảnh freeze ở physical px full-monitor, nên đổi hệ bằng tỉ lệ
+/// `image_px / snap_size` suy trực tiếp từ ảnh + `MonitorSnap` (đa nền tảng,
+/// không cần `cfg`).
+///
+/// LƯU Ý CHẤT LƯỢNG: ảnh freeze là JPEG q85 → crop ra hơi kém lossless một
+/// chút (rõ nhất ở chữ nhỏ). Đánh đổi để giữ dropdown và tuyệt đối không tác
+/// động tới nền freeze.
+fn crop_frozen(
+    app: &AppHandle,
+    idx: usize,
+    s: &MonitorSnap,
+    rx: f64,
+    ry: f64,
+    rw: f64,
+    rh: f64,
+) -> Option<capture::Capture> {
+    // Lấy JPEG base64 (đúng bản đang hiển thị) rồi giải mã ra RGBA để crop.
+    let b64 = {
+        let state = app.state::<AppState>();
+        let guard = state.frozen_screens.lock().ok()?;
+        guard.get(&idx).cloned()?
+    };
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64).ok()?;
+    let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+
+    let (bw, bh) = (img.width() as f64, img.height() as f64);
+    if s.w <= 0.0 || s.h <= 0.0 || bw < 1.0 || bh < 1.0 {
+        return None;
+    }
+    let sx = bw / s.w;
+    let sy = bh / s.h;
+    let cx = (rx * sx).round().max(0.0);
+    let cy = (ry * sy).round().max(0.0);
+    let mut cw = (rw * sx).round();
+    let mut ch = (rh * sy).round();
+    // Clamp vào biên ảnh để không panic khi vùng chọn chạm mép.
+    if cx + cw > bw {
+        cw = bw - cx;
+    }
+    if cy + ch > bh {
+        ch = bh - cy;
+    }
+    if cw < 1.0 || ch < 1.0 {
+        return None;
+    }
+    let cropped =
+        image::imageops::crop_imm(&img, cx as u32, cy as u32, cw as u32, ch as u32).to_image();
+    capture::persist(&cropped).ok()
+}
+
+/// Xác định overlay/màn hình chứa cửa sổ `id` và rect của nó QUY VỀ gốc màn
+/// đó, để dùng thẳng cho `crop_frozen` — cho phép `finalize_window` cũng ưu
+/// tiên crop từ freeze thay vì chụp live (giữ dropdown/menu nổi trên cửa sổ
+/// đích, xem chi tiết ở `crop_frozen`).
+///
+/// Toạ độ `xcap::Window` (macOS = points, Windows/Linux = physical px, xem
+/// `capture/window.rs`) CÙNG hệ với `MonitorSnap.x/y/w/h` (snapshot trực tiếp
+/// từ `xcap::Monitor` ở `windows::open_overlays_ex`) nên không cần quy đổi
+/// scale như `finalize_region` phải làm với toạ độ overlay CSS px.
+fn window_snap_and_rect(
+    app: &AppHandle,
+    id: u32,
+) -> Option<(usize, MonitorSnap, f64, f64, f64, f64)> {
+    let w = xcap::Window::all()
+        .ok()?
+        .into_iter()
+        .find(|w| w.id().map(|i| i == id).unwrap_or(false))?;
+    let (wx, wy, ww, wh) = (
+        w.x().unwrap_or(0) as f64,
+        w.y().unwrap_or(0) as f64,
+        w.width().unwrap_or(0) as f64,
+        w.height().unwrap_or(0) as f64,
+    );
+    if ww < 1.0 || wh < 1.0 {
+        return None;
+    }
+    let (cx, cy) = (wx + ww / 2.0, wy + wh / 2.0);
+
+    let snaps = app.state::<AppState>().overlay_monitors.lock().ok()?.clone();
+    let (idx, snap) = snaps.iter().enumerate().find(|(_, s)| {
+        cx >= s.x && cx < s.x + s.w && cy >= s.y && cy < s.y + s.h
+    })?;
+
+    let rx = (wx - snap.x).max(0.0);
+    let ry = (wy - snap.y).max(0.0);
+    let mut rw = ww;
+    let mut rh = wh;
+    if rx + rw > snap.w {
+        rw = snap.w - rx;
+    }
+    if ry + rh > snap.h {
+        rh = snap.h - ry;
+    }
+    if rw < 1.0 || rh < 1.0 {
+        return None;
+    }
+    Some((idx, *snap, rx, ry, rw, rh))
+}
+
 /// macOS: chụp lại "cửa sổ sản phẩm nào đang thật sự hiển thị" NGAY LÚC mở
 /// overlay chọn vùng/màn hình/Quick Capture — trước khi user có cơ hội bấm
 /// phím tắt Copy/Save (và trước khi hiện tượng cửa sổ tự bị đẩy lên có thể
@@ -483,7 +597,34 @@ pub fn finalize_region(
         return Ok(());
     }
 
-    // Step 3: close overlays BEFORE capture.
+    // Tỉ lệ pixel-vật-lý/CSS-px của bitmap kết quả — lưu vào PendingCapture để
+    // Editor hiển thị badge HiDPI đúng. Linux: xcap trả đúng số pixel yêu cầu
+    // (không nhân scale) → 1.0; macOS/Windows: bitmap ở physical px → s.scale.
+    // Áp dụng cho CẢ nhánh crop-từ-frozen lẫn nhánh chụp live: crop cho ra đúng
+    // số physical px như live grab nên badge scale giống nhau.
+    #[cfg(target_os = "linux")]
+    let bitmap_scale: f64 = 1.0;
+    #[cfg(not(target_os = "linux"))]
+    let bitmap_scale: f64 = s.scale;
+
+    // Step 3a: ưu tiên CROP từ buffer freeze (grab A — chụp TRƯỚC khi overlay
+    // giành key window) thay vì chụp lại pixel live. Đây là điểm mấu chốt giữ
+    // nguyên dropdown/menu native đang mở: live grab (grab B) chạy sau khi
+    // overlay `set_focus()` nên popup đã đóng, còn buffer freeze vẫn còn nó.
+    // Phải crop TRƯỚC `clear_frozen_screens`. Buffer freeze KHÔNG chứa overlay
+    // (freeze chạy trước khi mở overlay) nên bỏ luôn close-trước-khi-chụp,
+    // sleep 200ms và content-protection — không cần thiết.
+    if let Some(cap) = overlay_index(&win).and_then(|i| crop_frozen(app, i, &s, rx, ry, rw, rh)) {
+        windows::close_overlays(app);
+        clear_frozen_screens(app);
+        windows::restore_regular_activation(app);
+        let output = get_output(app);
+        return finish(app, cap, &output, bitmap_scale);
+    }
+
+    // Step 3b (fallback): không có buffer freeze cho màn này (vd bị loại do
+    // editor mở, hoặc freeze lỗi) → chụp lại pixel live như trước.
+    // close overlays BEFORE capture.
     // KHÔNG poll sau close — deadlock risk (xem close_overlays). Sleep 200ms.
     windows::close_overlays(app);
     // KHÔNG restore_regular_activation ở đây — xem lý do ngay trước lệnh
@@ -499,13 +640,7 @@ pub fn finalize_region(
     // từng nói) — xcap trên Windows tự init COM per-call nếu cần; nếu tương
     // lai gặp lỗi CoInitialize trên Windows, chuyển caller về
     // `std::thread::spawn` với COM apartment riêng.
-    // Tỉ lệ pixel-vật-lý/CSS-px của bitmap vừa chụp — lưu vào PendingCapture để
-    // Editor hiển thị badge HiDPI đúng. Linux: xcap trả đúng số pixel yêu cầu
-    // (không nhân scale) → 1.0; macOS/Windows: bitmap ở physical px → s.scale.
-    #[cfg(target_os = "linux")]
-    let bitmap_scale: f64 = 1.0;
-    #[cfg(not(target_os = "linux"))]
-    let bitmap_scale: f64 = s.scale;
+    // (`bitmap_scale` đã tính ở trên, dùng chung cho cả nhánh frozen.)
 
     // Chụp pixel TRƯỚC khi trả `ActivationPolicy::Regular` — trả Regular
     // trước lúc này khiến macOS coi SnapDoc là app active và hiện menu bar
@@ -523,13 +658,35 @@ pub fn finalize_region(
 }
 
 pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
-    windows::close_overlays(app);
-    clear_frozen_screens(app);
-
     if take_pending_record(app) {
+        windows::close_overlays(app);
+        clear_frozen_screens(app);
         windows::restore_regular_activation(app);
         return crate::record::start_recording_window(app, id);
     }
+
+    // Ưu tiên CROP từ buffer freeze (grab A — chụp TRƯỚC khi overlay giành key
+    // window) thay vì chụp lại pixel live: giữ nguyên dropdown/menu native nổi
+    // trên cửa sổ đích (vd popup/NSMenu là cửa sổ riêng, không thuộc bề mặt mà
+    // `capture_by_id` chụp). Phải làm TRƯỚC `clear_frozen_screens`.
+    if let Some((idx, snap, rx, ry, rw, rh)) = window_snap_and_rect(app, id) {
+        if let Some(cap) = crop_frozen(app, idx, &snap, rx, ry, rw, rh) {
+            windows::close_overlays(app);
+            clear_frozen_screens(app);
+            windows::restore_regular_activation(app);
+            let output = get_output(app);
+            #[cfg(target_os = "linux")]
+            let bitmap_scale: f64 = 1.0;
+            #[cfg(not(target_os = "linux"))]
+            let bitmap_scale: f64 = snap.scale;
+            return finish(app, cap, &output, bitmap_scale);
+        }
+    }
+
+    // Fallback: không có buffer freeze cho màn chứa cửa sổ này (vd bị loại do
+    // editor mở, hoặc freeze lỗi) → chụp lại pixel live như trước.
+    windows::close_overlays(app);
+    clear_frozen_screens(app);
 
     // Chờ WM_CLOSE được main thread xử lý và DWM unregister protected surface.
     // Không poll (deadlock risk) — sleep cố định 200ms là đủ.
@@ -558,6 +715,21 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
         return crate::record::start_recording_monitor(app, display_id);
     }
 
+    // Ưu tiên dùng NGUYÊN buffer freeze (grab A — chụp TRƯỚC khi overlay giành
+    // key window) thay vì chụp lại pixel live: giữ nguyên dropdown/menu native
+    // đang mở. `crop_frozen` với rect = cả màn hình (0,0,s.w,s.h) trả về đúng
+    // toàn bộ buffer — buffer full-monitor là chính thứ `capture_monitor` tạo.
+    if let Some(cap) =
+        overlay_index(&win).and_then(|i| crop_frozen(app, i, &s, 0.0, 0.0, s.w, s.h))
+    {
+        windows::close_overlays(app);
+        clear_frozen_screens(app);
+        windows::restore_regular_activation(app);
+        let output = get_output(app);
+        return finish(app, cap, &output, s.scale);
+    }
+
+    // Fallback: không có buffer freeze cho màn này → chụp live như trước.
     // KHÔNG poll sau close — deadlock risk (xem close_overlays). Sleep 200ms.
     windows::close_overlays(app);
     clear_frozen_screens(app);
@@ -755,6 +927,16 @@ pub fn capture_quick_region(
     #[cfg(not(target_os = "macos"))]
     std::thread::sleep(std::time::Duration::from_millis(200));
 
+    // Ưu tiên CROP từ buffer freeze (grab A — chụp TRƯỚC khi overlay giành key
+    // window) thay vì chụp lại pixel live: giữ nguyên dropdown/menu native đang
+    // mở. Buffer freeze không chứa overlay/dim/annotation (freeze chạy trước
+    // khi mở overlay) nên ảnh sạch sẵn. Frozen data chỉ được xoá về sau ở
+    // `cancel_overlay` nên vẫn còn ở đây.
+    if let Some(cap) = overlay_index(&win).and_then(|i| crop_frozen(app, i, &s, rx, ry, rw, rh)) {
+        return Ok(cap.base64);
+    }
+
+    // Fallback: không có buffer freeze cho màn này → chụp live như trước.
     // KHÔNG bọc `with_product_windows_protected` ở đây nữa (khác
     // `finalize_region`/`finalize_window`/`finalize_monitor`/`capture_all_screens`,
     // nơi cơ chế đó vẫn là tuyến phòng thủ DUY NHẤT): mọi cửa sổ sản phẩm
