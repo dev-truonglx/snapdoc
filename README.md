@@ -1,255 +1,293 @@
 # SnapDoc
 
-App desktop chụp ảnh, quay màn hình & chú thích cho **Windows + macOS**. Ưu tiên tốc độ: hotkey → chụp/quay → chú thích/cắt nhanh → save/copy.
+Desktop screenshot, screen recording & annotation app for **Windows +
+macOS**. Speed-first: hotkey → capture/record → annotate/trim → save/copy.
 
-> Stack: **Tauri 2** (Rust) + **React 19 + TypeScript + Vite** + **Konva** (editor) + **zustand** (state).
-> Xem [ARCHITECTURE.md](ARCHITECTURE.md) cho thiết kế capture-bar kiểu macOS và sơ đồ thư mục.
+> Stack: **Tauri 2** (Rust) + **React 19 + TypeScript + Vite** + **Konva**
+> (editor) + **zustand** (state).
+> See [ARCHITECTURE.md](ARCHITECTURE.md) for the macOS-style capture-bar
+> design and folder layout.
 
-## Luồng chính (User Flows)
+## Main flows
 
-### 1️⃣ Chụp ảnh nhanh
+### 1️⃣ Quick screenshot
 ```
-Phím tắt → Chụp (6 chế độ) → Thumbnail popup → Chọn hành động → Kết thúc
-                    ↓ (hoặc mở Editor)
-            Editor (chú thích) → Lưu/Copy
+Hotkey → Capture (6 modes) → Thumbnail popup → Pick an action → Done
+                    ↓ (or open Editor)
+            Editor (annotate) → Save/Copy
 ```
 
-### 2️⃣ Quay màn hình
+### 2️⃣ Screen recording
 ```
-Phím tắt → Chọn vùng/cửa sổ → Đang quay (icon + timer ở tray) → Dừng quay
+Hotkey → Pick region/window → Recording (icon + timer in tray) → Stop
                                                                       ↓
-                    → Xem lại & cắt video (CapCut-style) → Lưu hoặc Xoá
+                    → Review & trim (CapCut-style) → Save or Discard
 ```
 
-### 3️⃣ Chỉnh sửa ảnh
+### 3️⃣ Image editing
 ```
-Từ thumbnail / Library / Mở file → Editor → Vẽ chú thích / Nối ảnh / Crop
+From thumbnail / Library / Open file → Editor → Annotate / Stitch / Crop
                                          ↓
-                    → Lưu / Lưu + Copy / Copy / Flatten
+                    → Save / Save + Copy / Copy / Flatten
 ```
 
-### 4️⃣ Quản lý lịch sử (Library)
+### 4️⃣ History management (Library)
 ```
-Mở Library → Lọc (ảnh/video, chế độ, ngày) → Xem / Sửa tên / Copy / Xoá
+Open Library → Filter (image/video, mode, date) → View / Rename / Copy / Delete
                                         ↓
-                    → Trash (xoá mềm) → Khôi phục hoặc Xoá vĩnh viễn
+                    → Trash (soft delete) → Restore or Delete permanently
 ```
 
 ---
 
-## Tính năng
+## Features
 
-### 📸 Chụp ảnh — 6 chế độ
-| Chế độ | Mô tả | Phím tắt |
+### 📸 Screenshot — 6 modes
+| Mode | Description | Hotkey |
 |-------|-------|----------|
-| **Toàn màn hình** | Chụp màn hình hiện tại | `Cmd/Ctrl+Shift+1` |
-| **Vùng chọn** | Kéo vùng → chụp | `Cmd/Ctrl+Shift+2` |
-| **Cửa sổ** | Hover highlight window → chụp | `Cmd/Ctrl+Shift+3` |
-| **Tất cả màn hình** | Ghép ngang nhiều monitor | `Cmd/Ctrl+Shift+4` |
-| **Chụp cuộn** | Tự cuộn trang → ghép ảnh dài | `Cmd/Ctrl+Shift+6` |
-| **Chụp nhanh** | Vẽ trên overlay → chú thích ngay → lưu khi bấm Lưu/Copy | (trong Capture Bar) |
+| **Full screen** | Capture the current screen | `Cmd/Ctrl+Shift+1` |
+| **Region** | Drag to select an area → capture | `Cmd/Ctrl+Shift+2` |
+| **Window** | Hover to highlight a window → capture | `Cmd/Ctrl+Shift+3` |
+| **All screens** | Stitch every monitor side by side | `Cmd/Ctrl+Shift+4` |
+| **Scrolling capture** | Auto-scroll the page → stitch into one long image | `Cmd/Ctrl+Shift+6` |
+| **Quick capture** | Draw on an overlay → annotate instantly → save on Save/Copy | (from the Capture Bar) |
 
-**Sau chụp — chọn hành động:**
-- Mở Editor → chú thích chi tiết
+**After capture — choose an action:**
+- Open Editor → detailed annotation
 - Copy → clipboard
-- Lưu → thư mục
-- Lưu + Copy → cả hai
-- Copy + Editor → copy và mở editor liên tiếp
-- (cấu hình mặc định trong Settings)
+- Save → to a folder
+- Save + Copy → both
+- Copy + Editor → copy then open the editor
+- (default action configurable in Settings)
 
-### 🎥 Quay màn hình
-- **Chế độ:** Vùng chọn / Cửa sổ / Toàn màn hình
-- **Chất lượng:** 30fps
-- **Âm thanh:** Tắt / Micro / Âm thanh hệ thống (tuỳ chọn)
-- **Xem lại bắt buộc:** Sau quay dừng → màn "Xem lại" để cắt video trước khi lưu
+### 🎥 Screen recording
+- **Modes:** Region / Window / Full screen
+- **Quality:** 30fps
+- **Audio:** Off / Microphone / System audio (optional)
+- **Mandatory review:** after stopping, a "Review" screen lets you trim the
+  video before saving
 
-### ✂️ Cắt video (Video Trim) — kiểu CapCut
-- **Chế độ:** Nhiều đoạn chọn được giữ, các đoạn còn lại xoá
-- **Tính năng:**
-  - Chia đoạn: `Ctrl/Cmd+B`
-  - Xoá đoạn: `Delete`
-  - Cắt đầu: `Q` (tại vị trí pause)
-  - Cắt cuối: `W` (tại vị trí pause)
+### ✂️ Video trim — CapCut-style
+- **Mode:** keep multiple selected segments, the rest gets removed
+- **Features:**
+  - Split segment: `Ctrl/Cmd+B`
+  - Delete segment: `Delete`
+  - Trim start: `Q` (at the paused position)
+  - Trim end: `W` (at the paused position)
   - Undo/Redo: `Ctrl/Cmd+Z` / `+Shift`
-  - Xem trước: Filmstrip theo từng khung hình
-- **Kết thúc:** Lưu vào Library hoặc Xoá — không tự động
+  - Preview: frame-by-frame filmstrip
+- **Finish:** Save to Library or Discard — never automatic
 
-### 🎨 Chỉnh sửa ảnh (Editor)
-**Công cụ chú thích (bằng Konva):**
-- Chọn (V)
-- Chữ nhật (R)
+### 🎨 Image editing (Editor)
+**Annotation tools (built on Konva):**
+- Select (V)
+- Rectangle (R)
 - Ellipse (O)
-- Mũi tên (T)
-- Đường thẳng
-- Mũi tên đánh số (N)
-- Chữ (C)
-- Số bước / Step counter
+- Arrow (T)
+- Line
+- Numbered arrow (N)
+- Text (C)
+- Step counter
 - Highlight
-- Làm mờ (Blur)
+- Blur
 - Pixelate
-- Che toàn bộ (Solid color)
+- Solid color cover
 - Crop
 
-**Chức năng:**
+**Capabilities:**
 - **Undo/Redo:** `Cmd/Ctrl+Z` / `+Shift`
-- **Zoom thông minh:** 100% cho ảnh vùng chọn; tự fit cho các chế độ khác
-- **Nối ảnh:** Ghép nhiều ảnh thành 1 ảnh dài (stitch)
-- **Mở file:** Drag-drop hoặc "Open with" — chỉnh sửa file ảnh từ thư mục khác
-- **Xuất:**
-  - Lưu: lưu đè file gốc (hoặc tạo bản copy)
-  - Lưu + Copy: lưu + copy clipboard
-  - Copy: chỉ copy không lưu
-  - Flatten: gộp chú thích vào ảnh gốc
+- **Smart zoom:** 100% for region captures; auto-fit for other modes
+- **Stitching:** merge multiple images into one long image
+- **Open file:** drag-drop or "Open with" — edit image files from any folder
+- **Export:**
+  - Save: overwrite the original file (or create a copy)
+  - Save + Copy: save + copy to clipboard
+  - Copy: copy only, no save
+  - Flatten: bake annotations into the base image
 
-### 📚 Library (Lịch sử)
-- **Tự động lưu:** Mọi ảnh/video chụp/quay được lưu vào Library, không phụ thuộc hành động xuất
-- **Lọc:**
-  - Loại (ảnh / video)
-  - Chế độ (full screen / region / window / scrolling / all screens)
-  - Khoảng ngày
-- **Quản lý:**
-  - Xoá mềm (Trash)
-  - Khôi phục từ Trash
-  - Xoá vĩnh viễn
-  - Empty Trash (xoá tất cả ở Trash)
-- **Hành động trên file:**
-  - Đổi tên
-  - Mở thư mục chứa file
-  - Copy vào clipboard
-  - Mở lại trong Editor (lưu đè bản ghi cũ)
-  - Cắt video đã lưu (tạo bản ghi mới, giữ nguyên bản gốc)
+### 📚 Library (History)
+- **Auto-saved:** every captured/recorded image or video is saved to the
+  Library, independent of the export action taken
+- **Filters:**
+  - Type (image / video)
+  - Mode (full screen / region / window / scrolling / all screens)
+  - Date range
+- **Management:**
+  - Soft delete (Trash)
+  - Restore from Trash
+  - Delete permanently
+  - Empty Trash (delete everything in Trash)
+- **Per-item actions:**
+  - Rename
+  - Open containing folder
+  - Copy to clipboard
+  - Reopen in Editor (overwrites the existing record)
+  - Trim a saved video (creates a new record, keeps the original)
 
-### ⚙️ Cài đặt (Settings)
-- Thư mục lưu ảnh/video
-- Hành động mặc định sau chụp (6 tùy chọn: Edit / Copy / Save / Save+Copy / Copy+Edit / Quick capture)
-- Nguồn ghi âm khi quay (Tắt / Micro / Âm thanh hệ thống)
-- Khởi động cùng hệ thống
-- **Tuỳ biến phím tắt:** Mọi phím tắt toàn cục có thể thay đổi
-- Quyền Screen Recording (macOS) — kiểm tra trạng thái
+### ⚙️ Settings
+- Image/video save folder
+- Default action after capture (6 options: Edit / Copy / Save / Save+Copy /
+  Copy+Edit / Quick capture)
+- Recording audio source (Off / Microphone / System audio)
+- Launch at startup
+- **Custom shortcuts:** every global hotkey can be remapped
+- Screen Recording permission (macOS) — status check
 
-### 🎚️ Capture Bar (Thanh điều khiển)
-- **Vị trí:** Nổi lên ở đáy màn hình (always-on-top)
-- **Mở:** `Cmd/Ctrl+Shift+5` hoặc từ Menu Tray
-- **Chức năng:**
-  - Chọn chế độ chụp (Full / Window / Region)
-  - Dropdown Options (lưu vào / timer / mở editor / nhớ vùng)
-  - Nút Chụp / Esc (đóng)
-- **Menu Tray:**
-  - Mọi chế độ chụp/quay (direct hotkey)
-  - Mở Capture Bar
-  - Mở Library
-  - Mở Settings
-  - Icon + Đồng hồ đếm khi đang quay
+### 🎚️ Capture Bar (control bar)
+- **Position:** floats at the bottom of the screen (always-on-top)
+- **Open:** `Cmd/Ctrl+Shift+5` or from the tray menu
+- **Capabilities:**
+  - Pick capture mode (Full / Window / Region)
+  - Options dropdown (save location / timer / open editor / remember region)
+  - Capture / Esc (close) button
+- **Tray menu:**
+  - Every capture/recording mode (direct hotkey)
+  - Open Capture Bar
+  - Open Library
+  - Open Settings
+  - Icon + timer while recording
 
-### 🔄 Tự động cập nhật
-- Kiểm tra 1 lần mỗi khi mở app
-- Tải + cài âm thầm ở nền (không popup, không bắt restart)
-- Áp dụng ở lần khởi động kế tiếp
-- Kiểm tra/cài thủ công trong Settings
+### 🔄 Auto-update
+- Checked once on every app launch
+- Downloaded + installed silently in the background (no popup, no forced
+  restart)
+- Applied on the next launch
+- Manual check/install available in Settings
 
-### 🖥️ Đa màn hình & Đa nền tảng
-- **Nền tảng:** macOS (ScreenCaptureKit) + Windows (Windows Graphics Capture)
-- **Capture:** Chụp, quay, ghi âm hệ thống hỗ trợ cả 2 nền tảng
-- **UI multi-monitor:** Mọi cửa sổ (Capture Bar, Editor, Library, Settings, Xem lại video...) luôn mở trên màn hình chứa con trỏ chuột
+### 🖥️ Multi-monitor & cross-platform
+- **Platforms:** macOS (ScreenCaptureKit) + Windows (Windows Graphics
+  Capture)
+- **Capture:** screenshots, recording, and system audio capture supported on
+  both platforms
+- **Multi-monitor UI:** every window (Capture Bar, Editor, Library,
+  Settings, video review, etc.) always opens on the display containing the
+  mouse cursor
 
-## Yêu cầu môi trường
-- Node ≥ 20, Rust ≥ 1.80 (đã test Node 22 / Rust 1.96).
-- macOS: cấp quyền **Screen Recording** (System Settings → Privacy & Security) cho app/terminal khi chạy dev.
+## Requirements
 
-## Chạy dev
+- Node ≥ 20, Rust ≥ 1.80 (tested with Node 22 / Rust 1.96).
+- macOS: grant **Screen Recording** permission (System Settings → Privacy &
+  Security) to the app/terminal when running dev builds.
+
+## Running in dev
+
 ```bash
 npm install
-npm run app:dev      # = tauri dev (tự chạy vite + build Rust)
+npm run app:dev      # = tauri dev (runs vite + builds Rust automatically)
 ```
-App khởi động vào **tray / menu bar** (không có cửa sổ chính).
 
-## Dev trên macOS — giữ quyền Screen Recording qua mỗi lần build
-`tauri dev` chạy binary trần (ad-hoc), mỗi lần build lại đổi code identity → macOS **thu hồi quyền Screen Recording**, ảnh chụp ra đen. Dùng:
+The app starts in the **tray / menu bar** — there's no main window.
+
+## macOS dev: keeping Screen Recording permission across rebuilds
+
+`tauri dev` runs a bare (ad-hoc signed) binary, and each build changes its
+code identity → macOS **revokes the Screen Recording permission**,
+producing black captures. Use:
 ```bash
-npm run dev:mac      # build .app debug + ký bằng identity ổn định + mở app
+npm run dev:mac      # builds a debug .app, signs it with a stable identity, and launches it
 ```
-- Lần đầu: bật **System Settings → Privacy & Security → Screen Recording → SnapDoc**, thoát app, chạy lại.
-- Các lần `npm run dev:mac` sau **giữ nguyên quyền** (cùng một self-signed identity).
-- Identity được lưu tại `~/.tauri/snapdoc-codesign.p12` — **back up file này**; xoá/đổi sẽ phải cấp quyền lại.
-- Ký lại thủ công 1 bundle bất kỳ: `npm run sign:mac [path/SnapDoc.app]`.
+- First run: enable **System Settings → Privacy & Security → Screen
+  Recording → SnapDoc**, quit the app, then run it again.
+- Subsequent `npm run dev:mac` runs **keep the same grant** (same self-signed
+  identity).
+- The identity is stored at `~/.tauri/snapdoc-codesign.p12` — **back this
+  file up**; deleting/changing it means re-granting permission.
+- To re-sign an arbitrary bundle manually: `npm run sign:mac [path/SnapDoc.app]`.
 
-> Iterate UI nhanh (có HMR, chấp nhận phải cấp lại quyền): dùng `npm run app:dev`.
+> For fast UI iteration (HMR, accepting the permission re-grant), use
+> `npm run app:dev` instead.
 
-## Build bản phát hành
+## Building a release
+
 ```bash
-npm run app:build    # tạo .dmg (mac) / .msi,.exe (Windows)
+npm run app:build    # produces a .dmg (macOS) / .msi,.exe (Windows)
 ```
 
-## Phím tắt mặc định
-**Tất cả tuỳ biến được trong Settings** → Keybindings.
+See [BUILD.md](BUILD.md) for signing keys, cross-building Windows via
+Docker, and cutting a full release.
 
-### Chụp ảnh & Quay video
-| Hành động | macOS | Windows |
+## Default keyboard shortcuts
+
+**Everything below is customizable in Settings** → Keybindings.
+
+### Capture & recording
+| Action | macOS | Windows |
 |---|---|---|
-| **Mở Capture Bar** | `Cmd+Shift+5` | `Ctrl+Shift+5` |
-| **Chụp toàn màn hình** (instant) | `Cmd+Shift+1` | `Ctrl+Shift+1` |
-| **Chụp vùng chọn** (instant) | `Cmd+Shift+2` | `Ctrl+Shift+2` |
-| **Chụp cửa sổ** (instant) | `Cmd+Shift+3` | `Ctrl+Shift+3` |
-| **Chụp tất cả màn hình** | `Cmd+Shift+4` | `Ctrl+Shift+4` |
-| **Chụp cuộn** | `Cmd+Shift+6` | `Ctrl+Shift+6` |
-| **Quay màn hình** | `Cmd+Shift+7` | `Ctrl+Shift+7` |
-| **Chụp & Copy** (instant region) | `Cmd+Shift+C` | `Ctrl+Shift+C` |
+| **Open Capture Bar** | `Cmd+Shift+5` | `Ctrl+Shift+5` |
+| **Full screen capture** (instant) | `Cmd+Shift+1` | `Ctrl+Shift+1` |
+| **Region capture** (instant) | `Cmd+Shift+2` | `Ctrl+Shift+2` |
+| **Window capture** (instant) | `Cmd+Shift+3` | `Ctrl+Shift+3` |
+| **All-screens capture** | `Cmd+Shift+4` | `Ctrl+Shift+4` |
+| **Scrolling capture** | `Cmd+Shift+6` | `Ctrl+Shift+6` |
+| **Screen recording** | `Cmd+Shift+7` | `Ctrl+Shift+7` |
+| **Capture & Copy** (instant region) | `Cmd+Shift+C` | `Ctrl+Shift+C` |
 
-### Trong Editor (chú thích)
-| Phím | Chức năng |
+### In the Editor (annotation)
+| Key | Action |
 |-----|----------|
-| `V/R/O/T/N/C` | Chọn tool (Chọn/Hình chữ nhật/Ellipse/Text/Mũi tên/Mũi tên số) |
+| `V/R/O/T/N/C` | Select tool (Select/Rectangle/Ellipse/Arrow/Numbered arrow/Text) |
 | `Cmd/Ctrl+Z` | Undo |
 | `Cmd/Ctrl+Shift+Z` | Redo |
-| `Delete` | Xoá object chọn |
-| `Cmd/Ctrl+S` | Lưu |
-| `Cmd/Ctrl+Shift+S` | Lưu + Copy |
+| `Delete` | Delete selected object |
+| `Cmd/Ctrl+S` | Save |
+| `Cmd/Ctrl+Shift+S` | Save + Copy |
 
-### Trong Video Trim (cắt video)
-| Phím | Chức năng |
+### In Video Trim
+| Key | Action |
 |-----|----------|
-| `Ctrl/Cmd+B` | Chia đoạn (split) |
-| `Q` | Cắt đầu (trim start) |
-| `W` | Cắt cuối (trim end) |
-| `Delete` | Xoá đoạn đang chọn |
+| `Ctrl/Cmd+B` | Split segment |
+| `Q` | Trim start |
+| `W` | Trim end |
+| `Delete` | Delete selected segment |
 | `Ctrl/Cmd+Z` | Undo |
 | `Ctrl/Cmd+Shift+Z` | Redo |
 
-## Cấu trúc Project
+## Project structure
 
 ### Backend — `src-tauri/` (Rust + Tauri)
-| Module | Chức năng |
+| Module | Responsibility |
 |--------|----------|
-| `capture/` | Chụp ảnh (xcap + ScreenCaptureKit macOS + WGC Windows) |
-| `record/` | Quay video + ghi âm + encode FFmpeg |
-| `history/` | SQLite Library (lưu trữ metadata) |
-| `hotkey/` | Đăng ký + xử lý phím tắt toàn cục |
-| `windows/` | Quản lý lifecycle mọi cửa sổ webview |
-| `tray/` | Menu tray + icon + timer quay |
-| `storage/` | Cấu hình, settings |
+| `capture/` | Screenshot capture (xcap + macOS ScreenCaptureKit + Windows WGC) |
+| `record/` | Screen/audio recording + FFmpeg encoding |
+| `history/` | SQLite-backed Library (metadata storage) |
+| `hotkey/` | Global shortcut registration + handling |
+| `windows/` | Lifecycle management for every webview window |
+| `tray/` | Tray menu + icon + recording timer |
+| `storage/` | Configuration, settings |
 | `update/` | Auto-update checks + silent install |
 
 ### Frontend — `src/` (React + TypeScript + Vite)
 
-**Routes** (`routes/` — mỗi cửa sổ = 1 route):
-| Route | Cửa sổ | Chức năng |
+**Routes** (`routes/` — one route per window):
+| Route | Window | Responsibility |
 |-------|--------|----------|
-| `capture-bar/` | Capture Bar | Thanh điều khiển chụp/quay nổi |
-| `overlay/` | Overlay | Chọn vùng / chọn window / preview |
-| `editor/` | Editor Window | Chú thích ảnh (Konva canvas) |
-| `history/` | Library Window | Xem lịch sử ảnh/video |
-| `record-review/` | Video Review | Xem lại video sau quay, chọn cắt |
-| `history-trim/` | History Trim | Cắt video từ Library |
-| `settings/` | Settings Window | Cấu hình app |
-| `thumbnail/` | Thumbnail Popup | Popup ảnh vừa chụp (tự ẩn) |
-| `quick-capture/` | Quick Capture | Chế độ chụp nhanh + vẽ |
-| `recording-indicator/` | Recording Indicator | Icon + timer khi đang quay |
-| `update/` | Update Window | Thông báo cập nhật |
+| `capture-bar/` | Capture Bar | Floating capture/recording control bar |
+| `overlay/` | Overlay | Region select / window pick / preview |
+| `editor/` | Editor Window | Image annotation (Konva canvas) |
+| `history/` | Library Window | Browse image/video history |
+| `record-review/` | Video Review | Review a recording, then trim |
+| `history-trim/` | History Trim | Trim a video from the Library |
+| `settings/` | Settings Window | App configuration |
+| `thumbnail/` | Thumbnail Popup | Popup for a just-captured image (auto-hides) |
+| `quick-capture/` | Quick Capture | Fast capture + draw mode |
+| `recording-indicator/` | Recording Indicator | Icon + timer while recording |
+| `update/` | Update Window | Update notification |
 
-**Features** (logic chia sẻ):
-| Module | Chức năng |
+**Features** (shared logic):
+| Module | Responsibility |
 |--------|----------|
 | `features/annotation/` | Konva editor (canvas, tools, undo/redo) |
-| `features/video-trim/` | Logic cắt video (segments, frame seeking) |
-| `features/output/` | Xử lý output (copy/save/flatten) |
+| `features/video-trim/` | Video trim logic (segments, frame seeking) |
+| `features/output/` | Output handling (copy/save/flatten) |
 | `lib/` | Utilities (IPC, shortcut bindings) |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setting up a dev environment, and
+[BUILD.md](BUILD.md) for signing keys and cutting a release. Please report
+security issues per [SECURITY.md](SECURITY.md) rather than opening a public
+issue.
+
+## License
+
+[MIT](LICENSE)

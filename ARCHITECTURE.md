@@ -1,85 +1,108 @@
-# SnapDoc — Kiến trúc thư mục & Capture UX (macOS-style control bar)
+# SnapDoc — Folder Architecture & Capture UX (macOS-style control bar)
 
-> Bổ sung cho tài liệu MVP. Tài liệu này: (1) định nghĩa lại luồng chụp theo kiểu **control bar ở đáy màn hình** học từ macOS `Cmd+Shift+5`, và (2) phác kiến trúc thư mục project Tauri.
+> Companion to the main README. This document: (1) defines the capture flow
+> around a **floating control bar at the bottom of the screen**, modeled on
+> macOS `Cmd+Shift+5`, and (2) sketches the project's folder architecture.
 
 ---
 
-## A. Capture UX — học từ macOS Screenshot (`Cmd+Shift+5`)
+## A. Capture UX — learning from macOS Screenshot (`Cmd+Shift+5`)
 
-### A.1 Bài học rút ra từ macOS
-macOS có **2 tầng hotkey**, và đây là điểm cốt lõi cần copy:
+### A.1 Lessons from macOS
+macOS has **two hotkey tiers**, and this is the core idea worth copying:
 
-| Tầng | macOS | Hành vi | Khi nào user dùng |
+| Tier | macOS | Behavior | When users reach for it |
 |---|---|---|---|
-| **Instant** | `Cmd+Shift+3` (full), `Cmd+Shift+4` (region) | Chụp ngay, **không** hiện UI chọn | Người dùng đã biết mình muốn gì → nhanh nhất |
-| **Control bar** | `Cmd+Shift+5` | Hiện **thanh điều khiển nổi ở đáy màn hình** để chọn chế độ + options rồi mới chụp | Khi cần đổi chế độ / đổi nơi lưu / hẹn giờ |
+| **Instant** | `Cmd+Shift+3` (full), `Cmd+Shift+4` (region) | Captures immediately, **no** picker UI | User already knows what they want → fastest path |
+| **Control bar** | `Cmd+Shift+5` | Shows a **floating control bar at the bottom of the screen** to pick mode + options before capturing | When the mode / save location / timer needs to change |
 
-→ SnapDoc làm **cả hai tầng**. Direct hotkey cho người quen; control bar cho người cần lựa chọn. Đây là sự khác biệt then chốt so với plan ban đầu (vốn chỉ có direct hotkey).
+→ SnapDoc implements **both tiers**. Direct hotkeys for power users; the
+control bar for anyone who needs to choose. This is the key difference from
+the original plan (which only had direct hotkeys).
 
-### A.2 Control bar trông như thế nào
-Khi nhấn **master hotkey** (đề xuất `Ctrl/Cmd+Shift+5` để user macOS thấy quen), màn hình dim nhẹ và một thanh nổi bo góc xuất hiện **giữa-đáy màn hình**:
+### A.2 What the control bar looks like
+Pressing the **master hotkey** (`Ctrl/Cmd+Shift+5`, chosen so macOS users
+feel at home) dims the screen slightly and shows a rounded floating bar
+**centered at the bottom of the screen**:
 
 ```
         ┌─────────────────────────────────────────────────────────────┐
-        │  [▢ Full]  [◱ Window]  [⬚ Region]   │   ⚙ Options ▾   │  Chụp  │   ✕
+        │  [▢ Full]  [◱ Window]  [⬚ Region]   │   ⚙ Options ▾   │  Capture │   ✕
         └─────────────────────────────────────────────────────────────┘
-            ↑ nhóm chọn chế độ           ↑ dropdown tùy chọn   ↑ nút   ↑ Esc/đóng
+            ↑ mode switch                ↑ options dropdown   ↑ button ↑ Esc/close
 ```
 
-**Nhóm chế độ (mode):** Full / Window / Region — click chọn, mode đang chọn được highlight. Khi chọn:
-- **Full** → click "Chụp" (hoặc Enter) chụp ngay màn hình chứa con trỏ.
-- **Window** → con trỏ thành dạng chọn cửa sổ, hover highlight window, click để chụp.
-- **Region** → crosshair + kéo chọn vùng (kích thước realtime); thanh bar vẫn nổi để đổi options.
+**Mode switch:** Full / Window / Region — click to select, the active mode
+is highlighted.
+- **Full** → click "Capture" (or Enter) to instantly capture the screen
+  containing the cursor.
+- **Window** → cursor turns into a window picker, hovering highlights a
+  window, click to capture it.
+- **Region** → crosshair + drag to select an area (live size readout); the
+  bar stays floating so options can still be changed.
 
-**⚙ Options dropdown (học từ macOS "Options"):**
-- **Lưu vào:** Thư mục mặc định · Clipboard · Save + Copy · *Chọn thư mục khác…* (sticky — nhớ lần chọn gần nhất).
-- **Mở editor sau khi chụp:** bật/tắt (đây là điểm SnapDoc thêm so với macOS — macOS chỉ hiện thumbnail).
-- **Hẹn giờ:** Không / 3s / 5s.
-- **Nhớ vùng chọn gần nhất** (cho Region).
-- **Hiện con trỏ chuột:** bật/tắt.
+**⚙ Options dropdown (learned from macOS "Options"):**
+- **Save to:** default folder · Clipboard · Save + Copy · *choose another
+  folder…* (sticky — remembers the last choice).
+- **Open editor after capture:** on/off (this is SnapDoc's addition over
+  macOS, which only shows a thumbnail).
+- **Timer:** None / 3s / 5s.
+- **Remember last selected region** (for Region mode).
+- **Show mouse cursor:** on/off.
 
-**Nút "Chụp"** = thực thi theo mode + options đang chọn. **Esc / ✕** = đóng bar, không chụp.
+**"Capture" button** = executes with the currently selected mode + options.
+**Esc / ✕** = closes the bar without capturing.
 
-### A.3 Sau khi chụp — hành vi đầu ra (học "thumbnail" của macOS, cải tiến)
-macOS hiện một **thumbnail nổi góc dưới-phải** vài giây; click vào → mở markup, kệ nó → tự lưu. SnapDoc làm tương tự nhưng theo cấu hình:
+### A.3 Post-capture behavior (learned from macOS's "thumbnail", improved)
+macOS shows a **floating thumbnail in the bottom-right corner** for a few
+seconds — click it to open markup, ignore it and it auto-saves. SnapDoc does
+the same, but configurable:
 
-- Nếu **"Mở editor" = ON** → mở thẳng editor.
-- Nếu **OFF** → hiện **thumbnail nổi góc dưới-phải** + toast. Trên thumbnail có quick actions:
-  `[✎ Sửa]  [📋 Copy]  [💾 Lưu]  [↗ Mở thư mục]`. Tự ẩn sau ~5s và áp dụng hành vi mặc định (theo "Lưu vào").
-- *Lý do giữ thumbnail:* cho phép "chụp xong quên luôn" (flow nhanh) NHƯNG vẫn có đường tắt vào editor nếu đổi ý — đúng tinh thần macOS.
+- If **"Open editor" = ON** → opens the editor directly.
+- If **OFF** → shows a **floating thumbnail in the bottom-right corner** +
+  a toast. The thumbnail has quick actions:
+  `[✎ Edit]  [📋 Copy]  [💾 Save]  [↗ Open folder]`. It auto-hides after
+  ~5s and falls back to the default action (per "Save to").
+- *Why keep the thumbnail:* it enables a "capture and forget" flow (fast
+  path) while still offering a quick way into the editor if you change your
+  mind — matching the spirit of macOS's behavior.
 
-### A.4 Hệ quả tới hotkey (cập nhật mục 8 của MVP)
-| Hành động | Windows | macOS |
+### A.4 Impact on hotkeys
+| Action | Windows | macOS |
 |---|---|---|
-| **Mở control bar** (master) | `Ctrl+Shift+5` | `Cmd+Shift+5` |
+| **Open control bar** (master) | `Ctrl+Shift+5` | `Cmd+Shift+5` |
 | Instant full screen | `Ctrl+Shift+1` | `Cmd+Shift+1` |
 | Instant region | `Ctrl+Shift+2` | `Cmd+Shift+2` |
 | Instant window | `Ctrl+Shift+3` | `Cmd+Shift+3` |
 | Capture & copy (instant, region) | `Ctrl+Shift+C` | `Cmd+Shift+C` |
 
-→ Control bar là Must-have mới. Direct hotkey vẫn giữ. Cùng một capture engine ở Rust phục vụ cả hai (chỉ khác lớp UI gọi nó).
+→ The control bar is a new must-have. Direct hotkeys are kept. Both call the
+same capture engine in Rust (only the calling UI layer differs).
 
-### A.5 Hệ quả kiến trúc cửa sổ
-Vì capture bar + overlay phải nổi trên mọi app và phủ toàn màn hình, app dùng **nhiều cửa sổ webview riêng** (mỗi cái một route), không phải 1 cửa sổ:
+### A.5 Window architecture implications
+Since the capture bar + overlay must float above every app and cover the
+whole screen, the app uses **several dedicated webview windows** (one route
+each), not a single window:
 
-| Cửa sổ | Đặc tính | Route frontend |
+| Window | Characteristics | Frontend route |
 |---|---|---|
-| **Capture bar** | nổi (always-on-top), không viền, trong suốt, ở đáy màn hình | `/capture-bar` |
-| **Overlay** | full-screen mỗi màn hình, trong suốt, click-through có kiểm soát, crosshair/highlight | `/overlay` |
-| **Editor** | cửa sổ thường, có viền, resize được | `/editor` |
-| **Thumbnail** | nổi nhỏ góc dưới-phải, tự ẩn | `/thumbnail` |
-| **Settings** | cửa sổ thường | `/settings` |
-| (Tray/menu bar) | native, không phải webview | — (Rust) |
+| **Capture bar** | floating (always-on-top), borderless, transparent, bottom of screen | `/capture-bar` |
+| **Overlay** | full-screen per monitor, transparent, controlled click-through, crosshair/highlight | `/overlay` |
+| **Editor** | regular window, has a border, resizable | `/editor` |
+| **Thumbnail** | small floating popup in the bottom-right corner, auto-hides | `/thumbnail` |
+| **Settings** | regular window | `/settings` |
+| (Tray/menu bar) | native, not a webview | — (Rust) |
 
-Multi-monitor: overlay tạo **một cửa sổ cho mỗi màn hình**; capture bar hiện trên màn hình chứa con trỏ.
+Multi-monitor: the overlay creates **one window per monitor**; the capture
+bar appears on the monitor containing the cursor.
 
 ---
 
-## B. Kiến trúc thư mục (Tauri v2 + React/TS + Konva)
+## B. Folder architecture (Tauri v2 + React/TS + Konva)
 
 ```
 screenshort-app/
-├── ARCHITECTURE.md                  # tài liệu này
+├── ARCHITECTURE.md                  # this document
 ├── README.md
 ├── package.json                     # FE deps + scripts (tauri dev/build)
 ├── vite.config.ts
@@ -87,115 +110,132 @@ screenshort-app/
 ├── index.html
 │
 ├── src/                             # ───── FRONTEND (webview UI) ─────
-│   ├── main.tsx                     # bootstrap; route theo window label
-│   ├── routes/                      # mỗi cửa sổ Tauri = 1 route
-│   │   ├── capture-bar/             # thanh điều khiển kiểu Cmd+Shift+5
+│   ├── main.tsx                     # bootstrap; routes by window label
+│   ├── routes/                      # each Tauri window = one route
+│   │   ├── capture-bar/             # Cmd+Shift+5-style control bar
 │   │   │   ├── CaptureBar.tsx
 │   │   │   ├── ModeSwitch.tsx       # Full / Window / Region
-│   │   │   ├── OptionsMenu.tsx      # lưu vào / timer / mở editor / nhớ vùng
+│   │   │   ├── OptionsMenu.tsx      # save to / timer / open editor / remember region
 │   │   │   └── CaptureButton.tsx
-│   │   ├── overlay/                 # lớp phủ chọn vùng / chọn window
+│   │   ├── overlay/                 # region/window selection overlay
 │   │   │   ├── Overlay.tsx
-│   │   │   ├── RegionSelector.tsx   # kéo chọn + kích thước realtime
-│   │   │   └── WindowPicker.tsx     # highlight window dưới con trỏ
-│   │   ├── editor/                  # editor chú thích
+│   │   │   ├── RegionSelector.tsx   # drag-select + live size readout
+│   │   │   └── WindowPicker.tsx     # highlight the window under the cursor
+│   │   ├── editor/                  # annotation editor
 │   │   │   ├── Editor.tsx
 │   │   │   ├── Toolbar.tsx
 │   │   │   └── OutputActions.tsx    # Save / Copy / Save+Copy
-│   │   ├── thumbnail/               # thumbnail nổi sau chụp
+│   │   ├── thumbnail/               # post-capture floating thumbnail
 │   │   │   └── Thumbnail.tsx
 │   │   └── settings/
 │   │       ├── Settings.tsx
 │   │       ├── GeneralTab.tsx
-│   │       └── ShortcutsTab.tsx     # remap + cảnh báo xung đột
+│   │       └── ShortcutsTab.tsx     # remap + conflict warnings
 │   │
-│   ├── features/                    # logic theo domain (tách khỏi UI route)
+│   ├── features/                    # domain logic (separate from UI routes)
 │   │   ├── capture/
 │   │   │   ├── captureMode.ts       # enum Full|Window|Region
-│   │   │   └── useCapture.ts        # gọi command Rust
-│   │   ├── annotation/              # ⭐ trái tim của editor
+│   │   │   └── useCapture.ts        # calls the Rust command
+│   │   ├── annotation/              # ⭐ the heart of the editor
 │   │   │   ├── canvas/
 │   │   │   │   └── AnnotationStage.tsx   # Konva Stage + Layer
-│   │   │   ├── tools/               # mỗi tool 1 file
+│   │   │   ├── tools/               # one file per tool
 │   │   │   │   ├── RectTool.ts
 │   │   │   │   ├── EllipseTool.ts
 │   │   │   │   ├── TextTool.ts
-│   │   │   │   ├── StepNumberTool.ts     # badge tự tăng 1,2,3…
+│   │   │   │   ├── StepNumberTool.ts     # auto-incrementing badge 1,2,3…
 │   │   │   │   ├── SelectTool.ts         # move/resize/delete
 │   │   │   │   └── CropTool.ts
-│   │   │   ├── model.ts             # kiểu Annotation (object-based)
+│   │   │   ├── model.ts             # Annotation type (object-based)
 │   │   │   ├── history.ts           # undo/redo stack (≥20)
-│   │   │   └── flatten.ts           # gộp annotation + ảnh → PNG export
+│   │   │   └── flatten.ts           # merges annotations + image → PNG export
 │   │   ├── output/
 │   │   │   └── useOutput.ts         # save / copy / save+copy + sticky pref
 │   │   └── settings/
 │   │       └── useSettings.ts
 │   │
 │   ├── lib/
-│   │   ├── ipc.ts                   # wrapper invoke() → Rust commands
-│   │   ├── events.ts               # listen() event từ Rust (hotkey fired…)
-│   │   ├── shortcuts.ts            # phím tắt trong editor
-│   │   └── store.ts                # state toàn cục (zustand)
-│   ├── components/                 # UI dùng chung (Button, Dropdown, Toast…)
+│   │   ├── ipc.ts                   # invoke() wrapper → Rust commands
+│   │   ├── events.ts               # listen() for events from Rust (hotkey fired…)
+│   │   ├── shortcuts.ts            # editor keyboard shortcuts
+│   │   └── store.ts                # global state (zustand)
+│   ├── components/                 # shared UI (Button, Dropdown, Toast…)
 │   ├── styles/
-│   └── types/                      # type chia sẻ FE (khớp với Rust)
+│   └── types/                      # shared FE types (mirroring Rust structs)
 │
 ├── src-tauri/                       # ───── BACKEND (Rust, native) ─────
 │   ├── Cargo.toml
 │   ├── build.rs
-│   ├── tauri.conf.json              # khai báo windows, bundle, permissions
+│   ├── tauri.conf.json              # window declarations, bundle, permissions
 │   ├── icons/
-│   ├── capabilities/                # Tauri v2: phân quyền per-window
+│   ├── capabilities/                # Tauri v2: per-window permissions
 │   │   └── default.json
 │   └── src/
-│       ├── main.rs                  # entry
-│       ├── lib.rs                   # setup app, tray, đăng ký windows + commands
-│       ├── commands.rs              # #[tauri::command] expose cho FE
-│       ├── capture/                 # ⭐ engine chụp (dùng chung cho mọi hotkey)
+│       ├── main.rs                  # entry point
+│       ├── lib.rs                   # app setup, tray, window + command registration
+│       ├── commands.rs              # #[tauri::command] surface exposed to FE
+│       ├── capture/                 # ⭐ capture engine (shared by every hotkey)
 │       │   ├── mod.rs
 │       │   ├── fullscreen.rs
-│       │   ├── window.rs            # liệt kê + chụp cửa sổ
+│       │   ├── window.rs            # enumerate + capture windows
 │       │   ├── region.rs
 │       │   ├── monitor.rs           # multi-monitor, DPI/scale (HiDPI/Retina)
-│       │   └── mac_sck.rs           # macOS: grab pixel qua ScreenCaptureKit
+│       │   └── mac_sck.rs           # macOS: pixel grabbing via ScreenCaptureKit
 │       ├── hotkey/
 │       │   ├── mod.rs               # global-hotkey: master + direct
-│       │   └── conflict.rs          # phát hiện xung đột khi đăng ký
-│       ├── windows/                 # tạo & quản lý các cửa sổ webview
+│       │   └── conflict.rs          # conflict detection on registration
+│       ├── windows/                 # webview window creation & management
 │       │   ├── mod.rs
-│       │   ├── capture_bar.rs       # nổi, always-on-top, đáy màn hình
-│       │   ├── overlay.rs           # 1 cửa sổ / 1 màn hình
+│       │   ├── capture_bar.rs       # floating, always-on-top, bottom of screen
+│       │   ├── overlay.rs           # one window per monitor
 │       │   ├── editor.rs
 │       │   └── thumbnail.rs
-│       ├── clipboard.rs             # ghi ảnh vào clipboard (Win CF_DIB / mac NSPasteboard)
+│       ├── clipboard.rs             # writes images to the clipboard (Win CF_DIB / mac NSPasteboard)
 │       ├── storage/
 │       │   ├── mod.rs
-│       │   ├── save.rs              # ghi file, dedup tên (_1,_2), fallback Desktop
-│       │   └── settings.rs          # persist settings (JSON)
-│       ├── permissions/             # ⚠ cạm bẫy macOS
+│       │   ├── save.rs              # file writing, name dedup (_1,_2), Desktop fallback
+│       │   └── settings.rs          # settings persistence (JSON)
+│       ├── permissions/             # ⚠ macOS pitfalls
 │       │   ├── mod.rs
-│       │   └── macos.rs             # check Screen Recording + Accessibility
-│       └── tray.rs                  # tray (Win) / menu bar (mac)
+│       │   └── macos.rs             # checks Screen Recording + Accessibility
+│       └── tray.rs                  # tray (Windows) / menu bar (macOS)
 │
 └── .github/
     └── workflows/
-        └── build.yml                # CI build .dmg (ký+notarize) + .msi/.exe
+        └── build.yml                # CI build: .dmg (signed+notarized) + .msi/.exe
 ```
 
-### B.1 Nguyên tắc tách lớp
-- **Rust = quyền & native:** capture, global hotkey, clipboard ảnh, file, quyền OS, tray, tạo cửa sổ. Lý do: đây là phần phải chạm OS, và là thế mạnh kiểm soát của Tauri.
-- **Frontend = trải nghiệm & vẽ:** control bar, overlay UI, editor canvas (Konva), settings. Annotation là object-based nên hợp với Konva (mỗi shape là 1 node move/select/undo được — đúng mục 6 MVP).
-- **`commands.rs` + `lib/ipc.ts` là ranh giới hợp đồng:** mọi giao tiếp FE↔Rust đi qua đây; type ở `src/types` phải khớp struct Rust.
-- **Capture engine dùng chung:** cả direct hotkey lẫn control bar đều gọi cùng `capture::{fullscreen,window,region}` — không nhân đôi logic.
-- **Backend grab pixel theo OS (ưu tiên API native hiện đại):**
-  - **macOS (≥14.0):** ScreenCaptureKit — `SCScreenshotManager.captureImageInRect` cho vùng/màn hình (display-agnostic, đa màn hình, giữ Retina) và `SCContentFilter` + `captureImageWithFilter` cho cửa sổ (chụp đúng 1 cửa sổ kể cả bị che). Thay cho `CGWindowListCreateImage` đã deprecated. Quyền kiểm tra bằng `CGPreflightScreenCaptureAccess`.
-  - **Windows:** WGC — Windows.Graphics.Capture (qua xcap feature `wgc`), thay GDI BitBlt.
-  - **Linux:** pipewire / X11 (qua xcap).
-  - Việc **liệt kê** màn hình & cửa sổ (metadata) vẫn dùng xcap trên mọi OS; chỉ bước grab pixel mới tách theo API native.
+### B.1 Layering principles
+- **Rust = permissions & native integration:** capture, global hotkeys,
+  image clipboard, files, OS permissions, tray, window creation. Rationale:
+  this is the part that must touch the OS, and it's Tauri's core strength.
+- **Frontend = UX & drawing:** control bar, overlay UI, editor canvas
+  (Konva), settings. Annotations are object-based, which fits Konva well
+  (each shape is a movable/selectable/undoable node).
+- **`commands.rs` + `lib/ipc.ts` are the contract boundary:** all FE↔Rust
+  communication goes through here; types in `src/types` must mirror the
+  Rust structs.
+- **Shared capture engine:** both direct hotkeys and the control bar call
+  the same `capture::{fullscreen,window,region}` — no duplicated logic.
+- **Pixel grabbing is OS-specific, preferring modern native APIs:**
+  - **macOS (≥14.0):** ScreenCaptureKit — `SCScreenshotManager.captureImageInRect`
+    for region/screen capture (display-agnostic, multi-monitor, preserves
+    Retina) and `SCContentFilter` + `captureImageWithFilter` for windows
+    (captures exactly one window even if occluded). Replaces the deprecated
+    `CGWindowListCreateImage`. Permission is checked via
+    `CGPreflightScreenCaptureAccess`.
+  - **Windows:** WGC — Windows.Graphics.Capture (via the xcap `wgc`
+    feature), replacing GDI BitBlt.
+  - **Linux:** pipewire / X11 (via xcap).
+  - **Enumerating** displays & windows (metadata) still uses xcap on every
+    OS; only the pixel-grabbing step is split by native API.
 
-### B.2 Thứ tự dựng (gợi ý cho sprint)
-1. **Sprint 0 (PoC rủi ro):** `capture/` + `hotkey/` + `permissions/macos.rs` + `clipboard.rs` — chứng minh phần native chạy trên cả 2 OS (đây là rủi ro lớn nhất của Tauri-Rust).
-2. **Sprint 1:** control bar + overlay + direct hotkey → chụp ra file/clipboard (chưa editor).
+### B.2 Build order (suggested sprint plan)
+1. **Sprint 0 (highest-risk PoC):** `capture/` + `hotkey/` +
+   `permissions/macos.rs` + `clipboard.rs` — prove the native layer works
+   on both OSes (the biggest risk in a Tauri+Rust app).
+2. **Sprint 1:** control bar + overlay + direct hotkeys → capture to
+   file/clipboard (no editor yet).
 3. **Sprint 2:** editor + annotation tools + undo/redo + crop.
-4. **Sprint 3:** thumbnail nổi, settings (remap + thư mục), sticky output, đánh bóng + CI build.
-```
+4. **Sprint 3:** floating thumbnail, settings (remapping + folder), sticky
+   output, polish + CI build.

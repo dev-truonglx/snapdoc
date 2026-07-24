@@ -2,6 +2,11 @@
   "name": "snapdoc",
   "version": "1.2.3",
   "description": "SnapDoc — fast screenshot + annotation app for Windows & macOS",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dev-truonglx/snapdoc.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
