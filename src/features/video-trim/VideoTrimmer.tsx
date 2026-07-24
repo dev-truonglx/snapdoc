@@ -22,26 +22,32 @@ import {
 export interface VideoTrimmerProps {
   src: string;
   /** Đường dẫn file thật trên đĩa (KHÔNG phải URL `convertFileSrc`) — dùng để
-   * gọi `generate_video_frames` sinh filmstrip, xem `filePath` ở
-   * `RecordReview.tsx`/`HistoryPreviewPanel.tsx`. */
+   * gọi `generate_video_frames` sinh filmstrip. */
   filePath: string;
   durationMs: number;
   busy?: boolean;
-  /** Gọi khi bấm nút "Áp dụng cắt" TRONG toolbar — chỉ cần khi
-   * `showApplyButton` (mặc định `true`), bỏ qua khi màn hình cha tự gộp nút
-   * Áp dụng vào hành động của riêng nó (xem `showApplyButton`). `removeAudio`:
-   * user đã bấm "Tách nhạc nền" (xoá hẳn track âm thanh khỏi file kết quả). */
-  onApply?: (keepRangesMs: [number, number][], removeAudio: boolean) => void;
-  /** `false`: ẩn nút "Áp dụng cắt" khỏi toolbar — dùng khi màn hình cha (ví dụ
-   * `RecordReview`) muốn GỘP hành động áp dụng cắt vào nút Lưu của riêng nó
-   * (1 nút "Áp dụng cắt và lưu" duy nhất cho cả màn hình, thay vì 2 nút tách
-   * biệt: áp dụng rồi mới lưu). Cha phải tự lắng `onStateChange` để biết lúc
-   * nào có thay đổi cần áp dụng + đoạn giữ lại tương ứng, rồi tự gọi
-   * `ipc.trimPendingRecording` khi cần. Mặc định `true` (giữ hành vi cũ). */
-  showApplyButton?: boolean;
-  /** Báo cho cha biết trạng thái chỉnh sửa hiện tại — chỉ hữu ích khi
-   * `showApplyButton={false}` (xem trên); bỏ qua nếu cha không cần gộp nút. */
+  /** "Lưu đè" — ghi đè vĩnh viễn video gốc bằng đoạn đang giữ lại. Đặt ngay
+   * trong `editToolbar` (cạnh các nút chỉnh sửa: chia/xoá/cắt đầu-cuối…) thay
+   * vì ở Toolbar trên cùng của Editor — 2 nút Lưu tách biệt hẳn (không phải
+   * kiểu split-button Save/▾ như ảnh) vì đây là 2 hành động khác nhau rõ rệt
+   * (ghi đè vĩnh viễn vs giữ nguyên bản gốc), đặt cạnh nhau ngay chỗ đang thao
+   * tác cắt để không phải nhìn lên toolbar xa. */
+  onSave: () => void;
+  /** "Lưu thành video mới" — áp dụng đoạn đang giữ lại (hoặc y nguyên nếu
+   * chưa cắt gì) thành 1 record MỚI, giữ nguyên bản gốc. */
+  onSaveAs: () => void;
+  /** Báo cho cha (Editor.tsx) biết trạng thái chỉnh sửa hiện tại (có thay
+   * đổi/đoạn giữ lại/đã tách nhạc nền) — dùng để hiện toast/điều hướng khác,
+   * KHÔNG dùng để tính disabled cho `onSave` (VideoTrimmer tự tính `canSave`
+   * nội bộ, xem khai báo `canSave`). */
   onStateChange?: (state: { hasChanges: boolean; keepRanges: [number, number][]; removeAudio: boolean }) => void;
+  /** "open-editor" (mặc định): sau khi chụp frame, ingest xong rồi mở/focus
+   * cửa sổ Editor riêng — dùng khi VideoTrimmer đang chạy trong 1 cửa sổ KHÁC
+   * Editor. "in-place": chỉ ingest (ảnh vào History ngay), KHÔNG gọi
+   * `openEditor` — dùng khi VideoTrimmer đang render ngay trong chính Editor
+   * (chế độ video), tránh tự trigger "refresh-capture" khiến Editor nạp lại
+   * pending ảnh và mất video đang xem (xem `Editor.tsx`). */
+  frameCaptureMode?: "open-editor" | "in-place";
 }
 
 /** Chỉ giữ cạnh dài nhất chưa gộp, dùng lặp lại cho track/playhead math. */
@@ -49,7 +55,7 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
 }
 
-/** `93500` → `"1:34"` — mm:ss (cùng định dạng `RecordReview.tsx`/`HistoryPreviewPanel.tsx`). */
+/** `93500` → `"1:34"` — mm:ss (cùng định dạng `HistoryPreviewPanel.tsx`). */
 function fmtDuration(ms: number): string {
   const totalSec = Math.round(ms / 1000);
   const m = Math.floor(totalSec / 60);
@@ -90,14 +96,18 @@ const BASE_FRAME_COUNT = 40;
 /** Bề rộng đích (px) khi trích frame cho tile filmstrip — nhỏ, vì mỗi tile
  * trên timeline chỉ rộng ~100px (xem `THUMB_TARGET_PX`). */
 const FILMSTRIP_SCALE_W = 160;
-/** Chiều cao dải khung hình filmstrip — giữ NGUYÊN giá trị cũ (không đổi độ
- * phân giải/tỉ lệ hiện của frame), xem `track`/`filmstripLayer`. */
-const FILMSTRIP_BAND_H = 64;
+/** Chiều cao dải khung hình filmstrip — giảm cùng tỉ lệ với `TRACK_H` (xem
+ * bên dưới) để timeline gọn hơn, xem `track`/`filmstripLayer`. */
+const FILMSTRIP_BAND_H = 44;
 /** Chiều cao khối timeline — CAO HƠN dải khung hình (`FILMSTRIP_BAND_H`) để
  * `playhead` tràn ra lề trên/dưới dải frame, dễ thấy đang chạy tới đâu (trước
  * đây playhead cao bằng đúng dải frame nên bị "chìm" khi clip có màu trắng
- * trùng màu vạch). */
-const TRACK_H = 104;
+ * trùng màu vạch). Chênh lệch với `FILMSTRIP_BAND_H` (padding cho playhead
+ * tràn ra, mỗi bên = (TRACK_H - FILMSTRIP_BAND_H)/2) CỐ Ý giữ đủ lớn (16px,
+ * 8px mỗi bên) dù đã giảm tổng chiều cao — hụt xuống quá thấp (như lần thử
+ * 72/64 trước, chỉ 4px mỗi bên) khiến phần playhead tràn ra gần như không
+ * nhìn thấy được. */
+const TRACK_H = 60;
 /** Chiều cao dải thước thời gian (ruler) phía trên track — hiện mốc giờ:phút
  * dọc theo timeline, mật độ tự đổi theo zoom (xem `NICE_TICK_INTERVALS_MS`). */
 const RULER_H = 22;
@@ -145,8 +155,8 @@ function capFrameCache(m: Map<number, string>, max: number): Map<number, string>
   return m;
 }
 
-/** Timeline cắt video dùng chung cho RecordReview (trước khi Lưu) và
- * HistoryPreviewPanel (video đã lưu) — mô hình "nhiều đoạn giữ lại" kiểu
+/** Timeline cắt video dùng trong Editor (chế độ video) và
+ * HistoryPreviewPanel (preview nhỏ trong Library) — mô hình "nhiều đoạn giữ lại" kiểu
  * CapCut: chia nhỏ / xoá đoạn đã chọn / cắt đầu-cuối theo playhead, có
  * undo/redo. Logic thuần (split/xoá/quy đổi toạ độ) nằm ở `./segments` để dễ
  * đọc/khoanh vùng lỗi — component này chỉ giữ state React + tương tác +
@@ -161,9 +171,10 @@ export default function VideoTrimmer({
   filePath,
   durationMs,
   busy,
-  onApply,
-  showApplyButton = true,
+  onSave,
+  onSaveAs,
   onStateChange,
+  frameCaptureMode = "open-editor",
 }: VideoTrimmerProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -223,6 +234,21 @@ export default function VideoTrimmer({
    * ra ngoài rồi thả), tránh thanh biến mất giữa chừng lúc đang thao tác. */
   const [volumeHover, setVolumeHover] = useState(false);
   const [volumeDragging, setVolumeDragging] = useState(false);
+  const volumeGroupRef = useRef<HTMLDivElement>(null);
+  /** Toạ độ viewport (không phải toạ độ trong `videoWrap`) để đặt popover âm
+   * lượng qua `position: fixed` — bắt buộc vì icon loa giờ nằm TRONG
+   * `videoWrap` (`overflow: hidden`, xem `playbackOverlay`); neo bằng
+   * `position: absolute` như trước sẽ bị cắt mất phần popover tràn ra ngoài.
+   * Đo lại mỗi lần hover vào (icon không di chuyển trong lúc popover mở nên
+   * không cần đo lại liên tục). */
+  const [volumeAnchor, setVolumeAnchor] = useState<{ left: number; top: number } | null>(null);
+  /** Hover trên `videoWrap` — quyết định hiện/ẩn play/âm lượng/thời gian
+   * (`overlayCenterGroup`); nhóm zoom/fullscreen (`toolsGroup`) KHÔNG theo cờ
+   * này, luôn hiện vì dùng thường xuyên lúc chỉnh sửa. Giữ hiện thêm khi đang
+   * kéo thanh âm lượng (`volumeDragging`) — tránh thanh trượt biến mất giữa
+   * chừng nếu chuột lỡ rê ra khỏi `videoWrap` trong lúc kéo. */
+  const [wrapHover, setWrapHover] = useState(false);
+  const showCenterControls = wrapHover || volumeDragging;
   const volumeTrackRef = useRef<HTMLDivElement>(null);
   /** Cờ "đang giữ chuột" đọc qua ref (không phải state) trong
    * `onVolumeTrackMove` — tránh stale closure/re-render mỗi lần kéo, cùng
@@ -683,6 +709,38 @@ export default function VideoTrimmer({
     else v.pause();
   };
 
+  /** Chụp khung hình hiện tại của video thành ảnh PNG — dùng canvas để lấy
+   * đúng frame đang hiển thị (không round-trip qua ffmpeg như filmstrip), rồi
+   * ingest qua `setPendingImage`. Bước tiếp theo tuỳ `frameCaptureMode` — xem
+   * doc-comment của prop này ở `VideoTrimmerProps`. */
+  const [capturingFrame, setCapturingFrame] = useState(false);
+  const doCaptureFrame = async () => {
+    const v = videoRef.current;
+    if (!v || capturingFrame) return;
+    setCapturingFrame(true);
+    try {
+      const w = v.videoWidth;
+      const h = v.videoHeight;
+      if (!w || !h) return;
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(v, 0, 0, w, h);
+      const dataUrl = canvas.toDataURL("image/png");
+      // `setPendingImage` tự ingest vào History (emit "history:item-added" khi
+      // ghi asset xong) — luôn gọi dù ở chế độ nào, chỉ khác ở bước sau.
+      await ipc.setPendingImage(dataUrl, w, h);
+      if (frameCaptureMode !== "in-place") {
+        await ipc.keepCaptureFocus().catch(() => {});
+        await ipc.openEditor();
+      }
+    } finally {
+      setCapturingFrame(false);
+    }
+  };
+
   const toggleMute = () => setIsMuted((m) => !m);
 
   /** Đặt `volume` theo vị trí X con trỏ trên track ngang (`volumeTrackRef`) —
@@ -919,11 +977,15 @@ export default function VideoTrimmer({
   // liên tục) để effect báo `onStateChange` bên dưới không bắn dồn dập.
   const keepRanges = useMemo(() => computeKeepRanges(segments), [segments]);
   const hasChanges = past.length > 0;
-  const canApply = hasChanges && total >= MIN_SEG_MS && !busy;
+  // "Lưu đè" cần CÓ thay đổi để ghi đè (không có gì để lưu nếu chưa cắt) VÀ
+  // đoạn giữ lại còn đủ dài (không cho ghi đè thành video gần như rỗng).
+  // "Lưu thành video mới" không cần điều kiện này — chưa cắt gì thì kết quả
+  // chỉ là 1 bản sao y nguyên, vẫn hợp lệ (giống Save As của ảnh).
+  const canSave = hasChanges && total >= MIN_SEG_MS && !busy;
 
-  // Báo cho cha biết trạng thái chỉnh sửa — chỉ cha nào cần gộp nút Áp dụng
-  // vào hành động riêng mới lắng (xem `showApplyButton`); vô hại nếu không ai
-  // lắng (`onStateChange` optional).
+  // Báo cho cha biết trạng thái chỉnh sửa — cha (Editor.tsx) dùng để quyết
+  // định tham số truyền vào `onSave`/`onSaveAs`; vô hại nếu không ai lắng
+  // (`onStateChange` optional).
   useEffect(() => {
     onStateChange?.({ hasChanges, keepRanges, removeAudio });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -941,69 +1003,96 @@ export default function VideoTrimmer({
 
   return (
     <div ref={wrapRef} style={{ ...wrap, ...(isFullscreen ? fullscreenWrap : null) }}>
-      <div style={videoWrap}>
-        <video ref={videoRef} key={src} src={src} style={videoStyle} autoPlay />
-      </div>
+      {/* Video + thanh điều khiển phát NỔI đè lên đáy video (kiểu YouTube/
+          QuickTime/CapCut) thay vì 1 hàng riêng chiếm chỗ bên dưới — nhường
+          tối đa chiều cao cho khung xem, chỉ hiện chrome khi cần nhìn thấy. */}
+      <div style={videoWrap} onMouseEnter={() => setWrapHover(true)} onMouseLeave={() => setWrapHover(false)}>
+        <video ref={videoRef} key={src} src={src} style={videoStyle} onClick={togglePlay} />
 
-      <div style={playbackRow}>
-        <button style={playBtn} onClick={togglePlay} title={isPlaying ? "Tạm dừng" : "Phát"}>
-          {isPlaying ? "❚❚" : "▶"}
-        </button>
-        <div
-          style={volumeGroup}
-          onMouseEnter={() => setVolumeHover(true)}
-          onMouseLeave={() => setVolumeHover(false)}
-        >
-          <button style={iconToolBtn} onClick={toggleMute} title={isMuted || volume === 0 ? "Bật âm" : "Tắt âm"}>
-            {isMuted || volume === 0 ? <SpeakerMutedIcon /> : <SpeakerIcon />}
-          </button>
-          {/* Popover nổi DƯỚI icon (không nằm trong luồng layout của
-              `playbackRow`) — khác bản cũ co giãn `width` ngay trong hàng,
-              từng đẩy xê dịch `timeText`/`toolsGroup` bên phải mỗi lần
-              hiện/ẩn. Chỉ mount khi cần (hover/đang kéo) nên thanh trượt LUÔN
-              ở kích thước cuối cùng ngay khi xuất hiện.
-              `volumePopoverAnchor` áp SÁT icon (`top:100%`, KHÔNG có gap) —
-              khoảng cách nhìn thấy với card bên trong là `paddingTop` CỦA
-              CHÍNH anchor (không phải margin của card), nên toàn bộ khoảng
-              trống đó vẫn thuộc DOM của `volumeGroup` → di chuột từ icon
-              xuống card không hề rời khỏi phần tử đang lắng
-              `onMouseEnter`/`onMouseLeave`, không bị mất thanh giữa chừng
-              (nếu để card tự chừa margin-top thay vì anchor chừa padding-top,
-              khoảng trống đó nằm NGOÀI anchor nên di chuột qua sẽ trợt hover). */}
-          {(volumeHover || volumeDragging) && (
-            <div style={volumePopoverAnchor}>
-              <div style={volumePopoverCard}>
-                <div
-                  ref={volumeTrackRef}
-                  style={volumeTrackHit}
-                  onPointerDown={onVolumeTrackDown}
-                  onPointerMove={onVolumeTrackMove}
-                  onPointerUp={onVolumeTrackUp}
-                  title="Âm lượng"
-                >
-                  <div style={volumeTrackBar}>
-                    <div style={{ ...volumeTrackFill, width: `${(isMuted ? 0 : volume) * 100}%` }} />
-                    <div style={{ ...volumeThumb, left: `${(isMuted ? 0 : volume) * 100}%` }} />
+        <div style={playbackOverlay}>
+          {/* Cột trái RỖNG — chỉ để `overlayCenterGroup` (cột giữa, "auto")
+              được grid canh giữa THẬT SỰ trong toàn overlay bất kể `toolsGroup`
+              (cột phải) rộng bao nhiêu, thay vì bị lệch tâm nếu dùng flex +
+              marginLeft:auto như trước. */}
+          <div />
+          {/* Thời gian - Play - Âm lượng: chỉ hiện khi hover vào video
+              (`showCenterControls`) — ẩn mặc định để khung xem sạch hơn lúc
+              không thao tác, hiện lại ngay khi rê chuột vào (kiểu YouTube). */}
+          <div
+            style={{
+              ...overlayCenterGroup,
+              opacity: showCenterControls ? 1 : 0,
+              pointerEvents: showCenterControls ? "auto" : "none",
+            }}
+          >
+            <span style={overlayTimeText}>{fmtDuration(playheadMs)} / {fmtDuration(total)}</span>
+            <button style={overlayPlayBtn} onClick={togglePlay} title={isPlaying ? "Tạm dừng (Space)" : "Phát (Space)"}>
+              {isPlaying ? <PauseIcon size={22} /> : <PlayIcon size={22} />}
+            </button>
+            <div
+              ref={volumeGroupRef}
+              style={volumeGroup}
+              onMouseEnter={() => {
+                const rect = volumeGroupRef.current?.getBoundingClientRect();
+                if (rect) setVolumeAnchor({ left: rect.right, top: rect.top + rect.height / 2 });
+                setVolumeHover(true);
+              }}
+              onMouseLeave={() => setVolumeHover(false)}
+            >
+              <button style={overlayIconBtn} onClick={toggleMute} title={isMuted || volume === 0 ? "Bật âm" : "Tắt âm"}>
+                {isMuted || volume === 0 ? <SpeakerMutedIcon /> : <SpeakerIcon />}
+              </button>
+              {/* Popover nổi NGANG HÀNG bên PHẢI icon (cùng chiều cao, không
+                  còn xuống dưới như bản cũ) qua `position: fixed` (toạ độ
+                  viewport từ `volumeAnchor`, đo lúc hover vào) — KHÔNG dùng
+                  `position: absolute` neo trong `volumeGroup`, vì icon nằm
+                  TRONG `videoWrap` (`overflow: hidden`, xem `playbackOverlay`):
+                  popover tràn ra sẽ bị cắt mất nếu định vị tương đối trong
+                  luồng cha. `position: fixed` thoát được việc bị cắt (cùng kỹ
+                  thuật `hoverPreview` bên dưới) NHƯNG vẫn đặt là con DOM của
+                  `volumeGroup` (không phải sibling) — bắt buộc để trình duyệt
+                  coi việc rê chuột từ icon sang card là "vẫn ở trong
+                  `volumeGroup`" (không bắn `mouseleave`), dù popover render ở
+                  toạ độ khác trên màn hình. Đặt popover ra NGOÀI (làm sibling)
+                  từng khiến rê chuột qua khoảng cách giữa icon và card bị hiểu
+                  nhầm là đã rời khỏi, đóng sập popover giữa chừng. */}
+              {(volumeHover || volumeDragging) && volumeAnchor && (
+                <div style={{ ...volumePopoverAnchor, left: volumeAnchor.left, top: volumeAnchor.top }}>
+                  <div style={volumePopoverCard}>
+                    <div
+                      ref={volumeTrackRef}
+                      style={volumeTrackHit}
+                      onPointerDown={onVolumeTrackDown}
+                      onPointerMove={onVolumeTrackMove}
+                      onPointerUp={onVolumeTrackUp}
+                      title="Âm lượng"
+                    >
+                      <div style={volumeTrackBar}>
+                        <div style={{ ...volumeTrackFill, width: `${(isMuted ? 0 : volume) * 100}%` }} />
+                        <div style={{ ...volumeThumb, left: `${(isMuted ? 0 : volume) * 100}%` }} />
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
             </div>
-          )}
-        </div>
-        <span style={timeText}>{fmtDuration(playheadMs)} / {fmtDuration(total)}</span>
-        <div style={toolsGroup}>
-          <button style={toolBtn} onClick={zoomOut} disabled={zoom <= MIN_ZOOM} title="Thu nhỏ timeline">−</button>
-          <button style={toolBtn} onClick={zoomReset} title="Đặt lại zoom 100%">{Math.round(zoom * 100)}%</button>
-          <button style={toolBtn} onClick={zoomIn} disabled={zoom >= MAX_ZOOM} title="Phóng to timeline (xem từng khung hình)">+</button>
-          <button style={toolBtn} onClick={toggleFullscreen} title={isFullscreen ? "Thoát toàn màn hình" : "Phóng to toàn màn hình"}>
-            {isFullscreen ? "⤡" : "⤢"}
-          </button>
+          </div>
+          <div style={toolsGroup}>
+            <button style={overlayToolBtn} onClick={zoomOut} disabled={zoom <= MIN_ZOOM} title="Thu nhỏ timeline">−</button>
+            <button style={overlayToolBtn} onClick={zoomReset} title="Đặt lại zoom 100%">{Math.round(zoom * 100)}%</button>
+            <button style={overlayToolBtn} onClick={zoomIn} disabled={zoom >= MAX_ZOOM} title="Phóng to timeline (xem từng khung hình)">+</button>
+            <button style={overlayIconBtn} onClick={toggleFullscreen} title={isFullscreen ? "Thoát toàn màn hình" : "Phóng to toàn màn hình"}>
+              {isFullscreen ? <FullscreenExitIcon /> : <FullscreenEnterIcon />}
+            </button>
+          </div>
         </div>
       </div>
 
       <div style={editToolbar}>
-        <button style={iconToolBtn} disabled={past.length === 0} onClick={undo} title="Hoàn tác (Ctrl+Z)">↶</button>
-        <button style={iconToolBtn} disabled={future.length === 0} onClick={redo} title="Làm lại (Ctrl+Shift+Z)">↷</button>
+        {/* Cùng glyph ↩︎/↪︎ với Toolbar ảnh (`routes/editor/Toolbar.tsx`) — nhất
+            quán trong toàn app thay vì mỗi chế độ dùng 1 cặp ký tự khác nhau. */}
+        <button style={iconToolBtn} disabled={past.length === 0} onClick={undo} title="Hoàn tác (Ctrl+Z)">↩︎</button>
+        <button style={iconToolBtn} disabled={future.length === 0} onClick={redo} title="Làm lại (Ctrl+Shift+Z)">↪︎</button>
         <div style={toolDivider} />
         <button style={iconToolBtn} disabled={!canSplitAt(segments, playheadMs)} onClick={doSplit} title="Chia đoạn tại vị trí đang dừng (Ctrl+B)">
           <ScissorsIcon />
@@ -1016,6 +1105,10 @@ export default function VideoTrimmer({
         </button>
         <button style={iconToolBtn} disabled={!canTrimTail(segments, playheadMs)} onClick={doTrimTail} title="Cắt từ vị trí đang dừng tới cuối (W)">
           <span style={bracketGlyph}>]</span>
+        </button>
+        <div style={toolDivider} />
+        <button style={iconToolBtn} disabled={capturingFrame} onClick={doCaptureFrame} title="Lưu khung hình hiện tại thành ảnh và mở trong Editor">
+          <CameraIcon />
         </button>
         <div style={toolDivider} />
         {/* Tách nhạc nền: xoá HẲN track âm thanh khỏi file khi Áp dụng cắt —
@@ -1035,17 +1128,27 @@ export default function VideoTrimmer({
         <button style={resetBtn} disabled={!hasChanges || busy} onClick={doReset} title="Bỏ hết thay đổi, về lại video gốc">
           Đặt lại
         </button>
-        {/* Áp dụng cắt: chỉ hiện khi `showApplyButton` (mặc định true) — màn
-            hình cha muốn gộp hành động này vào nút Lưu của riêng nó (xem
-            `RecordReview.tsx`) sẽ tự ẩn nút này và tự xử lý qua
-            `onStateChange`. */}
-        {showApplyButton && (
-          <div style={trimCommitGroup}>
-            <button style={applyBtn} disabled={!canApply} onClick={() => onApply?.(keepRanges, removeAudio)}>
-              {busy ? "Đang cắt…" : "Áp dụng cắt"}
-            </button>
-          </div>
-        )}
+        {/* 2 nút Lưu tách biệt, đặt ngay trong hàng công cụ chỉnh sửa (không
+            phải ở Toolbar trên cùng của Editor) — xem doc-comment `onSave`/
+            `onSaveAs` ở `VideoTrimmerProps`. */}
+        <div style={trimCommitGroup}>
+          <button
+            style={saveOverwriteBtn}
+            disabled={!canSave}
+            onClick={onSave}
+            title="Ghi đè vĩnh viễn video gốc bằng đoạn đang giữ lại (Ctrl/Cmd+S)"
+          >
+            {busy ? "Đang lưu…" : "Lưu đè"}
+          </button>
+          <button
+            style={saveAsBtn}
+            disabled={busy}
+            onClick={onSaveAs}
+            title="Lưu thành video mới, giữ nguyên bản gốc (Ctrl/Cmd+Shift+S)"
+          >
+            Lưu thành video mới
+          </button>
+        </div>
       </div>
 
       <div
@@ -1128,13 +1231,6 @@ export default function VideoTrimmer({
         </div>
       </div>
 
-      {/* Chỉ còn thông tin thuần (không có nút) — xem `trimCommitGroup` ở
-          hàng editToolbar phía trên, đã gộp Đặt lại/Áp dụng cắt lên đó. */}
-      <div style={infoRow}>
-        Giữ lại: {fmtDuration(total)} / {fmtDuration(durationMs)}
-        {segments.length > 1 && ` · ${segments.length} đoạn`}
-      </div>
-
       {/* Preview lớn nổi theo con trỏ khi rê chuột (chưa click) qua timeline —
           kiểu "hover-scrub" của CapCut, giúp tìm điểm cắt mà không cần
           thử-sai bằng playhead. `position:fixed` theo toạ độ viewport
@@ -1159,6 +1255,39 @@ export default function VideoTrimmer({
   );
 }
 
+function PlayIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden>
+      <path d="M6.5 4.8v14.4a1 1 0 0 0 1.53.85l11.3-7.2a1 1 0 0 0 0-1.7l-11.3-7.2a1 1 0 0 0-1.53.85Z" />
+    </svg>
+  );
+}
+
+function PauseIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden>
+      <rect x="6" y="4.5" width="4.2" height="15" rx="1" />
+      <rect x="13.8" y="4.5" width="4.2" height="15" rx="1" />
+    </svg>
+  );
+}
+
+function FullscreenEnterIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M9 3H4v5M15 3h5v5M9 21H4v-5M15 21h5v-5" />
+    </svg>
+  );
+}
+
+function FullscreenExitIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M4 9h5V4M20 9h-5V4M4 15h5v5M20 15h-5v5" />
+    </svg>
+  );
+}
+
 function ScissorsIcon() {
   return (
     <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
@@ -1166,6 +1295,15 @@ function ScissorsIcon() {
       <circle cx="6" cy="18" r="2.6" />
       <line x1="8.2" y1="7.6" x2="20" y2="19" />
       <line x1="8.2" y1="16.4" x2="20" y2="5" />
+    </svg>
+  );
+}
+
+function CameraIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 8h3l1.5-2h7L17 8h3v11H4z" />
+      <circle cx="12" cy="13.5" r="3.2" />
     </svg>
   );
 }
@@ -1226,6 +1364,7 @@ const fullscreenWrap: React.CSSProperties = { background: "#000", padding: 16, b
 const videoWrap: React.CSSProperties = {
   flex: 1,
   minHeight: 0,
+  position: "relative",
   background: "#000",
   borderRadius: 8,
   overflow: "hidden",
@@ -1234,72 +1373,131 @@ const videoWrap: React.CSSProperties = {
   justifyContent: "center",
 };
 
-const videoStyle: React.CSSProperties = { width: "100%", height: "100%", objectFit: "contain" };
+const videoStyle: React.CSSProperties = { width: "100%", height: "100%", objectFit: "contain", cursor: "pointer" };
 
-const playbackRow: React.CSSProperties = {
+/** Thanh điều khiển phát NỔI đè lên đáy video (kiểu YouTube/QuickTime/CapCut)
+ * — gradient tối dần từ trong suốt lên đen để chữ/icon luôn đọc được dù nền
+ * video sáng màu, không chiếm thêm chiều cao cố định như 1 hàng riêng bên
+ * dưới (video có ít không gian chết hơn, giống trải nghiệm player chuyên
+ * nghiệp). Grid 3 cột (`1fr auto 1fr`) — cột giữa (`overlayCenterGroup`) LUÔN
+ * canh giữa TOÀN overlay bất kể `toolsGroup` (cột phải) rộng bao nhiêu, cột
+ * trái chỉ để giữ cân bằng khoảng trống (xem JSX). `toolsGroup` (zoom/toàn
+ * màn hình) luôn hiện — dùng thường xuyên lúc chỉnh sửa; `overlayCenterGroup`
+ * (thời gian/play/âm lượng) tự ẩn/hiện theo hover, xem `showCenterControls`. */
+const playbackOverlay: React.CSSProperties = {
+  position: "absolute",
+  left: 0,
+  right: 0,
+  bottom: 0,
+  display: "grid",
+  gridTemplateColumns: "1fr auto 1fr",
+  alignItems: "center",
+  padding: "20px 10px 10px",
+  background: "linear-gradient(to top, rgba(0,0,0,0.78), rgba(0,0,0,0.35) 65%, rgba(0,0,0,0) 100%)",
+};
+
+/** Nhóm Thời gian - Play - Âm lượng, canh giữa (cột "auto" của grid
+ * `playbackOverlay`) — thứ tự này (không phải Play trước) để play button —
+ * hành động chính — nằm ĐÚNG TÂM overlay, thời gian/âm lượng đối xứng 2 bên.
+ * `transition` cho opacity khi ẩn/hiện theo hover mượt hơn là bật/tắt đột
+ * ngột (xem `showCenterControls`). */
+const overlayCenterGroup: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 10,
-  flexShrink: 0,
+  transition: "opacity 0.15s ease",
 };
 
-const playBtn: React.CSSProperties = {
-  width: 28,
-  height: 28,
+const overlayTimeText: React.CSSProperties = {
+  fontSize: 12,
+  color: "#fff",
+  textShadow: "0 1px 2px rgba(0,0,0,0.6)",
+  fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap",
+};
+
+/** Nút icon trên `playbackOverlay` — trong suốt, chỉ nổi khi hover (kiểu
+ * YouTube/QuickTime: chrome player không có "chip" nền cố định, chỉ icon
+ * trắng trên nền gradient), khác `iconToolBtn` (chip nền xám dùng cho
+ * `editToolbar` — nơi KHÔNG có video làm nền nên cần viền/nền để phân định
+ * nút với xung quanh). */
+const overlayIconBtn: React.CSSProperties = {
+  width: 30,
+  height: 30,
   flexShrink: 0,
-  borderRadius: "50%",
-  border: "1px solid var(--border)",
-  background: "var(--bg-elevated)",
-  color: "var(--text)",
-  fontSize: 11,
+  borderRadius: 6,
+  border: "none",
+  background: "transparent",
+  color: "#fff",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
   padding: 0,
 };
 
-const timeText: React.CSSProperties = {
+/** Nút Play/Pause chính — TO hẳn (không chỉ nhỉnh hơn 1 chút như trước) để dễ
+ * bấm trúng, đúng vai trò hành động CHÍNH của thanh phát, cùng mức nhấn mạnh
+ * với play button to giữa màn hình của YouTube/QuickTime; nền trắng mờ + viền
+ * để vẫn rõ hình dạng nút dù icon/nền video cùng tông màu tối. */
+const overlayPlayBtn: React.CSSProperties = {
+  ...overlayIconBtn,
+  width: 46,
+  height: 46,
+  borderRadius: "50%",
+  background: "rgba(255,255,255,0.16)",
+  border: "1px solid rgba(255,255,255,0.3)",
+};
+
+/** Nút text (zoom −/100%/+) trên overlay — viền/nền mờ nhẹ để vẫn phân biệt
+ * được là 1 nút bấm được (khác `overlayIconBtn` thuần icon, không cần viền
+ * vì hình dạng icon đã đủ gợi ý "có thể bấm"). */
+const overlayToolBtn: React.CSSProperties = {
+  height: 26,
+  padding: "0 8px",
+  borderRadius: 6,
+  border: "1px solid rgba(255,255,255,0.25)",
+  background: "rgba(255,255,255,0.08)",
+  color: "#fff",
   fontSize: 12,
-  color: "var(--text-dim)",
-  fontVariantNumeric: "tabular-nums",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
 };
 
 const toolsGroup: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 4,
-  marginLeft: "auto",
+  // Cột phải ("1fr") của grid `playbackOverlay` — ép sát rìa phải trong cột
+  // đó (khác bản flex cũ dùng `marginLeft: auto` để tự đẩy sang phải).
+  justifySelf: "end",
 };
 
-/** `position:relative` làm mốc neo cho `volumePopoverAnchor` (absolute) —
- * không có `gap`/gì khác ảnh hưởng layout hàng `playbackRow` vì popover không
- * nằm trong luồng (xem comment ở JSX). */
 const volumeGroup: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   position: "relative",
 };
 
-/** Neo NGAY SÁT icon loa (`top:100%`, KHÔNG gap) — `position:absolute` nên
- * không đẩy xê dịch `timeText`/`toolsGroup` đứng sau trong `playbackRow` dù
- * hiện/ẩn liên tục lúc hover. Thả XUỐNG DƯỚI icon (đè lên vùng
- * timeline/filmstrip) thay vì TRÊN icon (đè lên `<video>`) — lúc test kéo thử
- * ở vị trí đè lên video, thao tác kéo bằng chuột bị "nuốt" mất giữa chừng
- * (dừng đột ngột dù vẫn giữ chuột), tái hiện nhiều lần đúng tại vùng chồng
- * lên `<video>`, không xảy ra khi đặt thử ở chỗ khác trên trang — nghi lớp
- * video tăng tốc phần cứng ở 1 số WebView giành lấy sự kiện con trỏ dù phần
- * tử che nó (`z-index` cao hơn) mới là đích thật. Đặt xuống dưới, đè lên
- * track/filmstrip (chỉ gồm div thường) để né hẳn khả năng này thay vì chỉ
- * dựa vào z-index.
- * `paddingTop` (KHÔNG phải gap/margin) chừa khoảng cách nhìn thấy với card ở
- * dưới — xem giải thích ở JSX (khoảng đệm này vẫn thuộc DOM của phần tử đang
- * lắng hover, di chuột từ icon xuống card không bị mất thanh giữa chừng). */
+/** Neo NGANG HÀNG bên PHẢI icon loa (cùng chiều cao — `top` = tâm icon,
+ * `transform: translateY(-50%)` tự canh giữa theo chiều dọc) qua toạ độ
+ * viewport đo được (`volumeAnchor`, xem JSX) — `position: fixed` (không phải
+ * `absolute`) để thoát khỏi `overflow: hidden` của `videoWrap` chứa icon.
+ * `paddingLeft` (KHÔNG phải gap/margin) chừa khoảng cách nhìn thấy với card
+ * bên phải, đồng thời vẫn giữ popover là CON DOM của `volumeGroup` (không
+ * phải sibling) — cả 2 điểm này đảm bảo di chuột từ icon sang card không hề
+ * bị trình duyệt hiểu nhầm là đã rời `volumeGroup` (xem giải thích dài hơn ở
+ * JSX).
+ * LƯU Ý: đặt ngang hàng nghĩa là popover đè lên `<video>` (khác bản cũ đặt
+ * XUỐNG DƯỚI hẳn ra ngoài `videoWrap` để né đúng vùng này) — từng có bug kéo
+ * thanh âm lượng bị "nuốt" mất giữa chừng khi popover chồng lên `<video>` ở 1
+ * số WebView (nghi lớp video tăng tốc phần cứng giành sự kiện con trỏ bất kể
+ * z-index). Nếu tái hiện lại bug đó sau thay đổi này, cân nhắc quay về đặt
+ * dưới `videoWrap`. */
 const volumePopoverAnchor: React.CSSProperties = {
-  position: "absolute",
-  top: "100%",
-  left: "50%",
-  transform: "translateX(-50%)",
-  paddingTop: 8,
+  position: "fixed",
+  transform: "translateY(-50%)",
+  paddingLeft: 8,
   zIndex: 20,
 };
 
@@ -1357,12 +1555,19 @@ const volumeThumb: React.CSSProperties = {
   pointerEvents: "none",
 };
 
+// Nền/viền/bo góc nhẹ — đọc thành 1 "thanh công cụ cắt" tách bạch khỏi
+// video phía trên (giờ không còn playbackRow ngăn cách, xem `playbackOverlay`)
+// và timeline phía dưới, giống thanh tool ngay trên timeline của Premiere/CapCut.
 const editToolbar: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 6,
   flexShrink: 0,
   flexWrap: "wrap",
+  padding: "6px 8px",
+  borderRadius: 8,
+  background: "var(--bg-elevated)",
+  border: "1px solid var(--border)",
 };
 
 /** Đẩy Đặt lại/Áp dụng cắt sát phải trong `editToolbar` — cùng kỹ thuật
@@ -1584,14 +1789,6 @@ const playhead: React.CSSProperties = {
   zIndex: 5,
 };
 
-// Chỉ còn text info (không nút, xem `trimCommitGroup`) — dim, nhỏ, đúng mức
-// "phụ" của 1 dòng chú thích.
-const infoRow: React.CSSProperties = {
-  fontSize: 12,
-  color: "var(--text-dim)",
-  flexShrink: 0,
-};
-
 // Cao 26px khớp `iconToolBtn` cùng hàng — to hơn bản cũ (padding "6px 10px",
 // font 12px) để không bị lép vế cạnh các icon, đúng mức 1 nút hành động thật
 // thay vì trông như phụ chú.
@@ -1605,7 +1802,7 @@ const resetBtn: React.CSSProperties = {
   fontSize: 13,
 };
 
-const applyBtn: React.CSSProperties = {
+const saveOverwriteBtn: React.CSSProperties = {
   height: 26,
   padding: "0 16px",
   borderRadius: 7,
@@ -1613,4 +1810,20 @@ const applyBtn: React.CSSProperties = {
   color: "var(--accent-text)",
   fontWeight: 600,
   fontSize: 13,
+  whiteSpace: "nowrap",
+};
+
+/** Nút "Lưu thành video mới" — cùng chiều cao/kiểu chữ với `saveOverwriteBtn`
+ * nhưng viền/nền nhẹ hơn (không phải hành động phá huỷ, không cần nhấn mạnh
+ * bằng màu accent) — cùng phân cấp thị giác với `resetBtn` cạnh nó. */
+const saveAsBtn: React.CSSProperties = {
+  height: 26,
+  padding: "0 14px",
+  borderRadius: 7,
+  border: "1px solid var(--border)",
+  background: "transparent",
+  color: "var(--text)",
+  fontWeight: 600,
+  fontSize: 13,
+  whiteSpace: "nowrap",
 };

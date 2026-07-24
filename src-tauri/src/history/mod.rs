@@ -113,6 +113,7 @@ pub fn ingest(
         title: None,
         is_edited: false,
         deleted_at: None,
+        exported_path: None,
     };
 
     // Đẩy việc ghi file nặng (I/O) qua worker cố định thay vì spawn thread mới
@@ -241,6 +242,7 @@ pub fn ingest_video(
         title: None,
         is_edited: false,
         deleted_at: None,
+        exported_path: None,
     };
 
     // Xem giải thích ở `ingest()` — cùng cơ chế báo cho cửa sổ History cập nhật ngay.

@@ -4,7 +4,7 @@ use std::sync::Mutex;
 /// Version schema hiện tại — tăng lên + thêm nhánh trong `migrate()` khi cần
 /// thay đổi schema (không dùng crate migration ngoài, tự quản lý qua
 /// `PRAGMA user_version`).
-pub const CURRENT_VERSION: i32 = 1;
+pub const CURRENT_VERSION: i32 = 2;
 
 /// State quản lý bởi Tauri — chỉ `.manage()` khi `open()` thành công. Nếu
 /// History DB không khởi tạo được (đĩa lỗi, quyền ghi...), state này KHÔNG
@@ -64,6 +64,7 @@ fn migrate(conn: &rusqlite::Connection) -> Result<(), String> {
             .map_err(|e| format!("Không mở transaction migrate: {e}"))?;
         match version {
             0 => migrate_v1(&tx)?,
+            1 => migrate_v2(&tx)?,
             _ => return Err(format!("Không có migration cho version {version}")),
         }
         version += 1;
@@ -103,6 +104,16 @@ fn migrate_v1(tx: &rusqlite::Transaction) -> Result<(), String> {
     .map_err(|e| format!("Migration v1 thất bại: {e}"))
 }
 
+/// Schema v2 — thêm `exported_path`: đường dẫn TUYỆT ĐỐI của bản sao gần nhất
+/// user đã Save/Save As ra một thư mục tuỳ chọn (khác `asset_path`, luôn là
+/// file GỐC nằm trong thư mục dữ liệu nội bộ của app). NULL nếu item chưa
+/// từng được export ra ngoài lần nào — "Xem file trong Thư mục" khi đó fallback
+/// về `asset_path`, xem `reveal_history_item_sync`.
+fn migrate_v2(tx: &rusqlite::Transaction) -> Result<(), String> {
+    tx.execute_batch("ALTER TABLE history ADD COLUMN exported_path TEXT;")
+        .map_err(|e| format!("Migration v2 thất bại: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,7 +131,7 @@ mod tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        for expected in ["id", "created_at", "capture_mode", "media_type", "duration_ms", "deleted_at", "is_edited"] {
+        for expected in ["id", "created_at", "capture_mode", "media_type", "duration_ms", "deleted_at", "is_edited", "exported_path"] {
             assert!(cols.contains(&expected.to_string()), "missing column: {expected}");
         }
     }

@@ -42,6 +42,21 @@ pub struct PendingCapture {
     pub capture_mode: String,
 }
 
+/// Video đang chờ mở trong Editor — đã CÓ SẴN trong History (`history_id`
+/// luôn là id thật): mở từ Library (xem
+/// `history::commands::open_history_item_in_editor_sync`) hoặc vừa quay xong
+/// (ingest ngay lập tức, xem `record::stop_recording_impl`) — không còn
+/// khái niệm "video chưa lưu" nữa.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingVideo {
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: i64,
+    pub history_id: String,
+}
+
 /// Chế độ chụp + output gần nhất — dùng cho nút "New" ở editor.
 /// Được cập nhật mỗi khi user chụp từ capture bar.
 #[derive(Default)]
@@ -77,6 +92,8 @@ impl LastCaptureMode {
 #[derive(Default)]
 pub struct AppState {
     pub pending: Mutex<Option<PendingCapture>>,
+    /// Video đang chờ mở trong Editor — xem `PendingVideo`.
+    pub pending_video: Mutex<Option<PendingVideo>>,
     /// Output đã chọn trước khi chụp (cho luồng region/window qua overlay).
     pub pending_output: Mutex<String>,
     /// Generation của phiên overlay hiện tại — để chỉ 1 luồng theo dõi con trỏ

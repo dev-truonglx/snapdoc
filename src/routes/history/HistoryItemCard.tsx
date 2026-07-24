@@ -27,8 +27,7 @@ export default function HistoryItemCard({ item, selected, onSelect, onOpenEditor
     <div
       style={{ ...card, outline: selected ? "2px solid var(--accent)" : "2px solid transparent" }}
       onClick={onSelect}
-      // Video chưa hỗ trợ Editor — double-click chỉ mở với ảnh.
-      onDoubleClick={isVideo ? undefined : onOpenEditor}
+      onDoubleClick={onOpenEditor}
       title={item.title ?? undefined}
     >
       <div style={thumbWrap}>

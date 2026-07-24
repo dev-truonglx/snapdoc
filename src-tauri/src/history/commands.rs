@@ -1,7 +1,7 @@
 use super::db::HistoryState;
 use super::model::{HistoryFilter, HistoryPage, HistoryRecord};
 use super::{decode_image_data, now_ms};
-use crate::state::{AppState, PendingCapture};
+use crate::state::{AppState, PendingCapture, PendingVideo};
 use crate::windows;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::ToSql;
@@ -241,7 +241,17 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
         return Err("Không thể mở item đang ở Trash — hãy Restore trước".to_string());
     }
     if rec.media_type == "video" {
-        return Err("Video chưa hỗ trợ mở trong Editor".to_string());
+        let state = app.state::<AppState>();
+        let mut g = state.pending_video.lock().map_err(|_| "Lock error".to_string())?;
+        *g = Some(PendingVideo {
+            path: rec.asset_path.clone(),
+            width: rec.width,
+            height: rec.height,
+            duration_ms: rec.duration_ms.unwrap_or(0),
+            history_id: id.to_string(),
+        });
+        drop(g);
+        return windows::open_editor(app);
     }
     let bytes = std::fs::read(&rec.asset_path).map_err(|e| format!("Không đọc được asset: {e}"))?;
     let base64 = STANDARD.encode(&bytes);
@@ -307,8 +317,8 @@ fn trim_history_video_sync(
 
     let asset_path = std::path::Path::new(&rec.asset_path);
     let new_path = crate::record::new_output_path(app)?;
-    // Báo tiến độ % cho cửa sổ `history-trim` qua event toàn app — xem
-    // doc-comment `encoder::trim` + listener ở `HistoryTrim.tsx`.
+    // Báo tiến độ % cho Editor (chế độ video) qua event toàn app — xem
+    // doc-comment `encoder::trim` + listener ở `Editor.tsx`.
     let progress_app = app.clone();
     crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path, remove_audio, move |frac| {
         use tauri::Emitter;
@@ -361,6 +371,51 @@ fn trim_history_video_sync(
     get_history_item_sync(app, &new_id)
 }
 
+/// "Lưu đè bản gốc" ở Editor — áp cắt trực tiếp vào asset/thumbnail của
+/// ĐÚNG record này, KHÔNG tạo record mới (khác `trim_history_video_sync`).
+/// Đây là lựa chọn NGƯỜI DÙNG CHỦ Ý (2 lựa chọn Lưu ở Editor, xem
+/// `Toolbar.tsx`) nên không giữ bản gốc dự phòng — mất phần đã cắt là hệ quả
+/// đã biết trước, khác lựa chọn còn lại "Lưu thành video mới"
+/// (`trim_history_video_sync`). Cùng pattern trim→tmp file cùng thư
+/// mục→rename đè mà `overwrite_history_video_sync` này thay thế cho
+/// `trim_pending_recording` cũ (đã xoá cùng `record-review`/pending-recording).
+fn overwrite_history_video_sync(
+    app: &AppHandle,
+    id: &str,
+    keep_ranges_ms: &[(i64, i64)],
+    remove_audio: bool,
+) -> Result<HistoryRecord, String> {
+    let rec = get_history_item_sync(app, id)?;
+    if rec.media_type != "video" {
+        return Err("Chỉ video mới cắt được".to_string());
+    }
+    let asset_path = std::path::Path::new(&rec.asset_path);
+    let tmp_output = asset_path.with_extension("trimtmp.mp4");
+    let progress_app = app.clone();
+    crate::record::encoder::trim(asset_path, keep_ranges_ms, &tmp_output, remove_audio, move |frac| {
+        use tauri::Emitter;
+        let _ = progress_app.emit("trim-progress", frac);
+    })?;
+    std::fs::rename(&tmp_output, asset_path).map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
+
+    let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
+    let file_size = std::fs::metadata(asset_path).ok().map(|m| m.len() as i64);
+    if let Err(e) = super::video_thumbnail::generate(asset_path, std::path::Path::new(&rec.thumb_path)) {
+        eprintln!("[SnapDoc][history] Sinh lại thumbnail sau khi ghi đè thất bại: {e}");
+    }
+
+    let st = state(app)?;
+    {
+        let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+        conn.execute(
+            "UPDATE history SET updated_at = ?1, duration_ms = ?2, file_size = ?3, is_edited = 1 WHERE id = ?4",
+            rusqlite::params![now_ms(), new_duration_ms, file_size, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    get_history_item_sync(app, id)
+}
+
 fn copy_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type == "video" {
@@ -370,12 +425,39 @@ fn copy_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     crate::clipboard::copy_png_bytes(&bytes)
 }
 
+/// Ưu tiên bản Save/Save As gần nhất (`exported_path`) nếu còn tồn tại trên
+/// đĩa — đúng chỗ user tự chọn lưu, thay vì luôn về file GỐC trong thư mục dữ
+/// liệu nội bộ của app (`asset_path`). Fallback về `asset_path` khi chưa từng
+/// export (`exported_path` = `None`) HOẶC bản export đã bị xoá/di chuyển khỏi
+/// đường dẫn cũ (kiểm tra tồn tại trước, tránh mở nhầm thư mục rồi báo lỗi
+/// file không tìm thấy).
 fn reveal_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let rec = get_history_item_sync(app, id)?;
+    let target = match &rec.exported_path {
+        Some(p) if std::path::Path::new(p).exists() => p.as_str(),
+        _ => rec.asset_path.as_str(),
+    };
     use tauri_plugin_opener::OpenerExt;
     app.opener()
-        .reveal_item_in_dir(&rec.asset_path)
+        .reveal_item_in_dir(target)
         .map_err(|e| format!("Không mở được thư mục chứa file: {e}"))
+}
+
+/// Ghi lại đường dẫn bản Save/Save As gần nhất cho 1 item — gọi ngay sau khi
+/// user export thành công ra 1 thư mục tuỳ chọn (Editor: `doSaveAs` ảnh),
+/// để "Xem file trong Thư mục" (`reveal_history_item_sync`) sau này mở đúng
+/// chỗ đó thay vì file gốc nội bộ.
+pub(crate) fn set_history_exported_path_sync(app: &AppHandle, id: &str, path: &str) -> Result<HistoryRecord, String> {
+    let st = state(app)?;
+    {
+        let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+        conn.execute(
+            "UPDATE history SET exported_path = ?1 WHERE id = ?2",
+            rusqlite::params![path, id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    get_history_item_sync(app, id)
 }
 
 // ── Tauri commands (IPC-facing) ────────────────────────────────────────────
@@ -464,13 +546,12 @@ pub async fn update_history_asset(app: AppHandle, id: String, data: String) -> R
 
 /// Cắt 1 video đã lưu trong Library — xem `trim_history_video_sync`.
 /// `spawn_blocking` bắt buộc: chạy ffmpeg re-encode + concat, có thể mất vài
-/// giây (cùng lý do `commands::trim_pending_recording`/`stop_recording`).
+/// giây (cùng lý do `commands::stop_recording`).
 ///
-/// Gọi từ cửa sổ RIÊNG `history-trim` (xem `windows::open_history_trim`) —
-/// KHÁC webview với cửa sổ "history" (mỗi cửa sổ Tauri là 1 JS heap/Zustand
-/// store riêng), nên thêm item mới xong không thể gọi thẳng `addItem` của
-/// store bên "history" được — phải emit event cho cửa sổ đó tự cập nhật, xem
-/// listener ở `HistoryWindow.tsx`.
+/// Gọi từ Editor (chế độ video, xem `Editor.tsx`) — KHÁC webview với cửa sổ
+/// "history" (mỗi cửa sổ Tauri là 1 JS heap/Zustand store riêng), nên thêm
+/// item mới xong không thể gọi thẳng `addItem` của store bên "history" được —
+/// phải emit event cho cửa sổ đó tự cập nhật, xem listener ở `HistoryWindow.tsx`.
 #[tauri::command]
 pub async fn trim_history_video(
     app: AppHandle,
@@ -489,6 +570,19 @@ pub async fn trim_history_video(
     Ok(result)
 }
 
+/// "Lưu đè bản gốc" cho video trong Editor — xem `overwrite_history_video_sync`.
+#[tauri::command]
+pub async fn overwrite_history_video(
+    app: AppHandle,
+    id: String,
+    ranges: Vec<(i64, i64)>,
+    remove_audio: bool,
+) -> Result<HistoryRecord, String> {
+    tauri::async_runtime::spawn_blocking(move || overwrite_history_video_sync(&app, &id, &ranges, remove_audio))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
 /// Copy nhanh 1 item History vào clipboard (đọc thẳng từ asset trên đĩa) —
 /// dùng cho dải "Gần đây" ở cạnh dưới Editor, không cần mở lại Editor.
 #[tauri::command]
@@ -501,6 +595,13 @@ pub async fn copy_history_item(app: AppHandle, id: String) -> Result<(), String>
 #[tauri::command]
 pub async fn reveal_history_item(app: AppHandle, id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || reveal_history_item_sync(&app, &id))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn set_history_exported_path(app: AppHandle, id: String, path: String) -> Result<HistoryRecord, String> {
+    tauri::async_runtime::spawn_blocking(move || set_history_exported_path_sync(&app, &id, &path))
         .await
         .map_err(|e| format!("Task join error: {e}"))?
 }
@@ -521,26 +622,6 @@ pub fn open_history(app: AppHandle) -> Result<(), String> {
         let _ = windows::open_history(&app);
     });
     Ok(())
-}
-
-/// Mở cửa sổ "Cắt video" cho 1 item — nút "Cắt video" ở `HistoryPreviewPanel.tsx`.
-/// Cùng lý do tách thread như `open_history` trên (cửa sổ không pre-warm,
-/// `build()` chạy live lần đầu, gọi trực tiếp trên IPC thread của Windows sẽ
-/// deadlock message pump).
-#[tauri::command]
-pub fn open_history_trim(app: AppHandle, id: String) -> Result<(), String> {
-    std::thread::spawn(move || {
-        let _ = windows::open_history_trim(&app, &id);
-    });
-    Ok(())
-}
-
-/// Đóng cửa sổ "Cắt video" — gọi sau khi áp dụng cắt xong (thành công) hoặc
-/// bấm "Đóng". Không có gì rủi ro mất dữ liệu khi đóng ngang (khác
-/// `record-review`) nên không cần chặn nút "x" của titlebar như bên đó.
-#[tauri::command]
-pub fn close_history_trim(app: AppHandle) {
-    windows::close_history_trim(&app);
 }
 
 /// Hoàn tất Quick Capture (copy/save ảnh đã flatten annotation) + ingest vào

@@ -19,11 +19,6 @@ export function dirnameOf(path: string): string {
   return path.replace(/[\\/][^\\/]*$/, "");
 }
 
-/** Tên file (không kèm thư mục) từ đường dẫn đầy đủ. */
-export function basenameOf(path: string): string {
-  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
-}
-
 /**
  * Mở dialog lưu file với đường dẫn mặc định cụ thể.
  * Dùng chung cho Save As ở editor và các flow muốn đổi cả thư mục lẫn tên file.
@@ -32,16 +27,6 @@ export async function promptSavePath(defaultPath: string): Promise<string | null
   return await save({
     defaultPath,
     filters: [{ name: "PNG", extensions: ["png"] }],
-  });
-}
-
-/**
- * Mở dialog lưu file video với đường dẫn mặc định cụ thể.
- * Không ép filter PNG để tránh thêm nhầm đuôi `.png` vào file quay.
- */
-export async function promptSaveVideoPath(defaultPath: string): Promise<string | null> {
-  return await save({
-    defaultPath,
   });
 }
 

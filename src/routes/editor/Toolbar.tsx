@@ -116,6 +116,12 @@ const TOOLS_GROUP2: { id: Tool; label: string; hint: string }[] = [
 ];
 
 interface Props {
+  /** "video": đang xem/cắt video trong Editor — ẩn hết công cụ vẽ ảnh
+   * (New/Open/Ghép, 2 nhóm tool, đổi màu/nét, undo-redo-xoá, flatten),
+   * Copy/Save+Copy (clipboard video chưa hỗ trợ), VÀ cả Save/Save As (2 nút
+   * "Lưu đè"/"Lưu thành video mới" nay nằm trong `editToolbar` của
+   * `VideoTrimmer`, ngay cạnh các nút chỉnh sửa video, thay vì ở đây). */
+  mode: "image" | "video";
   onSave: () => void;
   onSaveAs: () => void;
   onCopy: () => void;
@@ -265,7 +271,9 @@ function CustomColorButton({
   );
 }
 
-export default function Toolbar({ onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy }: Props) {
+export default function Toolbar({
+  mode, onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy,
+}: Props) {
   // Selector + useShallow thay vì subscribe cả store: trước đây MỌI thay đổi
   // store (mỗi tick kéo slider blur qua `updateAnnotationLive`, mỗi lần di
   // chuyển annotation) đều re-render toàn bộ toolbar (hàng chục nút SVG).
@@ -357,6 +365,8 @@ export default function Toolbar({ onSave, onSaveAs, onCopy, onSaveCopy, onFlatte
 
   return (
     <div style={bar}>
+      {mode === "image" && (
+      <>
       {/* New — chụp lại theo chế độ gần nhất + mở capture bar */}
       <button onClick={onNew} style={newBtn} title="Chụp mới (chế độ gần nhất + mở thanh chụp)">
         <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden fill="none">
@@ -622,22 +632,27 @@ export default function Toolbar({ onSave, onSaveAs, onCopy, onSaveCopy, onFlatte
         <button onClick={redo} disabled={!canRedo()} style={toolBtn(false)} title="Làm lại">↪︎</button>
         <button onClick={removeSelected} disabled={!selectedId} style={toolBtn(false)} title="Xoá (Delete)">🗑</button>
       </div>
+      </>
+      )}
 
       <div style={{ flex: 1 }} />
 
-      {/* Output — nhóm Save (chính) / Save+Copy / Copy, dùng chung kiểu pill
-          icon+label như nhóm New/Open/Ghép phía trên (nhất quán ngôn ngữ hình
-          ảnh toàn thanh công cụ, thay vì 3 nút vuông chỉ icon tách biệt như
-          trước). Save đứng đầu và tô accent vì là hành động dùng nhiều nhất
-          (giống Quick Access Toolbar của Office: Save luôn là icon đầu tiên);
-          Copy nhẹ nhàng nhất (không đụng file nào) đứng cuối. */}
+      {/* Output — nhóm Save (chính) / Save+Copy / Copy, chỉ ở chế độ ảnh.
+          Video: 2 nút "Lưu đè"/"Lưu thành video mới" nay nằm trong
+          `editToolbar` của `VideoTrimmer` (cạnh chia/xoá/cắt đầu-cuối), không
+          còn ở đây — xem doc-comment `mode` ở `Props`. */}
+      {mode === "image" && (
       <div style={group}>
-        {/* Save: split button — bấm chính giữ nguyên hành vi cũ (ghi đè tại
-            chỗ record History nếu ảnh có historyId, hoặc mở dialog nếu
-            không); mũi tên "▾" mở "Save As…" — LUÔN mở dialog chọn file mới,
-            xem `doSaveAs` ở Editor.tsx. */}
+        {/* Save: split button — bấm chính ghi đè tại chỗ record History nếu
+            có, hoặc mở dialog nếu không; "▾" mở "Save As…" (xuất file mới,
+            không đụng History). */}
         <div ref={saveMenuRef} style={splitGroup}>
-          <button onClick={onSave} disabled={busy} style={savePillBtn} title="Lưu (Ctrl/Cmd+S)">
+          <button
+            onClick={onSave}
+            disabled={busy}
+            style={savePillBtn}
+            title="Lưu (Ctrl/Cmd+S)"
+          >
             <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
               <path d="M13 14H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L14 5.5V13a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.5"/>
               <path d="M5 2v3.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.5"/>
@@ -685,6 +700,7 @@ export default function Toolbar({ onSave, onSaveAs, onCopy, onSaveCopy, onFlatte
           <span style={{ fontSize: 12, fontWeight: 600 }}>Copy</span>
         </button>
       </div>
+      )}
     </div>
   );
 }
@@ -825,3 +841,4 @@ const flattenBtn: React.CSSProperties = {
   background: "rgba(239,68,68,0.15)", color: "#fca5a5",
   border: "1px solid rgba(239,68,68,0.35)", whiteSpace: "nowrap", cursor: "pointer",
 };
+

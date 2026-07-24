@@ -79,12 +79,6 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
 
   const doReveal = () => ipc.revealHistoryItem(item.id).catch(() => {});
 
-  // Mở cửa sổ "Cắt video" riêng (cùng khuôn RecordReview) — bản gốc giữ
-  // nguyên, bản đã cắt tạo thành item MỚI, cửa sổ đó tự emit event cho danh
-  // sách ở đây cập nhật (xem `HistoryWindow.tsx`), không cần chờ/xử lý gì
-  // thêm ở component này.
-  const doOpenTrim = () => ipc.openHistoryTrim(item.id).catch((e) => alert(String(e)));
-
   return (
     <div style={panel}>
       <div style={previewWrap}>
@@ -138,13 +132,7 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
       <div style={actions}>
         {!isTrashed ? (
           <>
-            {/* Video chưa hỗ trợ Editor (xem history/commands.rs) — chỉ ảnh mới có nút này. */}
-            {!isVideo && (
-              <button style={primaryBtn} disabled={busy} onClick={() => onOpenEditor(item.id)}>Mở Editor</button>
-            )}
-            {isVideo && (
-              <button style={primaryBtn} disabled={busy} onClick={doOpenTrim}>Cắt video</button>
-            )}
+            <button style={primaryBtn} disabled={busy} onClick={() => onOpenEditor(item.id)}>Mở Editor</button>
             <button style={secondaryBtn} disabled={busy} onClick={doReveal}>Hiện trong Finder/Explorer</button>
             <button style={dangerBtn} disabled={busy} onClick={doDelete}>Xoá (chuyển vào Trash)</button>
           </>

@@ -21,6 +21,12 @@ pub struct HistoryRecord {
     pub title: Option<String>,
     pub is_edited: bool,
     pub deleted_at: Option<i64>,
+    /// Đường dẫn TUYỆT ĐỐI của bản sao gần nhất đã Save/Save As ra thư mục
+    /// tuỳ chọn — `None` nếu chưa từng export ra ngoài. Xem
+    /// `history::db::migrate_v2` (cột thêm ở schema v2) và
+    /// `commands::reveal_history_item_sync` (ưu tiên field này khi "Xem file
+    /// trong Thư mục", fallback về `asset_path` nếu `None`).
+    pub exported_path: Option<String>,
 }
 
 impl HistoryRecord {
@@ -42,6 +48,7 @@ impl HistoryRecord {
             title: row.get("title")?,
             is_edited: row.get::<_, i64>("is_edited")? != 0,
             deleted_at: row.get("deleted_at")?,
+            exported_path: row.get("exported_path")?,
         })
     }
 }

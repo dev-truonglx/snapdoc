@@ -1,23 +1,44 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import Toolbar from "./Toolbar";
 import HistoryStrip from "./HistoryStrip";
 import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
+import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 import { useEditor } from "../../features/annotation/store";
 import { copyToClipboard, saveToFile, saveAsToFile } from "../../features/output/useOutput";
-import { ipc, type Pending } from "../../lib/ipc";
+import { ipc, type Pending, type HistoryItem } from "../../lib/ipc";
 import { editorToolFromKey } from "../../lib/toolShortcuts";
 import StitchDialog from "../../features/annotation/compose/StitchDialog";
 import type { StitchResult } from "../../features/annotation/compose/stitch";
 
+interface VideoDoc {
+  historyId: string;
+  filePath: string;
+  src: string;
+  durationMs: number;
+}
+
+const EMPTY_TRIM_STATE = { hasChanges: false, keepRanges: [] as [number, number][], removeAudio: false };
+
 export default function Editor() {
   const stageRef = useRef<StageHandle>(null);
   const loadDoc = useEditor((s) => s.loadDoc);
+  const docHistoryId = useEditor((s) => s.doc?.historyId);
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showFlattenConfirm, setShowFlattenConfirm] = useState(false);
   const [stitchImage, setStitchImage] = useState<string | null>(null);
+  // Video đang xem/cắt trong Editor (song song với `doc` — ảnh — trong store
+  // `useEditor`; chỉ 1 trong 2 được render tại 1 thời điểm, xem JSX bên dưới).
+  const [videoDoc, setVideoDoc] = useState<VideoDoc | null>(null);
+  const [videoTrimState, setVideoTrimState] = useState(EMPTY_TRIM_STATE);
+  // Tăng lên sau mỗi lần "Lưu đè" thành công — ép `VideoTrimmer` remount lại
+  // từ đầu (key dưới JSX ghép `historyId`+số này) vì file vừa bị ghi đè có
+  // thời lượng/nội dung MỚI, trong khi `historyId` không đổi (cùng record) —
+  // segments/zoom/cache filmstrip cũ của lần mount trước không còn khớp.
+  const [videoVersion, setVideoVersion] = useState(0);
 
   const flash = (msg: string) => {
     setToast(msg);
@@ -77,13 +98,32 @@ export default function Editor() {
       return;
     }
 
-    ipc.takePending().then(loadPending);
-    const un = listen("refresh-capture", () => {
-      ipc.takePending().then(loadPending);
-    });
+    // Video (mở từ Library, hoặc vừa quay xong — cả 2 đều đã ingest vào
+    // History trước khi tới đây, xem `record::stop_recording_impl`) LUÔN
+    // được kiểm tra TRƯỚC ảnh — chỉ 1 trong 2 loại pending chờ tại 1 thời điểm.
+    const loadAnyPending = async () => {
+      const pv = await ipc.takePendingVideo();
+      if (pv) {
+        setVideoDoc({
+          historyId: pv.historyId,
+          filePath: pv.path,
+          src: convertFileSrc(pv.path),
+          durationMs: pv.durationMs,
+        });
+        setVideoTrimState(EMPTY_TRIM_STATE);
+        return;
+      }
+      const p = await ipc.takePending();
+      if (p) setVideoDoc(null);
+      loadPending(p);
+    };
+
+    loadAnyPending();
+    const un = listen("refresh-capture", loadAnyPending);
     // Windows "Open with" / double-click: Rust emit event này với data URL đầy đủ,
     // không cần round-trip IPC takePending (timing an toàn hơn).
     const unOpenFile = listen<string>("open-file", (e) => {
+      setVideoDoc(null);
       loadFromUrl(e.payload);
     });
     return () => {
@@ -104,7 +144,51 @@ export default function Editor() {
     }
   };
 
+  // "Lưu đè bản gốc" — ghi đè vĩnh viễn asset/thumbnail của ĐÚNG record này
+  // (không tạo record mới). Không có gì để lưu đè nếu chưa cắt gì. KHÔNG đóng
+  // Editor sau khi lưu (khác trước đây) — nạp lại đúng bản đã cắt (thời
+  // lượng/nội dung mới) để user xem kết quả và có thể tiếp tục chỉnh sửa
+  // ngay, không phải mở lại từ Library.
+  const doSaveVideo = async () => {
+    if (!videoDoc || !videoTrimState.hasChanges) return;
+    setBusy(true);
+    try {
+      const updated = await ipc.overwriteHistoryVideo(videoDoc.historyId, videoTrimState.keepRanges, videoTrimState.removeAudio);
+      setVideoDoc({
+        historyId: updated.id,
+        filePath: updated.assetPath,
+        src: convertFileSrc(updated.assetPath),
+        durationMs: updated.durationMs ?? 0,
+      });
+      setVideoTrimState(EMPTY_TRIM_STATE);
+      setVideoVersion((v) => v + 1);
+      flash("Đã lưu đè video");
+    } catch (e) {
+      flash(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // "Lưu thành video mới" — áp dụng cắt (hoặc y nguyên nếu chưa cắt gì) thành
+  // 1 record MỚI trong Library, giữ nguyên bản gốc. Không đóng Editor, không
+  // đụng gì tới `videoDoc`/`videoTrimState` hiện tại (đang xem/sửa) — bản gốc
+  // không hề đổi, chỉ có thêm 1 item mới xuất hiện trong dải "Gần đây".
+  const doSaveAsVideo = async () => {
+    if (!videoDoc) return;
+    setBusy(true);
+    try {
+      await ipc.trimHistoryVideo(videoDoc.historyId, videoTrimState.keepRanges, videoTrimState.removeAudio);
+      flash("Đã lưu thành video mới");
+    } catch (e) {
+      flash(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const doSave = async (alsoCopy = false) => {
+    if (videoDoc) return doSaveVideo();
     const url = stageRef.current?.exportPng();
     if (!url) return;
     setBusy(true);
@@ -132,12 +216,19 @@ export default function Editor() {
   // có). Xuất ra 1 file mới ở vị trí tuỳ chọn, KHÔNG đụng tới record History
   // gốc (giống "Save As" của các phần mềm khác: tạo bản sao, giữ nguyên bản gốc).
   const doSaveAs = async () => {
+    if (videoDoc) return doSaveAsVideo();
     const url = stageRef.current?.exportPng();
     if (!url) return;
     setBusy(true);
     try {
       const saved = await saveAsToFile(url);
       if (saved) {
+        // Ghi lại đường dẫn vừa export — "Xem file trong Thư mục" ở dải "Gần
+        // đây"/Library sau này sẽ mở đúng chỗ này thay vì file gốc nội bộ.
+        // Không chặn `closeSelf()` nếu lệnh này lỗi (mất tính năng phụ, không
+        // phải mất dữ liệu — ảnh đã lưu ra đĩa thành công rồi).
+        const historyId = useEditor.getState().doc?.historyId;
+        if (historyId) ipc.setHistoryExportedPath(historyId, saved).catch(() => {});
         ipc.closeSelf();
       }
     } finally {
@@ -219,6 +310,7 @@ export default function Editor() {
       if (!dataUrl) return;
       const img = new Image();
       img.onload = () => {
+        setVideoDoc(null);
         loadDoc({
           image: dataUrl,
           imgW: img.naturalWidth,
@@ -276,11 +368,49 @@ export default function Editor() {
 
   return (
     <div className="solid-bg" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <Toolbar onSave={() => doSave(false)} onSaveAs={doSaveAs} onCopy={doCopy} onSaveCopy={() => doSave(true)} onFlatten={doFlatten} onNew={doNew} onOpen={doOpen} onStitch={doStitch} busy={busy} />
-      <div style={{ flex: 1, minHeight: 0, background: "#161619" }}>
-        <AnnotationStage ref={stageRef} />
+      <Toolbar
+        mode={videoDoc ? "video" : "image"}
+        onSave={() => doSave(false)}
+        onSaveAs={doSaveAs}
+        onCopy={doCopy}
+        onSaveCopy={() => doSave(true)}
+        onFlatten={doFlatten}
+        onNew={doNew}
+        onOpen={doOpen}
+        onStitch={doStitch}
+        busy={busy}
+      />
+      <div style={{ flex: 1, minHeight: 0, background: "#161619", display: "flex", ...(videoDoc ? { padding: 10, boxSizing: "border-box" } : null) }}>
+        {videoDoc ? (
+          <VideoTrimmer
+            key={`${videoDoc.historyId}:${videoVersion}`}
+            src={videoDoc.src}
+            filePath={videoDoc.filePath}
+            durationMs={videoDoc.durationMs}
+            busy={busy}
+            onSave={doSaveVideo}
+            onSaveAs={doSaveAsVideo}
+            onStateChange={setVideoTrimState}
+            frameCaptureMode="in-place"
+          />
+        ) : (
+          <AnnotationStage ref={stageRef} />
+        )}
       </div>
-      <HistoryStrip onFlash={flash} />
+      <HistoryStrip
+        onFlash={flash}
+        currentId={videoDoc ? videoDoc.historyId : docHistoryId}
+        onOpenVideo={(item: HistoryItem) => {
+          setVideoDoc({
+            historyId: item.id,
+            filePath: item.assetPath,
+            src: convertFileSrc(item.assetPath),
+            durationMs: item.durationMs ?? 0,
+          });
+          setVideoTrimState(EMPTY_TRIM_STATE);
+        }}
+        onOpenImage={() => setVideoDoc(null)}
+      />
       {toast && <div style={toastStyle}>{toast}</div>}
       {showFlattenConfirm && (
         <FlattenConfirmDialog
