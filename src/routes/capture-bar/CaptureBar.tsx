@@ -1,7 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ipc, type AudioSource, type CaptureMode, type OutputMode } from "../../lib/ipc";
 
 type RecordMode = "full" | "window" | "region";
@@ -311,20 +309,6 @@ export default function CaptureBar() {
   syncWindowFrameRef.current = async () => {
     if (!("__TAURI_INTERNALS__" in window)) return;
 
-    const windowApi = getCurrentWebviewWindow();
-    // `innerSize()`/`outerPosition()` của Tauri LUÔN trả PHYSICAL px, bất kể
-    // đơn vị mình định dùng sau đó — trong khi `getBoundingClientRect()` (JS)
-    // luôn trả LOGICAL/CSS px, KHÔNG phụ thuộc scale màn hình. Bug thật đã gặp
-    // (che mất phần lớn capture bar trên màn Retina): trộn 2 đơn vị này rồi
-    // đóng gói thẳng vào `PhysicalSize`/`PhysicalPosition` — trên máy scale=2,
-    // 1 giá trị logical (vd 70) bị hiểu nhầm thành 70 physical px, tức chỉ 35
-    // điểm thật trên màn hình, làm cửa sổ co lại còn ~nửa chiều cao cần có.
-    // Quy hết về LOGICAL ngay từ đầu (qua `.toLogical(scaleFactor)`) rồi dùng
-    // `LogicalSize`/`LogicalPosition` khi set lại — Tauri tự quy đổi đúng theo
-    // scale HIỆN TẠI của cửa sổ lúc áp dụng, không còn lẫn đơn vị nữa.
-    const scaleFactor = await windowApi.scaleFactor();
-    const currentSize = (await windowApi.innerSize()).toLogical(scaleFactor);
-    const currentPosition = (await windowApi.outerPosition()).toLogical(scaleFactor);
     const barHeight = barRef.current?.getBoundingClientRect().height ?? 0;
     const popoverHeight = showPopover ? (popoverRef.current?.getBoundingClientRect().height ?? 0) : 0;
     const nextHeight = Math.ceil(
@@ -335,11 +319,13 @@ export default function CaptureBar() {
 
     if (nextHeight <= 0) return;
 
-    const heightDelta = nextHeight - currentSize.height;
-    await windowApi.setSize(new LogicalSize(currentSize.width, nextHeight));
-    if (heightDelta !== 0) {
-      await windowApi.setPosition(new LogicalPosition(currentPosition.x, currentPosition.y - heightDelta));
-    }
+    // Gọi 1 command Rust atomic thay vì tự `setSize` + `setPosition` riêng
+    // (2 lệnh OS tách rời, để lộ 1 khung hình trung gian sai kích thước/vị
+    // trí giữa 2 bước → nháy mỗi khi mở/đóng popover). `resize_capture_bar`
+    // đo, tính bù vị trí và set cả size+position trong 1 lệnh AppKit/Win32
+    // atomic (xem `src-tauri/src/windows/mod.rs`), giữ nguyên cạnh đáy mà
+    // không có khoảng hở nào lộ ra giữa các bước.
+    await ipc.resizeCaptureBar(nextHeight);
   };
 
   useLayoutEffect(() => {
