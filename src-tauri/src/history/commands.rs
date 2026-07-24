@@ -209,6 +209,32 @@ fn read_history_asset_bytes_sync(app: &AppHandle, id: &str) -> Result<Vec<u8>, S
     std::fs::read(&rec.asset_path).map_err(|e| format!("Không đọc được asset: {e}"))
 }
 
+/// Tìm id của ảnh (không phải video) mới nhất chưa bị xoá — dùng để mở
+/// editor với "ảnh chụp gần nhất" lúc khởi động app (xem `lib.rs::setup`).
+fn latest_image_history_id_sync(app: &AppHandle) -> Result<Option<String>, String> {
+    let st = state(app)?;
+    let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+    conn.query_row(
+        "SELECT id FROM history WHERE deleted_at IS NULL AND media_type != 'video' ORDER BY created_at DESC LIMIT 1",
+        [],
+        |r| r.get(0),
+    )
+    .map(Some)
+    .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e.to_string()) })
+}
+
+/// Mở editor lúc khởi động app, tải sẵn ảnh chụp gần nhất (nếu có) — tránh
+/// tình trạng lần chụp/hover đầu tiên sau khi mở app không giữ được overlay
+/// đang mở vì webview editor chưa "ấm" (xem yêu cầu người dùng: mở editor
+/// ngay khi khởi động để app "swap up" sẵn). Không có ảnh nào trong Library
+/// → coi như no-op, không mở editor trống.
+pub fn open_latest_capture_in_editor_sync(app: &AppHandle) -> Result<(), String> {
+    match latest_image_history_id_sync(app)? {
+        Some(id) => open_history_item_in_editor_sync(app, &id),
+        None => Ok(()),
+    }
+}
+
 fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.deleted_at.is_some() {

@@ -246,8 +246,25 @@ pub fn run() {
                 }
             }
 
-            // Pre-warm editor (ẩn) → lần chụp đầu hiển thị tức thì.
-            let _ = windows::prewarm_editor(&handle);
+            // Mở sẵn Editor lúc khởi động, tải ảnh chụp gần nhất trong Library
+            // (nếu có) — giúp webview editor "ấm" sẵn từ đầu, tránh tình trạng
+            // lần chụp/hover đầu tiên sau khi mở app không giữ được overlay/menu
+            // đang mở vì editor chưa kịp khởi tạo. Không có ảnh nào → chỉ
+            // pre-warm ẩn như cũ (không mở editor trống).
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    match history::commands::open_latest_capture_in_editor_sync(&h) {
+                        Ok(()) => {
+                            let _ = windows::prewarm_editor(&h);
+                        }
+                        Err(e) => {
+                            eprintln!("[SnapDoc] Mở editor với ảnh gần nhất lúc khởi động thất bại: {e}");
+                            let _ = windows::prewarm_editor(&h);
+                        }
+                    }
+                });
+            }
             // Pre-warm thumbnail (ẩn) → hiển thị tức thì sau khi chụp.
             let _ = windows::prewarm_thumbnail(&handle);
             // Pre-warm thanh "Dừng quay" (ẩn) → lần bắt đầu quay vùng chọn đầu
