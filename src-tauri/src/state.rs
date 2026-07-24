@@ -150,4 +150,8 @@ pub struct AppState {
     /// trễ từ phiên overlay cũ. Được thay Sender mới mỗi lần mở overlay,
     /// không cần dọn tay khi đóng overlay.
     pub overlay_ready_tx: Mutex<Option<std::sync::mpsc::Sender<(u64, usize)>>>,
+    /// Generation của phiên đếm ngược "hẹn giờ chụp" hiện tại (xem
+    /// `flow::wait_capture_delay`) — bump lên để huỷ đếm ngược đang chạy dở
+    /// (user bấm Esc, hoặc trigger 1 lần chụp mới trong lúc đang đếm).
+    pub countdown_gen: AtomicU64,
 }

@@ -5,6 +5,7 @@ use crate::{
     storage,
     windows,
 };
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 fn hide_bar(app: &AppHandle) {
@@ -65,6 +66,55 @@ fn bar_is_visible(app: &AppHandle) -> bool {
             }
         })
         .unwrap_or(false)
+}
+
+/// Đọc số giây hẹn giờ chụp từ Settings (`timerSeconds` — option "Tắt/5s/10s"
+/// ở capture-bar). `0` = tắt, chụp ngay như trước.
+fn capture_delay_seconds(app: &AppHandle) -> u64 {
+    let dir = app.path().app_config_dir().unwrap_or_default();
+    storage::settings::load(&dir)
+        .get("timerSeconds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+}
+
+/// Đếm ngược TRƯỚC KHI thực sự chụp, nếu user đã bật "hẹn giờ chụp" trong
+/// Settings/capture-bar. Cho phép user mở dropdown/hover menu SAU khi bấm nút
+/// chụp (hoặc phím tắt), đợi đếm ngược xong xuôi, KHÔNG cần bấm thêm phím nào
+/// lúc menu đang mở — né đúng race-condition mất focus cửa sổ khi bấm phím
+/// tắt trong lúc menu đang mở (đã xác nhận qua test thực tế — xem trao đổi:
+/// bấm phím bất kỳ không đóng menu, nhưng đổi cửa sổ active (Alt+Tab) thì có;
+/// và mọi cách rút ngắn/né thao tác cửa sổ phía SnapDoc đều không giải quyết
+/// được vì gốc rễ nằm ở tầng OS/app đích, ngoài tầm code SnapDoc).
+///
+/// Emit `capture-countdown-tick` (số giây còn lại, kể cả giây đầu = tổng số
+/// giây) mỗi giây cho capture-bar hiển thị đếm ngược. Trả `false` nếu bị huỷ
+/// giữa chừng (`cancel_capture_countdown` — Esc, hoặc 1 phiên đếm khác đè lên)
+/// — caller phải BỎ QUA bước chụp thật khi nhận `false`.
+fn wait_capture_delay(app: &AppHandle) -> bool {
+    let secs = capture_delay_seconds(app);
+    if secs == 0 {
+        return true;
+    }
+    let my_gen = app.state::<AppState>().countdown_gen.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = app.emit("capture-countdown-tick", secs);
+    for remaining in (0..secs).rev() {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if app.state::<AppState>().countdown_gen.load(Ordering::SeqCst) != my_gen {
+            return false;
+        }
+        let _ = app.emit("capture-countdown-tick", remaining);
+    }
+    true
+}
+
+/// Huỷ phiên đếm ngược "hẹn giờ chụp" đang chạy (nếu có) — gọi khi user bấm
+/// Esc trên capture-bar trong lúc đang đếm. No-op an toàn nếu không có phiên
+/// nào đang chạy (chỉ bump generation, phiên `wait_capture_delay` nào đang
+/// `sleep` sẽ tự thoát ở vòng lặp kế tiếp, chậm nhất 1s).
+pub fn cancel_capture_countdown(app: &AppHandle) {
+    app.state::<AppState>().countdown_gen.fetch_add(1, Ordering::SeqCst);
+    let _ = app.emit("capture-countdown-cancel", ());
 }
 
 /// Đọc vùng quay gần nhất đã lưu (persist trong settings.json, sống qua cả
@@ -418,6 +468,11 @@ fn overlay_snap(app: &AppHandle, win: &WebviewWindow) -> Option<MonitorSnap> {
 }
 
 pub fn run(app: &AppHandle, mode: &str, output: &str) {
+    // Đếm ngược trước (nếu bật "hẹn giờ chụp") — huỷ ngang (Esc) thì bỏ luôn,
+    // không chụp gì cả.
+    if !wait_capture_delay(app) {
+        return;
+    }
     // Lưu chế độ trước khi chụp (kể cả "full" → overlay monitor)
     app.state::<AppState>().last_capture.set(mode, output);
     // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
@@ -815,6 +870,9 @@ pub fn keep_capture_focus(app: &AppHandle) {
 /// Chụp tất cả màn hình ghép ngang, không cần overlay.
 /// Ẩn capture bar trước khi chụp để không lọt vào ảnh.
 pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> {
+    if !wait_capture_delay(app) {
+        return Ok(());
+    }
     app.state::<AppState>().last_capture.set("all", output);
     // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
     windows::hide_editor(app);

@@ -86,6 +86,16 @@ const AUDIO_OPTIONS: { id: AudioSource; label: string }[] = [
   { id: "system", label: "Âm thanh hệ thống" },
 ];
 
+// "Hẹn giờ chụp": đếm ngược TRƯỚC KHI thực sự chụp (chạy ở Rust, xem
+// `flow::wait_capture_delay`) — cho phép user mở dropdown/hover menu SAU khi
+// bấm nút chụp, không cần bấm thêm phím/nút gì lúc menu đang mở. Chỉ 3 lựa
+// chọn theo yêu cầu, không cho nhập tuỳ ý.
+const CAPTURE_DELAYS: { id: 0 | 5 | 10; label: string }[] = [
+  { id: 0,  label: "Tắt" },
+  { id: 5,  label: "5 giây" },
+  { id: 10, label: "10 giây" },
+];
+
 const CAPTURE_BAR_BOTTOM_PADDING = 12;
 const CAPTURE_BAR_POPOVER_GAP = 6;
 
@@ -95,6 +105,11 @@ export default function CaptureBar() {
   const [activeGroup, setActiveGroup] = useState<ActiveGroup>("photo");
   const [output, setOutput] = useState<OutputMode>("editor");
   const [audioSource, setAudioSource] = useState<AudioSource>("off");
+  const [delaySeconds, setDelaySeconds] = useState<0 | 5 | 10>(0);
+  // Số giây còn lại đang đếm ngược ("hẹn giờ chụp") — `null` = không có phiên
+  // đếm nào đang chạy. Nhận từ Rust qua event `capture-countdown-tick`, KHÔNG
+  // tự đếm ở frontend (tránh lệch nhịp với sleep() thật ở Rust).
+  const [countdown, setCountdown] = useState<number | null>(null);
   // Chỉ 1 trong 2 popover (output/audio) hiện tại 1 thời điểm — vì bản thân
   // 2 nút đó cũng không bao giờ cùng hiện (đổi theo activeGroup).
   const [showPopover, setShowPopover] = useState(false);
@@ -118,17 +133,22 @@ export default function CaptureBar() {
   outputRef.current = output;
   const showPopoverRef = useRef(showPopover);
   showPopoverRef.current = showPopover;
+  const countdownRef = useRef(countdown);
+  countdownRef.current = countdown;
 
   useEffect(() => {
     // Load settings lần đầu
     ipc.getSettings().then((s) => {
       if (s?.defaultOutput) setOutput(s.defaultOutput);
       if (s?.recordAudioSource) setAudioSource(s.recordAudioSource);
+      if (s?.timerSeconds === 0 || s?.timerSeconds === 5 || s?.timerSeconds === 10) {
+        setDelaySeconds(s.timerSeconds);
+      }
     }).catch(() => {});
 
-    // Sync output/audio khi Settings thay đổi từ cửa sổ Settings. Output chỉ
-    // áp dụng khi user KHÔNG đang chủ động chọn trong capture bar; audio thì
-    // luôn áp dụng (không có input debounce nào tranh chấp ở đây).
+    // Sync output/audio/delay khi Settings thay đổi từ cửa sổ Settings. Output
+    // chỉ áp dụng khi user KHÔNG đang chủ động chọn trong capture bar; audio +
+    // delay thì luôn áp dụng (không có input debounce nào tranh chấp ở đây).
     const unlistenSettings = listen<Record<string, unknown>>("settings-changed", (e) => {
       if (!userPickedRef.current && e.payload?.defaultOutput) {
         setOutput(e.payload.defaultOutput as OutputMode);
@@ -136,6 +156,21 @@ export default function CaptureBar() {
       if (e.payload?.recordAudioSource) {
         setAudioSource(e.payload.recordAudioSource as AudioSource);
       }
+      const t = e.payload?.timerSeconds;
+      if (t === 0 || t === 5 || t === 10) setDelaySeconds(t);
+    });
+
+    // Đếm ngược "hẹn giờ chụp" — Rust emit mỗi giây (kể cả giây đầu = tổng số
+    // giây đã chọn), payload = số giây CÒN LẠI. Huỷ (Esc, hoặc phiên đếm khác
+    // đè lên) thì Rust emit `capture-countdown-cancel`.
+    const unlistenCountdownTick = listen<number>("capture-countdown-tick", (e) => {
+      // payload=0 là nhịp cuối trước khi Rust chụp thật — ẩn overlay đếm ngược
+      // ngay lúc đó (bar tự bị ẩn/minimize ngay sau bởi luồng chụp thật) thay
+      // vì hiện "0" rồi mới biến mất, tránh khựng hình thừa.
+      setCountdown(e.payload === 0 ? null : e.payload);
+    });
+    const unlistenCountdownCancel = listen("capture-countdown-cancel", () => {
+      setCountdown(null);
     });
 
     // Nút "Quay lại" ở `record-review` (xem `record::redo_recording`) — mở
@@ -165,6 +200,11 @@ export default function CaptureBar() {
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (countdownRef.current !== null) {
+          ipc.cancelCaptureCountdown().catch(() => {});
+          setCountdown(null);
+          return;
+        }
         if (showPopoverRef.current) { setShowPopover(false); return; }
         ipc.closeSelf();
       }
@@ -202,6 +242,8 @@ export default function CaptureBar() {
       unlistenBlur.then((fn) => fn());
       unlistenHidePopover.then((fn) => fn());
       unlistenError.then((fn) => fn());
+      unlistenCountdownTick.then((fn) => fn());
+      unlistenCountdownCancel.then((fn) => fn());
     };
   }, []);
 
@@ -227,6 +269,16 @@ export default function CaptureBar() {
     setShowPopover(false);
     ipc.getSettings().then((s) => {
       if (s) ipc.setSettings({ ...s, recordAudioSource: a }).catch(() => {});
+    }).catch(() => {});
+  };
+
+  /** Chọn số giây hẹn giờ chụp (Tắt/5s/10s) — đọc bởi `flow::wait_capture_delay`
+   * (Rust) ở MỌI lần chụp ảnh sau đó (bar/hotkey), không riêng gì lần chọn này. */
+  const selectDelay = (d: 0 | 5 | 10) => {
+    setDelaySeconds(d);
+    setShowPopover(false);
+    ipc.getSettings().then((s) => {
+      if (s) ipc.setSettings({ ...s, timerSeconds: d }).catch(() => {});
     }).catch(() => {});
   };
 
@@ -292,7 +344,7 @@ export default function CaptureBar() {
 
   useLayoutEffect(() => {
     void syncWindowFrameRef.current?.();
-  }, [showPopover, output, audioSource]);
+  }, [showPopover, output, audioSource, countdown]);
 
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -326,6 +378,16 @@ export default function CaptureBar() {
       <div style={container}>
         {/* Bar nằm đáy */}
         <div ref={barRef} style={bar}>
+          {countdown !== null ? (
+            // Đang đếm ngược "hẹn giờ chụp" — thay hẳn nội dung thanh bằng số
+            // đếm ngược, tránh user bấm nhầm mode khác trong lúc đếm (freeze
+            // pixel thật chỉ diễn ra SAU khi đếm xong, xem `flow::run`).
+            <div style={countdownWrap}>
+              <span style={countdownNumber}>{countdown}</span>
+              <span style={countdownLabel}>Sắp chụp… (Esc để huỷ)</span>
+            </div>
+          ) : (
+          <>
           {/* Khu vực 1: chế độ CHỤP ẢNH */}
           <div style={modeGroup}>
             {/* Chụp nhanh — hành động chạy NGAY (không phải chế độ để chọn):
@@ -407,6 +469,17 @@ export default function CaptureBar() {
                     {audioSource === a.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
                   </button>
                 ))}
+                {/* Divider */}
+                <div style={popDivider} />
+                {/* Section 3: Hẹn giờ chụp — áp dụng cho MỌI lần chụp ảnh sau
+                    đó (bar lẫn phím tắt), xem `flow::wait_capture_delay`. */}
+                <div style={popSectionLabel}>Hẹn giờ chụp</div>
+                {CAPTURE_DELAYS.map((d) => (
+                  <button key={d.id} style={popItem(delaySeconds === d.id)} onClick={() => selectDelay(d.id)}>
+                    <span style={{ flex: 1 }}>{d.label}</span>
+                    {delaySeconds === d.id && <span style={{ opacity: 0.6, fontSize: 11 }}>✓</span>}
+                  </button>
+                ))}
               </div>
             )}
           </div>
@@ -415,6 +488,8 @@ export default function CaptureBar() {
           <button aria-label="Đóng" style={closeBtn} onClick={() => ipc.closeSelf()}>
             ✕
           </button>
+          </>
+          )}
         </div>
       </div>
     </div>
@@ -455,6 +530,31 @@ const modeGroup: React.CSSProperties = {
   background: "rgba(255,255,255,0.06)",
   borderRadius: 8,
   padding: 2,
+};
+
+// Thay hẳn nội dung bar khi đang đếm ngược "hẹn giờ chụp" — width cố định vừa
+// đủ chứa số + nhãn, tránh bar co giãn giật cục theo từng chữ số (1 vs 2 ký tự).
+const countdownWrap: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  padding: "4px 14px",
+  minWidth: 160,
+};
+
+const countdownNumber: React.CSSProperties = {
+  fontSize: 22,
+  fontWeight: 700,
+  fontVariantNumeric: "tabular-nums",
+  color: "#fbbf24",
+  minWidth: 28,
+  textAlign: "center",
+};
+
+const countdownLabel: React.CSSProperties = {
+  fontSize: 12,
+  color: "var(--text-dim)",
+  whiteSpace: "nowrap",
 };
 
 // Nút phạm vi (Full/Window/Region…) dùng chung cho cả 2 khu vực — mỗi bấm là

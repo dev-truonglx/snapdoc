@@ -75,6 +75,7 @@ pub fn run() {
             commands::take_pending,
             commands::set_pending_image,
             commands::capture_now,
+            commands::cancel_capture_countdown,
             commands::start_quick,
             commands::capture_quick_region,
             commands::finalize_region,

@@ -118,6 +118,9 @@ export const ipc = {
     invoke<string>("capture_quick_region", { x, y, w, h }),
   captureAllScreens: (output: OutputMode) =>
     invoke<void>("capture_all_screens", { output }),
+  /** Huỷ phiên đếm ngược "hẹn giờ chụp" đang chạy (nếu có) — xem
+   * `flow::wait_capture_delay`/`flow::cancel_capture_countdown`. */
+  cancelCaptureCountdown: () => invoke<void>("cancel_capture_countdown"),
   finalizeRegion: (x: number, y: number, w: number, h: number) =>
     invoke<void>("finalize_region", { x, y, w, h }),
   finalizeWindow: (id: number) => invoke<void>("finalize_window", { id }),

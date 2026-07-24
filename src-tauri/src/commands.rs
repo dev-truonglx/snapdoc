@@ -57,6 +57,13 @@ pub fn capture_now(app: AppHandle, mode: String, output: String) {
     std::thread::spawn(move || flow::run(&app, &mode, &output));
 }
 
+/// Huỷ phiên đếm ngược "hẹn giờ chụp" đang chạy (nếu có) — xem
+/// `flow::wait_capture_delay`.
+#[tauri::command]
+pub fn cancel_capture_countdown(app: AppHandle) {
+    flow::cancel_capture_countdown(&app);
+}
+
 /// "Chụp nhanh": mở overlay trong suốt trên mọi màn hình để chọn vùng + chú thích.
 #[tauri::command]
 pub fn start_quick(app: AppHandle) {
