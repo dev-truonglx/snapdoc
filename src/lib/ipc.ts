@@ -1,5 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** Video đang chờ mở trong Editor — đã CÓ SẴN trong History (`historyId`
+ * luôn là id thật): mở từ Library hoặc vừa quay xong (ingest ngay lập tức,
+ * xem `record::stop_recording_impl`) — không còn khái niệm "video chưa lưu". */
+export interface PendingVideo {
+  path: string;
+  width: number;
+  height: number;
+  durationMs: number;
+  historyId: string;
+}
+
 export interface Pending {
   base64: string;
   width: number;
@@ -33,6 +44,10 @@ export interface HistoryItem {
   title: string | null;
   isEdited: boolean;
   deletedAt: number | null;
+  /** Đường dẫn bản Save/Save As gần nhất ra thư mục tuỳ chọn — `null` nếu
+   * chưa từng export ra ngoài (khi đó "Xem file trong Thư mục" mở `assetPath`
+   * — file gốc trong thư mục dữ liệu nội bộ). Xem `setHistoryExportedPath`. */
+  exportedPath: string | null;
 }
 
 export interface HistoryFilter {
@@ -82,9 +97,6 @@ export interface Settings {
   /** Thư mục lần cuối user chọn qua "Save As…" ở editor (ảnh) — dùng làm mặc
    * định cho lần Save As kế tiếp, xem `useOutput.saveAsToFile`. */
   lastImageSaveAsDir?: string;
-  /** Thư mục lần cuối user chọn qua "Lưu thành…" ở RecordReview (video) —
-   * dùng làm mặc định cho lần kế tiếp, xem `RecordReview.pickSaveTarget`. */
-  lastVideoSaveAsDir?: string;
 }
 
 export interface UpdateInfo {
@@ -104,6 +116,8 @@ export const ipc = {
   notifyOverlayReady: (idx: number, gen: number) => invoke<void>("notify_overlay_ready", { idx, gen }),
   peekPending: () => invoke<Pending | null>("peek_pending"),
   takePending: () => invoke<Pending | null>("take_pending"),
+  peekPendingVideo: () => invoke<PendingVideo | null>("peek_pending_video"),
+  takePendingVideo: () => invoke<PendingVideo | null>("take_pending_video"),
   /** Ghi đè ảnh đang chờ (output="editor") — dùng khi "Chụp nhanh" bàn giao ảnh đã annotate sang Editor. */
   setPendingImage: (data: string, width: number, height: number) =>
     invoke<void>("set_pending_image", { data, width, height }),
@@ -187,12 +201,11 @@ export const ipc = {
   updateHistoryAsset: (id: string, data: string) => invoke<HistoryItem>("update_history_asset", { id, data }),
   copyHistoryItem: (id: string) => invoke<void>("copy_history_item", { id }),
   revealHistoryItem: (id: string) => invoke<void>("reveal_history_item", { id }),
+  /** Ghi lại đường dẫn bản Save/Save As gần nhất ra thư mục tuỳ chọn — gọi
+   * ngay sau khi export ảnh/video thành công, để lần sau "Xem file trong Thư
+   * mục" mở đúng chỗ user đã lưu thay vì file gốc nội bộ. */
+  setHistoryExportedPath: (id: string, path: string) => invoke<HistoryItem>("set_history_exported_path", { id, path }),
   openHistory: () => invoke<void>("open_history"),
-  /** Mở cửa sổ "Cắt video" riêng cho 1 item — cùng khuôn `record-review`
-   * (titlebar thật, thu nhỏ/phóng to/đóng). Cửa sổ mới đọc `id` qua query
-   * string (`HistoryTrim.tsx`), không qua tham số truyền trực tiếp. */
-  openHistoryTrim: (id: string) => invoke<void>("open_history_trim", { id }),
-  closeHistoryTrim: () => invoke<void>("close_history_trim"),
   finishQuickCapture: (data: string, width: number, height: number, output: string) =>
     invoke<string | null>("finish_quick_capture", { data, width, height, output }),
   // Quay màn hình — dừng quay/xem trạng thái chủ yếu vẫn qua tray icon (menu
@@ -207,28 +220,20 @@ export const ipc = {
    * coi như bấm "Bắt đầu quay" ngay tại khung đó, không mở lại phiên chọn
    * vùng mới. */
   confirmRegionRecordStart: () => invoke<void>("confirm_region_record_start"),
-  // Xem lại bản quay trước khi lưu vào History (record-review window).
-  peekPendingRecording: () => invoke<PendingRecording | null>("peek_pending_recording"),
-  /** `destDir`: thư mục lưu tuỳ chọn ("Lưu vào thư mục khác…") — bỏ trống để
-   * giữ nguyên vị trí file đã quay (saveDir mặc định trong Settings). */
-  confirmRecordingSave: (destDir?: string) => invoke<void>("confirm_recording_save", { destDir: destDir ?? null }),
-  confirmRecordingDiscard: () => invoke<void>("confirm_recording_discard"),
-  /** "Quay lại": xoá bản quay đang xem rồi mở CaptureBar đúng phạm vi vừa quay. */
-  redoRecording: () => invoke<void>("redo_recording"),
   /** Dừng quay — dùng cho popup "đang quay" trên Windows (bấm vào để dừng). */
   stopRecording: () => invoke<string>("stop_recording"),
   /** Thời lượng đã quay (ms), `null` nếu không có phiên quay — popup "đang quay" poll mỗi giây. */
   recordingStatus: () => invoke<number | null>("recording_status"),
-  /** Cắt bản quay đang chờ xác nhận (trước khi Lưu) — `ranges` là các đoạn GIỮ
-   * LẠI (ms). `removeAudio`: tách/xoá hẳn track âm thanh khỏi file kết quả
-   * (nút "Tách nhạc nền" ở `VideoTrimmer`). */
-  trimPendingRecording: (ranges: [number, number][], removeAudio: boolean) =>
-    invoke<PendingRecording>("trim_pending_recording", { ranges: roundRanges(ranges), removeAudio }),
-  /** Cắt 1 video ĐÃ LƯU trong History — KHÁC `trimPendingRecording` (ghi đè
-   * tại chỗ): tạo 1 item MỚI cho bản đã cắt, giữ nguyên item gốc — trả về
-   * item MỚI (id khác `id` truyền vào), không phải bản đã update tại chỗ. */
+  /** Cắt 1 video ĐÃ LƯU trong History, tạo THÀNH 1 ITEM MỚI trong Library
+   * (giữ nguyên item gốc) — lựa chọn "Lưu thành video mới" ở Editor. Trả về
+   * item MỚI (id khác `id` truyền vào). */
   trimHistoryVideo: (id: string, ranges: [number, number][], removeAudio: boolean) =>
     invoke<HistoryItem>("trim_history_video", { id, ranges: roundRanges(ranges), removeAudio }),
+  /** Cắt 1 video ĐÃ LƯU trong History, ghi ĐÈ TẠI CHỖ asset/thumbnail của
+   * ĐÚNG item đó — lựa chọn "Lưu đè bản gốc" ở Editor. Vĩnh viễn, không giữ
+   * bản gốc. */
+  overwriteHistoryVideo: (id: string, ranges: [number, number][], removeAudio: boolean) =>
+    invoke<HistoryItem>("overwrite_history_video", { id, ranges: roundRanges(ranges), removeAudio }),
   /** Trích frame tại các mốc ms cho trước — trả data URL JPEG base64, `null`
    * cho mốc nào trích lỗi. `scaleW` là bề rộng đích (px): filmstrip zoom của
    * `VideoTrimmer` dùng nhỏ (160, nhiều tile), hover-scrub preview dùng lớn
@@ -246,12 +251,4 @@ export const ipc = {
  * làm tròn ở biên IPC để tránh lỗi deserialize "expected i64". */
 function roundRanges(ranges: [number, number][]): [number, number][] {
   return ranges.map(([s, e]) => [Math.round(s), Math.round(e)]);
-}
-
-export interface PendingRecording {
-  path: string;
-  width: number;
-  height: number;
-  durationMs: number;
-  captureMode: string;
 }

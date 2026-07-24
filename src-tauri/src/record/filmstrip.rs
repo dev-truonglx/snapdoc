@@ -196,7 +196,7 @@ pub fn extract_frames(mp4_path: &Path, timestamps_ms: &[i64], scale_w: u32) -> V
 }
 
 /// IPC cho filmstrip zoom của `VideoTrimmer` — nhận đường dẫn file (frontend
-/// đã có sẵn: `PendingRecording.path` hoặc `HistoryRecord.assetPath`) + danh
+/// đã có sẵn: `PendingVideo.path` hoặc `HistoryRecord.assetPath`) + danh
 /// sách mốc ms cần lấy, trả về từng mốc dạng data URL JPEG base64 (`None` nếu
 /// mốc đó trích lỗi, không fail cả batch). `async fn` + `spawn_blocking` vì
 /// chạy ffmpeg + đọc/xoá file tạm — không được chặn Tokio event loop / WebView2

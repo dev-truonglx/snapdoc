@@ -69,10 +69,11 @@ pub fn run() {
         .manage(AppState::default())
         .manage(update::PendingUpdate::default())
         .manage(record::RecordingState::default())
-        .manage(record::PendingRecordingState::default())
         .invoke_handler(tauri::generate_handler![
             commands::peek_pending,
             commands::take_pending,
+            commands::peek_pending_video,
+            commands::take_pending_video,
             commands::set_pending_image,
             commands::capture_now,
             commands::cancel_capture_countdown,
@@ -124,13 +125,8 @@ pub fn run() {
             commands::notify_overlay_ready,
             commands::start_record_picker,
             commands::confirm_region_record_start,
-            commands::peek_pending_recording,
-            commands::confirm_recording_save,
-            commands::confirm_recording_discard,
-            commands::redo_recording,
             commands::stop_recording,
             commands::recording_status,
-            commands::trim_pending_recording,
             record::filmstrip::generate_video_frames,
             history::commands::list_history,
             history::commands::get_history_item,
@@ -143,11 +139,11 @@ pub fn run() {
             history::commands::get_history_asset_bytes,
             history::commands::update_history_asset,
             history::commands::trim_history_video,
+            history::commands::overwrite_history_video,
             history::commands::copy_history_item,
             history::commands::reveal_history_item,
+            history::commands::set_history_exported_path,
             history::commands::open_history,
-            history::commands::open_history_trim,
-            history::commands::close_history_trim,
             history::commands::finish_quick_capture,
         ])
         .setup(|app| {
@@ -365,21 +361,8 @@ pub fn run() {
                     let _ = _window.emit("hide-popover", ());
                 }
             }
-            // "record-review" giờ có titlebar thật (nút đóng, xem
-            // `open_record_review`) nhưng KHÔNG được phép đóng "trắng" —
-            // buộc người dùng phải quyết định Lưu/Xoá bản quay (dữ liệu quan
-            // trọng, không tự phục hồi được). Chặn close mặc định, coi như
-            // bấm "Xoá": để RecordReview.tsx tự chạy lại xác nhận + dọn dẹp
-            // (`confirmRecordingDiscard`) rồi mới đóng thật.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
-                if _window.label() == "record-review" {
-                    api.prevent_close();
-                    use tauri::Emitter;
-                    let _ = _window.emit("record-review-close-requested", ());
-                }
-            }
             // macOS: khi cửa sổ "thật" bị đóng (editor, settings, capture-bar,
-            // record-review, history-trim), trả về Accessory policy (ẩn Dock
+            // history), trả về Accessory policy (ẩn Dock
             // icon). Windows: khi cửa sổ "thật" bị đóng, ẩn icon trên taskbar.
             if let tauri::WindowEvent::Destroyed = _event {
                 use tauri::Manager;
@@ -396,10 +379,10 @@ pub fn run() {
                     }
                 }
                 // "editor" (capture) lẫn "editor-ow-N" ("Open with") + "settings"
-                // + "capture-bar" + "record-review" + "history-trim" = cửa sổ
+                // + "capture-bar" = cửa sổ
                 // thật → khi đóng, cân nhắc trả về Accessory policy (macOS)
                 // hoặc ẩn taskbar icon (Windows).
-                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" || label == "record-review" || label == "history-trim" {
+                if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" {
                     windows::on_editor_closed(_window.app_handle());
                 }
             }

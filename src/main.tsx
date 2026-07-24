@@ -9,10 +9,9 @@ import Settings from "./routes/settings/Settings";
 import UpdateWindow from "./routes/update/UpdateWindow";
 import ScrollControl from "./routes/scroll-control/ScrollControl";
 import HistoryWindow from "./routes/history/HistoryWindow";
-import RecordReview from "./routes/record-review/RecordReview";
-import HistoryTrim from "./routes/history-trim/HistoryTrim";
 import RecordingIndicator from "./routes/recording-indicator/RecordingIndicator";
 import RecordStopControl from "./routes/record-stop-control/RecordStopControl";
+import RecordBorder from "./routes/record-border/RecordBorder";
 
 const which = new URLSearchParams(window.location.search).get("win") ?? "capture-bar";
 
@@ -25,10 +24,9 @@ const routes: Record<string, React.ComponentType> = {
   update: UpdateWindow,
   "scroll-control": ScrollControl,
   history: HistoryWindow,
-  "record-review": RecordReview,
-  "history-trim": HistoryTrim,
   "recording-indicator": RecordingIndicator,
   "record-stop-control": RecordStopControl,
+  "record-border": RecordBorder,
 };
 
 const Route = routes[which] ?? CaptureBar;

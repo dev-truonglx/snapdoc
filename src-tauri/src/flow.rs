@@ -397,6 +397,23 @@ pub(crate) fn stamp_filename(prefix: &str) -> String {
     format!("{prefix}_{y:04}-{mo:02}-{d:02}_{hh:02}{mm:02}{ss:02}")
 }
 
+/// Lấy `saveDir` từ settings; fallback về Pictures/SnapDoc nếu chưa cấu hình.
+/// Dùng chung cho output mode "save"/"save_copy" (ghi chính) VÀ auto-export
+/// bản sao ở các mode còn lại (xem `finish()`).
+fn resolve_save_dir(app: &AppHandle) -> String {
+    let config_dir = app.path().app_config_dir().unwrap_or_default();
+    let s = storage::settings::load(&config_dir);
+    let dir = s.get("saveDir").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if dir.is_empty() {
+        app.path()
+            .picture_dir()
+            .map(|p| p.join("SnapDoc").to_string_lossy().to_string())
+            .unwrap_or_default()
+    } else {
+        dir
+    }
+}
+
 /// `scale_factor`: hệ số quy đổi pixel-vật-lý-của-bitmap → CSS/logical px,
 /// lưu vào `PendingCapture` (badge HiDPI ở Editor). Truyền 1.0 khi không rõ.
 pub fn finish(
@@ -412,40 +429,44 @@ pub fn finish(
 
     // Ingest vào History Library — LUÔN chạy bất kể output, KHÔNG BAO GIỜ làm
     // gián đoạn clipboard/save/editor phía dưới nếu lỗi (đĩa đầy, DB lỗi...).
-    match crate::history::ingest(app, &cap, &mode, scale_factor) {
-        Ok(rec) => crate::history::attach_pending_id(app, &rec.id),
-        Err(e) => eprintln!("[SnapDoc][history] ingest thất bại, luồng capture vẫn tiếp tục: {e}"),
-    }
+    let ingested_id = match crate::history::ingest(app, &cap, &mode, scale_factor) {
+        Ok(rec) => {
+            crate::history::attach_pending_id(app, &rec.id);
+            Some(rec.id)
+        }
+        Err(e) => {
+            eprintln!("[SnapDoc][history] ingest thất bại, luồng capture vẫn tiếp tục: {e}");
+            None
+        }
+    };
 
     match output {
         "clipboard" => {
             clipboard::copy_png(&cap.base64)?;
+            auto_export_copy(app, &cap, ingested_id.as_deref());
             windows::open_thumbnail(app)
         }
         "copy_editor" => {
             clipboard::copy_png(&cap.base64)?;
+            auto_export_copy(app, &cap, ingested_id.as_deref());
             windows::open_editor(app)
         }
         "save" | "save_copy" => {
-            // Lấy saveDir từ settings; fallback về Pictures/SnapDoc nếu chưa cấu hình.
-            let save_dir = {
-                let config_dir = app.path().app_config_dir().unwrap_or_default();
-                let s = storage::settings::load(&config_dir);
-                let dir = s.get("saveDir").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if dir.is_empty() {
-                    app.path()
-                        .picture_dir()
-                        .map(|p| p.join("SnapDoc").to_string_lossy().to_string())
-                        .unwrap_or_default()
-                } else {
-                    dir
-                }
-            };
+            let save_dir = resolve_save_dir(app);
             let path = format!("{save_dir}/{}.png", stamp_filename("Screenshot"));
             let data = format!("data:image/png;base64,{}", cap.base64);
             let saved = storage::save::write_png(&path, &data)?;
             if output == "save_copy" {
                 clipboard::copy_png(&cap.base64)?;
+            }
+            // Đây CHÍNH LÀ hành động Save chủ ý của user (không phải bản
+            // auto-export best-effort) — ghi luôn `exported_path` bằng đúng
+            // file này thay vì gọi thêm `auto_export_copy` (tránh ghi 2 file
+            // trùng lặp trong `save_dir`).
+            if let Some(id) = &ingested_id {
+                if let Err(e) = crate::history::commands::set_history_exported_path_sync(app, id, &saved) {
+                    eprintln!("[SnapDoc] Ghi exported_path thất bại: {e}");
+                }
             }
             // Lưu đường dẫn đã ghi vào pending để thumbnail/editor có thể dùng nếu cần
             let state = app.state::<AppState>();
@@ -456,7 +477,34 @@ pub fn finish(
             }
             windows::open_thumbnail(app)
         }
-        _ => windows::open_editor(app),
+        _ => {
+            auto_export_copy(app, &cap, ingested_id.as_deref());
+            windows::open_editor(app)
+        }
+    }
+}
+
+/// Tự động ghi thêm 1 bản PNG vào `saveDir` cấu hình cho các output mode
+/// KHÔNG chủ động ghi ra đó (khác "save"/"save_copy", đã tự làm việc này với
+/// xử lý lỗi chặt hơn ở `finish()`) — để "Xem file trong Thư mục" ở
+/// Editor/Library luôn có sẵn 1 bản trong đúng folder user cấu hình, không
+/// phải đợi user tự bấm Save As. BEST-EFFORT: lỗi (đĩa đầy, quyền ghi...) CHỈ
+/// log, không được làm gián đoạn output chính (clipboard đã copy/Editor đã mở
+/// xong ở lúc gọi hàm này) — khác nhánh "save"/"save_copy" nơi ghi file THẤT
+/// BẠI nghĩa là chính hành động user vừa chọn thất bại, phải báo lỗi rõ ràng.
+fn auto_export_copy(app: &AppHandle, cap: &capture::Capture, history_id: Option<&str>) {
+    let save_dir = resolve_save_dir(app);
+    let path = format!("{save_dir}/{}.png", stamp_filename("Screenshot"));
+    let data = format!("data:image/png;base64,{}", cap.base64);
+    match storage::save::write_png(&path, &data) {
+        Ok(saved) => {
+            if let Some(id) = history_id {
+                if let Err(e) = crate::history::commands::set_history_exported_path_sync(app, id, &saved) {
+                    eprintln!("[SnapDoc] Ghi exported_path thất bại: {e}");
+                }
+            }
+        }
+        Err(e) => eprintln!("[SnapDoc] Tự động lưu bản sao vào {save_dir} thất bại: {e}"),
     }
 }
 

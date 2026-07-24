@@ -914,7 +914,7 @@ function QuickAnnotate() {
       onPointerDownCapture={onDownCapture}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onContextMenu={(e) => { e.preventDefault(); doClose(); }}
+      onContextMenu={(e) => { e.preventDefault(); if (!sel) doClose(); }}
     >
       {sel ? (
         <div

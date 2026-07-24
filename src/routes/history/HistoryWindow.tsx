@@ -16,9 +16,9 @@ export default function HistoryWindow() {
     reload();
   }, [reload]);
 
-  // Cửa sổ "history-trim" (xem `HistoryTrim.tsx`) là 1 webview RIÊNG — item
-  // mới cắt xong không thể `addItem` thẳng vào store ở đây được (mỗi cửa sổ
-  // Tauri có JS heap/Zustand store độc lập), nên backend
+  // Cắt video giờ xảy ra ngay trong Editor (webview RIÊNG với cửa sổ này) —
+  // item mới cắt xong không thể `addItem` thẳng vào store ở đây được (mỗi
+  // cửa sổ Tauri có JS heap/Zustand store độc lập), nên backend
   // (`history/commands.rs::trim_history_video`) emit event này để cửa sổ
   // History (đúng chỗ hiển thị danh sách) tự cập nhật.
   useEffect(() => {

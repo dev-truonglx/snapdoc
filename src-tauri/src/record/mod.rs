@@ -27,12 +27,13 @@ mod audio_mic;
 #[cfg(target_os = "windows")]
 mod audio_wasapi;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
 use std::time::Instant;
 use tauri::{AppHandle, Manager};
+use crate::state::{AppState, PendingVideo};
 
 /// Cảnh báo người dùng về sự cố KHÔNG làm hỏng cả phiên quay (mic lỗi, drop
 /// frame, ghép audio thất bại...) — trước đây chỉ `eprintln!` (vô hình trong
@@ -153,35 +154,6 @@ pub struct ActiveRecording {
 #[derive(Default)]
 pub struct RecordingState(pub Mutex<Option<ActiveRecording>>);
 
-/// 1 bản quay đã ghi xong (mp4 hợp lệ trên đĩa) nhưng CHƯA được người dùng
-/// xác nhận lưu hay xoá — chờ `record-review` (xem `windows::open_record_review`)
-/// gọi `confirm_save`/`confirm_discard`. Serialize được để cửa sổ review đọc
-/// qua `peek_pending_recording`.
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingRecording {
-    pub path: String,
-    pub width: u32,
-    pub height: u32,
-    pub duration_ms: i64,
-    pub capture_mode: String,
-    /// Đường dẫn bản THÔ (trước khi cắt lần đầu) — chỉ set sau lần
-    /// `trim_pending_recording` ĐẦU TIÊN, giữ nguyên ở các lần cắt tiếp theo
-    /// (xem đó để hiểu vì sao). `#[serde(skip)]`: thuần nội bộ, frontend
-    /// không cần biết — `confirm_recording_save` tự ingest thêm bản này vào
-    /// History nếu có, `confirm_recording_discard` tự xoá luôn file này.
-    #[serde(skip)]
-    pub raw_path: Option<PathBuf>,
-    /// Thời lượng (ms) của bản thô — `duration_ms` ở trên bị ghi đè thành
-    /// thời lượng MỚI mỗi lần cắt nên phải lưu riêng, dùng khi ingest bản thô
-    /// vào History lúc Lưu.
-    #[serde(skip)]
-    pub raw_duration_ms: Option<i64>,
-}
-
-#[derive(Default)]
-pub struct PendingRecordingState(pub Mutex<Option<PendingRecording>>);
-
 /// Thư mục lưu video: `saveDir` đã cấu hình trong Settings, hoặc
 /// `Pictures/SnapDoc` mặc định — cùng quy tắc với ảnh chụp.
 fn resolve_save_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -211,7 +183,7 @@ pub(crate) fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
     // tauri.conf.json chỉ cho phép thư mục đó) — khác ảnh chụp, video không
     // copy vào Library nội bộ (xem `history::ingest_video`), nên phải tự mở
     // thêm scope asset-protocol cho ĐÚNG thư mục này thì `convertFileSrc`
-    // (record-review + History video player) mới đọc được, nếu không trình
+    // (Editor chế độ video + History video player) mới đọc được, nếu không trình
     // duyệt sẽ chặn request và video không tài phát được (404/blocked).
     allow_asset_scope(app, &dir);
     // dedupe: 2 bản quay bắt đầu trong cùng 1 giây (timestamp trùng) không
@@ -244,7 +216,7 @@ pub fn allow_asset_scope_at_startup(app: &AppHandle) {
 /// bình thường dọn sau khi mux; bị bỏ lại khi mux lỗi/discard/crash),
 /// `snapdoc-trim-*` (segment tạm của trim, bị bỏ lại khi crash giữa trim)
 /// trong temp dir, và `*.trimtmp.mp4` trong saveDir (file trung gian giữa
-/// bước encode và bước rename đè của `trim_pending_recording`).
+/// bước encode và bước rename đè của `history::commands::overwrite_history_video_sync`).
 pub fn cleanup_stale_temp(app: &AppHandle) {
     let tmp = std::env::temp_dir();
     if let Ok(entries) = std::fs::read_dir(&tmp) {
@@ -335,22 +307,66 @@ pub fn start_recording_window(app: &AppHandle, window_id: u32) -> Result<(), Str
     start_with_target(app, crate::capture::mac_stream::RecordTarget::Window(window_id))
 }
 
-/// Chặn bắt đầu quay mới khi đã có 1 phiên đang chạy, hoặc còn 1 bản quay
-/// trước chưa xác nhận lưu/xoá (`PendingRecordingState` chỉ giữ được 1 slot,
-/// quay tiếp sẽ GHI ĐÈ và làm mất hẳn đường dẫn tới bản trước). Dùng chung
-/// cho cả 2 nền tảng.
+/// Vùng (x, y, w, h) LOGICAL/points, toạ độ GLOBAL desktop, để vẽ khung viền
+/// "đang quay" (xem `windows::open_record_border`) cho quay TOÀN màn hình
+/// hoặc quay 1 CỬA SỔ — quay VÙNG trả `None` vì đã có khung riêng (chính
+/// overlay chọn vùng, xem `flow::finalize_region`). Phải gọi TRƯỚC khi
+/// `target` bị tiêu thụ (move) vào `mac_stream::start`/`windows_stream::start`.
+#[cfg(target_os = "macos")]
+fn record_border_rect(target: &crate::capture::mac_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
+    use crate::capture::mac_stream::RecordTarget;
+    use xcap::Monitor;
+    match target {
+        RecordTarget::Display(display_id) => {
+            let m = Monitor::all()
+                .ok()?
+                .into_iter()
+                .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
+            Some((m.x().ok()? as f64, m.y().ok()? as f64, m.width().ok()? as f64, m.height().ok()? as f64))
+        }
+        RecordTarget::Window(window_id) => {
+            let list = crate::capture::window::list(0.0, 0.0, 1.0).ok()?;
+            let w = list.into_iter().find(|w| w.id == *window_id)?;
+            Some((w.x, w.y, w.width, w.height))
+        }
+        RecordTarget::Region { .. } => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn record_border_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
+    use crate::capture::windows_stream::RecordTarget;
+    use xcap::Monitor;
+    match target {
+        RecordTarget::Display(display_id) => {
+            let m = Monitor::all()
+                .ok()?
+                .into_iter()
+                .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
+            let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
+            Some((
+                m.x().ok()? as f64 / scale,
+                m.y().ok()? as f64 / scale,
+                m.width().ok()? as f64 / scale,
+                m.height().ok()? as f64 / scale,
+            ))
+        }
+        RecordTarget::Window(window_id) => {
+            let list = crate::capture::window::list(0.0, 0.0, 1.0).ok()?;
+            let w = list.into_iter().find(|w| w.id == *window_id)?;
+            Some((w.x, w.y, w.width, w.height))
+        }
+        RecordTarget::Region { .. } => None,
+    }
+}
+
+/// Chặn bắt đầu quay mới khi đã có 1 phiên đang chạy. Dùng chung cho cả 2
+/// nền tảng.
 fn guard_can_start_recording(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<RecordingState>();
-    {
-        let guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
-        if guard.is_some() {
-            return Err("Đã có phiên quay đang chạy".to_string());
-        }
-    }
-    let pending = app.state::<PendingRecordingState>();
-    let guard = pending.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
+    let guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
     if guard.is_some() {
-        return Err("Còn 1 bản quay chưa xác nhận lưu/xoá — hãy xử lý cửa sổ xem lại trước".to_string());
+        return Err("Đã có phiên quay đang chạy".to_string());
     }
     Ok(())
 }
@@ -367,6 +383,9 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
         crate::capture::mac_stream::RecordTarget::Region { .. } => "region",
         crate::capture::mac_stream::RecordTarget::Window(_) => "window",
     };
+
+    // Phải tính TRƯỚC khi `target` bị move vào `mac_stream::start` bên dưới.
+    let border_rect = record_border_rect(&target);
 
     let audio_source = audio_source_setting(app);
     let want_system_audio = audio_source == AudioSource::System;
@@ -484,6 +503,11 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
     }
 
     crate::tray::show_recording_tray(app);
+    if let Some((bx, by, bw, bh)) = border_rect {
+        if let Err(e) = crate::windows::open_record_border(app, bx, by, bw, bh) {
+            eprintln!("[SnapDoc][record] Không hiện được khung viền đang quay: {e}");
+        }
+    }
     spawn_tray_ticker(app.clone());
     Ok(())
 }
@@ -592,6 +616,9 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
     // loopback qua `audio_wasapi.rs` — ĐỘC LẬP với WGC (khác macOS, nơi audio
     // hệ thống lấy chung sender với video từ `mac_stream`), giống hệt cách
     // mic đã là 1 capture riêng từ trước.
+    // Phải tính TRƯỚC khi `target` bị move vào `windows_stream::start` bên dưới.
+    let border_rect = record_border_rect(&target);
+
     let audio_source = audio_source_setting(app);
 
     let (stream, frame_rx, _system_audio_rx) =
@@ -699,6 +726,11 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
     }
 
     crate::tray::show_recording_tray(app);
+    if let Some((bx, by, bw, bh)) = border_rect {
+        if let Err(e) = crate::windows::open_record_border(app, bx, by, bw, bh) {
+            eprintln!("[SnapDoc][record] Không hiện được khung viền đang quay: {e}");
+        }
+    }
     if let Err(e) = crate::windows::open_recording_indicator(app) {
         eprintln!("[SnapDoc][record] Không hiện được popup đang quay: {e}");
     }
@@ -774,19 +806,18 @@ pub fn start_recording_window(_app: &AppHandle, _window_id: u32) -> Result<(), S
 }
 
 /// Dừng phiên quay hiện tại, đợi ffmpeg mux xong (+ ghép audio nếu có — xem
-/// `encoder::mux_audio`). KHÔNG ingest vào History ngay — chuyển bản quay
-/// vào `PendingRecordingState` và mở cửa sổ xem lại (`record-review`) để
-/// người dùng chọn "Lưu" hay "Xoá" trước (`confirm_recording_save`/
-/// `confirm_recording_discard` mới thực sự ingest/xoá file). Trả về đường
-/// dẫn file mp4 cuối cùng (vẫn hữu ích cho log/test).
+/// `encoder::mux_audio`), ingest NGAY vào History (không còn chờ xác nhận
+/// Lưu/Xoá — video quay xong coi như đã lưu, y hệt 1 ảnh chụp xong), rồi mở
+/// Editor (chế độ video, xem `Editor.tsx`) để xem/cắt tiếp nếu muốn. Trả về
+/// đường dẫn file mp4 cuối cùng (vẫn hữu ích cho log/test).
 pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
     stop_recording_impl(app, true)
 }
 
 /// Gọi TRƯỚC khi thoát app (tray "Quit") — nếu đang quay, dừng SẠCH để file
 /// mp4 phát được (đóng stdin ffmpeg → flush + moov atom, ghép audio nếu có)
-/// và ingest thẳng vào History (không mở cửa sổ xem lại vì app sắp thoát —
-/// bản quay sẽ nằm sẵn trong Library ở lần mở sau). No-op nếu không quay.
+/// và ingest thẳng vào History (không mở Editor vì app sắp thoát — bản quay
+/// sẽ nằm sẵn trong Library ở lần mở sau). No-op nếu không quay.
 /// Trước đây thoát giữa lúc quay giết ffmpeg giữa chừng → mp4 hỏng, mất trắng.
 pub fn finalize_on_exit(app: &AppHandle) {
     if status(app).is_none() {
@@ -801,9 +832,9 @@ pub fn finalize_on_exit(app: &AppHandle) {
     }
 }
 
-/// Lõi dùng chung của `stop_recording` (mở cửa sổ xem lại) và
-/// `finalize_on_exit` (`open_review=false`: ingest thẳng vào History).
-fn stop_recording_impl(app: &AppHandle, open_review: bool) -> Result<String, String> {
+/// Lõi dùng chung của `stop_recording` (ingest + mở Editor) và
+/// `finalize_on_exit` (`open_editor_after=false`: chỉ ingest, không mở Editor).
+fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<String, String> {
     let state = app.state::<RecordingState>();
     // Dừng có thể được kích hoạt gần-như-đồng-thời từ nhiều nơi (tray icon,
     // hotkey, thanh "Dừng quay", indicator, ticker phát hiện dừng ngoài) —
@@ -865,6 +896,7 @@ fn stop_recording_impl(app: &AppHandle, open_review: bool) -> Result<String, Str
     // phiên quay này bắt đầu từ `RecordRegionSelect`). No-op nếu không có.
     crate::windows::close_overlays(app);
     crate::windows::close_stop_control(app);
+    crate::windows::close_record_border(app);
     #[cfg(target_os = "windows")]
     crate::windows::close_recording_indicator(app);
 
@@ -906,381 +938,45 @@ fn stop_recording_impl(app: &AppHandle, open_review: bool) -> Result<String, Str
     }
 
     let path = output_path.to_string_lossy().to_string();
-    if open_review {
-        {
-            let pending = app.state::<PendingRecordingState>();
-            let mut guard = pending.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
-            *guard = Some(PendingRecording {
-                path: path.clone(),
-                width: active.width,
-                height: active.height,
-                duration_ms,
-                capture_mode: active.capture_mode.to_string(),
-                raw_path: None,
-                raw_duration_ms: None,
-            });
+    // Ingest NGAY vào History — dùng chung cho cả 2 nhánh gọi (trước đây chỉ
+    // nhánh thoát app mới ingest ngay, nhánh mở Editor phải chờ user bấm Lưu).
+    let ingested = crate::history::ingest_video(
+        app,
+        std::path::Path::new(&path),
+        active.width,
+        active.height,
+        duration_ms,
+        active.capture_mode,
+    );
+    if open_editor_after {
+        match ingested {
+            Ok(record) => {
+                let state = app.state::<AppState>();
+                let mut g = state.pending_video.lock().map_err(|_| "Lock error".to_string())?;
+                *g = Some(PendingVideo {
+                    path: path.clone(),
+                    width: active.width,
+                    height: active.height,
+                    duration_ms,
+                    history_id: record.id,
+                });
+                drop(g);
+                // Video đã lưu vào Library — Editor mở lên (chế độ video) chỉ để
+                // xem/cắt tiếp nếu muốn, tự đọc `PendingVideo` qua
+                // `takePendingVideo` khi mở, y hệt mở 1 video từ Library.
+                if let Err(e) = crate::windows::open_editor(app) {
+                    eprintln!("[SnapDoc][record] Không mở được Editor để xem bản quay vừa lưu: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("[SnapDoc][record] Ingest bản quay vào History thất bại (file vẫn còn trên đĩa, không mở Editor): {e}");
+            }
         }
-
-        if let Err(e) = crate::windows::open_record_review(app) {
-            eprintln!("[SnapDoc][record] Không mở được cửa sổ xem lại bản quay: {e}");
-        }
-    } else {
-        // Đường thoát app: không mở review — ingest thẳng vào History để bản
-        // quay không "biến mất" với người dùng ở lần mở app sau.
-        if let Err(e) = crate::history::ingest_video(
-            app,
-            std::path::Path::new(&path),
-            active.width,
-            active.height,
-            duration_ms,
-            active.capture_mode,
-        ) {
-            eprintln!("[SnapDoc][record] Ingest bản quay vào History trước khi thoát thất bại (file vẫn còn trên đĩa): {e}");
-        }
+    } else if let Err(e) = ingested {
+        eprintln!("[SnapDoc][record] Ingest bản quay vào History trước khi thoát thất bại (file vẫn còn trên đĩa): {e}");
     }
 
     Ok(path)
-}
-
-/// Đọc (không xoá) bản quay đang chờ xác nhận — `record-review` gọi lúc mount
-/// để biết đường dẫn/kích thước/thời lượng cần hiển thị.
-pub fn peek_pending_recording(app: &AppHandle) -> Option<PendingRecording> {
-    app.state::<PendingRecordingState>().0.lock().ok()?.clone()
-}
-
-/// Cắt bản quay đang chờ xác nhận (trước khi Lưu/Xoá ở `record-review`).
-/// `path` giữ nguyên vị trí (nội dung thay đổi) NHƯNG lần cắt ĐẦU TIÊN sẽ
-/// dời bản THÔ (chưa cắt gì) sang 1 file riêng (`raw_path`) trước khi ghi đè
-/// — cắt sai thì vẫn còn bản gốc để Lưu cùng lúc lúc bấm "Lưu" (xem
-/// `confirm_recording_save`), thay vì mất trắng ngay khi cắt. Các lần cắt
-/// tiếp theo (đã có `raw_path` từ trước) KHÔNG dời lại — bản thô luôn là bản
-/// DUY NHẤT trước lần cắt đầu tiên, không phải "bản trước lần cắt gần nhất".
-/// `keep_ranges_ms`: danh sách đoạn GIỮ LẠI (ms), xem `encoder::trim`.
-pub fn trim_pending_recording(
-    app: &AppHandle,
-    keep_ranges_ms: &[(i64, i64)],
-    remove_audio: bool,
-) -> Result<PendingRecording, String> {
-    let pending_state = app.state::<PendingRecordingState>();
-    let (path, has_raw, current_duration_ms) = {
-        let guard = pending_state.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
-        let pending = guard
-            .as_ref()
-            .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
-        (pending.path.clone(), pending.raw_path.is_some(), pending.duration_ms)
-    };
-
-    // Không giữ lock trong lúc chạy ffmpeg (có thể mất vài giây) — chỉ khoá
-    // lại ở bước đọc state (trên) và bước ghi kết quả (dưới).
-    let input_path = PathBuf::from(&path);
-
-    // `rename` (không `copy`) — tránh nhân đôi I/O với file video có thể vài
-    // trăm MB, chỉ đổi tên/entry thư mục nên gần như tức thời trên cùng ổ đĩa.
-    // Bản thô luôn được lưu vào `{saveDir}/records/` — không phụ thuộc vào
-    // nơi user chọn Save As — để tách biệt khỏi file đã cắt.
-    let new_raw: Option<(PathBuf, i64)> = if has_raw {
-        None
-    } else {
-        // Thư mục records nằm trong saveDir mặc định (settings), không theo
-        // folder Save As mà user chọn sau.
-        let base_dir = resolve_save_dir(app)
-            .unwrap_or_else(|_| input_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf());
-        let records_dir = base_dir.join("records");
-        let raw_path = match std::fs::create_dir_all(&records_dir) {
-            Ok(_) => {
-                let stem = input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
-                records_dir.join(format!("{stem}-raw.mp4"))
-            }
-            Err(e) => {
-                eprintln!("[SnapDoc][record] Không tạo được thư mục records ({e}), fallback về cùng thư mục");
-                let stem = input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
-                input_path.with_file_name(format!("{stem}-raw.mp4"))
-            }
-        };
-        // Mở asset scope cho thư mục records để video player đọc được bản thô
-        allow_asset_scope(app, raw_path.parent().unwrap_or(&records_dir));
-        std::fs::rename(&input_path, &raw_path)
-            .map_err(|e| format!("Không sao lưu được bản thô: {e}"))?;
-        Some((raw_path, current_duration_ms))
-    };
-
-    // Nguồn để trim: lần đầu là bản thô vừa dời đi; các lần sau là bản HIỆN
-    // TẠI ở `input_path` (đã cắt từ lần trước, ranges frontend gửi luôn tính
-    // theo toạ độ của bản hiện tại, không phải bản thô).
-    let trim_source: &Path = new_raw.as_ref().map(|(p, _)| p.as_path()).unwrap_or(&input_path);
-    let tmp_output = input_path.with_extension("trimtmp.mp4");
-    // Báo tiến độ % cho `record-review` qua event toàn app (webview đang mở
-    // sẽ tự lắng, xem `RecordReview.tsx`) — xem doc-comment `encoder::trim`.
-    let progress_app = app.clone();
-    encoder::trim(trim_source, keep_ranges_ms, &tmp_output, remove_audio, move |frac| {
-        use tauri::Emitter;
-        let _ = progress_app.emit("trim-progress", frac);
-    })?;
-    std::fs::rename(&tmp_output, &input_path)
-        .map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
-
-    let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
-
-    let mut guard = pending_state.0.lock().map_err(|_| "Lock PendingRecordingState lỗi".to_string())?;
-    let pending = guard
-        .as_mut()
-        .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
-    pending.duration_ms = new_duration_ms;
-    if let Some((raw_path, raw_duration_ms)) = new_raw {
-        pending.raw_path = Some(raw_path);
-        pending.raw_duration_ms = Some(raw_duration_ms);
-    }
-    Ok(pending.clone())
-}
-
-/// Di chuyển 1 file vào `dest_dir` (giữ nguyên tên file) — thử `rename` trước
-/// (tức thời, cùng ổ đĩa), fallback `copy` + xoá bản gốc nếu khác ổ đĩa
-/// (`rename` lỗi `CrossesDevices` trên 1 số hệ thống). Trả về `None` (giữ
-/// nguyên đường dẫn cũ, chỉ log lỗi) nếu cả 2 cách đều thất bại — KHÔNG được để
-/// mất file chỉ vì đổi thư mục lưu không thành công.
-fn move_into_dir(src: &Path, dest_dir: &Path) -> Option<PathBuf> {
-    let name = src.file_name()?;
-    let dest = dest_dir.join(name);
-    if std::fs::rename(src, &dest).is_ok() {
-        return Some(dest);
-    }
-    match std::fs::copy(src, &dest) {
-        Ok(_) => {
-            if let Err(e) = std::fs::remove_file(src) {
-                eprintln!("[SnapDoc][record] Đã copy sang thư mục mới nhưng không xoá được bản gốc: {e}");
-            }
-            Some(dest)
-        }
-        Err(e) => {
-            eprintln!("[SnapDoc][record] Không chuyển được file sang thư mục đã chọn ({}): {e}", dest_dir.display());
-            None
-        }
-    }
-}
-
-/// Trả về `true` nếu `path` nên được coi là đường dẫn đến một FILE đích
-/// (người dùng muốn lưu video với tên cụ thể đó), `false` nếu là thư mục đích
-/// (video giữ nguyên tên gốc, chỉ chuyển vào thư mục đó).
-///
-/// Logic: nếu path **đang tồn tại và là thư mục** → đây là thư mục đích.
-/// Mọi trường hợp còn lại (chưa tồn tại, hoặc tồn tại là file) → coi là file
-/// đích — bao gồm cả trường hợp tên không có extension (ví dụ `my_video` gõ
-/// từ dialog Save As trên Windows), vì native save dialog luôn trả về file path.
-///
-/// **Lưu ý quan trọng**: `path.extension().is_some()` KHÔNG đủ để phân biệt
-/// file/thư mục — người dùng hoàn toàn có thể gõ tên không có extension trong
-/// dialog, lúc đó path chưa tồn tại trên đĩa nên không thể dùng `is_dir()` mà
-/// phải coi mặc định là file path (mục đích tạo file mới).
-fn looks_like_file_path(path: &Path) -> bool {
-    // Nếu path đã tồn tại và thực sự là thư mục → không phải file path
-    if path.is_dir() {
-        return false;
-    }
-    // Path chưa tồn tại hoặc là file → coi là file đích (bao gồm tên không có extension)
-    true
-}
-
-fn move_into_target(src: &Path, target: &Path, raw_variant: bool) -> Option<PathBuf> {
-    let dest = if looks_like_file_path(target) {
-        let parent = target.parent()?;
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("[SnapDoc][record] Không tạo được thư mục đích ({}): {e}", parent.display());
-            return None;
-        }
-
-        if raw_variant {
-            let stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
-            let ext = target.extension().and_then(|s| s.to_str()).unwrap_or("mp4");
-            parent.join(format!("{stem}-raw.{ext}"))
-        } else {
-            target.to_path_buf()
-        }
-    } else {
-        let name = src.file_name()?;
-        target.join(name)
-    };
-
-    if std::fs::rename(src, &dest).is_ok() {
-        return Some(dest);
-    }
-    match std::fs::copy(src, &dest) {
-        Ok(_) => {
-            if let Err(e) = std::fs::remove_file(src) {
-                eprintln!("[SnapDoc][record] Đã copy sang vị trí mới nhưng không xoá được bản gốc: {e}");
-            }
-            Some(dest)
-        }
-        Err(e) => {
-            eprintln!("[SnapDoc][record] Không chuyển được file sang vị trí đã chọn ({}): {e}", dest.display());
-            None
-        }
-    }
-}
-
-/// Người dùng chọn "Lưu" ở `record-review`: ingest bản quay đang chờ vào
-/// History rồi đóng cửa sổ. Nếu đã từng cắt (có `raw_path`) thì ingest CẢ bản
-/// thô lẫn bản đã cắt — 2 item riêng trong History, giống hành vi cắt video
-/// đã lưu (`history::trim_history_video_sync`): không đánh đổi "cắt sai mất
-/// bản gốc" chỉ vì cắt trước khi Lưu thay vì sau. Ingest bản thô TRƯỚC (nếu
-/// có) rồi bản hiện tại SAU, để bản hiện tại — thứ người dùng vừa hoàn tất —
-/// hiện lên đầu danh sách (sort theo `created_at DESC`). Lỗi ingest
-/// (thumbnail/DB) vẫn coi là thành công đối với người dùng — file mp4 đã tồn
-/// tại sẵn trên đĩa từ trước, không mất; lỗi ở bản thô không chặn ingest bản
-/// hiện tại (vẫn còn ít nhất 1 bản trong History thay vì mất trắng cả 2).
-///
-/// `dest_dir`: nếu có giá trị (người dùng chọn "Lưu vào thư mục khác…" ở
-/// `record-review`), CHỈ di chuyển file đã cắt vào đó TRƯỚC khi ingest.
-/// Bản thô (`raw_path`) KHÔNG bị di chuyển — nó đã nằm sẵn trong
-/// `{saveDir}/records/` từ bước `trim_pending_recording` và ở lại đó.
-/// Hỗ trợ cả thư mục đích lẫn file đích cụ thể (ví dụ từ dialog Save As):
-/// nếu là file path thì video chính sẽ theo đúng tên đó.
-/// `None`/rỗng → giữ nguyên vị trí cũ.
-pub fn confirm_recording_save_to(app: &AppHandle, dest_dir: Option<String>) -> Result<(), String> {
-    let mut pending = app
-        .state::<PendingRecordingState>()
-        .0
-        .lock()
-        .map_err(|_| "Lock PendingRecordingState lỗi".to_string())?
-        .take()
-        .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
-
-    if let Some(target) = dest_dir.filter(|d| !d.is_empty()) {
-        // Nếu người dùng nhập tên không có extension (ví dụ "my_video" thay vì
-        // "my_video.mp4"), tự động thêm extension lấy từ file gốc đang pending.
-        // Chỉ áp dụng khi target chưa có extension và không phải thư mục đang
-        // tồn tại (tức là đây là file path mới sẽ tạo ra).
-        let target_with_ext: String;
-        let effective_target = {
-            let p = Path::new(&target);
-            if !p.is_dir() && p.extension().is_none() {
-                // Lấy extension từ file nguồn (pending.path), fallback về "mp4"
-                let src_ext = Path::new(&pending.path)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("mp4");
-                target_with_ext = format!("{}.{}", target, src_ext);
-                target_with_ext.as_str()
-            } else {
-                target.as_str()
-            }
-        };
-
-        // Chỉ di chuyển file đã cắt (pending.path) — bản thô (raw_path) đã
-        // nằm trong {saveDir}/records/ từ bước trim và KHÔNG bị di chuyển theo.
-        // Sau khi biết tên file cuối cùng user chọn, đổi tên raw thành
-        // `raw_<tên_user_chọn>` để dễ nhận diện.
-        let target_path = Path::new(effective_target);
-        if looks_like_file_path(target_path) {
-            if let Some(new_path) = move_into_target(Path::new(&pending.path), target_path, false) {
-                pending.path = new_path.to_string_lossy().to_string();
-            }
-        } else {
-            if let Err(e) = std::fs::create_dir_all(target_path) {
-                eprintln!("[SnapDoc][record] Không tạo được thư mục đã chọn, giữ nguyên vị trí cũ: {e}");
-            } else {
-                if let Some(new_path) = move_into_dir(Path::new(&pending.path), target_path) {
-                    pending.path = new_path.to_string_lossy().to_string();
-                }
-            }
-        }
-
-        // Đổi tên raw theo tên file đã cắt vừa được xác định — ví dụ user lưu
-        // thành "my_video.mp4" thì raw sẽ thành "raw_my_video.mp4" trong records/.
-        if let Some(raw_path) = &pending.raw_path {
-            let final_stem = Path::new(&pending.path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("recording");
-            let new_raw_name = format!("raw_{final_stem}.mp4");
-            let new_raw_path = raw_path
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join(&new_raw_name);
-            if new_raw_path != *raw_path {
-                if std::fs::rename(raw_path, &new_raw_path).is_ok() {
-                    pending.raw_path = Some(new_raw_path);
-                } else {
-                    eprintln!("[SnapDoc][record] Không đổi tên được file raw, giữ nguyên tên cũ");
-                }
-            }
-        }
-    }
-
-    if let (Some(raw_path), Some(raw_duration_ms)) = (&pending.raw_path, pending.raw_duration_ms) {
-        if let Err(e) = crate::history::ingest_video(
-            app,
-            raw_path,
-            pending.width,
-            pending.height,
-            raw_duration_ms,
-            &pending.capture_mode,
-        ) {
-            eprintln!("[SnapDoc][record] Ingest bản thô vào History thất bại: {e}");
-        }
-    }
-
-    if let Err(e) = crate::history::ingest_video(
-        app,
-        std::path::Path::new(&pending.path),
-        pending.width,
-        pending.height,
-        pending.duration_ms,
-        &pending.capture_mode,
-    ) {
-        eprintln!("[SnapDoc][record] Ingest video vào History thất bại (file mp4 vẫn còn nguyên): {e}");
-    }
-
-    crate::windows::close_record_review(app);
-    Ok(())
-}
-
-/// Người dùng chọn "Xoá" ở `record-review`: xoá hẳn file mp4 HIỆN TẠI lẫn
-/// bản thô (`raw_path`, nếu có — tức đã cắt ít nhất 1 lần trước khi Xoá) —
-/// cả 2 chưa từng vào History nên không cần dọn DB, chỉ xoá file trên đĩa.
-pub fn confirm_recording_discard(app: &AppHandle) -> Result<(), String> {
-    let pending = app
-        .state::<PendingRecordingState>()
-        .0
-        .lock()
-        .map_err(|_| "Lock PendingRecordingState lỗi".to_string())?
-        .take()
-        .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
-
-    if let Some(raw_path) = &pending.raw_path {
-        if let Err(e) = std::fs::remove_file(raw_path) {
-            eprintln!("[SnapDoc][record] Không xoá được bản thô: {e}");
-        }
-    }
-
-    let result = std::fs::remove_file(&pending.path).map_err(|e| format!("Không xoá được file: {e}"));
-    crate::windows::close_record_review(app);
-    result
-}
-
-/// Nút "Quay lại" ở `record-review`: XOÁ bản quay đang xem (cùng logic
-/// `confirm_recording_discard`) rồi mở CaptureBar với đúng chế độ vừa quay
-/// (`pending.capture_mode`) để người dùng quay lại NGAY, không phải tự chọn
-/// lại phạm vi từ đầu. Trả về `capture_mode` để `windows::open_capture_bar_with_record_mode`
-/// biết chế độ cần sync sang CaptureBar.
-pub fn redo_recording(app: &AppHandle) -> Result<String, String> {
-    let pending = app
-        .state::<PendingRecordingState>()
-        .0
-        .lock()
-        .map_err(|_| "Lock PendingRecordingState lỗi".to_string())?
-        .take()
-        .ok_or_else(|| "Không có bản quay nào đang chờ xác nhận".to_string())?;
-
-    if let Some(raw_path) = &pending.raw_path {
-        if let Err(e) = std::fs::remove_file(raw_path) {
-            eprintln!("[SnapDoc][record] Không xoá được bản thô: {e}");
-        }
-    }
-    if let Err(e) = std::fs::remove_file(&pending.path) {
-        eprintln!("[SnapDoc][record] Không xoá được file: {e}");
-    }
-    crate::windows::close_record_review(app);
-    Ok(pending.capture_mode)
 }
 
 /// Thời gian đã quay (ms) nếu đang có phiên quay — cửa sổ chỉ báo poll hàm

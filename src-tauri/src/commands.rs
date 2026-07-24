@@ -1,5 +1,6 @@
 use crate::{
-    capture, clipboard, flow, permissions, state::AppState, state::PendingCapture, storage, windows,
+    capture, clipboard, flow, permissions, state::AppState, state::PendingCapture, state::PendingVideo,
+    storage, windows,
 };
 use crate::capture::window::WindowInfo;
 use serde_json::Value;
@@ -15,6 +16,18 @@ pub fn peek_pending(state: State<AppState>) -> Option<PendingCapture> {
 #[tauri::command]
 pub fn take_pending(state: State<AppState>) -> Option<PendingCapture> {
     state.pending.lock().ok().and_then(|mut g| g.take())
+}
+
+/// Đọc (không xoá) video đang chờ mở trong Editor.
+#[tauri::command]
+pub fn peek_pending_video(state: State<AppState>) -> Option<PendingVideo> {
+    state.pending_video.lock().ok().and_then(|g| g.clone())
+}
+
+/// Lấy và xoá video đang chờ — Editor gọi khi mở/refresh.
+#[tauri::command]
+pub fn take_pending_video(state: State<AppState>) -> Option<PendingVideo> {
+    state.pending_video.lock().ok().and_then(|mut g| g.take())
 }
 
 /// Ghi đè ảnh đang chờ với output="editor" — dùng cho nút "Mở Editor" ở
@@ -674,50 +687,11 @@ pub fn confirm_region_record_start(app: AppHandle) {
     flow::confirm_region_record_start(&app);
 }
 
-/// Đọc bản quay đang chờ xác nhận (không xoá) — cửa sổ "record-review" gọi
-/// lúc mount để biết đường dẫn/kích thước/thời lượng cần hiển thị.
-#[tauri::command]
-pub fn peek_pending_recording(app: AppHandle) -> Option<crate::record::PendingRecording> {
-    crate::record::peek_pending_recording(&app)
-}
-
-/// Người dùng bấm "Lưu" ở cửa sổ xem lại — ingest vào History rồi đóng cửa sổ.
-/// `destDir`: thư mục lưu tuỳ chọn (nút "Lưu vào thư mục khác…" ở
-/// `RecordReview.tsx`) — `None`/rỗng thì giữ nguyên vị trí file đã quay
-/// (`saveDir` mặc định trong Settings), xem `record::confirm_recording_save_to`.
-#[tauri::command]
-pub async fn confirm_recording_save(app: AppHandle, dest_dir: Option<String>) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || crate::record::confirm_recording_save_to(&app, dest_dir))
-        .await
-        .map_err(|e| format!("Task join error: {e}"))?
-}
-
-/// Người dùng bấm "Xoá" ở cửa sổ xem lại — xoá file mp4 rồi đóng cửa sổ.
-#[tauri::command]
-pub async fn confirm_recording_discard(app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || crate::record::confirm_recording_discard(&app))
-        .await
-        .map_err(|e| format!("Task join error: {e}"))?
-}
-
-/// Người dùng bấm "Quay lại" ở cửa sổ xem lại — xoá bản quay đang xem rồi mở
-/// lại CaptureBar đúng phạm vi vừa quay để bấm "Quay" lại ngay.
-#[tauri::command]
-pub async fn redo_recording(app: AppHandle) -> Result<(), String> {
-    let mode = tauri::async_runtime::spawn_blocking({
-        let app = app.clone();
-        move || crate::record::redo_recording(&app)
-    })
-    .await
-    .map_err(|e| format!("Task join error: {e}"))??;
-    windows::open_capture_bar_with_record_mode(&app, &mode)
-}
-
 /// Dừng quay từ popup "đang quay" trên Windows (xem
 /// `windows::open_recording_indicator`) — trên macOS việc dừng vẫn chủ yếu đi
 /// qua tray icon (`tray.rs`), lệnh này chỉ thêm 1 đường dừng nữa, không thay
-/// thế đường cũ. `spawn_blocking` BẮT BUỘC (giống `confirm_recording_save/discard`
-/// phía trên): `record::stop_recording` join các thread ghi video/audio và
+/// thế đường cũ. `spawn_blocking` BẮT BUỘC:
+/// `record::stop_recording` join các thread ghi video/audio và
 /// chạy `ffmpeg` đồng bộ để ghép audio (có thể mất vài giây) — nếu để hàm này
 /// là `fn` thường (không `async`), Tauri chạy nó THẲNG trên main thread của
 /// webview (execution context "sync", không qua thread pool), nghẽn toàn bộ
@@ -734,24 +708,6 @@ pub async fn stop_recording(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 pub fn recording_status(app: AppHandle) -> Option<u64> {
     crate::record::status(&app)
-}
-
-/// Cắt bản quay đang chờ xác nhận ở `record-review` — xem
-/// `record::trim_pending_recording`. `spawn_blocking` bắt buộc: chạy ffmpeg
-/// re-encode + concat, có thể mất vài giây, không được chặn Tokio event loop
-/// / WebView2 message pump (cùng lý do đã sửa bug "Not Responding" ở
-/// `stop_recording` phía trên).
-#[tauri::command]
-pub async fn trim_pending_recording(
-    app: AppHandle,
-    ranges: Vec<(i64, i64)>,
-    remove_audio: bool,
-) -> Result<crate::record::PendingRecording, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::record::trim_pending_recording(&app, &ranges, remove_audio)
-    })
-    .await
-    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[derive(serde::Deserialize)]

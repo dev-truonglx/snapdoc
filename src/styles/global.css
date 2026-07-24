@@ -125,3 +125,15 @@ select,
   );
   animation: snapdoc-shimmer-sweep 1.4s ease-in-out infinite;
 }
+
+/* Nút Copy/Xoá trên mỗi thumbnail của dải "Gần đây" (HistoryStrip) — ẩn mặc
+   định, chỉ hiện khi hover vào đúng thumbnail đó, đỡ rối mắt lúc không thao
+   tác (xem `history-thumb`/`history-thumb-action` ở HistoryStrip.tsx). */
+.history-thumb-action {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.history-thumb:hover .history-thumb-action {
+  opacity: 1;
+}
