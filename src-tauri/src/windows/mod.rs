@@ -1604,6 +1604,21 @@ pub fn prewarm_editor(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Windows chặn `SetForegroundWindow` (mà `set_focus()` gọi bên dưới) từ tiến
+/// trình không phải là ứng dụng đang active — điển hình: Editor tự mở lúc
+/// khởi động app (autostart lúc boot, hoặc mở sẵn trong `setup()`) trong khi
+/// user đang thao tác ở app khác. Kết quả: cửa sổ được tạo/show nhưng nằm SAU
+/// app khác, chỉ nháy icon ở taskbar chứ không lên trước. Toggle
+/// `always_on_top` là `SetWindowPos` thuần z-order — không cần quyền
+/// "foreground lock" nên vẫn đưa được cửa sổ lên trên dù `set_focus()` bị OS
+/// từ chối; gọi `set_focus()` lại sau đó để có luôn bàn phím nếu OS cho phép.
+#[cfg(target_os = "windows")]
+fn force_to_foreground(win: &tauri::WebviewWindow) {
+    let _ = win.set_always_on_top(true);
+    let _ = win.set_always_on_top(false);
+    let _ = win.set_focus();
+}
+
 /// Editor chú thích.
 pub fn open_editor(app: &AppHandle) -> Result<(), String> {
     // macOS: chuyển về Regular khi editor hiển thị → icon xuất hiện trên Dock,
@@ -1622,6 +1637,8 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         // Windows: hiển thị icon trên taskbar khi editor visible
         #[cfg(target_os = "windows")]
         let _ = win.set_skip_taskbar(false);
+        #[cfg(target_os = "windows")]
+        force_to_foreground(&win);
         // Trên Windows, show() là async (WM_SHOWWINDOW qua message pump).
         // Emit refresh-capture sau một tick để đảm bảo webview visible và
         // JS message pump đang chạy trước khi nhận event.
@@ -1647,6 +1664,7 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
             .build()
             .map_err(|e| format!("Không tạo được editor: {e}"))?;
         place_center_on_monitor(app, &win);
+        force_to_foreground(&win);
 
         let win2 = win.clone();
         tauri::async_runtime::spawn(async move {
