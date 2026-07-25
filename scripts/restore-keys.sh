@@ -3,6 +3,9 @@
 # Restore the signing keys from secrets/*.enc back into ~/.tauri/.
 # Prompts for the passphrase used by scripts/backup-keys.sh.
 #
+# secrets/ is gitignored (not committed) — copy your .enc backups here first
+# from your password manager / private cloud storage before running this.
+#
 #   secrets/snapdoc-updater.key.enc   → ~/.tauri/snapdoc-updater.key
 #   secrets/snapdoc-codesign.p12.enc  → ~/.tauri/snapdoc-codesign.p12
 #

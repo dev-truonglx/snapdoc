@@ -82,16 +82,23 @@ Follow the script's output: commit the resulting `tauri.conf.json` change
 
 ```bash
 npm run backup:keys        # encrypts both keys with a passphrase you choose,
-                            # writes secrets/*.enc — SAFE to commit
+                            # writes secrets/*.enc locally
 ```
 
-`secrets/*.enc` files are AES-256/PBKDF2-encrypted and fine to have in the
-repo, but the passphrase itself is **not** stored anywhere in git — keep it
-in a password manager. Anyone who can decrypt the updater key can push a
-malicious auto-update to every SnapDoc install, so treat that passphrase
-with the same care as a production deploy credential.
+`secrets/` is **gitignored — never commit this folder**, including the
+`.enc` files. They're AES-256/PBKDF2-encrypted, but the updater key is the
+auto-update trust root: whoever decrypts it can push a malicious update to
+every SnapDoc install, so don't rely on git for this backup. Copy
+`secrets/*.enc` to a password manager or private cloud storage instead, and
+keep the passphrase in a password manager too.
 
-To restore keys onto a new machine:
+> This folder was briefly committed to the public repo early on and had to
+> be purged from history — see the note under
+> [Cutting a full release](#cutting-a-full-release-maintainers-only) about
+> the resulting divergence.
+
+To restore keys onto a new machine, copy your `secrets/*.enc` backups into
+the repo first, then:
 
 ```bash
 npm run restore:keys       # prompts for the passphrase, writes keys back to ~/.tauri/
@@ -150,6 +157,16 @@ notes:
 - Re-running the script for a tag that already has a draft release just
   updates its notes (and re-uploads the build artifacts) rather than
   failing.
+
+> **History note:** `secrets/` was briefly committed and pushed to the
+> public repo, then purged from its entire history (all branches + tags)
+> with `git-filter-repo` + a force-push. That means the public repo's
+> history no longer matches this local repo's history at and before that
+> point — a plain `git push --force <public-remote> main` from here would
+> silently reintroduce the old, dirty history. Going forward, sync new
+> commits to the public repo by rebasing/cherry-picking what's new since
+> the purge onto the public repo's current `main`, not by force-pushing
+> this local `main` wholesale.
 
 Prerequisites: `gh auth login` with push access to the releases repo,
 Docker Desktop running, `rustup` installed, and the updater key restored

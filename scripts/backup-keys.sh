@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 #
-# Encrypt the two signing keys to secrets/*.enc so they can be committed to git
-# SAFELY. The RAW keys must NEVER be committed — only the encrypted .enc files.
+# Encrypt the two signing keys to secrets/*.enc as a local, portable backup.
+# The whole secrets/ folder is gitignored — these encrypted files are NOT
+# meant to be committed to git (even encrypted, they were once accidentally
+# pushed to the public repo and had to be purged from history). Copy the
+# .enc files to a password manager or private cloud storage instead.
 #
 #   ~/.tauri/snapdoc-updater.key    → secrets/snapdoc-updater.key.enc
 #   ~/.tauri/snapdoc-codesign.p12   → secrets/snapdoc-codesign.p12.enc
 #
 # You are prompted for ONE passphrase (AES-256, PBKDF2). Store it in a password
-# manager — it is the ONLY thing protecting these keys and it is NOT in git.
+# manager — it is the ONLY thing protecting these keys.
 # Restore with scripts/restore-keys.sh.
 #
 # ⚠️  The updater key is the auto-update trust root: whoever can decrypt it can
@@ -46,6 +49,7 @@ encrypt_verify "$SRC_UPDATER"  "secrets/snapdoc-updater.key.enc"
 encrypt_verify "$SRC_CODESIGN" "secrets/snapdoc-codesign.p12.enc"
 
 echo
-echo "Done. Commit the encrypted backups:"
-echo "  git add secrets/*.enc && git commit -m 'chore: encrypted key backups'"
+echo "Done. secrets/*.enc written locally — this folder is gitignored, do NOT"
+echo "commit it. Copy the .enc files to a password manager or private cloud"
+echo "storage for safekeeping."
 echo "Keep the passphrase in a password manager — without it the backups are useless."
