@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ipc } from "../../../lib/ipc";
 import { uid } from "../model";
 import {
@@ -23,6 +24,7 @@ interface Props {
 const BG_SWATCHES = ["#ffffff", "#000000", "#161619", "transparent"] as const;
 
 export default function StitchDialog({ initialImage, onApply, onCancel }: Props) {
+  const { t } = useTranslation();
   const initialIdRef = useRef(uid());
   const [items, setItems] = useState<Item[]>([
     { id: initialIdRef.current, src: initialImage },
@@ -116,7 +118,7 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
 
   const apply = async () => {
     if (items.length < 2) {
-      setError("Cần ít nhất 2 ảnh để nối");
+      setError(t("stitch.minImages"));
       return;
     }
     setBusy(true);
@@ -193,8 +195,8 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
         <div style={optionsRow}>
           <div style={optGroup}>
             <span style={optLabel}>Hướng</span>
-            <Seg active={vertical} onClick={() => setDirection("vertical")}>Dọc</Seg>
-            <Seg active={!vertical} onClick={() => setDirection("horizontal")}>Ngang</Seg>
+            <Seg active={vertical} onClick={() => setDirection("vertical")}>{t("stitch.vertical")}</Seg>
+            <Seg active={!vertical} onClick={() => setDirection("horizontal")}>{t("stitch.horizontal")}</Seg>
           </div>
 
           <div style={optGroup}>

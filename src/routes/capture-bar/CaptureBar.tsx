@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { ipc, type AudioSource, type CaptureMode, type OutputMode } from "../../lib/ipc";
 
@@ -34,76 +35,71 @@ const SCOPE_ICONS: Record<RecordMode, React.ReactNode> = {
   ),
 };
 
-// Khu vực 1: chế độ CHỤP ẢNH — All/Scroll không có khái niệm quay tương ứng
-// nên chỉ xuất hiện ở nhóm này.
-const PHOTO_MODES: { id: CaptureMode; label: string; icon: React.ReactNode }[] = [
-  {
-    id: "all", label: "All",
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
-        <rect x="1" y="4" width="8" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.6"/>
-        <rect x="11" y="4" width="8" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.6"/>
-      </svg>
-    ),
-  },
-  { id: "full", label: "Full", icon: SCOPE_ICONS.full },
-  { id: "window", label: "Window", icon: SCOPE_ICONS.window },
-  { id: "region", label: "Region", icon: SCOPE_ICONS.region },
-  {
-    id: "scroll", label: "Scroll",
-    icon: (
-      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
-        <rect x="3" y="3" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.6"/>
-        <path d="M7 8l3-3 3 3M7 12l3 3 3-3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    ),
-  },
-];
-
-// Khu vực 2: chế độ QUAY MÀN HÌNH — đúng 3 phạm vi, dùng chung icon phạm vi
-// với nhóm chụp ảnh nhưng gắn thêm chấm đỏ nhỏ (xem `recordDotBadge`) để phân
-// biệt rõ đây là quay video, không phải chụp ảnh — cùng ngôn ngữ hình khối,
-// khác nhóm hành động, giống cách thanh Cmd+Shift+5 của macOS chia 2 cụm.
-const RECORD_MODES: { id: RecordMode; label: string }[] = [
-  { id: "full", label: "Full" },
-  { id: "window", label: "Window" },
-  { id: "region", label: "Region" },
-];
-
-const OUTPUTS: { id: OutputMode; label: string }[] = [
-  { id: "editor",    label: "Mở editor"  },
-  { id: "clipboard", label: "Clipboard"  },
-  { id: "save",      label: "Lưu file"   },
-  { id: "save_copy", label: "Lưu + Copy" },
-  { id: "copy_editor", label: "Copy + Mở editor" },
-];
-
-const AUDIO_OPTIONS: { id: AudioSource; label: string }[] = [
-  { id: "off",    label: "Tắt (chỉ hình)" },
-  { id: "mic",    label: "Microphone" },
-  { id: "system", label: "Âm thanh hệ thống" },
-];
-
-// "Hẹn giờ chụp": đếm ngược TRƯỚC KHI thực sự chụp (chạy ở Rust, xem
-// `flow::wait_capture_delay`) — cho phép user mở dropdown/hover menu SAU khi
-// bấm nút chụp, không cần bấm thêm phím/nút gì lúc menu đang mở. Chỉ 3 lựa
-// chọn theo yêu cầu, không cho nhập tuỳ ý.
-const CAPTURE_DELAYS: { id: 0 | 5 | 10; label: string }[] = [
-  { id: 0,  label: "Tắt" },
-  { id: 5,  label: "5 giây" },
-  { id: 10, label: "10 giây" },
-];
+// Icon dùng chung cho "phạm vi" (Full/Window/Region) — cả nhóm chụp ảnh lẫn
+// nhóm quay màn hình đều biểu diễn cùng khái niệm này nên dùng chung 1 bộ.
 
 const CAPTURE_BAR_BOTTOM_PADDING = 12;
 const CAPTURE_BAR_POPOVER_GAP = 6;
 
 export default function CaptureBar() {
+  const { t } = useTranslation();
   const [photoMode, setPhotoMode] = useState<CaptureMode>("region");
   const [videoMode, setVideoMode] = useState<RecordMode>("full");
   const [activeGroup, setActiveGroup] = useState<ActiveGroup>("photo");
   const [output, setOutput] = useState<OutputMode>("editor");
   const [audioSource, setAudioSource] = useState<AudioSource>("off");
   const [delaySeconds, setDelaySeconds] = useState<0 | 5 | 10>(0);
+
+  // Initialize modes with translations
+  const PHOTO_MODES: { id: CaptureMode; label: string; icon: React.ReactNode }[] = [
+    {
+      id: "all", label: t("captureBar.all"),
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
+          <rect x="1" y="4" width="8" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.6"/>
+          <rect x="11" y="4" width="8" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.6"/>
+        </svg>
+      ),
+    },
+    { id: "full", label: t("captureBar.full"), icon: SCOPE_ICONS.full },
+    { id: "window", label: t("captureBar.window"), icon: SCOPE_ICONS.window },
+    { id: "region", label: t("captureBar.region"), icon: SCOPE_ICONS.region },
+    {
+      id: "scroll", label: t("captureBar.scroll"),
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
+          <rect x="3" y="3" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.6"/>
+          <path d="M7 8l3-3 3 3M7 12l3 3 3-3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      ),
+    },
+  ];
+
+  const RECORD_MODES: { id: RecordMode; label: string }[] = [
+    { id: "full", label: t("captureBar.full") },
+    { id: "window", label: t("captureBar.window") },
+    { id: "region", label: t("captureBar.region") },
+  ];
+
+  const OUTPUTS: { id: OutputMode; label: string }[] = [
+    { id: "editor",    label: t("outputs.editor")    },
+    { id: "clipboard", label: t("outputs.clipboard") },
+    { id: "save",      label: t("outputs.save")      },
+    { id: "save_copy", label: t("outputs.save_copy") },
+    { id: "copy_editor", label: t("outputs.copy_editor") },
+  ];
+
+  const AUDIO_OPTIONS: { id: AudioSource; label: string }[] = [
+    { id: "off",    label: t("captureBar.audioOff") },
+    { id: "mic",    label: t("captureBar.audioMic") },
+    { id: "system", label: t("captureBar.audioSystem") },
+  ];
+
+  const CAPTURE_DELAYS: { id: 0 | 5 | 10; label: string }[] = [
+    { id: 0,  label: t("captureBar.noDelay") },
+    { id: 5,  label: t("captureBar.delay5s") },
+    { id: 10, label: t("captureBar.delay10s") },
+  ];
   // Số giây còn lại đang đếm ngược ("hẹn giờ chụp") — `null` = không có phiên
   // đếm nào đang chạy. Nhận từ Rust qua event `capture-countdown-tick`, KHÔNG
   // tự đếm ở frontend (tránh lệch nhịp với sleep() thật ở Rust).

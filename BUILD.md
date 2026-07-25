@@ -133,7 +133,7 @@ Two options:
 ## Cutting a full release (maintainers only)
 
 ```bash
-scripts/release-all.sh v1.2.4
+scripts/release-all.sh v1.2.4 "Fix scroll capture memory limit, add region remember option"
 ```
 
 One-shot: builds a macOS universal binary natively + the Windows installer
@@ -141,6 +141,15 @@ via Docker, and publishes both as a **draft** GitHub release (with a unified
 `latest.json` for the updater) to the repo configured as `RELEASES_REPO` in
 that script. Review the draft, then publish it manually to ship the update
 to all users.
+
+The description argument becomes the "What's new" section of the release
+notes:
+
+- Omit it and the script prompts for a one-line description interactively.
+- Pass a longer changelog from a file instead: `--notes-file CHANGELOG.md`.
+- Re-running the script for a tag that already has a draft release just
+  updates its notes (and re-uploads the build artifacts) rather than
+  failing.
 
 Prerequisites: `gh auth login` with push access to the releases repo,
 Docker Desktop running, `rustup` installed, and the updater key restored

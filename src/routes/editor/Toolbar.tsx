@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { useState, useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { useEditor } from "../../features/annotation/store";
 import { PRESET_COLORS, HIGHLIGHT_COLORS, STROKE_WIDTHS, SOLID_COLORS, type Tool } from "../../features/annotation/model";
@@ -97,23 +98,7 @@ const FONT_MIN = 8;
 const FONT_MAX = 200;
 const clampFont = (n: number) => Math.max(FONT_MIN, Math.min(FONT_MAX, Math.round(n || FONT_MIN)));
 
-// Tools chia thành 2 nhóm để tránh toolbar quá dài
-const TOOLS_GROUP1: { id: Tool; label: string; hint: string }[] = [
-  { id: "select",         label: "Chọn",        hint: "V" },
-  { id: "rect",           label: "Khung",        hint: "R" },
-  { id: "ellipse",        label: "Tròn",         hint: "O" },
-  { id: "text",           label: "Chữ",          hint: "T" },
-  { id: "step",           label: "Số bước",      hint: "N" },
-];
-
-const TOOLS_GROUP2: { id: Tool; label: string; hint: string }[] = [
-  { id: "arrow",          label: "Mũi tên",      hint: "A" },
-  { id: "line",           label: "Đường thẳng",  hint: "L" },
-  { id: "numbered-arrow", label: "Mũi tên số",   hint: "W" },
-  { id: "highlight",      label: "Highlight",    hint: "H" },
-  { id: "blur",           label: "Che mờ",       hint: "B" },
-  { id: "crop",           label: "Crop",         hint: "C" },
-];
+// Tools will be initialized inside component with translations
 
 interface Props {
   /** "video": đang xem/cắt video trong Editor — ẩn hết công cụ vẽ ảnh
@@ -274,6 +259,26 @@ function CustomColorButton({
 export default function Toolbar({
   mode, onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy,
 }: Props) {
+  const { t } = useTranslation();
+
+  // Initialize tool groups with translations
+  const TOOLS_GROUP1: { id: Tool; label: string; hint: string }[] = [
+    { id: "select",         label: t("tools.select"),     hint: "V" },
+    { id: "rect",           label: t("tools.rect"),       hint: "R" },
+    { id: "ellipse",        label: t("tools.circle"),     hint: "O" },
+    { id: "text",           label: t("tools.text"),       hint: "T" },
+    { id: "step",           label: t("tools.step"),       hint: "N" },
+  ];
+
+  const TOOLS_GROUP2: { id: Tool; label: string; hint: string }[] = [
+    { id: "arrow",          label: t("tools.arrow"),      hint: "A" },
+    { id: "line",           label: t("tools.line"),       hint: "L" },
+    { id: "numbered-arrow", label: t("tools.arrow") + " #", hint: "W" },
+    { id: "highlight",      label: t("tools.highlight"),  hint: "H" },
+    { id: "blur",           label: t("tools.blur"),       hint: "B" },
+    { id: "crop",           label: "Crop",                hint: "C" },
+  ];
+
   // Selector + useShallow thay vì subscribe cả store: trước đây MỌI thay đổi
   // store (mỗi tick kéo slider blur qua `updateAnnotationLive`, mỗi lần di
   // chuyển annotation) đều re-render toàn bộ toolbar (hàng chục nút SVG).
