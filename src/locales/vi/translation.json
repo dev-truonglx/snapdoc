@@ -132,5 +132,19 @@
     "start": "Bắt đầu",
     "end": "Kết thúc",
     "trim": "Cắt"
+  },
+  "captureBar": {
+    "all": "Mọi màn hình",
+    "full": "Toàn màn hình",
+    "window": "Cửa sổ",
+    "region": "Vùng chọn",
+    "scroll": "Cuộn dài",
+    "audioOff": "Tắt (chỉ hình)",
+    "audioMic": "Microphone",
+    "audioSystem": "Âm thanh hệ thống",
+    "noDelay": "Tắt",
+    "delay5s": "5 giây",
+    "delay10s": "10 giây",
+    "recordModeLabel": "Quay {{mode}}"
   }
 }

@@ -132,5 +132,19 @@
     "start": "Start",
     "end": "End",
     "trim": "Trim"
+  },
+  "captureBar": {
+    "all": "All screens",
+    "full": "Full screen",
+    "window": "Window",
+    "region": "Region",
+    "scroll": "Scrolling",
+    "audioOff": "Off (video only)",
+    "audioMic": "Microphone",
+    "audioSystem": "System audio",
+    "noDelay": "Off",
+    "delay5s": "5 seconds",
+    "delay10s": "10 seconds",
+    "recordModeLabel": "Record {{mode}}"
   }
 }
