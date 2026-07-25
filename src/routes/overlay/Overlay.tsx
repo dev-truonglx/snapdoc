@@ -125,11 +125,24 @@ function useInput(
 }
 
 export default function Overlay() {
-  if (MODE === "window") return <WindowPicker />;
-  if (MODE === "monitor") return <MonitorPick />;
-  if (MODE === "quick") return <QuickAnnotate />;
-  if (MODE === "region" && RECORD) return <RecordRegionSelect />;
-  return <RegionSelect />;
+  return (
+    <>
+      {/* Keyframes dùng chung cho hiệu ứng "kiến bò" (marching ants) của mọi
+          viền cam nét đứt trong overlay — xem `antsBorder()`. */}
+      <style>{ANTS_KEYFRAMES}</style>
+      {MODE === "window" ? (
+        <WindowPicker />
+      ) : MODE === "monitor" ? (
+        <MonitorPick />
+      ) : MODE === "quick" ? (
+        <QuickAnnotate />
+      ) : MODE === "region" && RECORD ? (
+        <RecordRegionSelect />
+      ) : (
+        <RegionSelect />
+      )}
+    </>
+  );
 }
 
 /* ───────────── Region: kéo vùng chọn (live, đa màn hình) ───────────── */
@@ -143,6 +156,14 @@ interface Sel {
 
 function rectFrom(sx: number, sy: number, x: number, y: number): Sel {
   return { x: Math.min(sx, x), y: Math.min(sy, y), w: Math.abs(x - sx), h: Math.abs(y - sy) };
+}
+
+/** Cửa sổ trên cùng (front-to-back, phần tử đầu tiên khớp) chứa điểm (x, y).
+ * Dùng chung giữa `WindowPicker` (chọn cửa sổ) và `RegionSelect` (gợi ý hover
+ * trước khi kéo vùng) — cả hai đều nhận `WindowInfo[]` cùng hệ toạ độ CSS px
+ * tương đối theo overlay hiện tại (xem `capture/window.rs::list`). */
+function pickWindow(wins: WindowInfo[], x: number, y: number): WindowInfo | null {
+  return wins.find((w) => x >= w.x && x <= w.x + w.width && y >= w.y && y <= w.y + w.height) ?? null;
 }
 
 /*
@@ -166,7 +187,29 @@ function RegionSelect() {
   // chuột) để còn khung để vẽ nếu backend báo đây là phiên chụp cuộn.
   const scrollRectRef = useRef<Sel | null>(null);
   const [scrollRect, setScrollRect] = useState<Sel | null>(null);
-  const [pulse, setPulse] = useState(true);
+
+  // Gợi ý cửa sổ khi hover (giống Snagit: di chuột qua cửa sổ → viền gợi ý;
+  // click không kéo = chụp nguyên cửa sổ đó; kéo = bỏ qua gợi ý, chọn vùng tự
+  // do như cũ). Danh sách cửa sổ fetch 1 lần lúc mount, cùng cách `WindowPicker`
+  // đã làm — không polling lại trong lúc chọn.
+  const winsRef = useRef<WindowInfo[]>([]);
+  const [hoverWin, setHoverWin] = useState<WindowInfo | null>(null);
+  // Cửa sổ đang hover TẠI THỜI ĐIỂM press — dùng để quyết định lúc release có
+  // phải "click nhanh trúng cửa sổ" hay không.
+  const pressWinRef = useRef<WindowInfo | null>(null);
+  // true nếu con trỏ THẬT SỰ đang ở overlay này (đa màn hình: mỗi overlay chỉ
+  // biết cursor có đang trên MÀN HÌNH của chính nó hay không). Dùng để bỏ lớp
+  // phủ xám ở đúng màn hình đang thao tác — các màn hình còn lại vẫn xám như
+  // cũ, chỉ màn hình có con trỏ mới cho nhìn rõ nội dung bên dưới.
+  const [cursorHere, setCursorHere] = useState(false);
+  // Vị trí con trỏ hiện tại (đủ để vẽ 2 đường dóng ngang/dọc kéo dài hết màn
+  // hình, giúp canh mép vùng chọn theo cửa sổ/nội dung bên dưới — giống vạch
+  // dóng của Snagit). `null` khi con trỏ rời khỏi màn hình này.
+  const [cursorPos, setCursorPos] = useState<Vec2 | null>(null);
+
+  useEffect(() => {
+    ipc.listWindows().then((w) => { winsRef.current = w; }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const un = listen("scroll-border-activate", () => {
@@ -175,20 +218,22 @@ function RegionSelect() {
     return () => { un.then((f) => f()); };
   }, []);
 
-  useEffect(() => {
-    if (!scrollRect) return;
-    const t = setInterval(() => setPulse((p) => !p), 1000);
-    return () => clearInterval(t);
-  }, [scrollRect]);
-
   useInput(
     (active, x, y) => {
-      if (scrollRect || !active || !startRef.current) return;
-      setSel(rectFrom(startRef.current[0], startRef.current[1], x, y));
+      if (scrollRect) return;
+      setCursorHere(active);
+      setCursorPos(active ? [x, y] : null);
+      if (startRef.current) {
+        if (active) setSel(rectFrom(startRef.current[0], startRef.current[1], x, y));
+        return;
+      }
+      setHoverWin(active ? pickWindow(winsRef.current, x, y) : null);
     },
     (x, y) => {
       if (scrollRect) return;
       startRef.current = [x, y];
+      pressWinRef.current = hoverWin;
+      setHoverWin(null);
       setSel({ x, y, w: 0, h: 0 });
     },
     (x, y) => {
@@ -196,7 +241,18 @@ function RegionSelect() {
       const s = startRef.current;
       startRef.current = null;
       setSel(null);
+      const w = pressWinRef.current;
+      pressWinRef.current = null;
       if (!s) return;
+      // Click nhanh (di chuyển rất ít) trong lúc đang hover 1 cửa sổ, và vẫn
+      // đang đứng trong đúng cửa sổ đó lúc thả chuột → chụp nguyên cửa sổ,
+      // giống Snagit. Kéo đủ xa (hoặc đã rời khỏi cửa sổ) → rơi về free-region
+      // như cũ, không đổi hành vi.
+      const dist = Math.hypot(x - s[0], y - s[1]);
+      if (dist < 4 && w && pickWindow(winsRef.current, x, y)?.id === w.id) {
+        ipc.finalizeWindow(w.id).catch((e) => alert(String(e)));
+        return;
+      }
       const r = rectFrom(s[0], s[1], x, y);
       if (r.w >= 3 && r.h >= 3) {
         scrollRectRef.current = r;
@@ -208,8 +264,8 @@ function RegionSelect() {
     },
   );
 
-  // Phiên chụp cuộn đã kích hoạt: khung viền nét đứt pulsing bao quanh vùng
-  // chọn (lớn hơn 12px mỗi chiều, cùng kích thước cửa sổ `scroll-border` cũ),
+  // Phiên chụp cuộn đã kích hoạt: khung viền cam nét đứt "kiến bò" bao quanh
+  // vùng chọn (lớn hơn 12px mỗi chiều, cùng kích thước cửa sổ `scroll-border` cũ),
   // click-through/content-protected đã được Rust bật ngay trên cửa sổ này.
   // `key` KHÁC với root ở nhánh "đang kéo chọn" bên dưới — bắt buộc: cả hai
   // đều là <div> ở cùng vị trí trong cây, nếu không có `key` riêng, React coi
@@ -228,16 +284,14 @@ function RegionSelect() {
             top: scrollRect.y - 6,
             width: scrollRect.w + 12,
             height: scrollRect.h + 12,
-            boxSizing: "border-box",
-            border: pulse ? "2.5px dashed #3b82f6" : "2.5px dashed #60a5fa",
+            ...antsBorder(2.5),
             // Dim toàn bộ phần NGOÀI khung (giống backdrop lúc kéo chọn) để
             // phân biệt rõ vùng đang chụp cuộn với phần còn lại — trước đây
             // nền trong suốt khiến vùng chụp và phần ngoài trông giống hệt
             // nhau, chỉ có nét đứt mảnh để nhận biết. An toàn với ảnh chụp:
             // cửa sổ đã `content_protected(true)` nên toàn bộ overlay (kể cả
             // lớp dim này) bị loại khỏi mọi lát cắt chụp cuộn.
-            boxShadow: "0 0 0 9999px rgba(0,0,0,0.45), inset 0 0 12px rgba(59, 130, 246, 0.25)",
-            transition: "border-color 0.5s ease-in-out",
+            boxShadow: "0 0 0 9999px rgba(0,0,0,0.45), inset 0 0 12px rgba(245, 158, 11, 0.25)",
             pointerEvents: "none",
           }}
         />
@@ -267,7 +321,7 @@ function RegionSelect() {
             top: sel.y,
             width: sel.w,
             height: sel.h,
-            border: "2px solid #3b82f6",
+            ...antsBorder(2),
             boxShadow: "0 0 0 9999px rgba(0,0,0,0.55)",
           }}
         >
@@ -276,11 +330,104 @@ function RegionSelect() {
           </span>
         </div>
       ) : (
-        <div style={{ position: "fixed", inset: 0, background: frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.5)" }}>
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            // Màn hình đang có con trỏ: bỏ lớp phủ xám để nhìn rõ nội dung bên
+            // dưới (chỉ còn viền cam khi hover cửa sổ + khung khi kéo chọn).
+            // Các màn hình còn lại vẫn xám như cũ.
+            background: cursorHere ? "transparent" : frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.5)",
+          }}
+        >
           <div style={banner}>{t("overlay.dragToSelect")}</div>
         </div>
       )}
+      {/* Gợi ý cửa sổ khi hover — chỉ trước khi press (`sel === null`), ẩn
+          ngay khi bắt đầu kéo để không che khung đang chọn. */}
+      {!sel && hoverWin && (
+        <div
+          style={{
+            position: "fixed",
+            left: hoverWin.x,
+            top: hoverWin.y,
+            width: hoverWin.width,
+            height: hoverWin.height,
+            ...antsBorder(2.5),
+            pointerEvents: "none",
+          }}
+        >
+          <span style={sizeLabel}>
+            {hoverWin.app || hoverWin.title || t("overlay.windowLabel")}
+          </span>
+        </div>
+      )}
+      {!sel && (
+        <RegionFullscreenButton onClick={() => ipc.finalizeMonitor().catch((e) => alert(String(e)))} />
+      )}
+      {/* Đường dóng ngang/dọc nét đứt kéo dài hết màn hình theo vị trí con
+          trỏ — giúp canh mép vùng chọn theo nội dung bên dưới, giống vạch
+          dóng của Snagit. */}
+      {cursorPos && (
+        <>
+          <div
+            style={{
+              position: "fixed",
+              left: 0,
+              top: cursorPos[1],
+              width: "100%",
+              height: 0,
+              borderTop: `1.5px dashed ${ANTS_COLOR}`,
+              opacity: 0.85,
+              pointerEvents: "none",
+            }}
+          />
+          <div
+            style={{
+              position: "fixed",
+              left: cursorPos[0],
+              top: 0,
+              width: 0,
+              height: "100%",
+              borderLeft: `1.5px dashed ${ANTS_COLOR}`,
+              opacity: 0.85,
+              pointerEvents: "none",
+            }}
+          />
+        </>
+      )}
     </div>
+  );
+}
+
+/** Nút nổi "Chụp toàn màn hình" trên overlay Region — gọi thẳng action đã có
+ * (`ipc.finalizeMonitor`, giống `MonitorPick`) để người dùng đổi ý sang chụp
+ * toàn màn hình ngay trong lúc đang thao tác, không cần đóng overlay quay lại
+ * capture bar. */
+function RegionFullscreenButton({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <button
+      style={{
+        position: "fixed",
+        top: 64,
+        left: "50%",
+        transform: "translateX(-50%)",
+        border: "none",
+        borderRadius: 999,
+        padding: "10px 22px",
+        background: "#3b82f6",
+        color: "#fff",
+        fontSize: 14,
+        fontWeight: 600,
+        cursor: "pointer",
+        boxShadow: "0 4px 16px rgba(0,0,0,0.45)",
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={onClick}
+    >
+      {t("overlay.captureFullscreen")}
+    </button>
   );
 }
 
@@ -361,6 +508,13 @@ function RecordRegionSelect() {
   // được (chính là nguyên nhân gốc của lỗi bấm nhầm nút Bắt đầu quay).
   const [bgHover, setBgHover] = useState(false);
   const startRef = useRef<Vec2 | null>(null);
+  // true nếu con trỏ THẬT SỰ đang ở overlay này (đa màn hình) — dùng để bỏ
+  // lớp phủ xám ở đúng màn hình đang thao tác, giống `RegionSelect`.
+  const [cursorHere, setCursorHere] = useState(false);
+  // Vị trí con trỏ — vẽ 2 đường dóng ngang/dọc nét đứt kéo dài hết màn hình,
+  // chỉ khi crosshair đang hoạt động (đang chọn/định vị lại vùng), giống
+  // `RegionSelect`/`QuickAnnotate`.
+  const [cursorPos, setCursorPos] = useState<Vec2 | null>(null);
 
   const winW = window.innerWidth;
   const winH = window.innerHeight;
@@ -385,11 +539,15 @@ function RecordRegionSelect() {
   useInput(
     (active, x, y) => {
       if (recording) return;
+      setCursorHere(active);
       // Hover thường (không đang kéo chọn/di chuyển/resize) → cập nhật gợi ý
       // con trỏ cho vùng nền trống.
       if (active && phase === "adjusting" && sel && !startRef.current && !moveRef.current && !resizeRef.current) {
         setBgHover(!isOverBoxOrBar(sel, winW, winH, x, y));
       }
+      setCursorPos(
+        active && (phase === "selecting" || (phase === "adjusting" && bgHover)) ? [x, y] : null,
+      );
       if (!active || !startRef.current) return;
       setSel(rectFrom(startRef.current[0], startRef.current[1], x, y));
     },
@@ -585,9 +743,35 @@ function RecordRegionSelect() {
           </div>
         </>
       ) : (
-        <div style={{ position: "fixed", inset: 0, background: frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.5)" }}>
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            // Màn hình đang có con trỏ: bỏ lớp phủ xám để nhìn rõ nội dung bên
+            // dưới, giống `RegionSelect`. Các màn hình còn lại vẫn xám như cũ.
+            background: cursorHere ? "transparent" : frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.5)",
+          }}
+        >
           <div style={banner}>{t("overlay.dragToSelectRecord")}</div>
         </div>
+      )}
+      {/* Đường dóng ngang/dọc nét đứt theo con trỏ — chỉ khi crosshair đang
+          hoạt động (đang chọn/định vị lại vùng), giống `RegionSelect`/`QuickAnnotate`. */}
+      {!recording && cursorPos && (
+        <>
+          <div
+            style={{
+              position: "fixed", left: 0, top: cursorPos[1], width: "100%", height: 0,
+              borderTop: `1.5px dashed ${ANTS_COLOR}`, opacity: 0.85, pointerEvents: "none",
+            }}
+          />
+          <div
+            style={{
+              position: "fixed", left: cursorPos[0], top: 0, width: 0, height: "100%",
+              borderLeft: `1.5px dashed ${ANTS_COLOR}`, opacity: 0.85, pointerEvents: "none",
+            }}
+          />
+        </>
       )}
     </div>
   );
@@ -679,6 +863,12 @@ function QuickAnnotate() {
   const [sel, setSel] = useState<Sel | null>(null);
   const [busy, setBusy] = useState(false);
   const startRef = useRef<Vec2 | null>(null);
+  // Vị trí con trỏ hiện tại — vẽ 2 đường dóng ngang/dọc nét đứt kéo dài hết
+  // màn hình để canh mép vùng chọn theo nội dung bên dưới (giống `RegionSelect`).
+  const [cursorPos, setCursorPos] = useState<Vec2 | null>(null);
+  // true nếu con trỏ THẬT SỰ đang ở overlay này (đa màn hình) — dùng để bỏ lớp
+  // phủ xám ở đúng màn hình đang thao tác, giống `RegionSelect`.
+  const [cursorHere, setCursorHere] = useState(false);
 
   const winW = window.innerWidth;
   const winH = window.innerHeight;
@@ -701,6 +891,8 @@ function QuickAnnotate() {
   // dùng cho cả chọn lần đầu lẫn chọn lại (kể cả sang màn hình khác). ──
   useInput(
     (active, x, y) => {
+      setCursorHere(active);
+      setCursorPos(active && phase === "selecting" ? [x, y] : null);
       if (!active || !startRef.current) return;
       setSel(rectFrom(startRef.current[0], startRef.current[1], x, y));
     },
@@ -925,7 +1117,7 @@ function QuickAnnotate() {
         <div
           style={{
             position: "fixed", left: sel.x, top: sel.y, width: sel.w, height: sel.h,
-            outline: "2px solid #3b82f6",
+            ...antsBorder(2),
             // Dim phần ngoài; frozen image vẫn hiện rõ bên trong qua background root.
             boxShadow: "0 0 0 9999px rgba(0,0,0,0.55)",
             cursor: phase === "adjusting" ? "move" : "default",
@@ -941,7 +1133,15 @@ function QuickAnnotate() {
           ))}
         </div>
       ) : (
-        <div style={{ position: "fixed", inset: 0, background: frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.45)" }}>
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            // Màn hình đang có con trỏ: bỏ lớp phủ xám để nhìn rõ nội dung bên
+            // dưới, giống `RegionSelect`. Các màn hình còn lại vẫn xám như cũ.
+            background: cursorHere ? "transparent" : "rgba(0,0,0,0.45)",
+          }}
+        >
           <div style={banner}>{t("overlay.quickDragSelect")}</div>
         </div>
       )}
@@ -969,6 +1169,24 @@ function QuickAnnotate() {
           onClose={doClose}
         />
       )}
+      {/* Đường dóng ngang/dọc nét đứt theo con trỏ — chỉ khi đang định vị vùng
+          chọn (`phase === "selecting"`), giống `RegionSelect`. */}
+      {cursorPos && (
+        <>
+          <div
+            style={{
+              position: "fixed", left: 0, top: cursorPos[1], width: "100%", height: 0,
+              borderTop: `1.5px dashed ${ANTS_COLOR}`, opacity: 0.85, pointerEvents: "none",
+            }}
+          />
+          <div
+            style={{
+              position: "fixed", left: cursorPos[0], top: 0, width: 0, height: "100%",
+              borderLeft: `1.5px dashed ${ANTS_COLOR}`, opacity: 0.85, pointerEvents: "none",
+            }}
+          />
+        </>
+      )}
     </div>
   );
 }
@@ -989,7 +1207,7 @@ function quickHandleStyle(hd: { cx: number; cy: number; cur: string }): React.CS
     position: "absolute",
     left: `calc(${hd.cx * 100}% - ${S / 2}px)`,
     top: `calc(${hd.cy * 100}% - ${S / 2}px)`,
-    width: S, height: S, background: "#fff", border: "1.5px solid #3b82f6", borderRadius: 2,
+    width: S, height: S, background: "#fff", border: `1.5px solid ${ANTS_COLOR}`, borderRadius: 2,
     cursor: hd.cur,
   };
 }
@@ -1008,15 +1226,10 @@ function WindowPicker() {
     });
   }, []);
 
-  // Front-to-back → cửa sổ ĐẦU TIÊN chứa con trỏ là trên cùng.
-  const pick = (x: number, y: number) =>
-    winsRef.current.find((w) => x >= w.x && x <= w.x + w.width && y >= w.y && y <= w.y + w.height) ??
-    null;
-
   useInput(
-    (active, x, y) => setHover(active ? pick(x, y) : null),
+    (active, x, y) => setHover(active ? pickWindow(winsRef.current, x, y) : null),
     (x, y) => {
-      const w = pick(x, y);
+      const w = pickWindow(winsRef.current, x, y);
       if (w) ipc.finalizeWindow(w.id).catch((e) => alert(String(e)));
     },
     () => {},
@@ -1045,9 +1258,8 @@ function WindowPicker() {
             top: hover.y,
             width: hover.width,
             height: hover.height,
-            border: "3px solid #3b82f6",
-            background: "rgba(59,130,246,0.15)",
-            boxSizing: "border-box",
+            ...antsBorder(3),
+            backgroundColor: "rgba(245,158,11,0.15)",
             pointerEvents: "none",
             zIndex: 1,
           }}
@@ -1081,22 +1293,23 @@ function MonitorPick() {
         backgroundSize: "100% 100%",
         backgroundRepeat: "no-repeat",
         cursor: CAMERA_CURSOR,
-        border: active ? "5px solid #3b82f6" : "5px solid transparent",
-        boxSizing: "border-box",
       }
     : {
         ...root,
         visibility: frozenReady ? "visible" : "hidden",
         cursor: CAMERA_CURSOR,
-        background: active ? "rgba(59,130,246,0.12)" : "rgba(0,0,0,0.28)",
-        border: active ? "5px solid #3b82f6" : "5px solid transparent",
-        boxSizing: "border-box",
+        background: active ? "rgba(245,158,11,0.12)" : "rgba(0,0,0,0.28)",
       };
 
   return (
     <div style={rootStyle}>
       {/* Dim layer khi có frozen image */}
-      {frozenUrl && <div style={{ position: "fixed", inset: 0, background: active ? "rgba(59,130,246,0.12)" : "rgba(0,0,0,0.45)", pointerEvents: "none" }} />}
+      {frozenUrl && <div style={{ position: "fixed", inset: 0, background: active ? "rgba(245,158,11,0.12)" : "rgba(0,0,0,0.45)", pointerEvents: "none" }} />}
+      {/* Viền cam "kiến bò" bao trọn màn hình khi đang hover — tách riêng
+          khỏi `rootStyle` vì div gốc còn dùng `backgroundImage` cho ảnh
+          màn hình đóng băng, không thể gộp chung với lớp gradient của
+          `antsBorder`. */}
+      {active && <div style={{ position: "fixed", inset: 0, pointerEvents: "none", ...antsBorder(5) }} />}
       <div style={banner}>{t("overlay.selectMonitor")}</div>
     </div>
   );
@@ -1114,17 +1327,48 @@ const CAMERA_SVG = `<svg xmlns='http://www.w3.org/2000/svg' width='32' height='3
 const CAMERA_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(CAMERA_SVG)}") 16 16, crosshair`;
 
 // Con trỏ chữ thập cho chế độ vẽ vùng. Trắng lõi + viền đen → rõ trên mọi nền;
-// chừa khoảng hở giữa + chấm tâm để ngắm chính xác. Hotspot ở tâm (16,16).
-const CROSSHAIR_SVG = `<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'>
-<g stroke='#000' stroke-width='4' stroke-linecap='round'>
-<line x1='16' y1='2' x2='16' y2='12'/><line x1='16' y1='20' x2='16' y2='30'/>
-<line x1='2' y1='16' x2='12' y2='16'/><line x1='20' y1='16' x2='30' y2='16'/></g>
-<g stroke='#fff' stroke-width='2' stroke-linecap='round'>
-<line x1='16' y1='2' x2='16' y2='12'/><line x1='16' y1='20' x2='16' y2='30'/>
-<line x1='2' y1='16' x2='12' y2='16'/><line x1='20' y1='16' x2='30' y2='16'/></g>
-<circle cx='16' cy='16' r='2.5' fill='#fff' stroke='#000' stroke-width='1.5'/>
+// chừa khoảng hở giữa + chấm tâm để ngắm chính xác. Hotspot ở tâm (24,24).
+// Kích thước tăng so với trước (32→48px, nét dày hơn) để dễ thấy hơn, giống
+// yêu cầu đối chiếu với crosshair to của Snagit.
+const CROSSHAIR_SVG = `<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'>
+<g stroke='#000' stroke-width='5' stroke-linecap='round'>
+<line x1='24' y1='2' x2='24' y2='18'/><line x1='24' y1='30' x2='24' y2='46'/>
+<line x1='2' y1='24' x2='18' y2='24'/><line x1='30' y1='24' x2='46' y2='24'/></g>
+<g stroke='#fff' stroke-width='2.5' stroke-linecap='round'>
+<line x1='24' y1='2' x2='24' y2='18'/><line x1='24' y1='30' x2='24' y2='46'/>
+<line x1='2' y1='24' x2='18' y2='24'/><line x1='30' y1='24' x2='46' y2='24'/></g>
+<circle cx='24' cy='24' r='3' fill='#fff' stroke='#000' stroke-width='2'/>
 </svg>`;
-const CROSSHAIR_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(CROSSHAIR_SVG)}") 16 16, crosshair`;
+const CROSSHAIR_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(CROSSHAIR_SVG)}") 24 24, crosshair`;
+
+// Viền "kiến bò" (marching ants) — thay cho mọi viền xanh liền nét trước đây,
+// dùng chung 1 màu cam + 1 kích thước nét đứt cho toàn bộ chế độ chụp. Vẽ
+// bằng 4 lớp linear-gradient (mỗi lớp 1 cạnh) thay vì `border`/`outline` vì
+// CSS không animate được dash-offset của border thật — đây là kỹ thuật thuần
+// CSS phổ biến để giả lập hiệu ứng này. `animation` tham chiếu keyframes toàn
+// cục `marching-ants` (bơm 1 lần qua `<style>` ở `Overlay()`).
+const ANTS_COLOR = "#f59e0b";
+const ANTS_DASH = 10;
+const ANTS_KEYFRAMES = `@keyframes marching-ants {
+  to {
+    background-position: left ${ANTS_DASH}px top, right -${ANTS_DASH}px bottom, left bottom ${ANTS_DASH}px, right top -${ANTS_DASH}px;
+  }
+}`;
+
+function antsBorder(width = 2.5): React.CSSProperties {
+  return {
+    backgroundImage:
+      `linear-gradient(90deg, ${ANTS_COLOR} 50%, transparent 50%),` +
+      `linear-gradient(90deg, ${ANTS_COLOR} 50%, transparent 50%),` +
+      `linear-gradient(0deg, ${ANTS_COLOR} 50%, transparent 50%),` +
+      `linear-gradient(0deg, ${ANTS_COLOR} 50%, transparent 50%)`,
+    backgroundRepeat: "repeat-x, repeat-x, repeat-y, repeat-y",
+    backgroundSize: `${ANTS_DASH}px ${width}px, ${ANTS_DASH}px ${width}px, ${width}px ${ANTS_DASH}px, ${width}px ${ANTS_DASH}px`,
+    backgroundPosition: "left top, right bottom, left bottom, right top",
+    boxSizing: "border-box",
+    animation: "marching-ants 0.5s infinite linear",
+  };
+}
 
 const root: React.CSSProperties = {
   position: "fixed",
@@ -1136,7 +1380,7 @@ const sizeLabel: React.CSSProperties = {
   position: "absolute",
   top: -24,
   left: 0,
-  background: "#3b82f6",
+  background: ANTS_COLOR,
   color: "#fff",
   fontSize: 12,
   padding: "2px 6px",

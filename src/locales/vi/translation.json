@@ -154,7 +154,7 @@
     "close": "Đóng"
   },
   "overlay": {
-    "dragToSelect": "Kéo để chọn vùng • Esc / chuột phải để huỷ",
+    "dragToSelect": "Kéo để chọn vùng • Di chuột qua cửa sổ rồi click để chụp cả cửa sổ • Esc / chuột phải để huỷ",
     "dragToSelectRecord": "Kéo để chọn vùng quay • Esc / chuột phải để huỷ",
     "cancel": "Huỷ",
     "startRecording": "● Bắt đầu quay",
@@ -162,6 +162,7 @@
     "selectWindow": "Di chuột tới cửa sổ rồi click để chụp • Esc / chuột phải để huỷ",
     "selectMonitor": "Click để chụp toàn bộ màn hình này • Esc / chuột phải để huỷ",
     "windowLabel": "Cửa sổ",
+    "captureFullscreen": "Chụp toàn màn hình",
     "quickDragSelect": "Kéo để chọn vùng • Esc / chuột phải để huỷ"
   },
   "recordStop": {

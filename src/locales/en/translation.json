@@ -154,7 +154,7 @@
     "close": "Close"
   },
   "overlay": {
-    "dragToSelect": "Drag to select area • Esc / right-click to cancel",
+    "dragToSelect": "Drag to select area • Hover a window and click to capture it • Esc / right-click to cancel",
     "dragToSelectRecord": "Drag to select recording area • Esc / right-click to cancel",
     "cancel": "Cancel",
     "startRecording": "● Start recording",
@@ -162,7 +162,8 @@
     "selectWindow": "Move cursor to window and click to capture • Esc / right-click to cancel",
     "selectMonitor": "Click to capture entire screen • Esc / right-click to cancel",
     "windowLabel": "Window",
-    "quickDragSelect": "Drag to select area • Esc / right-click to cancel"
+    "quickDragSelect": "Drag to select area • Esc / right-click to cancel",
+    "captureFullscreen": "Capture full screen"
   },
   "recordStop": {
     "stopping": "Stopping…",
