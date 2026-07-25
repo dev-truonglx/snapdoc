@@ -84,6 +84,18 @@ objc2-core-audio-types = { version = "0.3.2", default-features = false, features
 # Dispatch queue riêng cho SCStream callback (không dùng main queue để callback
 # nhận frame liên tục 30fps không bị chặn bởi UI thread).
 dispatch2 = "0.3.1"
+# Accessibility API (AXUIElement) — raise ĐÚNG 1 cửa sổ cụ thể lên trước khi
+# bắt đầu quay (xem `windows::ax_raise_window`). `NSRunningApplication.activate`
+# (objc2-app-kit, đã có sẵn) chỉ đưa được cả APP lên trước, không chọn được
+# đúng cửa sổ nếu app có nhiều cửa sổ (vd Finder). Dùng crate -sys thuần (khớp
+# style raw FFI đã có ở mac_sck.rs) thay vì crate `accessibility` cấp cao vì
+# crate đó kéo theo `objc`/`cocoa` (runtime Objective-C CŨ) song song objc2
+# đang dùng xuyên suốt — không cần thiết cho vài lệnh AX đơn giản này.
+accessibility-sys = "0.2.0"
+# CFDictionary/CFArray/CFString THÔ (không qua objc2-core-foundation) để khớp
+# type hệt những gì `accessibility-sys` khai (cùng crate `core-foundation-sys`,
+# tránh phải ép kiểu con trỏ qua lại giữa 2 hệ bọc CoreFoundation khác nhau).
+core-foundation-sys = "0.8.7"
 # Ghi âm microphone (Phase 4 — quay màn hình có âm thanh): SCStream chỉ hỗ trợ
 # captureMicrophone từ macOS 15, còn app hỗ trợ tối thiểu macOS 14 (xem
 # tauri.conf.json bundle.macOS.minimumSystemVersion), nên dùng cpal (CoreAudio

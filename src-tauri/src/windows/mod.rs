@@ -144,6 +144,122 @@ pub fn reactivate_app_pid(app: &AppHandle, pid: i32) {
     });
 }
 
+/// Đưa app sở hữu cửa sổ vừa chọn "Bắt đầu quay" lên foreground — nếu cửa sổ
+/// đó đang ẩn phía sau app khác, user sẽ THẤY nó nổi lên ngay khi bắt đầu
+/// quay thay vì phải tự Cmd+Tab/Alt+Tab đi tìm. ScreenCaptureKit/WGC vẫn quay
+/// được cửa sổ dù bị che (không phụ thuộc z-order), đây thuần là cải thiện
+/// trải nghiệm chứ không ảnh hưởng tới việc quay có thành công hay không.
+///
+/// `reactivate_app_pid` (kích hoạt cả app) KHÔNG đủ khi app có NHIỀU cửa sổ
+/// (vd Finder mở 2 cửa sổ, cả 2 đều đang ẩn): macOS tự chọn cửa sổ "gần nhất"
+/// của app đó lên, có thể KHÔNG PHẢI cửa sổ user vừa chọn trong dialog. Phải
+/// raise ĐÚNG cửa sổ cụ thể qua Accessibility API (`ax_raise_window`) — cần
+/// quyền Accessibility (khác Screen Recording, không tự prompt, phải chủ động
+/// xin — xem `permissions::request_accessibility`); nếu chưa cấp, chỉ activate
+/// được cả app (fallback), không chọn đúng cửa sổ.
+/// `pid`/`window_id` lấy từ `capture::window::pid_of(id)`/`id` NGAY TRƯỚC khi
+/// gọi hàm này (window có thể đã đóng giữa lúc user thao tác trong dialog).
+#[cfg(target_os = "macos")]
+pub fn bring_app_to_front(app: &AppHandle, pid: u32, window_id: u32) {
+    reactivate_app_pid(app, pid as i32);
+    if !crate::permissions::can_use_accessibility() {
+        // Xin quyền (mở prompt hệ thống lần đầu) — lần gọi NÀY sẽ chưa raise
+        // được đúng cửa sổ (quyền chưa kịp có), nhưng từ lần quay TIẾP THEO
+        // (sau khi user cấp quyền trong System Settings) sẽ raise đúng.
+        crate::permissions::request_accessibility();
+        return;
+    }
+    ax_raise_window(pid as i32, window_id);
+}
+
+/// Raise cửa sổ `target_window_id` (CGWindowID) thuộc process `pid` lên trước
+/// TRONG CHÍNH app đó, dùng Accessibility API. `_AXUIElementGetWindow` là API
+/// PRIVATE (không có trong header công khai của Apple) nhưng ổn định qua
+/// nhiều phiên bản macOS và được dùng rộng rãi bởi các công cụ quản lý cửa sổ
+/// (Rectangle, Contexts, yabai...) — không có API public nào khác để map
+/// ngược từ AXUIElement (cửa sổ) sang đúng CGWindowID mà `capture::window`
+/// đang dùng xuyên suốt app. No-op an toàn nếu bất kỳ bước AX nào lỗi (vd
+/// process đã thoát, cửa sổ đã đóng) — đây thuần là cải thiện UX, không phải
+/// đường dẫn quan trọng của việc quay.
+#[cfg(target_os = "macos")]
+fn ax_raise_window(pid: i32, target_window_id: u32) {
+    use accessibility_sys::{
+        kAXRaiseAction, kAXWindowsAttribute, AXUIElementCopyAttributeValue,
+        AXUIElementCreateApplication, AXUIElementPerformAction, AXUIElementRef,
+    };
+    use core_foundation_sys::{
+        array::{CFArrayGetCount, CFArrayGetValueAtIndex},
+        base::{kCFAllocatorDefault, CFRelease, CFTypeRef},
+        string::{CFStringCreateWithCString, kCFStringEncodingUTF8},
+    };
+
+    // Private, không có trong `accessibility-sys` — khai báo thủ công (xem
+    // doc-comment ở trên). Framework đã được `accessibility-sys` link sẵn,
+    // khai `#[link]` lại ở đây chỉ để rõ ràng (linker gộp, không trùng lặp).
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn _AXUIElementGetWindow(element: AXUIElementRef, out: *mut u32) -> i32;
+    }
+
+    unsafe fn ax_cfstring(s: &str) -> core_foundation_sys::string::CFStringRef {
+        let c = std::ffi::CString::new(s).unwrap_or_default();
+        unsafe { CFStringCreateWithCString(kCFAllocatorDefault, c.as_ptr(), kCFStringEncodingUTF8) }
+    }
+
+    unsafe {
+        let app_elem: AXUIElementRef = AXUIElementCreateApplication(pid);
+        if app_elem.is_null() {
+            return;
+        }
+        let attr = ax_cfstring(kAXWindowsAttribute);
+        let mut windows_ref: CFTypeRef = std::ptr::null();
+        let err = AXUIElementCopyAttributeValue(app_elem, attr, &mut windows_ref);
+        CFRelease(attr as CFTypeRef);
+        if err == accessibility_sys::kAXErrorSuccess && !windows_ref.is_null() {
+            let arr = windows_ref as core_foundation_sys::array::CFArrayRef;
+            for i in 0..CFArrayGetCount(arr) {
+                let win_elem = CFArrayGetValueAtIndex(arr, i) as AXUIElementRef;
+                let mut wid: u32 = 0;
+                if _AXUIElementGetWindow(win_elem, &mut wid) == accessibility_sys::kAXErrorSuccess
+                    && wid == target_window_id
+                {
+                    let action = ax_cfstring(kAXRaiseAction);
+                    AXUIElementPerformAction(win_elem, action);
+                    CFRelease(action as CFTypeRef);
+                    break;
+                }
+            }
+            CFRelease(windows_ref);
+        }
+        CFRelease(app_elem as CFTypeRef);
+    }
+}
+
+/// Windows: `window_id` (từ `capture::window::pid_of`/`list_metas`, xem
+/// `xcap::Window::id()`) CHÍNH LÀ giá trị HWND (ép kiểu u32) — raise ĐÚNG cửa
+/// sổ đó trực tiếp bằng `SetForegroundWindow`, không cần dò theo `pid` (tránh
+/// đúng vấn đề nhiều cửa sổ/1 process như macOS — Explorer cũng có thể có
+/// nhiều cửa sổ). Khôi phục trước nếu đang bị thu nhỏ (`SetForegroundWindow`
+/// không tự bỏ minimize). Có thể bị OS chặn nếu SnapDoc không phải app đang có
+/// input focus gần đây nhất (cùng hạn chế `SetForegroundWindow` đã ghi ở
+/// `force_to_foreground` phía trên) — best-effort, không coi là lỗi nếu không
+/// lên được, quay vẫn tiếp tục bình thường.
+#[cfg(target_os = "windows")]
+pub fn bring_app_to_front(_app: &AppHandle, _pid: u32, window_id: u32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE};
+
+    let hwnd = window_id as isize as windows_sys::Win32::Foundation::HWND;
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn bring_app_to_front(_app: &AppHandle, _pid: u32, _window_id: u32) {}
+
 fn url(win: &str) -> WebviewUrl {
     WebviewUrl::App(format!("index.html?win={win}").into())
 }
@@ -886,6 +1002,42 @@ pub fn open_overlays(app: &AppHandle, mode: &str) -> Result<(), String> {
     open_overlays_ex(app, mode, false, None)
 }
 
+/// Mở dialog "Chọn cửa sổ" dạng lưới thumbnail (tham khảo dialog "Select App
+/// Window" của macOS) — dùng cho CẢ chụp ảnh cửa sổ lẫn bắt đầu quay cửa sổ
+/// (cờ `pending_record`, set TRƯỚC khi gọi hàm này ở `flow::run`/
+/// `flow::run_record_picker`, quyết định `finalize_window` rẽ nhánh nào).
+///
+/// Khác hẳn `open_overlays_ex`: đây là 1 cửa sổ dialog BÌNH THƯỜNG (có viền/
+/// tiêu đề, không transparent/click-through/always-on-top-phủ-kín-màn-hình)
+/// — giống `open_editor`, không phải overlay phủ kín màn hình nên không cần
+/// freeze màn hình hay `ActivationPolicy::Accessory`.
+pub fn open_window_picker(app: &AppHandle, record: bool) -> Result<(), String> {
+    close_window_picker(app);
+    let query = if record { "win=window-picker&record=1" } else { "win=window-picker" };
+    let win = WebviewWindowBuilder::new(
+        app,
+        "window-picker",
+        WebviewUrl::App(format!("index.html?{query}").into()),
+    )
+        .title("SnapDoc")
+        .inner_size(880.0, 620.0)
+        .min_inner_size(560.0, 420.0)
+        .resizable(true)
+        .center()
+        .always_on_top(true)
+        .build()
+        .map_err(|e| format!("Không tạo được dialog chọn cửa sổ: {e}"))?;
+    let _ = win.set_focus();
+    Ok(())
+}
+
+/// Đóng dialog "Chọn cửa sổ" nếu đang mở — an toàn khi gọi dù chưa từng có.
+pub fn close_window_picker(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("window-picker") {
+        let _ = win.close();
+    }
+}
+
 /// Như `open_overlays`, kèm `record` (đang chọn phạm vi QUAY, không phải chụp
 /// ảnh — frontend `Overlay.tsx` dựa vào đây để hiện bước "chỉnh vùng + nút
 /// Bắt đầu" thay vì quay ngay khi thả chuột) và `preset` = vùng chọn lần quay
@@ -1520,6 +1672,11 @@ pub fn close_overlays(app: &AppHandle) {
             let _ = win.close();
         }
     }
+    // Dialog "Chọn cửa sổ" dạng lưới (`open_window_picker`) dùng chung vòng
+    // đời phiên chụp/quay với pool overlay — mọi nơi gọi `close_overlays` để
+    // "kết thúc phiên" (huỷ, chụp xong, chuyển sang quay...) cũng phải đóng
+    // luôn dialog này nếu đang mở, dù nó không thuộc pool overlay-{i}.
+    close_window_picker(app);
     // KHÔNG poll ở đây — xem comment trên.
 
     // Dựng lại pool overlay ẩn cho lần mở TIẾP THEO (xem `prewarm_overlays`) —

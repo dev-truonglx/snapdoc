@@ -159,11 +159,20 @@
     "cancel": "Cancel",
     "startRecording": "● Start recording",
     "startingRecording": "Starting…",
-    "selectWindow": "Move cursor to window and click to capture • Esc / right-click to cancel",
     "selectMonitor": "Click to capture entire screen • Esc / right-click to cancel",
     "windowLabel": "Window",
     "quickDragSelect": "Drag to select area • Esc / right-click to cancel",
     "captureFullscreen": "Capture full screen"
+  },
+  "windowPicker": {
+    "title": "Select App Window",
+    "titleRecord": "Select App Window to Record",
+    "empty": "No windows found",
+    "cancel": "Cancel",
+    "capture": "Capture",
+    "capturing": "Capturing…",
+    "record": "Start Recording",
+    "starting": "Starting…"
   },
   "recordStop": {
     "stopping": "Stopping…",

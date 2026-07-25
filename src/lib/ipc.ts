@@ -78,6 +78,24 @@ export interface WindowInfo {
   app: string;
 }
 
+/** Metadata 1 cửa sổ cho dialog "Chọn cửa sổ" dạng lưới (`WindowPickerDialog`) —
+ * KHÔNG kèm ảnh (trả về ngay để vẽ khung lưới trước), không có toạ độ overlay
+ * vì đây là dialog độc lập, không vẽ đè màn hình thật. Ảnh thumbnail lấy sau
+ * qua `captureWindowThumbsStream` + lắng nghe event `"window-thumb-ready"`. */
+export interface WindowMetaInfo {
+  id: number;
+  title: string;
+  app: string;
+  width: number;
+  height: number;
+}
+
+/** Payload event `"window-thumb-ready"` — bắn 1 lần cho mỗi cửa sổ ngay khi
+ * chụp xong (thứ tự hoàn thành thực tế, không phải thứ tự trong danh sách).
+ * `thumb` là PNG base64 đã thu nhỏ (KHÔNG có prefix `data:...`), `null` nếu
+ * chụp lỗi (vd cửa sổ vừa đóng giữa chừng). */
+export type WindowThumbReady = [id: number, thumb: string | null];
+
 /** Nguồn audio ghi kèm khi quay màn hình — chỉ chọn 1, không trộn (xem lý do
  * ở record/mod.rs: ghép audio+video "sống" qua ffmpeg từng gây bug video bị
  * cắt cụt sau vài giây). */
@@ -144,6 +162,8 @@ export const ipc = {
   finalizeWindow: (id: number) => invoke<void>("finalize_window", { id }),
   finalizeMonitor: () => invoke<void>("finalize_monitor"),
   listWindows: () => invoke<WindowInfo[]>("list_windows"),
+  listWindowMetas: () => invoke<WindowMetaInfo[]>("list_window_metas"),
+  captureWindowThumbsStream: (ids: number[]) => invoke<void>("capture_window_thumbs_stream", { ids }),
   cancelOverlay: () => invoke<void>("cancel_overlay"),
   // Chụp nhanh "Mở trong Editor": giữ SnapDoc frontmost (không trả focus về
   // app cũ). Gọi TRƯỚC openEditor. Xem `flow::keep_capture_focus`.

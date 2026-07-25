@@ -18,3 +18,14 @@ pub fn request_capture() -> bool {
         true
     }
 }
+
+/// Kiểm tra quyền Accessibility (không side-effect) — xem `macos::accessibility_ok`.
+pub fn can_use_accessibility() -> bool {
+    macos::accessibility_ok()
+}
+
+/// Yêu cầu quyền Accessibility (mở prompt hệ thống lần đầu nếu chưa cấp) —
+/// xem `macos::request_accessibility`.
+pub fn request_accessibility() -> bool {
+    macos::request_accessibility()
+}

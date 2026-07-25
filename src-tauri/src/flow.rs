@@ -525,6 +525,22 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
     app.state::<AppState>().last_capture.set(mode, output);
     // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
     windows::hide_editor(app);
+    set_output(app, output);
+
+    // "window": dialog "Chọn cửa sổ" dạng lưới thumbnail (tham khảo dialog
+    // "Select App Window" của macOS) — 1 cửa sổ dialog BÌNH THƯỜNG (có viền/
+    // tiêu đề), khác hẳn overlay phủ kín màn hình của "region"/"full" nên
+    // KHÔNG cần freeze màn hình/snapshot cửa sổ ẩn (không chụp "qua" nó).
+    if mode == "window" {
+        if bar_is_visible(app) {
+            hide_bar(app);
+        }
+        if let Err(e) = windows::open_window_picker(app, false) {
+            let _ = app.emit("snapdoc-error", e);
+        }
+        return;
+    }
+
     // Snapshot TRƯỚC KHI đụng tới bất kỳ cửa sổ/focus nào (kể cả hide_bar và
     // mở overlay) — vì bản thân open_overlays() cũng gọi set_focus() lên 1
     // cửa sổ của app, có thể tự kích hoạt app và đẩy cửa sổ ẩn lên trước NGAY
@@ -539,7 +555,6 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
     }
     take_frozen_screens(app);
     let result: Result<(), String> = (|| {
-        set_output(app, output);
         let overlay_mode = if mode == "full" { "monitor" } else { mode };
         windows::open_overlays(app, overlay_mode)
     })();
@@ -561,6 +576,24 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
 pub fn run_record_picker(app: &AppHandle, mode: &str) {
     // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
     windows::hide_editor(app);
+
+    // "window": dùng chung dialog "Chọn cửa sổ" dạng lưới thumbnail với chụp
+    // ảnh (xem nhánh tương ứng ở `run()`) — set `pending_record` để
+    // `finalize_window` biết chuyển hướng sang `record::start_recording_window`
+    // thay vì chụp ảnh. Không cần freeze vì đây là dialog thường, không phải
+    // overlay phủ kín màn hình.
+    if mode == "window" {
+        *app.state::<AppState>().pending_record.lock().unwrap() = true;
+        if bar_is_visible(app) {
+            hide_bar(app);
+        }
+        if let Err(e) = windows::open_window_picker(app, true) {
+            *app.state::<AppState>().pending_record.lock().unwrap() = false;
+            let _ = app.emit("snapdoc-error", e);
+        }
+        return;
+    }
+
     // Đóng băng màn hình: ẩn capture-bar TRƯỚC rồi mới chụp frozen.
     if bar_is_visible(app) {
         hide_bar_for_freeze(app);
@@ -765,6 +798,14 @@ pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
         windows::close_overlays(app);
         clear_frozen_screens(app);
         windows::restore_regular_activation(app);
+        // Đưa cửa sổ sắp quay lên trước — nếu đang ẩn phía sau app khác, user
+        // sẽ thấy nó nổi lên ngay thay vì vẫn chìm phía sau suốt phiên quay
+        // (quay vẫn hoạt động dù cửa sổ bị che, đây thuần là UX). Lấy pid
+        // NGAY LÚC NÀY (không phải trước đó) để tránh trường hợp cửa sổ đã
+        // đóng giữa lúc chọn — `pid_of` trả `None` thì bỏ qua, không chặn quay.
+        if let Some(pid) = capture::window::pid_of(id) {
+            windows::bring_app_to_front(app, pid, id);
+        }
         return crate::record::start_recording_window(app, id);
     }
 

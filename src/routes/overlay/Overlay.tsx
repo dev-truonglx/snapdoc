@@ -130,9 +130,7 @@ export default function Overlay() {
       {/* Keyframes dùng chung cho hiệu ứng "kiến bò" (marching ants) của mọi
           viền cam nét đứt trong overlay — xem `antsBorder()`. */}
       <style>{ANTS_KEYFRAMES}</style>
-      {MODE === "window" ? (
-        <WindowPicker />
-      ) : MODE === "monitor" ? (
+      {MODE === "monitor" ? (
         <MonitorPick />
       ) : MODE === "quick" ? (
         <QuickAnnotate />
@@ -159,9 +157,9 @@ function rectFrom(sx: number, sy: number, x: number, y: number): Sel {
 }
 
 /** Cửa sổ trên cùng (front-to-back, phần tử đầu tiên khớp) chứa điểm (x, y).
- * Dùng chung giữa `WindowPicker` (chọn cửa sổ) và `RegionSelect` (gợi ý hover
- * trước khi kéo vùng) — cả hai đều nhận `WindowInfo[]` cùng hệ toạ độ CSS px
- * tương đối theo overlay hiện tại (xem `capture/window.rs::list`). */
+ * Dùng trong `RegionSelect` để gợi ý hover cửa sổ trước khi kéo vùng — nhận
+ * `WindowInfo[]` theo hệ toạ độ CSS px tương đối theo overlay hiện tại (xem
+ * `capture/window.rs::list`). */
 function pickWindow(wins: WindowInfo[], x: number, y: number): WindowInfo | null {
   return wins.find((w) => x >= w.x && x <= w.x + w.width && y >= w.y && y <= w.y + w.height) ?? null;
 }
@@ -1210,66 +1208,6 @@ function quickHandleStyle(hd: { cx: number; cy: number; cur: string }): React.CS
     width: S, height: S, background: "#fff", border: `1.5px solid ${ANTS_COLOR}`, borderRadius: 2,
     cursor: hd.cur,
   };
-}
-
-/* ───────────── Window: chọn cửa sổ (đa màn hình) ───────────── */
-
-function WindowPicker() {
-  const { t } = useTranslation();
-  const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
-  const winsRef = useRef<WindowInfo[]>([]);
-  const [hover, setHover] = useState<WindowInfo | null>(null);
-
-  useEffect(() => {
-    ipc.listWindows().then((w) => {
-      winsRef.current = w;
-    });
-  }, []);
-
-  useInput(
-    (active, x, y) => setHover(active ? pickWindow(winsRef.current, x, y) : null),
-    (x, y) => {
-      const w = pickWindow(winsRef.current, x, y);
-      if (w) ipc.finalizeWindow(w.id).catch((e) => alert(String(e)));
-    },
-    () => {},
-  );
-
-  const rootStyle: React.CSSProperties = frozenUrl
-    ? {
-        ...root,
-        visibility: frozenReady ? "visible" : "hidden",
-        backgroundImage: `url("${frozenUrl}")`,
-        backgroundSize: "100% 100%",
-        backgroundRepeat: "no-repeat",
-        cursor: CAMERA_CURSOR,
-      }
-    : { ...root, visibility: frozenReady ? "visible" : "hidden", background: "rgba(0,0,0,0.28)", cursor: CAMERA_CURSOR };
-
-  return (
-    <div style={rootStyle}>
-      {/* Dim layer khi có frozen image */}
-      {frozenUrl && <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", pointerEvents: "none" }} />}
-      {hover && (
-        <div
-          style={{
-            position: "fixed",
-            left: hover.x,
-            top: hover.y,
-            width: hover.width,
-            height: hover.height,
-            ...antsBorder(3),
-            backgroundColor: "rgba(245,158,11,0.15)",
-            pointerEvents: "none",
-            zIndex: 1,
-          }}
-        >
-          <span style={{ ...sizeLabel, top: 6, left: 6 }}>{hover.app || hover.title || t("overlay.windowLabel")}</span>
-        </div>
-      )}
-      <div style={banner}>{t("overlay.selectWindow")}</div>
-    </div>
-  );
 }
 
 /* ───────────── Monitor: chọn cả màn hình (chế độ full) ───────────── */

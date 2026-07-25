@@ -159,11 +159,20 @@
     "cancel": "Huỷ",
     "startRecording": "● Bắt đầu quay",
     "startingRecording": "Đang bắt đầu…",
-    "selectWindow": "Di chuột tới cửa sổ rồi click để chụp • Esc / chuột phải để huỷ",
     "selectMonitor": "Click để chụp toàn bộ màn hình này • Esc / chuột phải để huỷ",
     "windowLabel": "Cửa sổ",
     "captureFullscreen": "Chụp toàn màn hình",
     "quickDragSelect": "Kéo để chọn vùng • Esc / chuột phải để huỷ"
+  },
+  "windowPicker": {
+    "title": "Chọn cửa sổ ứng dụng",
+    "titleRecord": "Chọn cửa sổ ứng dụng để quay",
+    "empty": "Không tìm thấy cửa sổ nào",
+    "cancel": "Huỷ",
+    "capture": "Chụp",
+    "capturing": "Đang chụp…",
+    "record": "Bắt đầu quay",
+    "starting": "Đang bắt đầu…"
   },
   "recordStop": {
     "stopping": "Đang dừng…",

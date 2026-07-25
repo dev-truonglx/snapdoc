@@ -189,3 +189,108 @@ pub fn capture_window(window_id: u32) -> CapResult {
     rx.recv_timeout(TIMEOUT)
         .map_err(|_| "Hết thời gian chờ ScreenCaptureKit".to_string())?
 }
+
+/// Chụp thumbnail cho NHIỀU cửa sổ cùng lúc — dùng cho dialog "Chọn cửa sổ"
+/// dạng lưới (`capture::window::capture_thumbs_streaming`).
+///
+/// `capture_window()` ở trên, nếu gọi lặp lại cho từng cửa sổ, phải
+/// `getShareableContentWithCompletionHandler` (enumerate TOÀN BỘ cửa sổ/màn
+/// hình hệ thống — thao tác tốn thời gian nhất trong cả quy trình, không phải
+/// bản thân bước chụp) MỖI LẦN GỌI → N cửa sổ = N lần fetch tuần tự, đây
+/// chính là nguyên nhân dialog load chậm khi có nhiều cửa sổ đang mở.
+///
+/// Hàm này fetch shareable content CHỈ 1 LẦN, sau đó bắn TẤT CẢ N yêu cầu
+/// `captureImageWithFilter` liên tiếp KHÔNG chờ nhau (SCK xử lý async, tự chạy
+/// song song trên hàng đợi nội bộ) — và chụp THẲNG ở kích thước đã thu nhỏ
+/// (set Width/Height nhỏ ngay trong `SCStreamConfiguration`) thay vì chụp
+/// full-res rồi resize lại ở Rust, giảm cả dung lượng ảnh truyền qua IPC lẫn
+/// thời gian encode/decode phía SCK.
+///
+/// Gọi `on_result(id, result)` NGAY khi từng cửa sổ chụp xong (thứ tự hoàn
+/// thành thực tế, không phải thứ tự trong `ids`) — để caller (xem
+/// `capture::window::capture_thumbs_streaming`) có thể bắn event cho frontend
+/// hiển thị thumbnail đó luôn, thay vì phải đợi TOÀN BỘ N cửa sổ chụp xong
+/// mới thấy gì cả.
+pub fn capture_window_thumbs(ids: &[u32], max_dim: u32, mut on_result: impl FnMut(u32, CapResult)) {
+    if ids.is_empty() {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<(u32, CapResult)>();
+    let ids_owned: Vec<u32> = ids.to_vec();
+    let n = ids_owned.len();
+
+    let outer = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
+        if content.is_null() {
+            let msg = format!("Không lấy được nội dung chia sẻ: {}", unsafe { err_msg(err) });
+            for id in &ids_owned {
+                let _ = tx.send((*id, Err(msg.clone())));
+            }
+            return;
+        }
+        let content: &SCShareableContent = unsafe { &*content };
+        let windows = unsafe { content.windows() };
+
+        for &id in &ids_owned {
+            let mut target = None;
+            for w in windows.iter() {
+                if unsafe { w.windowID() } == id {
+                    target = Some(w);
+                    break;
+                }
+            }
+            let Some(scwin) = target else {
+                let _ = tx.send((id, Err("Không tìm thấy cửa sổ".to_string())));
+                continue;
+            };
+
+            let filter = unsafe {
+                SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &scwin)
+            };
+            let scale = unsafe { filter.pointPixelScale() } as f64;
+            let crect = unsafe { filter.contentRect() };
+            let full_w = (crect.size.width * scale).max(1.0);
+            let full_h = (crect.size.height * scale).max(1.0);
+            let ratio = (max_dim as f64 / full_w.max(full_h)).min(1.0);
+            let px_w = ((full_w * ratio).round() as usize).max(1);
+            let px_h = ((full_h * ratio).round() as usize).max(1);
+
+            let config = unsafe { SCStreamConfiguration::new() };
+            unsafe {
+                config.setWidth(px_w);
+                config.setHeight(px_h);
+                config.setShowsCursor(false);
+                config.setIgnoreShadowsSingleWindow(true);
+            }
+
+            let tx_inner = tx.clone();
+            let inner = RcBlock::new(move |img: *mut CGImage, err2: *mut NSError| {
+                let r = if img.is_null() {
+                    Err(format!("Chụp cửa sổ lỗi: {}", unsafe { err_msg(err2) }))
+                } else {
+                    unsafe { cgimage_to_rgba(img) }
+                };
+                let _ = tx_inner.send((id, r));
+            });
+            unsafe {
+                SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+                    &filter,
+                    &config,
+                    Some(&inner),
+                );
+            }
+        }
+    });
+
+    unsafe {
+        SCShareableContent::getShareableContentWithCompletionHandler(&outer);
+    }
+
+    // Chờ đủ N kết quả — timeout TỔNG (không phải mỗi cửa sổ 1 timeout riêng),
+    // dừng sớm (bỏ những cửa sổ còn lại) nếu quá hạn thay vì treo vô thời hạn.
+    for _ in 0..n {
+        match rx.recv_timeout(TIMEOUT) {
+            Ok((id, r)) => on_result(id, r),
+            Err(_) => break,
+        }
+    }
+}

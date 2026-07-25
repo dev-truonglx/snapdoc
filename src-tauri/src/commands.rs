@@ -4,7 +4,7 @@ use crate::{
 };
 use crate::capture::window::WindowInfo;
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 /// Đọc (không xoá) ảnh đang chờ — dùng cho overlay & thumbnail.
 #[tauri::command]
@@ -157,6 +157,33 @@ pub async fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, Stri
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Liệt kê cửa sổ (metadata, KHÔNG kèm ảnh) cho dialog "Chọn cửa sổ" dạng
+/// lưới — trả về ngay lập tức để dialog vẽ khung lưới + spinner từng ô trước,
+/// gọi `capture_window_thumbs_stream` riêng để lấy ảnh thumbnail sau.
+#[tauri::command]
+pub async fn list_window_metas() -> Result<Vec<capture::window::WindowMetaInfo>, String> {
+    tauri::async_runtime::spawn_blocking(capture::window::list_metas)
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Chụp thumbnail cho từng cửa sổ trong `ids`, bắn event `"window-thumb-ready"`
+/// (payload `(id, thumb | null)`) NGAY khi từng cửa sổ xong — cửa sổ nào chụp
+/// xong trước hiển thị trước ở frontend, không phải đợi cả danh sách xong mới
+/// thấy gì (xem `capture::window::capture_thumbs_streaming`). async +
+/// spawn_blocking vì chụp ảnh (ScreenCaptureKit/xcap) tốn thời gian, không
+/// được block Tokio event loop.
+#[tauri::command]
+pub async fn capture_window_thumbs_stream(app: AppHandle, ids: Vec<u32>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        capture::window::capture_thumbs_streaming(&ids, |id, thumb| {
+            let _ = app.emit("window-thumb-ready", (id, thumb));
+        });
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))
 }
 
 #[tauri::command]

@@ -13,6 +13,7 @@ import HistoryWindow from "./routes/history/HistoryWindow";
 import RecordingIndicator from "./routes/recording-indicator/RecordingIndicator";
 import RecordStopControl from "./routes/record-stop-control/RecordStopControl";
 import RecordBorder from "./routes/record-border/RecordBorder";
+import WindowPickerDialog from "./routes/window-picker/WindowPickerDialog";
 
 const which = new URLSearchParams(window.location.search).get("win") ?? "capture-bar";
 
@@ -28,6 +29,7 @@ const routes: Record<string, React.ComponentType> = {
   "recording-indicator": RecordingIndicator,
   "record-stop-control": RecordStopControl,
   "record-border": RecordBorder,
+  "window-picker": WindowPickerDialog,
 };
 
 const Route = routes[which] ?? CaptureBar;

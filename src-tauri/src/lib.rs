@@ -83,6 +83,8 @@ pub fn run() {
             commands::finalize_window,
             commands::finalize_monitor,
             commands::list_windows,
+            commands::list_window_metas,
+            commands::capture_window_thumbs_stream,
             commands::cancel_overlay,
             commands::keep_capture_focus,
             commands::copy_image,
@@ -384,6 +386,17 @@ pub fn run() {
                 // hoặc ẩn taskbar icon (Windows).
                 if label.starts_with("editor") || label == "settings" || label == "capture-bar" || label == "history" {
                     windows::on_editor_closed(_window.app_handle());
+                }
+                // Dialog "Chọn cửa sổ" (window-picker) là cửa sổ CÓ VIỀN/nút
+                // đóng thật (khác overlay cũ) — user có thể bấm nút đóng đỏ
+                // (macOS)/X (Windows) thay vì bấm "Huỷ" trong dialog. Phải
+                // dọn `pending_record` ở đây, không thì phiên chụp KẾ TIẾP
+                // (không phải quay) sẽ bị hiểu nhầm thành "quay" (cờ rò rỉ từ
+                // phiên chọn cửa sổ để quay đã bị đóng dở). An toàn khi gọi dù
+                // dialog đóng qua nút "Huỷ"/Capture thành công (đã tự tắt cờ
+                // từ trước, set lại `false` ở đây là no-op).
+                if label == "window-picker" {
+                    *_window.app_handle().state::<crate::state::AppState>().pending_record.lock().unwrap() = false;
                 }
             }
         })
