@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles/global.css";
+import "./i18n/config"; // Initialize i18next
 import CaptureBar from "./routes/capture-bar/CaptureBar";
 import Overlay from "./routes/overlay/Overlay";
 import Editor from "./routes/editor/Editor";

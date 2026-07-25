@@ -5,7 +5,12 @@
 # latest.json. No GitHub Actions needed. Publish the draft afterwards to ship.
 #
 # Usage:
-#   scripts/release-all.sh v1.0.0
+#   scripts/release-all.sh v1.0.0 ["release description"]
+#
+#   The description becomes the body of the "## What's new" section in the
+#   GitHub release notes. It can also be a path to a file containing longer
+#   notes: scripts/release-all.sh v1.0.0 --notes-file CHANGELOG-v1.0.0.md
+#   If omitted, you'll be prompted for a one-line description interactively.
 #
 # Prerequisites (one-time):
 #   • scripts/setup-keys.sh          (generate updater key + write pubkey to tauri.conf.json)
@@ -22,9 +27,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RELEASES_REPO="dev-truonglx/snapdoc"
-TAG="${1:?usage: scripts/release-all.sh vX.Y.Z}"
+TAG="${1:?usage: scripts/release-all.sh vX.Y.Z [\"release description\" | --notes-file FILE]}"
 VERSION="${TAG#v}"
 KEYFILE="$HOME/.tauri/snapdoc-updater.key"
+shift || true
+
+# ── Release description (used in the GitHub release notes) ───────────────────
+if [ "${1:-}" = "--notes-file" ]; then
+  NOTES_FILE="${2:?--notes-file requires a path}"
+  [ -f "$NOTES_FILE" ] || { echo "ERROR: notes file not found: $NOTES_FILE"; exit 1; }
+  DESCRIPTION="$(cat "$NOTES_FILE")"
+elif [ -n "${1:-}" ]; then
+  DESCRIPTION="$1"
+else
+  echo "==> No release description passed — enter one now (used in the GitHub release notes)."
+  read -r -p "Description: " DESCRIPTION
+fi
+DESCRIPTION="${DESCRIPTION:-(no description provided)}"
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 command -v gh >/dev/null     || { echo "ERROR: gh not installed (brew install gh)"; exit 1; }
@@ -179,16 +198,21 @@ VERSION="$VERSION" BASE="$BASE" MAC="$MAC" MAC_SIG="$MAC_SIG" EXE="$EXE" EXE_SIG
 
 # ── 6) Create the draft release and upload everything ─────────────────────────
 echo "==> [6/6] Creating draft release + uploading assets"
-if ! gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+NOTES="## What's new
+
+$DESCRIPTION
+
+**Full Changelog**: https://github.com/${RELEASES_REPO}/commits/${TAG}"
+
+if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+  echo "    release $TAG already exists — updating its notes"
+  gh release edit "$TAG" --repo "$RELEASES_REPO" --notes "$NOTES"
+else
   gh release create "$TAG" \
     --repo "$RELEASES_REPO" \
     --draft \
     --title "SnapDoc $TAG" \
-    --notes "## What's new
-
-<!-- describe changes here before publishing -->
-
-**Full Changelog**: https://github.com/${RELEASES_REPO}/commits/${TAG}"
+    --notes "$NOTES"
 fi
 
 # Upload all artifacts. .sig files are NOT uploaded separately — the updater

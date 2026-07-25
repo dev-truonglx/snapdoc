@@ -1,29 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ipc, type Settings as S, type UpdateInfo } from "../../lib/ipc";
 
-const OUTPUTS = [
-  { id: "editor",    label: "Mở editor" },
-  { id: "clipboard", label: "Clipboard" },
-  { id: "save",      label: "Lưu file" },
-  { id: "save_copy", label: "Lưu + Copy" },
-  { id: "copy_editor", label: "Copy + Mở editor" },
-] as const;
-
-const SHORTCUT_KEYS: { key: string; label: string; hint?: string }[] = [
-  { key: "quick",       label: "Chụp nhanh",          hint: "Chọn vùng rồi chú thích ngay tại chỗ" },
-  { key: "record",      label: "Quay màn hình",       hint: "Bắt đầu/dừng quay toàn màn hình — chọn màn hình nếu máy có nhiều màn hình" },
-  { key: "captureBar",  label: "Mở thanh chụp",      hint: "Mở thanh công cụ chụp nổi" },
-  { key: "full",        label: "Chụp toàn màn hình",  hint: "Chụp ngay không cần chọn vùng" },
-  { key: "region",      label: "Chụp vùng chọn",      hint: "Kéo chọn vùng để chụp" },
-  { key: "window",      label: "Chụp cửa sổ",         hint: "Chọn cửa sổ ứng dụng" },
-  { key: "all",         label: "Chụp tất cả màn hình", hint: "Ghép ngang tất cả màn hình" },
-  { key: "captureCopy", label: "Chụp & copy nhanh",   hint: "Chụp vùng và copy vào clipboard" },
-  { key: "scroll",      label: "Chụp cuộn",          hint: "Chọn vùng rồi cuộn để ghép ảnh dài" },
-];
-
 export default function Settings() {
+  const { t, i18n } = useTranslation();
   const [s, setS] = useState<S | null>(null);
   const [perm, setPerm] = useState<boolean | null>(null);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "err">("idle");
@@ -38,6 +20,27 @@ export default function Settings() {
   const pendingRef = useRef<S | null>(null);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shortcutTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Initialize output modes and shortcuts with translations
+  const OUTPUTS = [
+    { id: "editor" as const,    label: t("outputs.editor") },
+    { id: "clipboard" as const, label: t("outputs.clipboard") },
+    { id: "save" as const,      label: t("outputs.save") },
+    { id: "save_copy" as const, label: t("outputs.save_copy") },
+    { id: "copy_editor" as const, label: t("outputs.copy_editor") },
+  ];
+
+  const SHORTCUT_KEYS: { key: string; label: string; hint?: string }[] = [
+    { key: "quick",       label: t("shortcuts.quick"),       hint: t("shortcuts.quickHint") },
+    { key: "record",      label: t("shortcuts.record"),      hint: t("shortcuts.recordHint") },
+    { key: "captureBar",  label: t("shortcuts.captureBar"),  hint: t("shortcuts.captureBarHint") },
+    { key: "full",        label: t("shortcuts.full"),        hint: t("shortcuts.fullHint") },
+    { key: "region",      label: t("shortcuts.region"),      hint: t("shortcuts.regionHint") },
+    { key: "window",      label: t("shortcuts.window"),      hint: t("shortcuts.windowHint") },
+    { key: "all",         label: t("shortcuts.all"),         hint: t("shortcuts.allHint") },
+    { key: "captureCopy", label: t("shortcuts.captureCopy"), hint: t("shortcuts.captureCopyHint") },
+    { key: "scroll",      label: t("shortcuts.scroll"),      hint: t("shortcuts.scrollHint") },
+  ];
 
   useEffect(() => {
     ipc.getSettings().then(async (loaded) => {
@@ -100,7 +103,7 @@ export default function Settings() {
     };
   }, []);
 
-  if (!s) return <div className="solid-bg" style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)" }}>Đang tải…</div>;
+  if (!s) return <div className="solid-bg" style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)" }}>{t("common.loading")}</div>;
 
   const persist = async (next: S) => {
     setSaveStatus("saving");
@@ -210,7 +213,7 @@ export default function Settings() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {updateInfo?.available && (
-            <span style={updateDot} title={`v${updateInfo.version} có sẵn`}>🆕</span>
+            <span style={updateDot} title={t("updates.updateAvailable", { version: updateInfo.version })}>🆕</span>
           )}
           <button
             style={{
@@ -220,11 +223,11 @@ export default function Settings() {
             disabled={updateStatus === "checking" || updateStatus === "installing"}
             onClick={updateReady ? () => ipc.restartApp() : (updateInfo?.available ? handleInstall : handleCheckUpdate)}
           >
-            {updateReady                           ? "↺ Khởi động lại để áp dụng" :
-             updateStatus === "checking"           ? "Đang kiểm tra…"             :
-             updateStatus === "installing"         ? "Đang cài đặt…"              :
-             updateInfo?.available                 ? `Cài v${updateInfo.version}` :
-             "Kiểm tra cập nhật"}
+            {updateReady                           ? t("updates.restart") :
+             updateStatus === "checking"           ? t("updates.checkingUpdates")             :
+             updateStatus === "installing"         ? t("updates.installing")              :
+             updateInfo?.available                 ? `${t("updates.installAvailable")}${updateInfo.version}` :
+             t("updates.checkUpdates")}
           </button>
         </div>
       </div>
@@ -234,38 +237,38 @@ export default function Settings() {
 
         {/* Update banners — nằm trong scroll area */}
         {updateStatus === "err" && (
-          <div style={errBanner}>⚠ {updateErr || "Không kiểm tra được — kiểm tra kết nối mạng"}</div>
+          <div style={errBanner}>⚠ {updateErr || t("updates.networkError")}</div>
         )}
         {updateReady && (
           <div style={restartBanner}>
-            <span>✅ Bản cập nhật đã được cài đặt. Khởi động lại để áp dụng phiên bản mới.</span>
+            <span>✅ {t("updates.updateInstalled")}</span>
             <button style={restartBannerBtn} onClick={() => ipc.restartApp()}>
-              Khởi động lại ngay
+              {t("updates.restartNow")}
             </button>
           </div>
         )}
         {!updateReady && updateStatus === "idle" && updateInfo && !updateInfo.available && (
-          <div style={successBanner}>✓ Đang dùng phiên bản mới nhất</div>
+          <div style={successBanner}>✓ {t("updates.latestVersion")}</div>
         )}
         {!updateReady && updateInfo?.available && (
           <div style={infoBanner}>
-            Có bản cập nhật: <strong>v{updateInfo.version}</strong>. Nhấn "Cài v{updateInfo.version}" để cài và khởi động lại.
+            {t("updates.availableUpdate")}<strong>v{updateInfo.version}</strong>{t("updates.available")}v{updateInfo.version}{t("updates.availableEnd")}
           </div>
         )}
 
-        {/* LƯU FILE */}
-        <Card title="LƯU FILE">
-          <Field label="Thư mục lưu mặc định">
+        {/* SAVE FILE */}
+        <Card title={t("settings.saveFile")}>
+          <Field label={t("settings.saveDirLabel")}>
             <div style={{ display: "flex", gap: 6 }}>
               <input
                 style={{ flex: 1, minWidth: 0 }}
                 value={s.saveDir}
                 onChange={(e) => update({ saveDir: e.target.value }, { debounce: true })}
               />
-              <button style={smallBtn} onClick={pickDir}>Chọn…</button>
+              <button style={smallBtn} onClick={pickDir}>{t("settings.chooseDir")}</button>
             </div>
           </Field>
-          <Field label="Hành vi mặc định sau khi chụp">
+          <Field label={t("settings.defaultBehavior")}>
             <select
               value={s.defaultOutput}
               onChange={(e) => update({ defaultOutput: e.target.value as S["defaultOutput"] })}
@@ -273,40 +276,31 @@ export default function Settings() {
               {OUTPUTS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
             </select>
           </Field>
-          {/* <Field label="Hẹn giờ trước khi chụp">
-            <select
-              value={s.timerSeconds}
-              onChange={(e) => update({ timerSeconds: Number(e.target.value) })}
-            >
-              {[0, 3, 5].map((t) => <option key={t} value={t}>{t === 0 ? "Không hẹn giờ" : `${t} giây`}</option>)}
-            </select>
-          </Field> */}
         </Card>
 
-        {/* QUAY MÀN HÌNH */}
-        <Card title="QUAY MÀN HÌNH">
-          <Field label="Ghi âm khi quay">
+        {/* SCREEN RECORDING */}
+        <Card title={t("settings.recording")}>
+          <Field label={t("settings.audioLabel")}>
             <select
               value={s.recordAudioSource ?? "off"}
               onChange={(e) => update({ recordAudioSource: e.target.value as S["recordAudioSource"] })}
             >
-              <option value="off">Tắt (chỉ hình, không tiếng)</option>
-              <option value="mic">Microphone</option>
-              <option value="system">Âm thanh hệ thống</option>
+              <option value="off">{t("settings.audioOff")}</option>
+              <option value="mic">{t("settings.audioMic")}</option>
+              <option value="system">{t("settings.audioSystem")}</option>
             </select>
           </Field>
           <p style={hint}>
-            Chỉ chọn được 1 nguồn tại 1 thời điểm — mic cần cấp quyền Microphone,
-            âm thanh hệ thống dùng chung quyền Screen Recording đã cấp.
+            {t("settings.audioHint")}
           </p>
         </Card>
 
-        {/* KHỞI ĐỘNG */}
-        <Card title="KHỞI ĐỘNG">
+        {/* STARTUP */}
+        <Card title={t("settings.startup")}>
           <div style={toggleRow}>
             <div>
-              <div style={toggleLabel}>Khởi động cùng hệ thống</div>
-              <div style={toggleDesc}>SnapDoc tự chạy nền khi bật máy</div>
+              <div style={toggleLabel}>{t("settings.launchAtLogin")}</div>
+              <div style={toggleDesc}>{t("settings.launchAtLoginDesc")}</div>
             </div>
             <Toggle
               checked={s.launchAtLogin ?? true}
@@ -318,15 +312,31 @@ export default function Settings() {
           </div>
         </Card>
 
-        {/* PHÍM TẮT */}
-        <Card title="PHÍM TẮT TOÀN CỤC">
+        {/* LANGUAGE */}
+        <Card title="LANGUAGE">
+          <Field label="Language / Ngôn ngữ">
+            <select
+              value={i18n.language}
+              onChange={(e) => {
+                i18n.changeLanguage(e.target.value);
+                localStorage.setItem("app-language", e.target.value);
+              }}
+            >
+              <option value="en">English</option>
+              <option value="vi">Tiếng Việt</option>
+            </select>
+          </Field>
+        </Card>
+
+        {/* GLOBAL SHORTCUTS */}
+        <Card title={t("settings.shortcuts")}>
           {hotkeyWarning && (
             <div style={hotkeyWarningBox}>
-              ⚠ {hotkeyWarning} — hãy đổi sang tổ hợp khác bên dưới rồi lưu lại.
+              ⚠ {hotkeyWarning} — {t("settings.hotkeyWarning")}
             </div>
           )}
           <p style={hint}>
-            Nhấp vào ô bên phải và nhấn tổ hợp phím mong muốn. Nhấn <kbd style={kbdStyle}>Esc</kbd> để hủy, <kbd style={kbdStyle}>⌫</kbd> để xóa.
+            {t("settings.shortcutHint")}
           </p>
           {SHORTCUT_KEYS.map(({ key, label: lbl, hint: h }) => (
             <ShortcutRow
@@ -337,16 +347,16 @@ export default function Settings() {
               onChange={(v) => update({ shortcuts: { ...s.shortcuts, [key]: v } }, { shortcuts: true })}
             />
           ))}
-          {shortcutMsg === "ok" && <div style={successInline}>✓ Phím tắt đã cập nhật</div>}
-          {shortcutMsg === "err" && <div style={errInline}>✕ Lỗi — kiểm tra xung đột phím tắt</div>}
+          {shortcutMsg === "ok" && <div style={successInline}>✓ {t("settings.shortcutUpdated")}</div>}
+          {shortcutMsg === "err" && <div style={errInline}>✕ {t("settings.shortcutError")}</div>}
         </Card>
 
-        {/* QUYỀN HỆ THỐNG */}
-        <Card title="QUYỀN HỆ THỐNG">
+        {/* SYSTEM PERMISSIONS */}
+        <Card title={t("settings.permissions")}>
           <div style={permRow}>
             <div>
-              <div style={permLabel}>Screen Recording</div>
-              <div style={permDesc}>Cần thiết để chụp màn hình</div>
+              <div style={permLabel}>{t("settings.screenRecording")}</div>
+              <div style={permDesc}>{t("settings.screenRecordingDesc")}</div>
             </div>
             <PermBadge granted={perm} />
           </div>
@@ -386,6 +396,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function ShortcutRow({ label, hint, value, onChange }: {
   label: string; hint?: string; value: string; onChange: (v: string) => void;
 }) {
+  const { t } = useTranslation();
   const [recording, setRecording] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -493,20 +504,20 @@ function ShortcutRow({ label, hint, value, onChange }: {
         }}
       >
         {recording ? (
-          <span style={{ color: "var(--accent)", fontSize: 11 }}>Nhấn tổ hợp phím…</span>
+          <span style={{ color: "var(--accent)", fontSize: 11 }}>{t("settings.recordingText")}</span>
         ) : value ? (
           <span style={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap", justifyContent: "center" }}>
             {display(value)}
           </span>
         ) : (
-          <span style={{ color: "var(--text-dim)", fontSize: 11 }}>Nhấp để đặt phím tắt</span>
+          <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("settings.clickToSet")}</span>
         )}
       </div>
 
       {value && !recording && (
         <button
           style={clearBtn}
-          title="Xóa phím tắt"
+          title={t("settings.clearShortcut")}
           onMouseDown={async (e) => { e.preventDefault(); onChange(""); }}
         >×</button>
       )}
@@ -515,18 +526,20 @@ function ShortcutRow({ label, hint, value, onChange }: {
 }
 
 function PermBadge({ granted }: { granted: boolean | null }) {
-  if (granted === null) return <span style={permPending}>Đang kiểm tra…</span>;
+  const { t } = useTranslation();
+  if (granted === null) return <span style={permPending}>{t("settings.checkPermissions")}</span>;
   return granted
-    ? <span style={permGranted}>✓ Đã cấp</span>
-    : <span style={permDenied}>✕ Chưa cấp</span>;
+    ? <span style={permGranted}>✓ {t("settings.permGranted")}</span>
+    : <span style={permDenied}>✕ {t("settings.permDenied")}</span>;
 }
 
 function SaveStatus({ status }: { status: "idle" | "saving" | "saved" | "err" }) {
-  if (status === "idle") return <span style={footerText}>Thay đổi được lưu tự động.</span>;
+  const { t } = useTranslation();
+  if (status === "idle") return <span style={footerText}>{t("settings.autoSave")}</span>;
   const map = {
-    saving: { text: "Đang lưu…",  color: "var(--text-dim)" },
-    saved:  { text: "✓ Đã lưu",   color: "#22c55e" },
-    err:    { text: "✕ Lỗi lưu",  color: "var(--danger)" },
+    saving: { text: t("settings.saving"),  color: "var(--text-dim)" },
+    saved:  { text: t("settings.saved"),   color: "#22c55e" },
+    err:    { text: t("settings.saveFailed"),  color: "var(--danger)" },
   } as const;
   return <span style={{ ...footerText, color: map[status].color }}>{map[status].text}</span>;
 }
