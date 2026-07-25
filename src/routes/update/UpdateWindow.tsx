@@ -44,7 +44,7 @@ export default function UpdateWindow() {
   if (!info) {
     return (
       <div style={container}>
-        <p style={{ color: "var(--text-dim)", fontSize: 13 }}>Đang tải…</p>
+        <p style={{ color: "var(--text-dim)", fontSize: 13 }}>Loading…</p>
       </div>
     );
   }
@@ -55,13 +55,13 @@ export default function UpdateWindow() {
         <img src="/app-icon.png" width={64} height={64} style={{ borderRadius: 14 }} alt="SnapDoc" />
       </div>
 
-      <h2 style={title}>Có bản cập nhật mới</h2>
+      <h2 style={title}>New update available</h2>
       <p style={versionText}>
         <strong>v{info.version}</strong>
-        <span style={{ color: "var(--text-dim)" }}> (hiện tại: v{info.currentVersion})</span>
+        <span style={{ color: "var(--text-dim)" }}> (current: v{info.currentVersion})</span>
       </p>
       <p style={desc}>
-        Cài đặt ngay để nhận tính năng mới và bản vá bảo mật. App sẽ tự khởi động lại.
+        Install now to get new features and security fixes. The app will restart automatically.
       </p>
 
       {status === "err" && err && (
@@ -74,7 +74,7 @@ export default function UpdateWindow() {
           disabled={status === "installing"}
           onClick={handleInstall}
         >
-          {status === "installing" ? "Đang cài đặt…" : "Cài đặt và khởi động lại"}
+          {status === "installing" ? "Installing…" : "Install and restart"}
         </button>
         <button
           style={{ ...actionBtn, ...secondaryBtn }}

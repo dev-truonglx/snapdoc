@@ -4,12 +4,12 @@ import type { HistoryItem } from "../../lib/ipc";
 import { fmtTime, fmtDuration } from "./formatUtils";
 
 export const MODE_LABEL: Record<string, string> = {
-  region: "Vùng chọn",
-  window: "Cửa sổ",
-  full: "Toàn màn hình",
-  all: "Mọi màn hình",
-  scroll: "Cuộn dài",
-  quick: "Nhanh",
+  region: "Region",
+  window: "Window",
+  full: "Full screen",
+  all: "All screens",
+  scroll: "Scrolling",
+  quick: "Quick",
 };
 
 interface Props {

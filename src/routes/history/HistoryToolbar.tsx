@@ -1,25 +1,28 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
 import { useHistory } from "./useHistoryStore";
 import { dayStartMs, msToDayStr, ONE_DAY_MS } from "./dateUtils";
 
-const MODES = [
-  { id: "", label: "Tất cả loại" },
-  { id: "region", label: "Vùng chọn" },
-  { id: "window", label: "Cửa sổ" },
-  { id: "full", label: "Toàn màn hình" },
-  { id: "all", label: "Mọi màn hình" },
-  { id: "scroll", label: "Cuộn dài" },
-  { id: "quick", label: "Chụp nhanh" },
-] as const;
-
-const MEDIA_TYPES = [
-  { id: "", label: "Tất cả nội dung" },
-  { id: "image", label: "Ảnh" },
-  { id: "video", label: "Video" },
-] as const;
-
 export default function HistoryToolbar() {
+  const { t } = useTranslation();
+
+  const MODES = [
+    { id: "", label: t("capture.all") },
+    { id: "region", label: t("capture.region") },
+    { id: "window", label: t("capture.window") },
+    { id: "full", label: t("capture.full") },
+    { id: "all", label: t("capture.all") },
+    { id: "scroll", label: t("capture.scroll") },
+    { id: "quick", label: t("shortcuts.quick") },
+  ] as const;
+
+  const MEDIA_TYPES = [
+    { id: "", label: "All types" },
+    { id: "image", label: "Images" },
+    { id: "video", label: "Videos" },
+  ] as const;
+
   const filter = useHistory((s) => s.filter);
   const setFilter = useHistory((s) => s.setFilter);
   const reload = useHistory((s) => s.reload);
@@ -36,7 +39,7 @@ export default function HistoryToolbar() {
   };
 
   const onEmptyTrash = async () => {
-    if (!confirm("Xoá vĩnh viễn toàn bộ mục trong Trash? Không thể hoàn tác.")) return;
+    if (!confirm("Permanently delete all items in Trash? Cannot be undone.")) return;
     setEmptying(true);
     try {
       await ipc.emptyTrash();
@@ -74,14 +77,14 @@ export default function HistoryToolbar() {
         type="date"
         value={filter.from != null ? msToDayStr(filter.from) : ""}
         onChange={(e) => onFromChange(e.target.value)}
-        title="Từ ngày"
+        title="From date"
       />
       <span style={{ color: "var(--text-dim)" }}>—</span>
       <input
         type="date"
         value={filter.to != null ? msToDayStr(filter.to - ONE_DAY_MS) : ""}
         onChange={(e) => onToChange(e.target.value)}
-        title="Đến ngày"
+        title="To date"
       />
 
       <div style={{ flex: 1 }} />
@@ -89,7 +92,7 @@ export default function HistoryToolbar() {
       <div style={viewSwitch}>
         <button
           style={viewIconBtn(viewMode === "grid")}
-          title="Xem dạng lưới"
+          title="Grid view"
           onClick={() => setViewMode("grid")}
         >
           <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor">
@@ -101,7 +104,7 @@ export default function HistoryToolbar() {
         </button>
         <button
           style={viewIconBtn(viewMode === "list")}
-          title="Xem dạng danh sách"
+          title="List view"
           onClick={() => setViewMode("list")}
         >
           <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor">

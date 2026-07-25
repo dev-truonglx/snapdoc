@@ -321,7 +321,7 @@ export default function Editor() {
       };
       img.src = dataUrl;
     } catch (e) {
-      flash(`Lỗi mở file: ${e}`);
+      flash(`Error opening file: ${e}`);
     }
   };
 
