@@ -797,6 +797,16 @@ pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
     if take_pending_record(app) {
         windows::close_overlays(app);
         clear_frozen_screens(app);
+        // Chờ WM_CLOSE của dialog "window-picker" được main thread xử lý
+        // trước khi tạo/thao tác thêm cửa sổ khác (recording indicator, record
+        // border, focus...) — cùng lý do + cùng thời gian đã áp dụng ở nhánh
+        // chụp ảnh bên dưới (`finalize_window` fallback). Thiếu bước này gây
+        // crash "null pointer dereference" trong WebView2 (wry) trên Windows:
+        // dialog window-picker là cửa sổ CÓ VIỀN thật (khác overlay cũ vốn
+        // không gặp vấn đề này), teardown WebView2 của nó cần thời gian xử lý
+        // xong trước khi thao tác cửa sổ tiếp theo.
+        #[cfg(not(target_os = "macos"))]
+        std::thread::sleep(std::time::Duration::from_millis(200));
         windows::restore_regular_activation(app);
         // Đưa cửa sổ sắp quay lên trước — nếu đang ẩn phía sau app khác, user
         // sẽ thấy nó nổi lên ngay thay vì vẫn chìm phía sau suốt phiên quay

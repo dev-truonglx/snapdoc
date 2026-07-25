@@ -32,7 +32,7 @@
 // Homebrew...) thì chỉ log cảnh báo rồi thoát BÌNH THƯỜNG — nếu binary vẫn
 // thật sự thiếu, chính Tauri sẽ tự báo lỗi rõ ràng ở bước build/bundle như cũ.
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,13 +94,52 @@ async function downloadFile(url, dest) {
   execFileSync("curl", ["-L", "--fail", "--silent", "--show-error", "--output", dest, url]);
 }
 
-// `tar` trên Windows (bsdtar, có sẵn từ 10 1803+) và macOS (cũng bsdtar) tự
-// nhận diện và giải nén được cả .zip — nhưng `tar` mặc định trên Debian/Ubuntu
-// (container Linux cross-build) là GNU tar, KHÔNG hỗ trợ .zip, cần `unzip`
-// riêng (đã thêm vào scripts/win-cross.Dockerfile).
+// Kiểm tra chữ ký ZIP ("PK") ngay sau khi tải, TRƯỚC khi đưa cho tar/unzip —
+// nếu mạng (proxy công ty, firewall chặn GitHub...) trả về trang HTML lỗi
+// hoặc nội dung bị cắt cụt thay vì file zip thật, HTTP status vẫn có thể là
+// 200 nên downloadFile() không phát hiện được; để lọt xuống tar sẽ chỉ báo
+// lỗi mơ hồ "This does not look like a tar archive".
+function assertLooksLikeZip(zipPath, url) {
+  const fd = openSync(zipPath, "r");
+  const header = Buffer.alloc(4);
+  let bytesRead = 0;
+  try {
+    bytesRead = readSync(fd, header, 0, 4, 0);
+  } finally {
+    closeSync(fd);
+  }
+  const isZip = bytesRead >= 2 && header[0] === 0x50 && header[1] === 0x4b; // "PK"
+  if (!isZip) {
+    const size = statSync(zipPath).size;
+    throw new Error(
+      `File tải về từ ${url} không phải zip hợp lệ (kích thước ${size} byte, ` +
+        `4 byte đầu: ${header.subarray(0, bytesRead).toString("hex") || "rỗng"}). ` +
+        `Có thể mạng/proxy/firewall đang chặn hoặc chuyển hướng GitHub — thử tải thủ công URL trên bằng trình duyệt để kiểm tra.`,
+    );
+  }
+}
+
+// `tar` mặc định trên Debian/Ubuntu (container Linux cross-build) là GNU tar,
+// KHÔNG hỗ trợ .zip, cần `unzip` riêng (đã thêm vào scripts/win-cross.Dockerfile).
+//
+// Windows: CỐ TÌNH KHÔNG dùng `tar` (bsdtar) nữa — dù bsdtar có sẵn từ
+// Windows 10 1803+ và thường tự nhận diện được .zip, nhưng bản kèm theo một
+// số máy Windows lại parse sai path ổ đĩa dạng "C:\..." (hiểu nhầm thành cú
+// pháp remote-host cổ điển "host:file" → lỗi "Cannot connect to C: resolve
+// failed") hoặc không nhận diện được định dạng zip dù file tải về hợp lệ
+// (lỗi "This does not look like a tar archive") — không ổn định giữa các
+// máy. PowerShell `Expand-Archive` là cmdlet gốc, có sẵn từ Windows 10 trở
+// lên, xử lý zip nhất quán hơn hẳn.
 function extractZip(zipPath, destDir) {
   if (process.platform === "linux") {
     execFileSync("unzip", ["-o", "-q", zipPath, "-d", destDir]);
+  } else if (process.platform === "win32") {
+    execFileSync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${destDir}' -Force`,
+    ]);
   } else {
     execFileSync("tar", ["-xf", zipPath, "-C", destDir]);
   }
@@ -114,6 +153,7 @@ async function fetchWindows(dest, triple) {
   try {
     const zipPath = join(tmp, "ffmpeg.zip");
     await downloadFile(url, zipPath);
+    assertLooksLikeZip(zipPath, url);
     extractZip(zipPath, tmp);
     const found = findFileRecursive(tmp, "ffmpeg.exe");
     if (!found) throw new Error("Không tìm thấy ffmpeg.exe sau khi giải nén");
@@ -140,6 +180,7 @@ async function fetchMacArmViaOsxExperts(dest) {
   try {
     const zipPath = join(tmp, "ffmpeg.zip");
     await downloadFile(url, zipPath);
+    assertLooksLikeZip(zipPath, url);
     execFileSync("tar", ["-xf", zipPath, "-C", tmp]);
     const found = findFileRecursive(tmp, "ffmpeg");
     if (!found) throw new Error("Không tìm thấy binary ffmpeg sau khi giải nén");
@@ -170,6 +211,7 @@ async function fetchMacIntelViaEvermeet(dest) {
   try {
     const zipPath = join(tmp, "ffmpeg.zip");
     await downloadFile(url, zipPath);
+    assertLooksLikeZip(zipPath, url);
     execFileSync("tar", ["-xf", zipPath, "-C", tmp]);
     const found = findFileRecursive(tmp, "ffmpeg");
     if (!found) throw new Error("Không tìm thấy binary ffmpeg sau khi giải nén");
