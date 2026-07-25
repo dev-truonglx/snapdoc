@@ -1,6 +1,6 @@
 use crate::{
     capture, clipboard, flow, permissions, state::AppState, state::PendingCapture, state::PendingVideo,
-    storage, windows,
+    storage, tray, windows,
 };
 use crate::capture::window::WindowInfo;
 use serde_json::Value;
@@ -457,6 +457,9 @@ pub fn set_settings(app: AppHandle, value: Value) -> Result<(), String> {
     // CaptureBar cần biết khi Settings đổi defaultOutput, và ngược lại.
     use tauri::Emitter;
     let _ = app.emit("settings-changed", &value);
+    // Rebuild tray menu — rẻ, và đảm bảo đổi "language" phản ánh ngay trên
+    // menu tray (chỉ đọc lại từ settings.json, không phụ thuộc field nào đổi).
+    tray::rebuild_menu(&app);
     Ok(())
 }
 

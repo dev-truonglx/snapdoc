@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
 
 /**
@@ -18,6 +19,7 @@ import { ipc } from "../../lib/ipc";
  * nút đã hiện sẵn "Đang dừng…", bấm không có tác dụng.
  */
 export default function RecordStopControl() {
+  const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -63,7 +65,7 @@ export default function RecordStopControl() {
           whiteSpace: "nowrap",
         }}
       >
-        {busy ? "Đang dừng…" : "■ Dừng quay"}
+        {busy ? t("recordStop.stopping") : t("recordStop.stopRecording")}
       </button>
     </div>
   );

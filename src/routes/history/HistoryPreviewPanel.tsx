@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
 import { useHistory } from "./useHistoryStore";
 import { MODE_LABEL } from "./HistoryItemCard";
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
+  const { t } = useTranslation();
   const items = useHistory((s) => s.items);
   const selectedId = useHistory((s) => s.selectedId);
   const filter = useHistory((s) => s.filter);
@@ -27,7 +29,7 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
   }, [item?.id]);
 
   if (!item) {
-    return <div style={{ ...panel, alignItems: "center", justifyContent: "center", color: "var(--text-dim)" }}>Chọn một ảnh để xem chi tiết</div>;
+    return <div style={{ ...panel, alignItems: "center", justifyContent: "center", color: "var(--text-dim)" }}>{t("history.selectItem")}</div>;
   }
 
   const isTrashed = item.deletedAt != null;
@@ -67,7 +69,7 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
   };
 
   const doPermanentDelete = async () => {
-    if (!confirm("Xoá vĩnh viễn ảnh này? Không thể hoàn tác.")) return;
+    if (!confirm(t("history.permanentDeleteConfirm"))) return;
     setBusy(true);
     try {
       await ipc.permanentlyDeleteHistoryItem(item.id);
@@ -111,35 +113,35 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
               onKeyDown={(e) => e.key === "Enter" && doRename()}
               style={{ flex: 1 }}
             />
-            <button onClick={doRename} disabled={busy}>Lưu</button>
-            <button onClick={() => setRenaming(false)}>Huỷ</button>
+            <button onClick={doRename} disabled={busy}>{t("history.save")}</button>
+            <button onClick={() => setRenaming(false)}>{t("history.cancel")}</button>
           </div>
         ) : (
-          <div style={titleRow} onClick={() => setRenaming(true)} title="Bấm để đổi tên">
-            {item.title || "(Không tên)"}
+          <div style={titleRow} onClick={() => setRenaming(true)} title={t("history.renameTooltip")}>
+            {item.title || t("history.unnamed")}
           </div>
         )}
 
-        <Row label="Chụp lúc" value={fmtDateTime(item.createdAt)} />
-        <Row label="Kích thước ảnh" value={`${item.width} × ${item.height}px${item.scaleFactor > 1 ? ` (${item.scaleFactor}×)` : ""}`} />
-        {isVideo && item.durationMs != null && <Row label="Thời lượng" value={fmtDuration(item.durationMs)} />}
-        <Row label="Dung lượng" value={fmtSize(item.fileSize)} />
-        <Row label="Loại capture" value={MODE_LABEL[item.captureMode] ?? item.captureMode} />
-        {item.isEdited && <Row label="Trạng thái" value="Đã chỉnh sửa" />}
-        {isTrashed && <Row label="Trạng thái" value="Trong Trash" />}
+        <Row label={t("history.capturedAt")} value={fmtDateTime(item.createdAt)} />
+        <Row label={t("history.imageSize")} value={`${item.width} × ${item.height}px${item.scaleFactor > 1 ? ` (${item.scaleFactor}×)` : ""}`} />
+        {isVideo && item.durationMs != null && <Row label={t("history.duration")} value={fmtDuration(item.durationMs)} />}
+        <Row label={t("history.fileSize")} value={fmtSize(item.fileSize)} />
+        <Row label={t("history.captureType")} value={MODE_LABEL[item.captureMode] ?? item.captureMode} />
+        {item.isEdited && <Row label={t("history.status")} value={t("history.edited")} />}
+        {isTrashed && <Row label={t("history.status")} value={t("history.inTrash")} />}
       </div>
 
       <div style={actions}>
         {!isTrashed ? (
           <>
-            <button style={primaryBtn} disabled={busy} onClick={() => onOpenEditor(item.id)}>Mở Editor</button>
-            <button style={secondaryBtn} disabled={busy} onClick={doReveal}>Hiện trong Finder/Explorer</button>
-            <button style={dangerBtn} disabled={busy} onClick={doDelete}>Xoá (chuyển vào Trash)</button>
+            <button style={primaryBtn} disabled={busy} onClick={() => onOpenEditor(item.id)}>{t("history.openEditor")}</button>
+            <button style={secondaryBtn} disabled={busy} onClick={doReveal}>{t("history.showInFinder")}</button>
+            <button style={dangerBtn} disabled={busy} onClick={doDelete}>{t("history.moveToTrash")}</button>
           </>
         ) : (
           <>
-            <button style={primaryBtn} disabled={busy} onClick={doRestore}>Khôi phục</button>
-            <button style={dangerBtn} disabled={busy} onClick={doPermanentDelete}>Xoá vĩnh viễn</button>
+            <button style={primaryBtn} disabled={busy} onClick={doRestore}>{t("history.restore")}</button>
+            <button style={dangerBtn} disabled={busy} onClick={doPermanentDelete}>{t("history.permanentDelete")}</button>
           </>
         )}
       </div>

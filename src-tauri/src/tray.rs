@@ -1,15 +1,56 @@
-use crate::{flow, windows};
+use crate::{flow, storage, windows};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter,
+    AppHandle, Emitter, Manager,
 };
 
 /// Track whether the "restart to update" item should be shown in tray menu.
 static RESTART_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Đọc "language" hiện tại từ settings.json ("vi" hoặc "en") — tray menu
+/// (native, Rust-side) không đọc được localStorage của webview nên phải tự
+/// tra lại field này (Settings.tsx ghi qua `set_settings` mỗi lần user đổi
+/// ngôn ngữ, xem `commands::set_settings` gọi `rebuild_menu` ngay sau đó).
+fn current_lang(app: &AppHandle) -> String {
+    let dir = app.path().app_config_dir().unwrap_or_default();
+    storage::settings::load(&dir)
+        .get("language")
+        .and_then(|v| v.as_str())
+        .unwrap_or("vi")
+        .to_string()
+}
+
+/// Bảng dịch tối giản cho các chuỗi hiển thị trên tray menu (native — không
+/// dùng chung được với i18next bên webview). Chỉ 2 ngôn ngữ, danh sách cố
+/// định nên tra thẳng bằng match thay vì kéo thêm dependency i18n cho Rust.
+fn tr<'a>(lang: &str, key: &'a str) -> &'a str {
+    let vi = lang != "en";
+    match key {
+        "quickCapture" => if vi { "Chụp nhanh" } else { "Quick capture" },
+        "captureAll" => if vi { "Chụp tất cả màn hình" } else { "Capture all screens" },
+        "captureFull" => if vi { "Chụp toàn màn hình" } else { "Capture full screen" },
+        "captureRegion" => if vi { "Chụp vùng chọn" } else { "Capture region" },
+        "captureWindow" => if vi { "Chụp cửa sổ" } else { "Capture window" },
+        "captureScroll" => if vi { "Chụp cuộn" } else { "Capture scrolling" },
+        "openCaptureBar" => if vi { "Mở thanh chụp…" } else { "Open capture bar…" },
+        "openHistory" => if vi { "Thư viện (History)…" } else { "Library (History)…" },
+        "openSettings" => if vi { "Cài đặt…" } else { "Settings…" },
+        "quitApp" => if vi { "Thoát SnapDoc" } else { "Quit SnapDoc" },
+        "recordScreen" => if vi { "Quay màn hình" } else { "Record screen" },
+        "recordFull" => if vi { "Toàn màn hình" } else { "Full screen" },
+        "recordRegion" => if vi { "Vùng chọn" } else { "Region" },
+        "recordWindow" => if vi { "Cửa sổ" } else { "Window" },
+        "restartUpdate" => if vi { "↺ Khởi động lại để cập nhật" } else { "↺ Restart to update" },
+        "recordingTooltip" => if vi { "Đang quay màn hình — bấm để dừng" } else { "Recording — click to stop" },
+        "updateDownloading" => if vi { "SnapDoc — 🔄 Đang tải bản cập nhật…" } else { "SnapDoc — 🔄 Downloading update…" },
+        "updateReady" => if vi { "SnapDoc — ✅ Đã cập nhật! Khởi động lại để áp dụng" } else { "SnapDoc — ✅ Updated! Restart to apply" },
+        _ => key,
+    }
+}
 
 /// Icon tray template (16×16 và 32×32 PNG đen/trắng cho macOS menu bar).
 const TRAY_ICON: &[u8] = include_bytes!("../icons/tray.png");
@@ -84,6 +125,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 }
 
 fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<tauri::Wry>> {
+    let lang = current_lang(app);
     let shortcuts = crate::hotkey::shortcuts_from_settings(app);
     // Chỉ hiển thị accelerator nếu combo không rỗng
     let sc = |action: &str| -> Option<String> {
@@ -93,16 +135,16 @@ fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<t
             .and_then(|(_, c)| if c.is_empty() { None } else { Some(c.clone()) })
     };
 
-    let quick  = MenuItem::with_id(app, "quick",  "Chụp nhanh",           true, sc("quick").as_deref())?;
-    let all    = MenuItem::with_id(app, "all",    "Chụp tất cả màn hình", true, sc("all").as_deref())?;
-    let full   = MenuItem::with_id(app, "full",   "Chụp toàn màn hình",   true, sc("full").as_deref())?;
-    let region = MenuItem::with_id(app, "region", "Chụp vùng chọn",       true, sc("region").as_deref())?;
-    let window = MenuItem::with_id(app, "window", "Chụp cửa sổ",          true, sc("window").as_deref())?;
-    let scroll = MenuItem::with_id(app, "scroll", "Chụp cuộn",            true, sc("scroll").as_deref())?;
-    let bar    = MenuItem::with_id(app, "bar",    "Mở thanh chụp…",       true, sc("bar").as_deref())?;
-    let history = MenuItem::with_id(app, "history", "Thư viện (History)…", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "Cài đặt…",         true, None::<&str>)?;
-    let quit   = MenuItem::with_id(app, "quit",   "Thoát SnapDoc",         true, None::<&str>)?;
+    let quick  = MenuItem::with_id(app, "quick",  tr(&lang, "quickCapture"),   true, sc("quick").as_deref())?;
+    let all    = MenuItem::with_id(app, "all",    tr(&lang, "captureAll"),     true, sc("all").as_deref())?;
+    let full   = MenuItem::with_id(app, "full",   tr(&lang, "captureFull"),    true, sc("full").as_deref())?;
+    let region = MenuItem::with_id(app, "region", tr(&lang, "captureRegion"),  true, sc("region").as_deref())?;
+    let window = MenuItem::with_id(app, "window", tr(&lang, "captureWindow"), true, sc("window").as_deref())?;
+    let scroll = MenuItem::with_id(app, "scroll", tr(&lang, "captureScroll"), true, sc("scroll").as_deref())?;
+    let bar    = MenuItem::with_id(app, "bar",    tr(&lang, "openCaptureBar"), true, sc("bar").as_deref())?;
+    let history = MenuItem::with_id(app, "history", tr(&lang, "openHistory"), true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", tr(&lang, "openSettings"), true, None::<&str>)?;
+    let quit   = MenuItem::with_id(app, "quit",   tr(&lang, "quitApp"),        true, None::<&str>)?;
     let sep1   = PredefinedMenuItem::separator(app)?;
     let sep2   = PredefinedMenuItem::separator(app)?;
 
@@ -110,18 +152,18 @@ fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<t
     // (giống hệt 3 lựa chọn của nút "Quay" trong CaptureBar). Không có
     // accelerator riêng cho từng lựa chọn — phím tắt "Quay màn hình" chung
     // (xem `hotkey::run_action`) vẫn hoạt động song song, độc lập với menu này.
-    let record_full   = MenuItem::with_id(app, "record_full",   "Toàn màn hình", true, None::<&str>)?;
-    let record_region = MenuItem::with_id(app, "record_region", "Vùng chọn",     true, None::<&str>)?;
-    let record_window = MenuItem::with_id(app, "record_window", "Cửa sổ",        true, None::<&str>)?;
+    let record_full   = MenuItem::with_id(app, "record_full",   tr(&lang, "recordFull"),   true, None::<&str>)?;
+    let record_region = MenuItem::with_id(app, "record_region", tr(&lang, "recordRegion"), true, None::<&str>)?;
+    let record_window = MenuItem::with_id(app, "record_window", tr(&lang, "recordWindow"), true, None::<&str>)?;
     let record_menu = Submenu::with_items(
         app,
-        "Quay màn hình",
+        tr(&lang, "recordScreen"),
         true,
         &[&record_full, &record_region, &record_window],
     )?;
 
     if show_restart {
-        let restart = MenuItem::with_id(app, "restart_update", "↺ Khởi động lại để cập nhật", true, None::<&str>)?;
+        let restart = MenuItem::with_id(app, "restart_update", tr(&lang, "restartUpdate"), true, None::<&str>)?;
         let sep3    = PredefinedMenuItem::separator(app)?;
         Menu::with_items(app, &[&restart, &sep3, &quick, &full, &region, &window, &scroll, &all, &record_menu, &sep1, &bar, &history, &settings, &sep2, &quit])
     } else {
@@ -188,12 +230,13 @@ pub fn show_recording_tray(app: &AppHandle) {
     if guard.is_some() {
         return; // đã hiện rồi (phòng gọi start 2 lần)
     }
+    let lang = current_lang(app);
     let rgba = recording_dot_rgba();
     let icon = Image::new(&rgba, DOT_SIZE, DOT_SIZE);
     let result = TrayIconBuilder::with_id("recording-tray")
         .icon(icon)
         .icon_as_template(false)
-        .tooltip("Đang quay màn hình — bấm để dừng")
+        .tooltip(tr(&lang, "recordingTooltip"))
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
@@ -201,7 +244,10 @@ pub fn show_recording_tray(app: &AppHandle) {
                 std::thread::spawn(move || {
                     if let Err(e) = crate::record::stop_recording(&app) {
                         eprintln!("[SnapDoc][record] Dừng quay từ tray icon thất bại: {e}");
-                        let _ = app.emit("snapdoc-error", format!("Dừng quay thất bại: {e}"));
+                        let lang = current_lang(&app);
+                        let vi = lang != "en";
+                        let msg = if vi { format!("Dừng quay thất bại: {e}") } else { format!("Stop recording failed: {e}") };
+                        let _ = app.emit("snapdoc-error", msg);
                     }
                 });
             }
@@ -216,7 +262,9 @@ pub fn show_recording_tray(app: &AppHandle) {
             // chung (CaptureBar.tsx lắng `snapdoc-error`) để ít nhất còn 1
             // thông báo hiện ra thay vì im lặng hoàn toàn.
             eprintln!("[SnapDoc][record] Không tạo được tray icon quay: {e}");
-            let _ = app.emit("snapdoc-error", format!("Đang quay nhưng không hiện được icon trên tray: {e}"));
+            let vi = lang != "en";
+            let msg = if vi { format!("Đang quay nhưng không hiện được icon trên tray: {e}") } else { format!("Recording but couldn't show tray icon: {e}") };
+            let _ = app.emit("snapdoc-error", msg);
         }
     }
 }
@@ -282,7 +330,8 @@ pub fn rebuild_menu(app: &AppHandle) {
 /// Đổi tooltip tray để báo có update đang tải/cài.
 pub fn set_update_badge(app: &AppHandle) {
     if let Some(tray) = app.tray_by_id("main-tray") {
-        let _ = tray.set_tooltip(Some("SnapDoc — 🔄 Đang tải bản cập nhật…"));
+        let lang = current_lang(app);
+        let _ = tray.set_tooltip(Some(tr(&lang, "updateDownloading")));
     }
 }
 
@@ -294,7 +343,8 @@ pub fn set_update_badge(app: &AppHandle) {
 pub fn set_restart_badge(app: &AppHandle) {
     RESTART_PENDING.store(true, Ordering::Relaxed);
     if let Some(tray) = app.tray_by_id("main-tray") {
-        let _ = tray.set_tooltip(Some("SnapDoc — ✅ Đã cập nhật! Khởi động lại để áp dụng"));
+        let lang = current_lang(app);
+        let _ = tray.set_tooltip(Some(tr(&lang, "updateReady")));
         if let Ok(menu) = build_menu_inner(app, true) {
             let _ = tray.set_menu(Some(menu));
         }

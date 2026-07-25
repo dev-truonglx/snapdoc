@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { useTranslation } from "react-i18next";
 import { useHistory } from "./useHistoryStore";
 import HistoryItemCard from "./HistoryItemCard";
 
@@ -14,6 +15,7 @@ interface Props {
 /** Grid virtualized (chỉ render hàng trong viewport) + background loading:
  * cuộn gần đáy sẽ tự nạp trang tiếp theo qua `loadMore()` thay vì tải hết. */
 export default function HistoryGrid({ onOpenEditor }: Props) {
+  const { t } = useTranslation();
   const items = useHistory((s) => s.items);
   const selectedId = useHistory((s) => s.selectedId);
   const setSelected = useHistory((s) => s.setSelected);
@@ -56,7 +58,7 @@ export default function HistoryGrid({ onOpenEditor }: Props) {
   return (
     <div ref={parentRef} style={scrollArea}>
       {items.length === 0 && !loading ? (
-        <div style={emptyState}>Chưa có capture nào trong khoảng lọc này.</div>
+        <div style={emptyState}>{t("historyView.noCaptures")}</div>
       ) : (
         <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
           {virtualRows.map((vRow) => {
@@ -93,7 +95,7 @@ export default function HistoryGrid({ onOpenEditor }: Props) {
           })}
         </div>
       )}
-      {loading && <div style={loadingRow}>Đang tải...</div>}
+      {loading && <div style={loadingRow}>{t("historyView.loading")}</div>}
     </div>
   );
 }

@@ -29,6 +29,7 @@ fn defaults() -> Value {
         "rememberLastRegion": false,
         "launchAtLogin": true,
         "recordAudioSource": "off",
+        "language": "vi",
         "shortcuts": {
             "captureBar": "CmdOrCtrl+Shift+5",
             "full": "CmdOrCtrl+Shift+1",

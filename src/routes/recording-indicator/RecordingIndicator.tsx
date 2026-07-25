@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
 
 /** `93500` → `"01:33"` — mm:ss, luôn 2 chữ số. */
@@ -24,6 +25,7 @@ function fmt(ms: number): string {
  * content-protected ở phía Rust nên popup này không lọt vào chính video đang
  * quay. */
 export default function RecordingIndicator() {
+  const { t } = useTranslation();
   const [elapsedMs, setElapsedMs] = useState(0);
   const [stopping, setStopping] = useState(false);
 
@@ -56,9 +58,9 @@ export default function RecordingIndicator() {
   };
 
   return (
-    <div style={wrap} onClick={stop} title="Bấm để dừng quay">
+    <div style={wrap} onClick={stop} title={t("recordingIndicator.clickToStop")}>
       <span style={dot} />
-      <span style={time}>{stopping ? "Đang dừng…" : fmt(elapsedMs)}</span>
+      <span style={time}>{stopping ? t("recordingIndicator.stopping") : fmt(elapsedMs)}</span>
       <style>{`
         @keyframes sd-rec-dot-pulse {
           0%   { box-shadow: 0 0 0 0 rgba(239,68,68,0.55); }

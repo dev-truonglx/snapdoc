@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
 import {
   type Segment,
@@ -176,6 +177,7 @@ export default function VideoTrimmer({
   onStateChange,
   frameCaptureMode = "open-editor",
 }: VideoTrimmerProps) {
+  const { t } = useTranslation();
   const wrapRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1065,7 +1067,7 @@ export default function VideoTrimmer({
                       onPointerDown={onVolumeTrackDown}
                       onPointerMove={onVolumeTrackMove}
                       onPointerUp={onVolumeTrackUp}
-                      title="Âm lượng"
+                      title={t("videoTrimmer.volume")}
                     >
                       <div style={volumeTrackBar}>
                         <div style={{ ...volumeTrackFill, width: `${(isMuted ? 0 : volume) * 100}%` }} />
@@ -1078,10 +1080,10 @@ export default function VideoTrimmer({
             </div>
           </div>
           <div style={toolsGroup}>
-            <button style={overlayToolBtn} onClick={zoomOut} disabled={zoom <= MIN_ZOOM} title="Thu nhỏ timeline">−</button>
-            <button style={overlayToolBtn} onClick={zoomReset} title="Đặt lại zoom 100%">{Math.round(zoom * 100)}%</button>
-            <button style={overlayToolBtn} onClick={zoomIn} disabled={zoom >= MAX_ZOOM} title="Phóng to timeline (xem từng khung hình)">+</button>
-            <button style={overlayIconBtn} onClick={toggleFullscreen} title={isFullscreen ? "Thoát toàn màn hình" : "Phóng to toàn màn hình"}>
+            <button style={overlayToolBtn} onClick={zoomOut} disabled={zoom <= MIN_ZOOM} title={t("videoTrimmer.zoomOut")}>−</button>
+            <button style={overlayToolBtn} onClick={zoomReset} title={t("videoTrimmer.resetZoom")}>{Math.round(zoom * 100)}%</button>
+            <button style={overlayToolBtn} onClick={zoomIn} disabled={zoom >= MAX_ZOOM} title={t("videoTrimmer.zoomIn")}>+</button>
+            <button style={overlayIconBtn} onClick={toggleFullscreen} title={isFullscreen ? t("videoTrimmer.exitFullscreen") : t("videoTrimmer.enterFullscreen")}>
               {isFullscreen ? <FullscreenExitIcon /> : <FullscreenEnterIcon />}
             </button>
           </div>
@@ -1091,23 +1093,23 @@ export default function VideoTrimmer({
       <div style={editToolbar}>
         {/* Cùng glyph ↩︎/↪︎ với Toolbar ảnh (`routes/editor/Toolbar.tsx`) — nhất
             quán trong toàn app thay vì mỗi chế độ dùng 1 cặp ký tự khác nhau. */}
-        <button style={iconToolBtn} disabled={past.length === 0} onClick={undo} title="Hoàn tác (Ctrl+Z)">↩︎</button>
-        <button style={iconToolBtn} disabled={future.length === 0} onClick={redo} title="Làm lại (Ctrl+Shift+Z)">↪︎</button>
+        <button style={iconToolBtn} disabled={past.length === 0} onClick={undo} title={t("editorToolbar.undo")}>↩︎</button>
+        <button style={iconToolBtn} disabled={future.length === 0} onClick={redo} title={t("videoTrimmer.redo")}>↪︎</button>
         <div style={toolDivider} />
-        <button style={iconToolBtn} disabled={!canSplitAt(segments, playheadMs)} onClick={doSplit} title="Chia đoạn tại vị trí đang dừng (Ctrl+B)">
+        <button style={iconToolBtn} disabled={!canSplitAt(segments, playheadMs)} onClick={doSplit} title={t("videoTrimmer.split")}>
           <ScissorsIcon />
         </button>
-        <button style={iconToolBtn} disabled={!selectedSegmentId || segments.length <= 1} onClick={doDeleteSelected} title="Xoá đoạn đang chọn (Delete)">
+        <button style={iconToolBtn} disabled={!selectedSegmentId || segments.length <= 1} onClick={doDeleteSelected} title={t("videoTrimmer.deleteSegment")}>
           <TrashIcon />
         </button>
-        <button style={iconToolBtn} disabled={!canTrimHead(segments, playheadMs)} onClick={doTrimHead} title="Cắt từ đầu tới vị trí đang dừng (Q)">
+        <button style={iconToolBtn} disabled={!canTrimHead(segments, playheadMs)} onClick={doTrimHead} title={t("videoTrimmer.trimStart")}>
           <span style={bracketGlyph}>[</span>
         </button>
-        <button style={iconToolBtn} disabled={!canTrimTail(segments, playheadMs)} onClick={doTrimTail} title="Cắt từ vị trí đang dừng tới cuối (W)">
+        <button style={iconToolBtn} disabled={!canTrimTail(segments, playheadMs)} onClick={doTrimTail} title={t("videoTrimmer.trimEnd")}>
           <span style={bracketGlyph}>]</span>
         </button>
         <div style={toolDivider} />
-        <button style={iconToolBtn} disabled={capturingFrame} onClick={doCaptureFrame} title="Lưu khung hình hiện tại thành ảnh và mở trong Editor">
+        <button style={iconToolBtn} disabled={capturingFrame} onClick={doCaptureFrame} title={t("videoTrimmer.exportFrame")}>
           <CameraIcon />
         </button>
         <div style={toolDivider} />
@@ -1117,7 +1119,7 @@ export default function VideoTrimmer({
         <button
           style={{ ...iconToolBtn, ...(removeAudio ? iconToolBtnActive : null) }}
           onClick={doToggleRemoveAudio}
-          title={removeAudio ? "Đã tách nhạc nền — bấm để giữ lại âm thanh" : "Tách nhạc nền (xoá âm thanh khỏi video)"}
+          title={removeAudio ? t("videoTrimmer.audioRemoved") : t("videoTrimmer.removeAudio")}
         >
           <NoAudioIcon />
         </button>
@@ -1125,8 +1127,8 @@ export default function VideoTrimmer({
             đây là hành động "bỏ hết" cho đúng nhóm công cụ này, đứng liền kề
             dễ liên tưởng hơn là gộp chung với Áp dụng cắt ở xa bên phải như
             bản cũ. */}
-        <button style={resetBtn} disabled={!hasChanges || busy} onClick={doReset} title="Bỏ hết thay đổi, về lại video gốc">
-          Đặt lại
+        <button style={resetBtn} disabled={!hasChanges || busy} onClick={doReset} title={t("videoTrimmer.resetChanges")}>
+          {t("videoTrimmer.resetButton")}
         </button>
         {/* 2 nút Lưu tách biệt, đặt ngay trong hàng công cụ chỉnh sửa (không
             phải ở Toolbar trên cùng của Editor) — xem doc-comment `onSave`/
@@ -1136,17 +1138,17 @@ export default function VideoTrimmer({
             style={saveOverwriteBtn}
             disabled={!canSave}
             onClick={onSave}
-            title="Ghi đè vĩnh viễn video gốc bằng đoạn đang giữ lại (Ctrl/Cmd+S)"
+            title={t("videoTrimmer.overwriteOriginal")}
           >
-            {busy ? "Đang lưu…" : "Lưu đè"}
+            {busy ? t("videoTrimmer.saving") : t("videoTrimmer.overwrite")}
           </button>
           <button
             style={saveAsBtn}
             disabled={busy}
             onClick={onSaveAs}
-            title="Lưu thành video mới, giữ nguyên bản gốc (Ctrl/Cmd+Shift+S)"
+            title={t("videoTrimmer.saveAsNew")}
           >
-            Lưu thành video mới
+            {t("videoTrimmer.saveAsNewButton")}
           </button>
         </div>
       </div>

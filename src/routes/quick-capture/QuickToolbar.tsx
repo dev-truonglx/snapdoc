@@ -184,7 +184,7 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
           </button>
         ))}
         <div style={{ position: "relative" }}>
-          <button title="Chọn màu" disabled={!annotating} onClick={() => setShowColors((v) => !v)} style={toolBtn(showColors, !annotating)}>
+          <button title={t("quickToolbar.selectColor")} disabled={!annotating} onClick={() => setShowColors((v) => !v)} style={toolBtn(showColors, !annotating)}>
             <span style={{ width: 16, height: 16, borderRadius: "50%", background: swatch, border: "1.5px solid rgba(255,255,255,0.6)" }} />
           </button>
           {showColors && annotating && (
@@ -196,16 +196,16 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
             </div>
           )}
         </div>
-        <button title="Hoàn tác (Ctrl/Cmd+Z)" disabled={!annotating || !canUndo} onClick={() => undo()} style={toolBtn(false, !annotating || !canUndo)}>
+        <button title={t("quickToolbar.undoAction")} disabled={!annotating || !canUndo} onClick={() => undo()} style={toolBtn(false, !annotating || !canUndo)}>
           {UndoIcon}
         </button>
       </div>
 
       <div style={{ ...bottomBar, left: hLeft, top: hTop, ...insideStyle }} onPointerDown={stop}>
-        <button title="Copy (Ctrl/Cmd+C)" style={actionBtn()} disabled={busy} onClick={onCopy}>{CopyIcon}</button>
-        <button title="Lưu (Ctrl/Cmd+S)" style={actionBtn()} disabled={busy} onClick={onSave}>{SaveIcon}</button>
-        <button title="Mở Editor" style={actionBtn()} disabled={busy} onClick={onOpenEditor}>{EditorIcon}</button>
-        <button title="Đóng (Esc)" style={actionBtn("danger")} disabled={busy} onClick={onClose}>{CloseIcon}</button>
+        <button title={t("quickToolbar.copyAction")} style={actionBtn()} disabled={busy} onClick={onCopy}>{CopyIcon}</button>
+        <button title={t("quickToolbar.saveAction")} style={actionBtn()} disabled={busy} onClick={onSave}>{SaveIcon}</button>
+        <button title={t("quickToolbar.openEditor")} style={actionBtn()} disabled={busy} onClick={onOpenEditor}>{EditorIcon}</button>
+        <button title={t("quickToolbar.close")} style={actionBtn("danger")} disabled={busy} onClick={onClose}>{CloseIcon}</button>
       </div>
     </>
   );

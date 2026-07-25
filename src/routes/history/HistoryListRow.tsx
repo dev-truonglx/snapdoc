@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useTranslation } from "react-i18next";
 import type { HistoryItem } from "../../lib/ipc";
 import { MODE_LABEL } from "./HistoryItemCard";
 import { fmtDateTime, fmtSize, fmtDuration } from "./formatUtils";
@@ -14,6 +15,7 @@ interface Props {
 /** 1 hàng trong list view — cùng dữ liệu với `HistoryItemCard` (grid) nhưng
  * bày ngang: thumbnail nhỏ + loại chụp + thời gian + dung lượng + kích thước. */
 export default function HistoryListRow({ item, selected, onSelect, onOpenEditor }: Props) {
+  const { t } = useTranslation();
   const [broken, setBroken] = useState(false);
   const isVideo = item.mediaType === "video";
 
@@ -46,7 +48,7 @@ export default function HistoryListRow({ item, selected, onSelect, onOpenEditor 
       </div>
 
       <span style={{ ...cell, flex: "1 1 auto", minWidth: 0, color: selected ? "var(--accent-text)" : "var(--text)" }}>
-        <span style={titleText}>{item.title || "(Không tên)"}</span>
+        <span style={titleText}>{item.title || t("history.unnamed")}</span>
       </span>
       <span style={{ ...cell, width: 100, color: selected ? "var(--accent-text)" : "var(--text-dim)" }}>
         {MODE_LABEL[item.captureMode] ?? item.captureMode}

@@ -97,6 +97,10 @@ export interface Settings {
   /** Thư mục lần cuối user chọn qua "Save As…" ở editor (ảnh) — dùng làm mặc
    * định cho lần Save As kế tiếp, xem `useOutput.saveAsToFile`. */
   lastImageSaveAsDir?: string;
+  /** Ngôn ngữ giao diện ("vi"/"en") — đồng bộ với i18next ở webview VÀ ghi
+   * xuống settings.json để tray menu (native, Rust-side) đọc được, xem
+   * `Settings.tsx` language switcher + `tray::current_lang`. */
+  language?: string;
 }
 
 export interface UpdateInfo {

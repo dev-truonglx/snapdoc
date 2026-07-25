@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
 
 const params = new URLSearchParams(window.location.search);
@@ -9,11 +10,11 @@ const ry = Number(params.get("ry") ?? "0");
 const rw = Number(params.get("rw") ?? "0");
 const rh = Number(params.get("rh") ?? "0");
 
-function loadImage(src: string): Promise<HTMLImageElement> {
+function loadImage(src: string, t: any): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Không tải được ảnh chụp"));
+    img.onerror = () => reject(new Error(t("scroll.imageLoadError")));
     img.src = src;
   });
 }
@@ -343,6 +344,7 @@ function analyzeScroll(prev: ImageData, cur: ImageData): ScrollAnalysis {
 }
 
 export default function ScrollControl() {
+  const { t } = useTranslation();
   // Bắt đầu thẳng ở trạng thái "capturing": vẽ xong khung là tự động chụp, nút
   // "Hoàn thành" hiện ngay (không cần nhấn "Bắt đầu").
   const [status, setStatus] = useState<"ready" | "capturing" | "processing">("capturing");
@@ -468,7 +470,7 @@ export default function ScrollControl() {
       const sliceIdx = totalSlicesRef.current;
       totalSlicesRef.current++;
 
-      const img = await loadImage(`data:image/png;base64,${base64}`);
+      const img = await loadImage(`data:image/png;base64,${base64}`, t);
       const fw = img.naturalWidth;
       const fh = img.naturalHeight;
 
@@ -548,7 +550,7 @@ export default function ScrollControl() {
         prevImageDataRef.current = newImgData;
       }
     } catch (err) {
-      console.error("Lỗi chụp cuộn slice:", err);
+      console.error(t("scroll.captureSliceError"), err);
       // Lỗi thật (vd chạm giới hạn số lát) phải dừng vòng lặp + hiện cho user
       // thấy — trước đây chỉ log console, user thấy "đang ghi..." mãi không rõ vì sao.
       isCapturingRef.current = false;
@@ -626,28 +628,28 @@ export default function ScrollControl() {
       {/* Header */}
       <div style={header} data-tauri-drag-region>
         <div style={status === "capturing" ? pulseDot : inactiveDot} />
-        <span style={title} data-tauri-drag-region>Chụp cuộn</span>
+        <span style={title} data-tauri-drag-region>{t("scroll.title")}</span>
       </div>
 
       {/* Slices Counter / Status */}
       <div style={statusRow} data-tauri-drag-region>
-        {status === "ready" && <span style={statusText}>Sẵn sàng chụp</span>}
+        {status === "ready" && <span style={statusText}>{t("scroll.readyCapture")}</span>}
         {status === "capturing" && (
           <span style={fastWarn ? statusWarn : statusText}>
             {fastWarn
-              ? "⚠ Cuộn quá nhanh — chậm lại kẻo bỏ sót nội dung"
-              : "Đang ghi... cuộn chậm & đều tay"}
+              ? t("scroll.scrollWarning")
+              : t("scroll.recording")}
           </span>
         )}
-        {status === "processing" && <span style={statusText}>Đang kết xuất...</span>}
+        {status === "processing" && <span style={statusText}>{t("scroll.rendering")}</span>}
       </div>
 
       {/* Info Stats */}
       {status !== "ready" && (
         <div style={statsRow} data-tauri-drag-region>
-          <span>Khung hình: {frameCount}</span>
+          <span>{t("scroll.frameCount")} {frameCount}</span>
           <span>·</span>
-          <span>Chiều cao: {stitchedHeight}px</span>
+          <span>{t("scroll.height")} {stitchedHeight}px</span>
         </div>
       )}
 
@@ -658,7 +660,7 @@ export default function ScrollControl() {
       {DEBUG && status !== "ready" && (
         <div style={logBox}>
           <div style={logHeader}>
-            <span>Log chẩn đoán ({logRef.current.length})</span>
+            <span>{t("scroll.diagnosticLog")} ({logRef.current.length})</span>
             <div style={{ display: "flex", gap: 6 }}>
               <button
                 style={logBtn}
@@ -673,7 +675,7 @@ export default function ScrollControl() {
                   window.setTimeout(() => setCopied(false), 1500);
                 }}
               >
-                {copied ? "Đã copy ✓" : "Copy"}
+                {copied ? t("scroll.copied") : t("scroll.copy")}
               </button>
               <button
                 style={logBtn}
@@ -683,7 +685,7 @@ export default function ScrollControl() {
                   setLogText("");
                 }}
               >
-                Xoá
+                {t("scroll.clear")}
               </button>
             </div>
           </div>
@@ -700,7 +702,7 @@ export default function ScrollControl() {
         </div>
         {status === "ready" && (
           <div style={emptyOverlay} data-tauri-drag-region>
-            Nhấn Bắt đầu rồi cuộn chuột từ từ để ghi lại trang dài
+            {t("scroll.startMessage")}
           </div>
         )}
       </div>
@@ -716,7 +718,7 @@ export default function ScrollControl() {
             onMouseOver={(e) => Object.assign(e.currentTarget.style, startBtnHover)}
             onMouseOut={(e) => Object.assign(e.currentTarget.style, startBtn)}
           >
-            Bắt đầu (Space)
+            {t("scroll.startButton")}
           </button>
         )}
 
@@ -727,13 +729,13 @@ export default function ScrollControl() {
             onMouseOver={(e) => Object.assign(e.currentTarget.style, finishBtnHover)}
             onMouseOut={(e) => Object.assign(e.currentTarget.style, finishBtn)}
           >
-            Hoàn thành (Enter)
+            {t("scroll.finishButton")}
           </button>
         )}
 
         {status === "processing" && (
           <button disabled style={processingBtn}>
-            Đang xử lý...
+            {t("scroll.processingButton")}
           </button>
         )}
 
@@ -747,7 +749,7 @@ export default function ScrollControl() {
           onMouseOver={(e) => Object.assign(e.currentTarget.style, cancelBtnHover)}
           onMouseOut={(e) => Object.assign(e.currentTarget.style, cancelBtn)}
         >
-          Huỷ
+          {t("scroll.cancelButton")}
         </button>
       </div>
     </div>

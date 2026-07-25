@@ -1,6 +1,7 @@
 // Nối nhiều ảnh thành một ảnh dài (long screenshot): dọc hoặc ngang.
 // Vẽ tất cả lên một canvas offscreen rồi xuất ra data URL — kết quả là một ảnh
 // phẳng, nạp lại vào editor qua loadDoc (không đụng tới model annotation).
+import i18next from "../../../i18n/config";
 
 export type StitchDirection = "vertical" | "horizontal";
 /** Canh lề theo trục vuông góc với hướng nối. */
@@ -25,7 +26,7 @@ export function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Không tải được ảnh"));
+    img.onerror = () => reject(new Error(i18next.t("errors.cannotLoadImage")));
     img.src = src;
   });
 }
@@ -42,7 +43,7 @@ export async function composeStitch(
   srcs: string[],
   opt: StitchOptions,
 ): Promise<StitchResult> {
-  if (srcs.length === 0) throw new Error("Chưa có ảnh nào để nối");
+  if (srcs.length === 0) throw new Error(i18next.t("errors.noImagesToStitch"));
 
   const imgs = await Promise.all(srcs.map(loadImage));
   const n = imgs.length;
@@ -63,7 +64,7 @@ export async function composeStitch(
   canvas.width = Math.max(1, width);
   canvas.height = Math.max(1, height);
   const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Không tạo được canvas context");
+  if (!ctx) throw new Error(i18next.t("errors.cannotCreateCanvas"));
 
   if (opt.background && opt.background !== "transparent") {
     ctx.fillStyle = opt.background;

@@ -9,6 +9,7 @@ import {
 import { flushSync } from "react-dom";
 import { Stage, Layer, Rect, Line, Ellipse, Text, Circle, Group, Image as KImage, Transformer, Arrow } from "react-konva";
 import type Konva from "konva";
+import { useTranslation } from "react-i18next";
 import { useEditor } from "../store";
 import type { Annotation } from "../model";
 import { uid } from "../model";
@@ -49,6 +50,7 @@ interface AnnotationStageProps {
 }
 
 const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoomBar }, ref) => {
+  const { t } = useTranslation();
   const doc = useEditor((s) => s.doc);
   const tool = useEditor((s) => s.tool);
   const color = useEditor((s) => s.color);
@@ -1634,7 +1636,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         <>
           <span
             style={dpiBadge}
-            title={`HiDPI ${dpiLabel} — ${doc.imgW}×${doc.imgH}px vật lý (${Math.round(doc.imgW / scaleFactor)}×${Math.round(doc.imgH / scaleFactor)} pts)`}
+            title={t("annotationCanvas.hidpiInfo", { label: dpiLabel, physicalW: doc.imgW, physicalH: doc.imgH, logicalW: Math.round(doc.imgW / scaleFactor), logicalH: Math.round(doc.imgH / scaleFactor) })}
           >
             {dpiLabel}
           </span>
@@ -1645,7 +1647,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       <button
         onClick={doZoomFit}
         style={{ ...zoomChip, ...(zoom === 1 ? zoomChipActive : null) }}
-        title="Vừa khung — ảnh fill cửa sổ (Ctrl/Cmd 0)"
+        title={t("annotationCanvas.fitWindow")}
       >
         <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden>
           <path d="M1 4V1h3M9 1h3v3M12 9v3H9M4 12H1V9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -1657,7 +1659,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       <button
         onClick={doZoomActual}
         style={{ ...zoomChip, ...(Math.abs(scale - 1) < 0.005 ? zoomChipActive : null) }}
-        title="Kích thước thật — 1 pixel ảnh = 1 pixel màn hình"
+        title={t("annotationCanvas.actualSize")}
       >100%</button>
 
       {/* Separator */}
@@ -1668,8 +1670,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         onClick={doZoomOut}
         disabled={atZoomMin}
         style={{ ...zoomIconBtn, ...(atZoomMin ? zoomBtnDisabled : null) }}
-        title="Thu nhỏ (Ctrl/Cmd −)"
-        aria-label="Thu nhỏ"
+        title={t("annotationCanvas.zoomOut")}
+        aria-label={t("annotationCanvas.zoomOutLabel")}
       >
         <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
           <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5" fill="none"/>
@@ -1682,7 +1684,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       <button
         onClick={toggleFitActual}
         style={zoomPctBtn}
-        title="Bấm để đổi Fit ↔ 100%"
+        title={t("annotationCanvas.toggleZoom")}
       >
         {zoomPct}%
       </button>
@@ -1692,8 +1694,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         onClick={doZoomIn}
         disabled={atZoomMax}
         style={{ ...zoomIconBtn, ...(atZoomMax ? zoomBtnDisabled : null) }}
-        title="Phóng to (Ctrl/Cmd +)"
-        aria-label="Phóng to"
+        title={t("annotationCanvas.zoomIn")}
+        aria-label={t("annotationCanvas.zoomInLabel")}
       >
         <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
           <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5" fill="none"/>

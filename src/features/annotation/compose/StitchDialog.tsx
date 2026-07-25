@@ -81,7 +81,7 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
         .filter((f): f is File => !!f);
       if (files.length === 0) return;
       e.preventDefault();
-      Promise.all(files.map(fileToDataUrl)).then((urls) => {
+      Promise.all(files.map((f) => fileToDataUrl(f, t("stitchDialog.cannotReadFile")))).then((urls) => {
         setItems((prev) => [...prev, ...urls.map((src) => ({ id: uid(), src }))]);
       });
     };
@@ -97,7 +97,7 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
         setItems((prev) => [...prev, ...urls.map((src) => ({ id: uid(), src }))]);
       }
     } catch (e) {
-      setError(`Lỗi mở ảnh: ${e}`);
+      setError(t("stitchDialog.openImageError", { error: e }));
     } finally {
       setAdding(false);
     }
@@ -138,18 +138,18 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
 
   const vertical = direction === "vertical";
   const alignLabels: Record<StitchAlign, string> = vertical
-    ? { start: "Trái", center: "Giữa", end: "Phải" }
-    : { start: "Trên", center: "Giữa", end: "Dưới" };
+    ? { start: t("stitchDialog.left"), center: t("stitchDialog.center"), end: t("stitchDialog.right") }
+    : { start: t("stitchDialog.top"), center: t("stitchDialog.center"), end: t("stitchDialog.bottom") };
 
   return (
     <div style={overlay} onClick={onCancel}>
       <div style={dialog} onClick={(e) => e.stopPropagation()}>
         <div style={header}>
           <span style={{ fontSize: 15, fontWeight: 600, color: "var(--text, #e2e8f0)" }}>
-            Nối ảnh dài
+            {t("stitchDialog.title")}
           </span>
           <span style={{ fontSize: 12, color: "var(--text-dim, #94a3b8)" }}>
-            {items.length} ảnh
+            {t("stitchDialog.imageCount", { count: items.length })}
             {dims && ` · ${dims.w} × ${dims.h}px`}
           </span>
         </div>
@@ -162,21 +162,21 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
                 <div key={it.id} style={row}>
                   <span style={rowIndex}>{i + 1}</span>
                   <img src={it.src} alt="" style={thumb} />
-                  {it.id === initialIdRef.current && <span style={badge}>Hiện tại</span>}
+                  {it.id === initialIdRef.current && <span style={badge}>{t("stitchDialog.current")}</span>}
                   <span style={{ flex: 1 }} />
-                  <button style={iconBtn} title="Lên" disabled={i === 0}
+                  <button style={iconBtn} title={t("stitchDialog.moveUp")} disabled={i === 0}
                     onClick={() => move(it.id, -1)}>↑</button>
-                  <button style={iconBtn} title="Xuống" disabled={i === items.length - 1}
+                  <button style={iconBtn} title={t("stitchDialog.moveDown")} disabled={i === items.length - 1}
                     onClick={() => move(it.id, 1)}>↓</button>
-                  <button style={iconBtn} title="Xoá" disabled={items.length <= 1}
+                  <button style={iconBtn} title={t("stitchDialog.delete")} disabled={items.length <= 1}
                     onClick={() => removeItem(it.id)}>✕</button>
                 </div>
               ))}
             </div>
             <button style={addBtn} onClick={addImages} disabled={adding}>
-              {adding ? "Đang mở…" : "+ Thêm ảnh"}
+              {adding ? t("stitchDialog.opening") : t("stitchDialog.addImages")}
             </button>
-            <span style={hint}>Có thể dán ảnh từ clipboard (⌘/Ctrl+V)</span>
+            <span style={hint}>{t("stitchDialog.pasteHint")}</span>
           </div>
 
           {/* Cột phải: preview */}
@@ -185,7 +185,7 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
               <img src={previewUrl} alt="preview" style={previewImg} />
             ) : (
               <span style={{ fontSize: 12, color: "var(--text-dim, #94a3b8)" }}>
-                Chưa có preview
+                {t("stitchDialog.noPreview")}
               </span>
             )}
           </div>
@@ -194,13 +194,13 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
         {/* Tuỳ chọn */}
         <div style={optionsRow}>
           <div style={optGroup}>
-            <span style={optLabel}>Hướng</span>
+            <span style={optLabel}>{t("stitchDialog.direction")}</span>
             <Seg active={vertical} onClick={() => setDirection("vertical")}>{t("stitch.vertical")}</Seg>
             <Seg active={!vertical} onClick={() => setDirection("horizontal")}>{t("stitch.horizontal")}</Seg>
           </div>
 
           <div style={optGroup}>
-            <span style={optLabel}>Canh</span>
+            <span style={optLabel}>{t("stitchDialog.alignment")}</span>
             {(["start", "center", "end"] as StitchAlign[]).map((a) => (
               <Seg key={a} active={align === a} onClick={() => setAlign(a)}>
                 {alignLabels[a]}
@@ -209,7 +209,7 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
           </div>
 
           <div style={optGroup}>
-            <span style={optLabel}>Khe</span>
+            <span style={optLabel}>{t("stitchDialog.gap")}</span>
             <input type="number" min={0} max={400} value={gap}
               onChange={(e) => setGap(Math.max(0, Math.min(400, Number(e.target.value) || 0)))}
               style={gapInput} />
@@ -217,9 +217,9 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
           </div>
 
           <div style={optGroup}>
-            <span style={optLabel}>Nền</span>
+            <span style={optLabel}>{t("stitchDialog.background")}</span>
             {BG_SWATCHES.map((c) => (
-              <button key={c} title={c === "transparent" ? "Trong suốt" : c}
+              <button key={c} title={c === "transparent" ? t("stitchDialog.transparent") : c}
                 onClick={() => setBackground(c)}
                 style={{
                   width: 22, height: 22, borderRadius: 4, flexShrink: 0,
@@ -236,9 +236,9 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
         {error && <p style={errStyle}>{error}</p>}
 
         <div style={actions}>
-          <button style={cancelBtn} onClick={onCancel}>Huỷ</button>
+          <button style={cancelBtn} onClick={onCancel}>{t("stitchDialog.cancel")}</button>
           <button style={applyBtn} onClick={apply} disabled={busy || items.length < 2}>
-            {busy ? "Đang nối…" : "Nối ảnh"}
+            {busy ? t("stitchDialog.stitching") : t("stitchDialog.stitch")}
           </button>
         </div>
       </div>
@@ -246,11 +246,11 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
   );
 }
 
-function fileToDataUrl(file: File): Promise<string> {
+function fileToDataUrl(file: File, errorMessage: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onload = () => resolve(r.result as string);
-    r.onerror = () => reject(new Error("Không đọc được file dán"));
+    r.onerror = () => reject(new Error(errorMessage));
     r.readAsDataURL(file);
   });
 }

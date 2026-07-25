@@ -366,7 +366,7 @@ export default function CaptureBar() {
             // pixel thật chỉ diễn ra SAU khi đếm xong, xem `flow::run`).
             <div style={countdownWrap}>
               <span style={countdownNumber}>{countdown}</span>
-              <span style={countdownLabel}>Sắp chụp… (Esc để huỷ)</span>
+              <span style={countdownLabel}>{t("captureBar.aboutToCapture")}</span>
             </div>
           ) : (
           <>
@@ -377,7 +377,7 @@ export default function CaptureBar() {
             <button
               onClick={() => ipc.startQuick().catch((e) => alert(String(e)))}
               style={quickModeBtn}
-              title="Chụp nhanh — chọn vùng rồi chú thích ngay tại chỗ"
+              title={t("captureBar.quickCaptureHint")}
             >
               <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
                 <path d="M11 2 3 12h6l-1 6 8-10h-6l1-6Z" fill="currentColor" />
@@ -434,7 +434,7 @@ export default function CaptureBar() {
             {showPopover && (
               <div ref={popoverRef} style={popover} onClick={(e) => e.stopPropagation()}>
                 {/* Section 1: Output chụp ảnh */}
-                <div style={popSectionLabel}>Chụp ảnh</div>
+                <div style={popSectionLabel}>{t("captureBar.photoSection")}</div>
                 {OUTPUTS.map((o) => (
                   <button key={o.id} style={popItem(output === o.id)} onClick={() => selectOutput(o.id)}>
                     <span style={{ flex: 1 }}>{o.label}</span>
@@ -444,7 +444,7 @@ export default function CaptureBar() {
                 {/* Divider */}
                 <div style={popDivider} />
                 {/* Section 2: Nguồn audio quay */}
-                <div style={popSectionLabel}>Quay màn hình</div>
+                <div style={popSectionLabel}>{t("captureBar.videoSection")}</div>
                 {AUDIO_OPTIONS.map((a) => (
                   <button key={a.id} style={popItem(audioSource === a.id)} onClick={() => selectAudioSource(a.id)}>
                     <span style={{ flex: 1 }}>{a.label}</span>
@@ -455,7 +455,7 @@ export default function CaptureBar() {
                 <div style={popDivider} />
                 {/* Section 3: Hẹn giờ chụp — áp dụng cho MỌI lần chụp ảnh sau
                     đó (bar lẫn phím tắt), xem `flow::wait_capture_delay`. */}
-                <div style={popSectionLabel}>Hẹn giờ chụp</div>
+                <div style={popSectionLabel}>{t("captureBar.timerSection")}</div>
                 {CAPTURE_DELAYS.map((d) => (
                   <button key={d.id} style={popItem(delaySeconds === d.id)} onClick={() => selectDelay(d.id)}>
                     <span style={{ flex: 1 }}>{d.label}</span>
@@ -467,7 +467,7 @@ export default function CaptureBar() {
           </div>
 
           {/* Close */}
-          <button aria-label="Đóng" style={closeBtn} onClick={() => ipc.closeSelf()}>
+          <button aria-label={t("captureBar.close")} style={closeBtn} onClick={() => ipc.closeSelf()}>
             ✕
           </button>
           </>

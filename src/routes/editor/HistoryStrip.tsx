@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useTranslation } from "react-i18next";
 import { ipc, type HistoryItem } from "../../lib/ipc";
 import { useEditor } from "../../features/annotation/store";
 import { fmtDuration } from "../history/formatUtils";
@@ -24,6 +25,7 @@ interface Props {
 /** Dải "Gần đây" ở cạnh dưới Editor — xem nhanh, copy hoặc mở lại các capture
  * gần nhất mà không cần mở cửa sổ History đầy đủ. */
 export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenImage }: Props) {
+  const { t } = useTranslation();
   const [items, setItems] = useState<HistoryItem[]>([]);
   const [copyingId, setCopyingId] = useState<string | null>(null);
   const [openingId, setOpeningId] = useState<string | null>(null);
@@ -138,7 +140,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
     setCopyingId(id);
     try {
       await ipc.copyHistoryItem(id);
-      onFlash("Đã copy vào clipboard");
+      onFlash(t("historyStrip.copiedToClipboard"));
     } catch (err) {
       onFlash(String(err));
     } finally {
@@ -185,7 +187,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
 
   return (
     <div style={strip}>
-      <span style={label}>Gần đây</span>
+      <span style={label}>{t("historyStrip.recent")}</span>
       <div style={scrollRow}>
         {items.map((item) => {
           const isVideo = item.mediaType === "video";
@@ -207,7 +209,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                 e.preventDefault();
                 setMenu({ id: item.id, x: e.clientX, y: e.clientY });
               }}
-              title={isVideo ? "Mở video trong Editor" : "Mở lại trong Editor"}
+              title={isVideo ? t("historyStrip.openVideoEditor") : t("historyStrip.reopenEditor")}
             >
               <img src={convertFileSrc(item.thumbPath)} alt="" style={thumbImg} loading="lazy" />
               {/* `.history-thumb-action`: ẩn mặc định, chỉ hiện khi hover vào
@@ -219,7 +221,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                 style={deleteBtn}
                 disabled={deletingId === item.id}
                 onClick={(e) => quickDelete(e, item.id)}
-                title={isVideo ? "Xoá vĩnh viễn video này (cả file trên máy)" : "Xoá vĩnh viễn ảnh này (cả file trên máy)"}
+                title={isVideo ? t("historyStrip.deleteVideo") : t("historyStrip.deleteImage")}
               >
                 {DeleteIcon}
               </button>
@@ -241,7 +243,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                   style={copyBtn}
                   disabled={copyingId === item.id}
                   onClick={(e) => quickCopy(e, item.id)}
-                  title="Copy nhanh vào clipboard"
+                  title={t("historyStrip.quickCopy")}
                 >
                   {CopyIcon}
                 </button>
@@ -250,7 +252,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
           );
         })}
       </div>
-      <button style={viewAllBtn} onClick={() => ipc.openHistory()}>Xem tất cả →</button>
+      <button style={viewAllBtn} onClick={() => ipc.openHistory()}>{t("historyStrip.viewAll")}</button>
       {/* Menu chuột phải trên 1 thumbnail — `position: fixed` theo đúng toạ độ
           bấm chuột (`menu.x`/`menu.y`), không phụ thuộc `scrollRow` cuộn
           ngang. Đóng khi click ra ngoài/Escape, xem effect ở trên. */}
@@ -265,19 +267,19 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
         return (
           <div ref={menuRef} style={{ ...contextMenu, left: menu.x, top: menu.y - 6, transform: "translateY(-100%)" }}>
             <button style={contextMenuItem} onClick={() => { setMenu(null); openItem(item); }}>
-              {isVideo ? "Mở video trong Editor" : "Mở lại trong Editor"}
+              {isVideo ? t("historyStrip.openVideoEditor") : t("historyStrip.reopenEditor")}
             </button>
             <button style={contextMenuItem} onClick={() => { setMenu(null); doReveal(item.id); }}>
-              Xem file trong Thư mục
+              {t("historyStrip.viewInFolder")}
             </button>
             {!isVideo && (
               <button style={contextMenuItem} onClick={() => { setMenu(null); doCopy(item.id); }}>
-                Copy nhanh vào clipboard
+                {t("historyStrip.quickCopy")}
               </button>
             )}
             <div style={contextMenuDivider} />
             <button style={{ ...contextMenuItem, color: "#fca5a5" }} onClick={() => { setMenu(null); doDelete(item.id); }}>
-              Xoá vĩnh viễn (cả file trên máy)
+              {t("historyStrip.deletePermanent")}
             </button>
           </div>
         );

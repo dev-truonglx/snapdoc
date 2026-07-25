@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { useTranslation } from "react-i18next";
 import { ipc, type WindowInfo } from "../../lib/ipc";
 import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
 import { useEditor } from "../../features/annotation/store";
@@ -157,6 +158,7 @@ function rectFrom(sx: number, sy: number, x: number, y: number): Sel {
  * bị đóng/tạo lại nên không có khoảng hở gây "nháy khung".
  */
 function RegionSelect() {
+  const { t } = useTranslation();
   const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const startRef = useRef<Vec2 | null>(null);
   const [sel, setSel] = useState<Sel | null>(null);
@@ -275,7 +277,7 @@ function RegionSelect() {
         </div>
       ) : (
         <div style={{ position: "fixed", inset: 0, background: frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.5)" }}>
-          <div style={banner}>Kéo để chọn vùng • Esc / chuột phải để huỷ</div>
+          <div style={banner}>{t("overlay.dragToSelect")}</div>
         </div>
       )}
     </div>
@@ -347,6 +349,7 @@ function isOverBoxOrBar(sel: Sel, winW: number, winH: number, x: number, y: numb
 }
 
 function RecordRegionSelect() {
+  const { t } = useTranslation();
   const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const [phase, setPhase] = useState<RecPhase>(PRESET ? "adjusting" : "selecting");
   const [sel, setSel] = useState<Sel | null>(PRESET);
@@ -583,7 +586,7 @@ function RecordRegionSelect() {
         </>
       ) : (
         <div style={{ position: "fixed", inset: 0, background: frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.5)" }}>
-          <div style={banner}>Kéo để chọn vùng quay • Esc / chuột phải để huỷ</div>
+          <div style={banner}>{t("overlay.dragToSelectRecord")}</div>
         </div>
       )}
     </div>
@@ -597,6 +600,7 @@ function RecordRegionToolbar({
   sel: Sel; winW: number; winH: number; busy: boolean;
   onStart: () => void; onCancel: () => void;
 }) {
+  const { t } = useTranslation();
   const bar = recToolbarRect(sel, winW, winH);
   return (
     <div
@@ -618,9 +622,9 @@ function RecordRegionToolbar({
       <span style={{ color: "#fff", fontSize: 12, whiteSpace: "nowrap", padding: "0 4px" }}>
         {Math.round(sel.w)} × {Math.round(sel.h)}
       </span>
-      <button style={recBtnStyle(false)} onClick={onCancel} disabled={busy}>Huỷ</button>
+      <button style={recBtnStyle(false)} onClick={onCancel} disabled={busy}>{t("overlay.cancel")}</button>
       <button style={recBtnStyle(true)} onClick={onStart} disabled={busy}>
-        {busy ? "Đang bắt đầu…" : "● Bắt đầu quay"}
+        {busy ? t("overlay.startingRecording") : t("overlay.startRecording")}
       </button>
     </div>
   );
@@ -664,6 +668,7 @@ function loadImg(src: string): Promise<HTMLImageElement> {
 }
 
 function QuickAnnotate() {
+  const { t } = useTranslation();
   const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const loadDoc = useEditor((s) => s.loadDoc);
   const setTool = useEditor((s) => s.setTool);
@@ -937,7 +942,7 @@ function QuickAnnotate() {
         </div>
       ) : (
         <div style={{ position: "fixed", inset: 0, background: frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.45)" }}>
-          <div style={banner}>Kéo để chọn vùng • Esc / chuột phải để huỷ</div>
+          <div style={banner}>{t("overlay.quickDragSelect")}</div>
         </div>
       )}
 
@@ -992,6 +997,7 @@ function quickHandleStyle(hd: { cx: number; cy: number; cur: string }): React.CS
 /* ───────────── Window: chọn cửa sổ (đa màn hình) ───────────── */
 
 function WindowPicker() {
+  const { t } = useTranslation();
   const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const winsRef = useRef<WindowInfo[]>([]);
   const [hover, setHover] = useState<WindowInfo | null>(null);
@@ -1046,10 +1052,10 @@ function WindowPicker() {
             zIndex: 1,
           }}
         >
-          <span style={{ ...sizeLabel, top: 6, left: 6 }}>{hover.app || hover.title || "Cửa sổ"}</span>
+          <span style={{ ...sizeLabel, top: 6, left: 6 }}>{hover.app || hover.title || t("overlay.windowLabel")}</span>
         </div>
       )}
-      <div style={banner}>Di chuột tới cửa sổ rồi click để chụp • Esc / chuột phải để huỷ</div>
+      <div style={banner}>{t("overlay.selectWindow")}</div>
     </div>
   );
 }
@@ -1057,6 +1063,7 @@ function WindowPicker() {
 /* ───────────── Monitor: chọn cả màn hình (chế độ full) ───────────── */
 
 function MonitorPick() {
+  const { t } = useTranslation();
   const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const [active, setActive] = useState(false);
 
@@ -1090,7 +1097,7 @@ function MonitorPick() {
     <div style={rootStyle}>
       {/* Dim layer khi có frozen image */}
       {frozenUrl && <div style={{ position: "fixed", inset: 0, background: active ? "rgba(59,130,246,0.12)" : "rgba(0,0,0,0.45)", pointerEvents: "none" }} />}
-      <div style={banner}>Click để chụp toàn bộ màn hình này • Esc / chuột phải để huỷ</div>
+      <div style={banner}>{t("overlay.selectMonitor")}</div>
     </div>
   );
 }

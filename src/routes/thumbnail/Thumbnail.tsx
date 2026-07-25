@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
 import { copyToClipboard, saveToFile } from "../../features/output/useOutput";
 
 export default function Thumbnail() {
+  const { t } = useTranslation();
   const [src, setSrc] = useState("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -58,12 +60,12 @@ export default function Thumbnail() {
 
   return (
     <div style={card}>
-      {src && <img src={src} style={preview} onClick={edit} title="Nhấn để mở editor" />}
+      {src && <img src={src} style={preview} onClick={edit} title={t("thumbnail.openEditorTooltip")} />}
       <div style={actions}>
-        <button style={btn} onClick={edit} title="Sửa">✎ Sửa</button>
-        <button style={btn} onClick={copy} title="Copy">📋</button>
-        <button style={btn} onClick={saveFile} title="Lưu">💾</button>
-        <button style={btn} onClick={dismiss} title="Đóng">✕</button>
+        <button style={btn} onClick={edit} title={t("thumbnail.editTitle")}>{t("thumbnail.editButton")}</button>
+        <button style={btn} onClick={copy} title={t("thumbnail.copyTitle")}>📋</button>
+        <button style={btn} onClick={saveFile} title={t("thumbnail.saveTitle")}>💾</button>
+        <button style={btn} onClick={dismiss} title={t("thumbnail.closeTitle")}>✕</button>
       </div>
     </div>
   );

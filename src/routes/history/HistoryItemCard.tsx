@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useTranslation } from "react-i18next";
 import type { HistoryItem } from "../../lib/ipc";
 import { fmtTime, fmtDuration } from "./formatUtils";
 
@@ -20,6 +21,7 @@ interface Props {
 }
 
 export default function HistoryItemCard({ item, selected, onSelect, onOpenEditor }: Props) {
+  const { t } = useTranslation();
   const [broken, setBroken] = useState(false);
   const isVideo = item.mediaType === "video";
 
@@ -42,7 +44,7 @@ export default function HistoryItemCard({ item, selected, onSelect, onOpenEditor
             loading="lazy"
           />
         ) : (
-          <div style={brokenBox}>Không tải được ảnh</div>
+          <div style={brokenBox}>{t("historyItemCard.cannotLoadImage")}</div>
         )}
         {isVideo && (
           <>

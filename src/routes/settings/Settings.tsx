@@ -318,8 +318,13 @@ export default function Settings() {
             <select
               value={i18n.language}
               onChange={(e) => {
-                i18n.changeLanguage(e.target.value);
-                localStorage.setItem("app-language", e.target.value);
+                const lang = e.target.value;
+                i18n.changeLanguage(lang);
+                localStorage.setItem("app-language", lang);
+                // Ghi luôn xuống settings.json — tray menu (native, Rust-side)
+                // không đọc được localStorage của webview, phải tự tra field
+                // này (xem `commands::set_settings` gọi `tray::rebuild_menu`).
+                update({ language: lang });
               }}
             >
               <option value="en">English</option>

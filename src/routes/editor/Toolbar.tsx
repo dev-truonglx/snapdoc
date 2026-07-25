@@ -196,7 +196,7 @@ function CustomColorButton({
   selected,
   onChange,
   round = false,
-  title = "Chọn màu tùy chỉnh",
+  title,
 }: {
   value: string;
   selected: boolean;
@@ -204,9 +204,10 @@ function CustomColorButton({
   round?: boolean;
   title?: string;
 }) {
+  const { t } = useTranslation();
   return (
     <label
-      title={title}
+      title={title ?? t("editorToolbar.customColor")}
       style={{
         position: "relative",
         width: 24,
@@ -373,7 +374,7 @@ export default function Toolbar({
       {mode === "image" && (
       <>
       {/* New — chụp lại theo chế độ gần nhất + mở capture bar */}
-      <button onClick={onNew} style={newBtn} title="Chụp mới (chế độ gần nhất + mở thanh chụp)">
+      <button onClick={onNew} style={newBtn} title={t("editorToolbar.newCapture")}>
         <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden fill="none">
           <circle cx="7.5" cy="7.5" r="6.5" stroke="currentColor" strokeWidth="1.6"/>
           <path d="M7.5 4v7M4 7.5h7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
@@ -382,7 +383,7 @@ export default function Toolbar({
       </button>
 
       {/* Open — mở ảnh từ file */}
-      <button onClick={onOpen} style={newBtn} title="Mở ảnh từ file (Ctrl/Cmd+O)">
+      <button onClick={onOpen} style={newBtn} title={t("editorToolbar.openFile")}>
         <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden fill="none">
           <path d="M1.5 4.5A1 1 0 0 1 2.5 3.5h3.8l1.2 1.5H12.5a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.5"/>
         </svg>
@@ -390,12 +391,12 @@ export default function Toolbar({
       </button>
 
       {/* Ghép — nối nhiều ảnh thành ảnh dài */}
-      <button onClick={onStitch} style={newBtn} title="Nối ảnh dài (ghép nhiều ảnh)">
+      <button onClick={onStitch} style={newBtn} title={t("editorToolbar.stitchImages")}>
         <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden fill="none">
           <rect x="2" y="1.5" width="11" height="5" rx="1" stroke="currentColor" strokeWidth="1.4"/>
           <rect x="2" y="8.5" width="11" height="5" rx="1" stroke="currentColor" strokeWidth="1.4"/>
         </svg>
-        <span style={{ fontSize: 12, fontWeight: 600 }}>Ghép</span>
+        <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.stitchButton")}</span>
       </button>
 
       <div style={sep} />
@@ -429,7 +430,7 @@ export default function Toolbar({
       {/* Màu stroke — ẩn khi đang dùng highlight/blur */}
       {!isHighlight && !isBlur && (
         <div style={group}>
-          <span style={dimLabel}>Màu</span>
+          <span style={dimLabel}>{t("editorToolbar.color")}</span>
           {PRESET_COLORS.map((c) => (
             <button key={c} onClick={() => setColor(c)} title={c}
               style={{
@@ -458,7 +459,7 @@ export default function Toolbar({
       {/* Màu highlight — chỉ hiện khi tool = highlight */}
       {isHighlight && (
         <div style={group}>
-          <span style={dimLabel}>Màu</span>
+          <span style={dimLabel}>{t("editorToolbar.color")}</span>
           {HIGHLIGHT_COLORS.map((c) => (
             <button key={c} onClick={() => setHighlightColor(c)} title={c}
               style={{
@@ -491,7 +492,7 @@ export default function Toolbar({
           <div style={group}>
             {STROKE_WIDTHS.map((w) => (
               <button key={w} onClick={() => setStrokeWidth(w)}
-                style={toolBtn(strokeWidth === w)} title={`Nét ${w}px`}>
+                style={toolBtn(strokeWidth === w)} title={t("editorToolbar.strokeWidth", { n: w })}>
                 <span style={{ display: "inline-block", width: 18, height: w, background: "currentColor", borderRadius: 2 }} />
               </button>
             ))}
@@ -504,10 +505,10 @@ export default function Toolbar({
         <>
           <div style={sep} />
           <div style={group}>
-            <span style={dimLabel}>Cỡ chữ</span>
-            <button onClick={() => setFontSize(clampFont(fontSize - 2))} style={toolBtn(false)} title="Nhỏ hơn">−</button>
-            <NumberField value={fontSize} min={FONT_MIN} max={FONT_MAX} onCommit={(n) => setFontSize(clampFont(n))} title="Cỡ chữ (px)" />
-            <button onClick={() => setFontSize(clampFont(fontSize + 2))} style={toolBtn(false)} title="Lớn hơn">+</button>
+            <span style={dimLabel}>{t("editorToolbar.fontSize")}</span>
+            <button onClick={() => setFontSize(clampFont(fontSize - 2))} style={toolBtn(false)} title={t("editorToolbar.fontSizeSmaller")}>−</button>
+            <NumberField value={fontSize} min={FONT_MIN} max={FONT_MAX} onCommit={(n) => setFontSize(clampFont(n))} title={t("editorToolbar.fontSizeInput")} />
+            <button onClick={() => setFontSize(clampFont(fontSize + 2))} style={toolBtn(false)} title={t("editorToolbar.fontSizeLarger")}>+</button>
           </div>
         </>
       )}
@@ -517,26 +518,26 @@ export default function Toolbar({
         <>
           <div style={sep} />
           <div style={group}>
-            <span style={dimLabel}>Số tiếp theo</span>
+            <span style={dimLabel}>{t("editorToolbar.nextNumber")}</span>
             <NumberField
               value={isStep ? stepCounter : arrowCounter}
               min={1}
               onCommit={isStep ? setStepCounter : setArrowCounter}
-              title="Số sẽ gán cho mục kế tiếp"
+              title={t("editorToolbar.nextNumberToAssign")}
             />
             <button
               onClick={() => (isStep ? setStepCounter : setArrowCounter)(1)}
               style={toolBtn(false)}
-              title="Đặt lại bộ đếm về 1"
+              title={t("editorToolbar.resetCounter")}
             >
               ↺ 1
             </button>
             <button
               onClick={() => (isStep ? renumberSteps : renumberArrows)()}
               style={newBtn}
-              title="Đánh số lại toàn bộ theo thứ tự tạo (dọn khoảng trống sau khi xóa)"
+              title={t("editorToolbar.renumberAll")}
             >
-              Đánh số lại
+              {t("editorToolbar.renumber")}
             </button>
           </div>
         </>
@@ -553,7 +554,7 @@ export default function Toolbar({
                 key={m}
                 onClick={() => setBlurMode(m)}
                 style={modeBtn(blurMode === m)}
-                title={m === "blur" ? "Blur mềm" : m === "pixelate" ? "Pixel hoá" : "Che đặc"}
+                title={m === "blur" ? t("editorToolbar.blurSoft") : m === "pixelate" ? t("editorToolbar.pixelate") : t("editorToolbar.solidMode")}
               >
                 {m === "blur" ? "Blur" : m === "pixelate" ? "Pixel" : "Solid"}
               </button>
@@ -565,7 +566,7 @@ export default function Toolbar({
             <>
               <div style={sep} />
               <div style={group}>
-                <span style={dimLabel}>{blurMode === "pixelate" ? "Tile" : "Mờ"}</span>
+                <span style={dimLabel}>{blurMode === "pixelate" ? t("editorToolbar.pixelTileSize") : t("editorToolbar.blurIntensity")}</span>
                 <input
                   type="range"
                   min={2} max={blurMode === "pixelate" ? 32 : 20}
@@ -574,7 +575,7 @@ export default function Toolbar({
                   onMouseUp={commitBlurRadius}
                   onPointerUp={commitBlurRadius}
                   style={sliderStyle}
-                  title={`Cường độ: ${blurRadius}`}
+                  title={t("editorToolbar.intensityLabel", { n: blurRadius })}
                 />
                 <span style={blurLabel}>{blurRadius}</span>
               </div>
@@ -586,7 +587,7 @@ export default function Toolbar({
             <>
               <div style={sep} />
               <div style={group}>
-                <span style={dimLabel}>Màu</span>
+                <span style={dimLabel}>{t("editorToolbar.color")}</span>
                 {SOLID_COLORS.map((c) => (
                   <button
                     key={c}
@@ -622,9 +623,9 @@ export default function Toolbar({
             onClick={onFlatten}
             disabled={busy}
             style={flattenBtn}
-            title="Flatten — ghi đè annotation vào ảnh gốc, không thể hoàn tác"
+            title={t("editorToolbar.flattenTooltip")}
           >
-            🔒 Flatten
+            {t("editorToolbar.flatten")}
           </button>
         </>
       )}
@@ -633,9 +634,9 @@ export default function Toolbar({
 
       {/* Undo / redo / xoá */}
       <div style={group}>
-        <button onClick={undo} disabled={!canUndo()} style={toolBtn(false)} title="Hoàn tác (Ctrl/Cmd+Z)">↩︎</button>
-        <button onClick={redo} disabled={!canRedo()} style={toolBtn(false)} title="Làm lại">↪︎</button>
-        <button onClick={removeSelected} disabled={!selectedId} style={toolBtn(false)} title="Xoá (Delete)">🗑</button>
+        <button onClick={undo} disabled={!canUndo()} style={toolBtn(false)} title={t("editorToolbar.undo")}>↩︎</button>
+        <button onClick={redo} disabled={!canRedo()} style={toolBtn(false)} title={t("editorToolbar.redo")}>↪︎</button>
+        <button onClick={removeSelected} disabled={!selectedId} style={toolBtn(false)} title={t("editorToolbar.delete")}>🗑</button>
       </div>
       </>
       )}
@@ -656,7 +657,7 @@ export default function Toolbar({
             onClick={onSave}
             disabled={busy}
             style={savePillBtn}
-            title="Lưu (Ctrl/Cmd+S)"
+            title={t("editorToolbar.save")}
           >
             <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
               <path d="M13 14H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L14 5.5V13a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.5"/>
@@ -669,8 +670,8 @@ export default function Toolbar({
             onClick={(e) => { e.stopPropagation(); setShowSaveMenu((v) => !v); }}
             disabled={busy}
             style={saveCaretBtn}
-            title="Tuỳ chọn lưu khác"
-            aria-label="Tuỳ chọn lưu khác"
+            title={t("editorToolbar.saveOptions")}
+            aria-label={t("editorToolbar.saveOptions")}
           >
             ▾
           </button>
@@ -680,13 +681,13 @@ export default function Toolbar({
                 style={saveMenuItem}
                 onClick={() => { setShowSaveMenu(false); onSaveAs(); }}
               >
-                Save As… (Ctrl/Cmd+Shift+S)
+                {t("editorToolbar.saveAs")}
               </button>
             </div>
           )}
         </div>
 
-        <button onClick={onSaveCopy} disabled={busy} style={newBtn} title="Lưu + Copy (Ctrl/Cmd+Alt+S)">
+        <button onClick={onSaveCopy} disabled={busy} style={newBtn} title={t("editorToolbar.saveCopy")}>
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
             <path d="M12 13.5H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L13 5v7.5a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.4"/>
             <path d="M4.5 2v3a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.4"/>
@@ -697,7 +698,7 @@ export default function Toolbar({
           <span style={{ fontSize: 12, fontWeight: 600 }}>Save+Copy</span>
         </button>
 
-        <button onClick={onCopy} disabled={busy} style={newBtn} title="Copy vào clipboard (Ctrl/Cmd+C)">
+        <button onClick={onCopy} disabled={busy} style={newBtn} title={t("editorToolbar.copy")}>
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
             <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
             <path d="M3 11H2.5A1.5 1.5 0 0 1 1 9.5v-7A1.5 1.5 0 0 1 2.5 1h7A1.5 1.5 0 0 1 11 2.5V3" stroke="currentColor" strokeWidth="1.5"/>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { useTranslation, Trans } from "react-i18next";
 import Toolbar from "./Toolbar";
 import HistoryStrip from "./HistoryStrip";
 import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
@@ -23,6 +24,7 @@ interface VideoDoc {
 const EMPTY_TRIM_STATE = { hasChanges: false, keepRanges: [] as [number, number][], removeAudio: false };
 
 export default function Editor() {
+  const { t } = useTranslation();
   const stageRef = useRef<StageHandle>(null);
   const loadDoc = useEditor((s) => s.loadDoc);
   const docHistoryId = useEditor((s) => s.doc?.historyId);
@@ -138,7 +140,7 @@ export default function Editor() {
     setBusy(true);
     try {
       await copyToClipboard(url);
-      flash("Đã copy vào clipboard");
+      flash(t("editorMain.copiedClipboard"));
     } finally {
       setBusy(false);
     }
@@ -162,7 +164,7 @@ export default function Editor() {
       });
       setVideoTrimState(EMPTY_TRIM_STATE);
       setVideoVersion((v) => v + 1);
-      flash("Đã lưu đè video");
+      flash(t("editorMain.videoOverwritten"));
     } catch (e) {
       flash(String(e));
     } finally {
@@ -179,7 +181,7 @@ export default function Editor() {
     setBusy(true);
     try {
       await ipc.trimHistoryVideo(videoDoc.historyId, videoTrimState.keepRanges, videoTrimState.removeAudio);
-      flash("Đã lưu thành video mới");
+      flash(t("editorMain.videoSavedNew"));
     } catch (e) {
       flash(String(e));
     } finally {
@@ -321,7 +323,7 @@ export default function Editor() {
       };
       img.src = dataUrl;
     } catch (e) {
-      flash(`Error opening file: ${e}`);
+      flash(t("editorMain.errorOpeningFile", { error: e }));
     }
   };
 
@@ -329,7 +331,7 @@ export default function Editor() {
   const doStitch = () => {
     const current = stageRef.current?.flattenPng();
     if (!current) {
-      flash("Chưa có ảnh để nối");
+      flash(t("editorMain.noImagesToStitch"));
       return;
     }
     setStitchImage(current);
@@ -339,7 +341,7 @@ export default function Editor() {
     setStitchImage(null);
     // Đi qua history (không loadDoc reset) → Ctrl/Cmd+Z hoàn tác về trước khi nối.
     useEditor.getState().applyStitch(result.dataUrl, result.width, result.height);
-    flash("Đã nối ảnh — Ctrl/Cmd+Z để hoàn tác");
+    flash(t("editorMain.imageStitched"));
   };
 
   const confirmFlatten = () => {
@@ -361,7 +363,7 @@ export default function Editor() {
         annotations: [],
         historyId: doc.historyId,
       });
-      flash("Đã flatten — annotation đã được ghi vào ảnh");
+      flash(t("editorMain.flattened"));
     };
     el.src = url;
   };
@@ -432,6 +434,7 @@ export default function Editor() {
 /* ── Flatten Confirm Dialog ── */
 
 function FlattenConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
+  const { t } = useTranslation();
   // Đóng khi nhấn Escape
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -448,27 +451,27 @@ function FlattenConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; 
         {/* Icon + tiêu đề */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
           <span style={{ fontSize: 22 }}>🔒</span>
-          <span style={{ fontSize: 15, fontWeight: 600, color: "#fca5a5" }}>Flatten ảnh?</span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: "#fca5a5" }}>{t("editorMain.flattenConfirmTitle")}</span>
         </div>
 
         {/* Mô tả */}
         <p style={descStyle}>
-          Thao tác này sẽ <strong style={{ color: "#f87171" }}>ghi tất cả annotation vào ảnh gốc</strong> và không thể hoàn tác (Undo sẽ bị xóa).
+          <Trans i18nKey="editorMain.flattenDescription" components={{ 1: <strong style={{ color: "#f87171" }} /> }} />
         </p>
 
         <ul style={listStyle}>
-          <li>Mọi lớp vẽ (blur, highlight, text, mũi tên…) sẽ được <strong>hợp nhất thành pixel</strong> trong ảnh.</li>
-          <li>Toàn bộ lịch sử Undo/Redo sẽ bị <strong>xóa sạch</strong>.</li>
-          <li>Ảnh sau khi flatten vẫn <strong>chưa được lưu</strong> — bạn cần bấm Save để lưu tiếp.</li>
+          <li><Trans i18nKey="editorMain.flattenItem1" components={{ 1: <strong /> }} /></li>
+          <li><Trans i18nKey="editorMain.flattenItem2" components={{ 1: <strong /> }} /></li>
+          <li><Trans i18nKey="editorMain.flattenItem3" components={{ 1: <strong /> }} /></li>
         </ul>
 
         {/* Actions */}
         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 20 }}>
           <button style={cancelBtnStyle} onClick={onCancel}>
-            Huỷ
+            {t("editorMain.flattenCancel")}
           </button>
           <button style={confirmBtnStyle} onClick={onConfirm} autoFocus>
-            Flatten
+            {t("editorMain.flattenConfirm")}
           </button>
         </div>
       </div>
