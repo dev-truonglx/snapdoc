@@ -161,7 +161,7 @@
     "startingRecording": "Starting…",
     "selectMonitor": "Click to capture entire screen • Esc / right-click to cancel",
     "windowLabel": "Window",
-    "quickDragSelect": "Drag to select area • Esc / right-click to cancel",
+    "quickDragSelect": "Drag to select area • Hover a window and click to capture it • Esc / right-click to cancel",
     "captureFullscreen": "Capture full screen"
   },
   "windowPicker": {

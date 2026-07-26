@@ -162,7 +162,7 @@
     "selectMonitor": "Click để chụp toàn bộ màn hình này • Esc / chuột phải để huỷ",
     "windowLabel": "Cửa sổ",
     "captureFullscreen": "Chụp toàn màn hình",
-    "quickDragSelect": "Kéo để chọn vùng • Esc / chuột phải để huỷ"
+    "quickDragSelect": "Kéo để chọn vùng • Di chuột qua cửa sổ rồi click để chụp cả cửa sổ • Esc / chuột phải để huỷ"
   },
   "windowPicker": {
     "title": "Chọn cửa sổ ứng dụng",

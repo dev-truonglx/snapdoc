@@ -476,12 +476,17 @@ const REC_HANDLES = [
  * dưới) để bấm nút không bao giờ bị hiểu nhầm thành "chọn vùng khác". */
 function recToolbarRect(sel: Sel, winW: number, winH: number): Sel {
   const barH = 48;
-  const gap = 12;
+  // Khoảng cách từ mép khung tới thanh nút — tăng so với trước (12→16px) để
+  // dễ nhìn/dễ bấm hơn, đồng bộ với `QuickToolbar`.
+  const gap = 16;
   const barW = 260;
   const below = sel.y + sel.h + gap + barH <= winH;
   const top = below ? sel.y + sel.h + gap : Math.max(gap, sel.y - gap - barH);
   const left = recClamp(sel.x, 0, Math.max(0, winW - barW));
-  return { x: left, y: top, w: barW, h: barH };
+  // An toàn cuối: đảm bảo thanh nút luôn nằm trọn trong viewport kể cả khi
+  // khung chọn chiếm gần hết chiều cao màn hình (cùng lớp bug đã sửa ở
+  // `quickToolbarLayout`).
+  return { x: left, y: recClamp(top, 0, Math.max(0, winH - barH)), w: barW, h: barH };
 }
 
 /** true nếu (x,y) rơi vào khung đang chỉnh HOẶC thanh nút của nó — dùng
@@ -793,10 +798,11 @@ function RecordRegionToolbar({
         display: "flex",
         alignItems: "center",
         gap: 8,
-        background: "rgba(20,20,24,0.95)",
+        background: "rgba(20,20,24,0.97)",
         borderRadius: 10,
         padding: "8px 10px",
-        boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+        border: "1px solid rgba(255,255,255,0.1)",
+        boxShadow: "0 6px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.3)",
         cursor: "default",
       }}
       onPointerDown={(e) => e.stopPropagation()}
@@ -868,6 +874,18 @@ function QuickAnnotate() {
   // phủ xám ở đúng màn hình đang thao tác, giống `RegionSelect`.
   const [cursorHere, setCursorHere] = useState(false);
 
+  // Gợi ý cửa sổ khi hover (giống `RegionSelect`): click nhanh không kéo khi
+  // đang hover 1 cửa sổ → nạp thẳng khung = đúng cửa sổ đó (pha "adjusting",
+  // y hệt vừa kéo-chọn xong) thay vì phải tự kéo tay. Chỉ áp dụng lúc CHƯA có
+  // khung nào (`phase === "selecting"`) — xem gate trong `useInput` bên dưới.
+  const winsRef = useRef<WindowInfo[]>([]);
+  const [hoverWin, setHoverWin] = useState<WindowInfo | null>(null);
+  const pressWinRef = useRef<WindowInfo | null>(null);
+
+  useEffect(() => {
+    ipc.listWindows().then((w) => { winsRef.current = w; }).catch(() => {});
+  }, []);
+
   const winW = window.innerWidth;
   const winH = window.innerHeight;
 
@@ -890,7 +908,9 @@ function QuickAnnotate() {
   useInput(
     (active, x, y) => {
       setCursorHere(active);
+      const stillSelecting = active && phase === "selecting" && !startRef.current;
       setCursorPos(active && phase === "selecting" ? [x, y] : null);
+      setHoverWin(stillSelecting ? pickWindow(winsRef.current, x, y) : null);
       if (!active || !startRef.current) return;
       setSel(rectFrom(startRef.current[0], startRef.current[1], x, y));
     },
@@ -912,13 +932,27 @@ function QuickAnnotate() {
       prevSelRef.current = sel;
       prevPhaseRef.current = phase;
       startRef.current = [x, y];
+      pressWinRef.current = hoverWin;
+      setHoverWin(null);
       setSel({ x, y, w: 0, h: 0 });
       setPhase("selecting");
     },
     (x, y) => {
       const s = startRef.current;
       startRef.current = null;
+      const hovered = pressWinRef.current;
+      pressWinRef.current = null;
       if (!s) return; // không phải đang kéo chọn (vd: đang vẽ/di chuyển native)
+      // Click nhanh (không kéo) trúng 1 cửa sổ đang hover → nạp thẳng khung =
+      // đúng cửa sổ đó, y hệt vừa kéo-chọn xong — giống Snagit/`RegionSelect`.
+      const dist = Math.hypot(x - s[0], y - s[1]);
+      if (dist < 4 && hovered && pickWindow(winsRef.current, x, y)?.id === hovered.id) {
+        setSel({ x: hovered.x, y: hovered.y, w: hovered.width, h: hovered.height });
+        setPhase("adjusting");
+        loadDoc({ image: transparentPng(1, 1), imgW: 1, imgH: 1, scaleFactor: SCALE, annotations: [] });
+        getCurrentWindow().setFocus().catch(() => {});
+        return;
+      }
       const r = rectFrom(s[0], s[1], x, y);
       if (r.w >= MIN_SEL && r.h >= MIN_SEL) {
         setSel(r);
@@ -1142,6 +1176,35 @@ function QuickAnnotate() {
         >
           <div style={banner}>{t("overlay.quickDragSelect")}</div>
         </div>
+      )}
+      {/* Gợi ý cửa sổ khi hover — chỉ trước khi có khung (`phase === "selecting"`),
+          giống `RegionSelect`. */}
+      {phase === "selecting" && !sel && hoverWin && (
+        <div
+          style={{
+            position: "fixed",
+            left: hoverWin.x,
+            top: hoverWin.y,
+            width: hoverWin.width,
+            height: hoverWin.height,
+            ...antsBorder(2.5),
+            pointerEvents: "none",
+          }}
+        >
+          <span style={sizeLabel}>
+            {hoverWin.app || hoverWin.title || t("overlay.windowLabel")}
+          </span>
+        </div>
+      )}
+      {phase === "selecting" && !sel && (
+        <RegionFullscreenButton
+          onClick={() => {
+            setSel({ x: 0, y: 0, w: winW, h: winH });
+            setPhase("adjusting");
+            loadDoc({ image: transparentPng(1, 1), imgW: 1, imgH: 1, scaleFactor: SCALE, annotations: [] });
+            getCurrentWindow().setFocus().catch(() => {});
+          }}
+        />
       )}
 
       {/* Canvas chú thích phủ đúng khung (trong suốt → thấy frozen image bên dưới) */}

@@ -4,7 +4,10 @@ import { useEditor } from "../../features/annotation/store";
 import { PRESET_COLORS, HIGHLIGHT_COLORS, type Tool } from "../../features/annotation/model";
 
 const TOOLBAR_W = 44;
-const GAP = 8;
+// Khoảng cách từ mép khung tới toolbar — tăng so với trước (8→14px) để
+// toolbar không dính sát khung, dễ nhìn/dễ bấm hơn, tránh cảm giác che mất
+// góc ảnh vừa chụp.
+const GAP = 14;
 const EST_V_H = 370; // ước lượng cao thanh dọc (9 nút × 34 + gap + padding)
 const BOTTOM_H = 44;
 const BOTTOM_W = 184; // ước lượng rộng thanh ngang (4 nút icon) để canh phải
@@ -109,6 +112,18 @@ export function quickToolbarLayout(sel: Rect, winW: number, winH: number) {
     hLeft = clamp(sel.x + sel.w - BOTTOM_W, GAP, Math.max(GAP, winW - BOTTOM_W - GAP));
   }
 
+  // An toàn CUỐI CÙNG — bất kể nhánh nào ở trên tính ra: ép cả 2 thanh luôn
+  // nằm TRỌN trong viewport. Trước đây `flipX`/`flipY` chỉ đổi hướng dựa vào
+  // khoảng trống 1 PHÍA (vd "hết chỗ bên phải → sang trái") mà không kiểm tra
+  // phía còn lại có thật sự đủ chỗ không — khi khung chọn chiếm gần hết chiều
+  // rộng/cao màn hình (CẢ 2 phía đều thiếu chỗ), toolbar bị đẩy ra ngoài màn
+  // hình (toạ độ âm hoặc vượt mép), coi như "biến mất". Clamp lại ở đây đảm
+  // bảo luôn thấy được toolbar dù `sel` sát mép màn hình cỡ nào.
+  vLeft = clamp(vLeft, GAP, Math.max(GAP, winW - TOOLBAR_W - GAP));
+  vTop  = clamp(vTop, GAP, Math.max(GAP, winH - EST_V_H - GAP));
+  hLeft = clamp(hLeft, GAP, Math.max(GAP, winW - BOTTOM_W - GAP));
+  hTop  = clamp(hTop, GAP, Math.max(GAP, winH - BOTTOM_H - GAP));
+
   return {
     flipX,
     insideMode,
@@ -211,17 +226,21 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
   );
 }
 
+// Viền + bóng đổ đậm hơn trước để 2 thanh nổi rõ trên mọi nền (ảnh sáng lẫn
+// tối) thay vì chỉ dựa vào màu nền tối gần như hoà lẫn lúc chụp màn hình tối.
 const sideBar: React.CSSProperties = {
   position: "absolute", width: TOOLBAR_W,
   display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
-  background: "rgba(28,28,32,0.96)", borderRadius: 10, padding: "8px 4px",
-  boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
+  background: "rgba(28,28,32,0.97)", borderRadius: 10, padding: "8px 4px",
+  border: "1px solid rgba(255,255,255,0.1)",
+  boxShadow: "0 6px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.3)",
 };
 const bottomBar: React.CSSProperties = {
   position: "absolute", height: BOTTOM_H,
   display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6,
-  background: "rgba(28,28,32,0.96)", borderRadius: 10, padding: "0 8px",
-  boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
+  background: "rgba(28,28,32,0.97)", borderRadius: 10, padding: "0 8px",
+  border: "1px solid rgba(255,255,255,0.1)",
+  boxShadow: "0 6px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.3)",
 };
 
 function toolBtn(active: boolean, disabled = false): React.CSSProperties {
