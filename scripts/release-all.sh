@@ -198,11 +198,39 @@ VERSION="$VERSION" BASE="$BASE" MAC="$MAC" MAC_SIG="$MAC_SIG" EXE="$EXE" EXE_SIG
 
 # ── 6) Create the draft release and upload everything ─────────────────────────
 echo "==> [6/6] Creating draft release + uploading assets"
+
+# Compare link: previous published tag -> this one (e.g. .../compare/v1.0.0...v1.0.1).
+# Falls back to a plain commit history link if there's no prior published release.
+PREV_TAG="$(gh release list --repo "$RELEASES_REPO" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
+if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$TAG" ]; then
+  CHANGELOG_LINK="https://github.com/${RELEASES_REPO}/compare/${PREV_TAG}...${TAG}"
+else
+  CHANGELOG_LINK="https://github.com/${RELEASES_REPO}/commits/${TAG}"
+fi
+
+# Commit list since the previous published tag (best-effort — requires the
+# tag to be reachable in this local clone). Each line: "- <subject> by @<author>
+# in <commit-link>", where the link text is the short sha and points at the
+# commit's diff on GitHub.
+COMMITS=""
+if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$TAG" ]; then
+  git fetch --tags --quiet origin "$PREV_TAG" >/dev/null 2>&1 || true
+  COMMITS="$(git log --no-merges --pretty=format:'%s|%an|%h|%H' "${PREV_TAG}..HEAD" 2>/dev/null \
+    | awk -F'|' -v repo="$RELEASES_REPO" '{printf "- %s by @%s in [%s](https://github.com/%s/commit/%s)\n", $1, $2, $3, repo, $4}')"
+fi
+
 NOTES="## What's new
 
-$DESCRIPTION
+$DESCRIPTION"
+if [ -n "$COMMITS" ]; then
+  NOTES="$NOTES
 
-**Full Changelog**: https://github.com/${RELEASES_REPO}/commits/${TAG}"
+### Commits
+$COMMITS"
+fi
+NOTES="$NOTES
+
+**Full Changelog**: ${CHANGELOG_LINK}"
 
 if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
   echo "    release $TAG already exists — updating its notes"
