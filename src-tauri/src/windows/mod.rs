@@ -264,38 +264,49 @@ fn url(win: &str) -> WebviewUrl {
     WebviewUrl::App(format!("index.html?win={win}").into())
 }
 
-/// Vùng làm việc THẬT của màn hình chứa điểm `(px, py)` (physical px, hệ toạ
-/// độ màn hình Win32) — đã TRỪ taskbar (và mọi appbar khác neo cạnh màn
-/// hình), khác `GetMonitorInfoW().rcMonitor`/xcap `Monitor::size()` chỉ trả
-/// kích thước MÀN HÌNH ĐẦY ĐỦ. Không có API nào của xcap/Tauri/tao lộ ra work
-/// area này — phải gọi thẳng Win32. Trả `None` nếu không tìm được monitor tại
-/// điểm đó (hiếm, vd toạ độ ngoài mọi màn hình đang bật).
-#[cfg(target_os = "windows")]
-fn windows_work_area_physical(px: i32, py: i32) -> Option<(i32, i32, i32, i32)> {
-    use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    };
-    use windows_sys::Win32::Foundation::POINT;
-    unsafe {
-        let pt = POINT { x: px, y: py };
-        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-        if hmon == 0 {
-            return None;
-        }
-        let mut mi: MONITORINFO = std::mem::zeroed();
-        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if GetMonitorInfoW(hmon, &mut mi) == 0 {
-            return None;
-        }
-        let rc = mi.rcWork;
-        Some((rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top))
+/// Khoảng cách (trái, trên, phải, dưới — theo LOGICAL) giữa kích thước MÀN
+/// HÌNH ĐẦY ĐỦ và WORK AREA (đã trừ taskbar/Dock/menu bar…) của màn hình chứa
+/// điểm `(cx, cy)` (physical px). Dùng `Monitor::work_area()` — API CROSS-
+/// PLATFORM tao/Tauri đã lộ sẵn (tao tự gọi đúng API từng OS: GetMonitorInfoW
+/// trên Windows, NSScreen.visibleFrame trên macOS…) — nên KHÔNG cần tự viết
+/// code Win32/Cocoa thủ công. `None` nếu không tìm được monitor tại điểm đó
+/// (rơi về kích thước màn hình đầy đủ như cũ, xem `cursor_or_primary_monitor_logical_rect`).
+fn work_area_insets(app: &AppHandle, cx: f64, cy: f64) -> Option<(f64, f64, f64, f64)> {
+    let m = app.monitor_from_point(cx, cy).ok().flatten()?;
+    let scale = m.scale_factor().max(0.0001);
+    let pos = m.position();
+    let size = m.size();
+    let wa = m.work_area();
+    let left = (wa.position.x - pos.x).max(0) as f64 / scale;
+    let top = (wa.position.y - pos.y).max(0) as f64 / scale;
+    let right = ((pos.x + size.width as i32) - (wa.position.x + wa.size.width as i32)).max(0) as f64 / scale;
+    let bottom = ((pos.y + size.height as i32) - (wa.position.y + wa.size.height as i32)).max(0) as f64 / scale;
+    Some((left, top, right, bottom))
+}
+
+/// Trừ insets (`work_area_insets`) vào rect màn hình đầy đủ `(m_x, m_y, m_w,
+/// m_h)` — dùng chung cho cả nhánh cursor lẫn nhánh fallback `primary_monitor`
+/// của `cursor_or_primary_monitor_logical_rect`. `(cx, cy)` (physical px) là
+/// điểm để tìm ĐÚNG monitor cần hỏi work area — không nhất thiết bằng
+/// `(m_x, m_y)` (đó là logical, đã lệch hệ đơn vị).
+fn shrink_to_work_area(app: &AppHandle, cx: f64, cy: f64, rect: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    let (m_x, m_y, m_w, m_h) = rect;
+    match work_area_insets(app, cx, cy) {
+        Some((left, top, right, bottom)) => (
+            m_x + left,
+            m_y + top,
+            (m_w - left - right).max(1.0),
+            (m_h - top - bottom).max(1.0),
+        ),
+        None => rect,
     }
 }
 
-/// Vùng (x, y, width, height) theo LOGICAL/points của màn hình đang chứa con
-/// trỏ chuột. Dùng để mở cửa sổ (capture bar, thumbnail, recording
-/// indicator, và cả Editor/History/Settings) đúng
-/// màn hình user đang nhìn vào lúc bấm mở, thay vì luôn mở ở màn hình chính.
+/// Vùng (x, y, width, height) theo LOGICAL/points của WORK AREA (đã trừ
+/// taskbar/Dock/menu bar) màn hình đang chứa con trỏ chuột. Dùng để mở cửa sổ
+/// (capture bar, thumbnail, recording indicator, và cả Editor/History/
+/// Settings) đúng màn hình user đang nhìn vào lúc bấm mở, thay vì luôn mở ở
+/// màn hình chính — VÀ để full-màn-hình (Editor) không bị taskbar/Dock che.
 /// Chỉ cần `app` (không cần cửa sổ đã tồn tại) — fallback về
 /// `app.primary_monitor()` (hành vi cũ) nếu không đọc được con trỏ hoặc
 /// không xác định được màn hình chứa nó, nên dùng được cả TRƯỚC khi tạo cửa
@@ -310,9 +321,7 @@ fn windows_work_area_physical(px: i32, py: i32) -> Option<(i32, i32, i32, i32)> 
 /// khoảng cách thật (đúng hiện tượng "FullHD lệch phải, Retina thì đúng" đã
 /// gặp). Dùng `Position::Logical` bỏ HẲN bước quy đổi này — giá trị Logical
 /// chỉ được cast, không bị chia lại theo bất kỳ scale nào — an toàn tuyệt
-/// đối bất kể cửa sổ đang ở màn nào lúc gọi. Trên Windows, ưu tiên work area
-/// (trừ taskbar) qua `windows_work_area_physical` thay vì kích thước màn hình
-/// đầy đủ — lý do gây bug "Editor full màn hình bị taskbar che".
+/// đối bất kể cửa sổ đang ở màn nào lúc gọi.
 fn cursor_or_primary_monitor_logical_rect(app: &AppHandle) -> Option<(f64, f64, f64, f64)> {
     if let Some((cx, cy)) = read_cursor(app) {
         if let Ok(m) = crate::capture::monitor::at_point(cx as i32, cy as i32) {
@@ -328,21 +337,6 @@ fn cursor_or_primary_monitor_logical_rect(app: &AppHandle) -> Option<(f64, f64, 
             #[cfg(not(target_os = "macos"))]
             let rect = {
                 let scale = (m.scale_factor().unwrap_or(1.0).max(1.0)) as f64;
-                // Windows: ưu tiên work area (trừ taskbar) qua Win32 thẳng —
-                // `cx`/`cy` (từ `app.cursor_position()`) đã là physical px, cùng
-                // hệ toạ độ Win32 dùng cho `MonitorFromPoint`. Rơi về kích thước
-                // màn hình đầy đủ của xcap nếu Win32 lỗi (hiếm).
-                #[cfg(target_os = "windows")]
-                let full = windows_work_area_physical(cx as i32, cy as i32);
-                #[cfg(target_os = "windows")]
-                if let Some((wx, wy, ww, wh)) = full {
-                    return Some((
-                        wx as f64 / scale,
-                        wy as f64 / scale,
-                        ww as f64 / scale,
-                        wh as f64 / scale,
-                    ));
-                }
                 (
                     m.x().unwrap_or(0) as f64 / scale,
                     m.y().unwrap_or(0) as f64 / scale,
@@ -350,28 +344,18 @@ fn cursor_or_primary_monitor_logical_rect(app: &AppHandle) -> Option<(f64, f64, 
                     m.height().unwrap_or(0) as f64 / scale,
                 )
             };
-            return Some(rect);
+            return Some(shrink_to_work_area(app, cx, cy, rect));
         }
     }
     let pm = app.primary_monitor().ok().flatten()?;
     let scale = pm.scale_factor() as f64;
-    #[cfg(target_os = "windows")]
-    if let Some((wx, wy, ww, wh)) =
-        windows_work_area_physical(pm.position().x, pm.position().y)
-    {
-        return Some((
-            wx as f64 / scale,
-            wy as f64 / scale,
-            ww as f64 / scale,
-            wh as f64 / scale,
-        ));
-    }
-    Some((
+    let rect = (
         pm.position().x as f64 / scale,
         pm.position().y as f64 / scale,
         pm.size().width as f64 / scale,
         pm.size().height as f64 / scale,
-    ))
+    );
+    Some(shrink_to_work_area(app, pm.position().x as f64, pm.position().y as f64, rect))
 }
 
 /// Kích thước NGOÀI cửa sổ hiện tại theo LOGICAL — dùng cùng
@@ -422,6 +406,29 @@ fn fill_monitor(app: &AppHandle, win: &tauri::WebviewWindow) {
     if let Some((m_x, m_y, m_w, m_h)) = cursor_or_primary_monitor_logical_rect(app) {
         let _ = win.set_position(tauri::LogicalPosition::new(m_x, m_y));
         let _ = win.set_size(tauri::LogicalSize::new(m_w, m_h));
+        // Editor CÓ title bar/viền native (không `.decorations(false)` như hầu
+        // hết cửa sổ khác trong app) — `set_size` ở trên chỉnh INNER size
+        // (client area, giống `inner_size()` lúc build), nên OUTER size (kích
+        // thước thật hiển thị/chiếm chỗ trên màn hình) LỚN HƠN đúng bằng chiều
+        // cao title bar + viền. Kết quả: dù `m_h` đã là work area (trừ
+        // taskbar), outer bottom vẫn tràn xuống quá `m_h` một khoảng bằng
+        // title bar/viền đó, đè lên taskbar — đúng hiện tượng "vẫn bị che 1
+        // ít" sau khi đã trừ work area. Đo lệch outer-inner NGAY TRÊN cửa sổ
+        // (đã đứng đúng màn hình đích, đúng DPI đích) rồi trừ lại phần đó vào
+        // size mới nhất để outer bottom khớp đúng mép work area.
+        if let (Ok(outer), Ok(inner), Ok(scale)) =
+            (win.outer_size(), win.inner_size(), win.scale_factor())
+        {
+            let scale = scale.max(0.0001);
+            let extra_w = (outer.width as f64 - inner.width as f64) / scale;
+            let extra_h = (outer.height as f64 - inner.height as f64) / scale;
+            if extra_w > 0.0 || extra_h > 0.0 {
+                let _ = win.set_size(tauri::LogicalSize::new(
+                    (m_w - extra_w).max(1.0),
+                    (m_h - extra_h).max(1.0),
+                ));
+            }
+        }
     }
 }
 
