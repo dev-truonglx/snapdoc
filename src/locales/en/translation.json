@@ -317,7 +317,7 @@
     "undoAction": "Undo (Ctrl/Cmd+Z)",
     "copyAction": "Copy (Ctrl/Cmd+C)",
     "saveAction": "Save (Ctrl/Cmd+S)",
-    "openEditor": "Open Editor",
+    "openEditor": "Open Editor (Ctrl/Cmd+E)",
     "close": "Close (Esc)"
   },
   "stitchDialog": {

@@ -1179,6 +1179,7 @@ function QuickAnnotate() {
       if (e.key === "Escape") { e.preventDefault(); doClose(); return; }
       if (mod && e.key.toLowerCase() === "c") { e.preventDefault(); doCopy(); return; }
       if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); doSave(); return; }
+      if (mod && e.key.toLowerCase() === "e") { e.preventDefault(); doOpenEditor(); return; }
       if (phase === "selecting" || !sel) return;
 
       if (!mod) {

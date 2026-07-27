@@ -317,7 +317,7 @@
     "undoAction": "Hoàn tác (Ctrl/Cmd+Z)",
     "copyAction": "Copy (Ctrl/Cmd+C)",
     "saveAction": "Lưu (Ctrl/Cmd+S)",
-    "openEditor": "Mở Editor",
+    "openEditor": "Mở Editor (Ctrl/Cmd+E)",
     "close": "Đóng (Esc)"
   },
   "stitchDialog": {

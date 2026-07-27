@@ -135,33 +135,36 @@ export function quickToolbarLayout(sel: Rect, winW: number, winH: number) {
 export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPickTool, onCopy, onSave, onOpenEditor, onClose }: Props) {
   const { t } = useTranslation();
 
-  const TOOLS: { id: Tool; label: string; icon: React.ReactNode }[] = [
+  // `shortcut`: phím tương ứng ở `quickToolFromKey` (chỉ hoạt động khi đã có
+  // khung chọn — pha "adjusting"/"annotating", xem `onKey` ở `Overlay.tsx`) —
+  // hiện luôn trong tooltip để user biết không cần bấm chuột vào toolbar.
+  const TOOLS: { id: Tool; label: string; shortcut: string; icon: React.ReactNode }[] = [
     {
-      id: "select", label: t("tools.select"),
+      id: "select", label: t("tools.select"), shortcut: "V",
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><path d="M4 2l10 5.2-4.1 1.3 2.4 4.8-1.8.9-2.4-4.8L4 13z" fill="currentColor" /></svg>,
     },
     {
-      id: "rect", label: t("tools.rect"),
+      id: "rect", label: t("tools.rect"), shortcut: "R",
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><rect x="2.5" y="4" width="13" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" /></svg>,
     },
     {
-      id: "step", label: t("tools.step"),
+      id: "step", label: t("tools.step"), shortcut: "N",
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" strokeWidth="1.8" /><text x="9" y="12.4" textAnchor="middle" fontSize="9" fontWeight="700" fill="currentColor">1</text></svg>,
     },
     {
-      id: "text", label: t("tools.text"),
+      id: "text", label: t("tools.text"), shortcut: "T",
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><path d="M3.5 4.5h11" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" /><path d="M9 4.5v9.5" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" /></svg>,
     },
     {
-      id: "arrow", label: t("tools.arrow"),
+      id: "arrow", label: t("tools.arrow"), shortcut: "A",
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><line x1="3" y1="15" x2="14" y2="4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /><polygon points="14,4 9,5.5 12.5,9" fill="currentColor" /></svg>,
     },
     {
-      id: "numbered-arrow", label: t("tools.arrow") + " #",
+      id: "numbered-arrow", label: t("tools.arrow") + " #", shortcut: "W",
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><circle cx="4.5" cy="13.5" r="3.5" fill="currentColor" /><text x="4.5" y="16.2" textAnchor="middle" fontSize="5" fontWeight="700" fill="#fff">1</text><line x1="7.5" y1="11" x2="14.5" y2="4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /><polygon points="14.5,4 10,5.5 13,8.5" fill="currentColor" /></svg>,
     },
     {
-      id: "highlight", label: t("tools.highlight"),
+      id: "highlight", label: t("tools.highlight"), shortcut: "H",
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><rect x="6.5" y="2" width="5" height="9" rx="1.2" fill="currentColor" opacity="0.85" /><rect x="6.5" y="2" width="5" height="2.8" rx="1.2" fill="currentColor" /><polygon points="8,11 10,11 9,13.5" fill="currentColor" opacity="0.85" /><rect x="3" y="14.5" width="12" height="2" rx="1" fill="currentColor" opacity="0.55" /></svg>,
     },
   ];
@@ -194,7 +197,7 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
     <>
       <div style={{ ...sideBar, left: vLeft, top: vTop, ...insideStyle }} onPointerDown={stop}>
         {TOOLS.map((t) => (
-          <button key={t.id} title={t.label} onClick={() => onPickTool(t.id)} style={toolBtn(annotating && tool === t.id)}>
+          <button key={t.id} title={`${t.label} (${t.shortcut})`} onClick={() => onPickTool(t.id)} style={toolBtn(annotating && tool === t.id)}>
             {t.icon}
           </button>
         ))}
