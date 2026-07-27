@@ -250,7 +250,7 @@
     "recordingIconFailed": "Recording but couldn't show tray icon: {error}"
   },
   "editorToolbar": {
-    "newCapture": "New capture (last mode + open bar)",
+    "newCapture": "New capture (last mode + open bar) (Ctrl/Cmd+N)",
     "openFile": "Open image from file (Ctrl/Cmd+O)",
     "stitchImages": "Stitch images (combine multiple)",
     "stitchButton": "Combine",

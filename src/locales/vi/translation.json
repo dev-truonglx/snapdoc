@@ -250,7 +250,7 @@
     "recordingIconFailed": "Đang quay nhưng không hiện được icon trên tray: {error}"
   },
   "editorToolbar": {
-    "newCapture": "Chụp mới (chế độ gần nhất + mở thanh chụp)",
+    "newCapture": "Chụp mới (chế độ gần nhất + mở thanh chụp) (Ctrl/Cmd+N)",
     "openFile": "Mở ảnh từ file (Ctrl/Cmd+O)",
     "stitchImages": "Nối ảnh dài (ghép nhiều ảnh)",
     "stitchButton": "Ghép",

@@ -296,6 +296,10 @@ export default function Editor() {
         if (e.shiftKey) doSaveAs();
         else if (e.altKey) doSave(true);
         else doSave(false);
+      } else if (mod && e.key.toLowerCase() === "n") {
+        // Giống nút "New" trên toolbar — chụp mới theo chế độ gần nhất.
+        e.preventDefault();
+        doNew();
       } else if (mod && e.key.toLowerCase() === "o") {
         e.preventDefault();
         doOpen();
