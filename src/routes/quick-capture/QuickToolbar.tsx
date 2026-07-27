@@ -193,16 +193,64 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
     ? { zIndex: 10, background: "rgba(28,28,32,0.88)" }
     : {};
 
+  // Tooltip TỰ VẼ (KHÔNG dùng `title` native) — overlay chụp nhanh gồm NHIỀU
+  // cửa sổ Tauri `always_on_top` xếp chồng (overlay mỗi màn hình + CaptureBar
+  // + các control quay), tooltip native của hệ điều hành là 1 surface RIÊNG
+  // ngoài webview nên hay bị 1 cửa sổ always-on-top khác đè lên (ẩn phía
+  // sau) thay vì luôn nổi trên cùng như bình thường. Vẽ tooltip bằng
+  // `position: fixed` + z-index cao NGAY TRONG webview này thì luôn nổi trên
+  // toolbar, không phụ thuộc thứ tự z giữa các cửa sổ hệ điều hành nữa.
+  const [hint, setHint] = useState<
+    { text: string; x: number; y: number; placement: "left" | "right" | "top" | "bottom" } | null
+  >(null);
+  const hideHint = () => setHint(null);
+  // Nút thanh dọc: tooltip mở ngang — chọn trái/phải theo nửa màn hình nút
+  // đang đứng để không bị hụt ra ngoài viewport.
+  const hintSide = (e: React.MouseEvent<HTMLButtonElement>, text: string) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const placement: "left" | "right" = r.left < winW / 2 ? "right" : "left";
+    setHint({
+      text,
+      x: placement === "right" ? r.right + 8 : r.left - 8,
+      y: r.top + r.height / 2,
+      placement,
+    });
+  };
+  // Nút thanh ngang: tooltip mở dọc — chọn trên/dưới theo nửa màn hình nút
+  // đang đứng, cùng lý do với `hintSide`.
+  const hintVert = (e: React.MouseEvent<HTMLButtonElement>, text: string) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const placement: "top" | "bottom" = r.top < winH / 2 ? "bottom" : "top";
+    setHint({
+      text,
+      x: r.left + r.width / 2,
+      y: placement === "bottom" ? r.bottom + 8 : r.top - 8,
+      placement,
+    });
+  };
+
   return (
     <>
       <div style={{ ...sideBar, left: vLeft, top: vTop, ...insideStyle }} onPointerDown={stop}>
         {TOOLS.map((t) => (
-          <button key={t.id} title={`${t.label} (${t.shortcut})`} onClick={() => onPickTool(t.id)} style={toolBtn(annotating && tool === t.id)}>
+          <button
+            key={t.id}
+            onClick={() => onPickTool(t.id)}
+            onMouseEnter={(e) => hintSide(e, `${t.label} (${t.shortcut})`)}
+            onMouseLeave={hideHint}
+            style={toolBtn(annotating && tool === t.id)}
+          >
             {t.icon}
           </button>
         ))}
         <div style={{ position: "relative" }}>
-          <button title={t("quickToolbar.selectColor")} disabled={!annotating} onClick={() => setShowColors((v) => !v)} style={toolBtn(showColors, !annotating)}>
+          <button
+            disabled={!annotating}
+            onClick={() => setShowColors((v) => !v)}
+            onMouseEnter={(e) => hintSide(e, t("quickToolbar.selectColor"))}
+            onMouseLeave={hideHint}
+            style={toolBtn(showColors, !annotating)}
+          >
             <span style={{ width: 16, height: 16, borderRadius: "50%", background: swatch, border: "1.5px solid rgba(255,255,255,0.6)" }} />
           </button>
           {showColors && annotating && (
@@ -214,17 +262,83 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
             </div>
           )}
         </div>
-        <button title={t("quickToolbar.undoAction")} disabled={!annotating || !canUndo} onClick={() => undo()} style={toolBtn(false, !annotating || !canUndo)}>
+        <button
+          disabled={!annotating || !canUndo}
+          onClick={() => undo()}
+          onMouseEnter={(e) => hintSide(e, t("quickToolbar.undoAction"))}
+          onMouseLeave={hideHint}
+          style={toolBtn(false, !annotating || !canUndo)}
+        >
           {UndoIcon}
         </button>
       </div>
 
       <div style={{ ...bottomBar, left: hLeft, top: hTop, ...insideStyle }} onPointerDown={stop}>
-        <button title={t("quickToolbar.copyAction")} style={actionBtn()} disabled={busy} onClick={onCopy}>{CopyIcon}</button>
-        <button title={t("quickToolbar.saveAction")} style={actionBtn()} disabled={busy} onClick={onSave}>{SaveIcon}</button>
-        <button title={t("quickToolbar.openEditor")} style={actionBtn()} disabled={busy} onClick={onOpenEditor}>{EditorIcon}</button>
-        <button title={t("quickToolbar.close")} style={actionBtn("danger")} disabled={busy} onClick={onClose}>{CloseIcon}</button>
+        <button
+          style={actionBtn()}
+          disabled={busy}
+          onClick={onCopy}
+          onMouseEnter={(e) => hintVert(e, t("quickToolbar.copyAction"))}
+          onMouseLeave={hideHint}
+        >
+          {CopyIcon}
+        </button>
+        <button
+          style={actionBtn()}
+          disabled={busy}
+          onClick={onSave}
+          onMouseEnter={(e) => hintVert(e, t("quickToolbar.saveAction"))}
+          onMouseLeave={hideHint}
+        >
+          {SaveIcon}
+        </button>
+        <button
+          style={actionBtn()}
+          disabled={busy}
+          onClick={onOpenEditor}
+          onMouseEnter={(e) => hintVert(e, t("quickToolbar.openEditor"))}
+          onMouseLeave={hideHint}
+        >
+          {EditorIcon}
+        </button>
+        <button
+          style={actionBtn("danger")}
+          disabled={busy}
+          onClick={onClose}
+          onMouseEnter={(e) => hintVert(e, t("quickToolbar.close"))}
+          onMouseLeave={hideHint}
+        >
+          {CloseIcon}
+        </button>
       </div>
+
+      {hint && (
+        <div
+          style={{
+            position: "fixed",
+            left: hint.x,
+            top: hint.y,
+            transform:
+              hint.placement === "right" ? "translate(0, -50%)"
+              : hint.placement === "left" ? "translate(-100%, -50%)"
+              : hint.placement === "bottom" ? "translate(-50%, 0)"
+              : "translate(-50%, -100%)",
+            background: "rgba(20,20,24,0.97)",
+            color: "#fff",
+            fontSize: 12,
+            fontWeight: 500,
+            padding: "5px 9px",
+            borderRadius: 6,
+            border: "1px solid rgba(255,255,255,0.14)",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.45)",
+            whiteSpace: "nowrap",
+            pointerEvents: "none",
+            zIndex: 999999,
+          }}
+        >
+          {hint.text}
+        </div>
+      )}
     </>
   );
 }
