@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Mutex;
 
 /// Snapshot một màn hình tại thời điểm mở overlay, đơn vị **POINTS** trong
@@ -99,6 +99,13 @@ pub struct AppState {
     /// Generation của phiên overlay hiện tại — để chỉ 1 luồng theo dõi con trỏ
     /// chạy tại một thời điểm (lần mở overlay mới sẽ dừng watcher cũ).
     pub overlay_gen: AtomicU64,
+    /// `true` trong lúc `windows::open_overlays_ex` đang dựng/tái sử dụng pool
+    /// overlay (từ lúc kiểm tra reuse tới lúc show() xong) — chặn 2 lệnh mở
+    /// overlay chạy CHỒNG NHAU (double-click nút chụp, hotkey double-fire,
+    /// ...) cùng lúc `close_overlays()` + `build()` lại label `overlay-{i}`,
+    /// gây lỗi "a webview with label ... already exists". Xem
+    /// `windows::OverlayOpenGuard`.
+    pub overlay_opening: AtomicBool,
     /// Snapshot màn hình của phiên overlay hiện tại — chia sẻ giữa `open_overlays`
     /// và `input_loop` để chỉ số overlay luôn khớp.
     pub overlay_monitors: Mutex<Vec<MonitorSnap>>,

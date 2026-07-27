@@ -1259,6 +1259,64 @@ fn wait_for_overlays_ready(app: &AppHandle, gen: u64, expected: usize) {
     }
 }
 
+/// Dựng 1 cửa sổ overlay với đúng bộ thuộc tính chuẩn (dùng chung cho cả
+/// `prewarm_overlays` lẫn nhánh fallback của `open_overlays_ex`) — RETRY khi
+/// `build()` báo lỗi "already exists": `close_overlays()` chỉ RA LỆNH
+/// `win.close()` rồi return ngay (không chờ xác nhận), trong khi việc đóng
+/// cửa sổ ở tầng OS/DWM có thể xảy ra SAU đó một khoảng ngắn (đặc biệt
+/// Windows) — nếu build() lại đúng label đó ngay lập tức, OS có thể vẫn còn
+/// coi label cũ là "đang tồn tại". Retry ngắn (tối đa 5 lần, cách nhau 40ms,
+/// tổng tối đa ~200ms) đủ để hứng đúng khoảng hở này mà không cần đoán 1 con
+/// số sleep cố định trước khi build() như cách cũ. Lỗi KHÁC "already exists"
+/// (ví dụ hết bộ nhớ, permission...) trả về ngay lập tức, không retry.
+fn build_overlay_window_with_retry(
+    app: &AppHandle,
+    label: &str,
+    query: &str,
+) -> Result<tauri::WebviewWindow, String> {
+    const MAX_RETRIES: u32 = 5;
+    const RETRY_DELAY_MS: u64 = 40;
+
+    let mut last_err = String::new();
+    for attempt in 0..=MAX_RETRIES {
+        let result = WebviewWindowBuilder::new(
+            app,
+            label,
+            WebviewUrl::App(format!("index.html?{query}").into()),
+        )
+        .title("SnapDoc")
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        // Windows: tắt DWM drop-shadow để set_position khớp chính xác pixel
+        // gốc màn hình. Shadow DWM làm nội dung lệch phải/xuống một khoảng
+        // bằng shadow margin (~8 px ở 100% DPI, tự scale theo DPI).
+        .shadow(false)
+        // Không cho OS resize overlay — toạ độ CSS/tính rect trong
+        // Overlay.tsx giả định cửa sổ luôn khớp CHÍNH XÁC `MonitorSnap`.
+        .resizable(false)
+        .build();
+
+        match result {
+            Ok(w) => return Ok(w),
+            Err(e) => {
+                last_err = e.to_string();
+                let is_label_conflict = last_err.contains("already exists");
+                if !is_label_conflict || attempt == MAX_RETRIES {
+                    break;
+                }
+                eprintln!(
+                    "[SnapDoc] overlay {label}: label vừa đóng chưa giải phóng xong (lần {attempt}), thử lại..."
+                );
+                std::thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
+            }
+        }
+    }
+    Err(format!("Không tạo được overlay: {last_err}"))
+}
+
 /// Tạo sẵn (ẩn) 1 cửa sổ overlay cho mỗi màn hình hiện có — gọi lúc khởi
 /// động app và sau mỗi lần `close_overlays` (xem đó) — để lần
 /// `open_overlays_ex` TIẾP THEO chỉ cần `navigate()` cửa sổ đã có sẵn thay vì
@@ -1297,21 +1355,7 @@ pub fn prewarm_overlays(app: &AppHandle) {
         // gen=0: cửa sổ pre-warm chưa thuộc phiên chụp thật nào — sẽ được
         // navigate() lại với gen thật trước khi dùng (xem `try_reuse_prewarmed_overlays`).
         let query = build_overlay_query("region", i, &snap, false, None, 0);
-        let win = match WebviewWindowBuilder::new(
-            app,
-            &label,
-            WebviewUrl::App(format!("index.html?{query}").into()),
-        )
-        .title("SnapDoc")
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .visible(false)
-        .shadow(false)
-        .resizable(false)
-        .build()
-        {
+        let win = match build_overlay_window_with_retry(app, &label, &query) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("[SnapDoc] prewarm_overlays: không tạo được overlay-{i}: {e}");
@@ -1413,12 +1457,41 @@ fn try_reuse_prewarmed_overlays(
     true
 }
 
+/// Nhả `overlay_opening` khi ra khỏi scope của `open_overlays_ex` — kể cả qua
+/// return sớm bằng `?` — để ĐẢM BẢO không có đường thoát nào quên nhả cờ.
+/// Xem doc-comment `AppState::overlay_opening` để hiểu lý do cần cờ này (chặn
+/// 2 lệnh mở overlay chạy chồng lên nhau, tránh lỗi build() "already exists").
+struct OverlayOpenGuard(AppHandle);
+impl Drop for OverlayOpenGuard {
+    fn drop(&mut self) {
+        self.0
+            .state::<AppState>()
+            .overlay_opening
+            .store(false, Ordering::SeqCst);
+    }
+}
+
 pub fn open_overlays_ex(
     app: &AppHandle,
     mode: &str,
     record: bool,
     preset: Option<(u32, f64, f64, f64, f64)>,
 ) -> Result<(), String> {
+    // Chặn 2 lệnh mở overlay chạy CHỒNG NHAU (double-click nút chụp, hotkey
+    // double-fire, ...) — nếu không, cả 2 luồng có thể cùng lúc chạy
+    // `close_overlays()` + build() lại đúng label `overlay-{i}`, dẫn tới lỗi
+    // "a webview with label ... already exists" (xem phân tích trong hội
+    // thoại/commit liên quan). Luồng tới sau bị từ chối thẳng thay vì race.
+    let acquired = app
+        .state::<AppState>()
+        .overlay_opening
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok();
+    if !acquired {
+        return Err("Đang có một phiên mở overlay khác chạy, bỏ qua yêu cầu trùng".to_string());
+    }
+    let _overlay_open_guard = OverlayOpenGuard(app.clone());
+
     // macOS: hạ về Accessory TRƯỚC khi show/focus overlay bên dưới. Verify
     // thực nghiệm (2026-07-22, panel_test/testN.m): dưới Accessory policy, gọi
     // `activateIgnoringOtherApps` + `makeKeyAndOrderFront` (đúng những gì
@@ -1490,30 +1563,7 @@ pub fn open_overlays_ex(
         for (i, snap) in snaps.iter().enumerate() {
             let label = format!("overlay-{i}");
             let query = build_overlay_query(mode, i, snap, record, preset, gen);
-            let win = WebviewWindowBuilder::new(
-                app,
-                &label,
-                WebviewUrl::App(format!("index.html?{query}").into()),
-            )
-            .title("SnapDoc")
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .visible(false)
-            // Windows: tắt DWM drop-shadow để set_position khớp chính xác pixel
-            // gốc màn hình. Shadow DWM làm nội dung lệch phải/xuống một khoảng
-            // bằng shadow margin (~8 px ở 100% DPI, tự scale theo DPI).
-            .shadow(false)
-            // Không cho OS resize overlay (đồng bộ với `prewarm_overlays`) —
-            // toạ độ CSS/tính rect trong Overlay.tsx giả định cửa sổ luôn
-            // khớp CHÍNH XÁC `MonitorSnap`; thiếu dòng này ở nhánh fallback
-            // (khi tái dùng pool pre-warm thất bại) sẽ tái phát bug "lock
-            // resize" đã fix ở commit 9b16ba5, vì nhánh đó chỉ áp cho pool
-            // pre-warm, không áp cho window build() mới ở đây.
-            .resizable(false)
-            .build()
-            .map_err(|e| format!("Không tạo được overlay: {e}"))?;
+            let win = build_overlay_window_with_retry(app, &label, &query)?;
 
             let _ = win.set_content_protected(true);
             // Chỉ định vị (ẩn) — CHƯA show(), giống nhánh reuse ở trên.
