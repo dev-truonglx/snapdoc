@@ -115,6 +115,10 @@ export interface Settings {
   /** Thư mục lần cuối user chọn qua "Save As…" ở editor (ảnh) — dùng làm mặc
    * định cho lần Save As kế tiếp, xem `useOutput.saveAsToFile`. */
   lastImageSaveAsDir?: string;
+  /** Thư mục lần cuối user chọn qua dropdown "Chọn nơi lưu…" của nút "Lưu
+   * thành video mới" ở VideoTrimmer — dùng làm mặc định cho lần kế tiếp,
+   * xem `useOutput.promptSaveVideoPath` + `Editor.doSaveAsVideo`. */
+  lastVideoSaveAsDir?: string;
   /** Ngôn ngữ giao diện ("vi"/"en") — đồng bộ với i18next ở webview VÀ ghi
    * xuống settings.json để tray menu (native, Rust-side) đọc được, xem
    * `Settings.tsx` language switcher + `tray::current_lang`. */
@@ -251,8 +255,13 @@ export const ipc = {
   /** Cắt 1 video ĐÃ LƯU trong History, tạo THÀNH 1 ITEM MỚI trong Library
    * (giữ nguyên item gốc) — lựa chọn "Lưu thành video mới" ở Editor. Trả về
    * item MỚI (id khác `id` truyền vào). */
-  trimHistoryVideo: (id: string, ranges: [number, number][], removeAudio: boolean) =>
-    invoke<HistoryItem>("trim_history_video", { id, ranges: roundRanges(ranges), removeAudio }),
+  trimHistoryVideo: (id: string, ranges: [number, number][], removeAudio: boolean, outputPath?: string) =>
+    invoke<HistoryItem>("trim_history_video", {
+      id,
+      ranges: roundRanges(ranges),
+      removeAudio,
+      outputPath: outputPath ?? null,
+    }),
   /** Cắt 1 video ĐÃ LƯU trong History, ghi ĐÈ TẠI CHỖ asset/thumbnail của
    * ĐÚNG item đó — lựa chọn "Lưu đè bản gốc" ở Editor. Vĩnh viễn, không giữ
    * bản gốc. */

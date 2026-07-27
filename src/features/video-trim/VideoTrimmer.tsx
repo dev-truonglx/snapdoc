@@ -35,8 +35,10 @@ export interface VideoTrimmerProps {
    * tác cắt để không phải nhìn lên toolbar xa. */
   onSave: () => void;
   /** "Lưu thành video mới" — áp dụng đoạn đang giữ lại (hoặc y nguyên nếu
-   * chưa cắt gì) thành 1 record MỚI, giữ nguyên bản gốc. */
-  onSaveAs: () => void;
+   * chưa cắt gì) thành 1 record MỚI, giữ nguyên bản gốc. `pickLocation = true`
+   * (từ dropdown "▾" cạnh nút) → mở dialog Save As để chọn thư mục + sửa tên
+   * file thay vì auto lưu vào `saveDir` với tên mặc định. */
+  onSaveAs: (pickLocation?: boolean) => void;
   /** Báo cho cha (Editor.tsx) biết trạng thái chỉnh sửa hiện tại (có thay
    * đổi/đoạn giữ lại/đã tách nhạc nền) — dùng để hiện toast/điều hướng khác,
    * KHÔNG dùng để tính disabled cho `onSave` (VideoTrimmer tự tính `canSave`
@@ -225,6 +227,20 @@ export default function VideoTrimmer({
   });
   const [editState, setEditState] = useState<EditState>(makeInitialEditState);
   const { segments, removeAudio, past, future, selectedSegmentId } = editState;
+  // Popover "Chọn nơi lưu…" gắn cạnh nút "Lưu thành video mới" (split button)
+  // — đóng khi click ra ngoài, cùng cơ chế popover "Save As…" ở `Toolbar.tsx`.
+  const [showSaveAsMenu, setShowSaveAsMenu] = useState(false);
+  const saveAsMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showSaveAsMenu) return;
+    const onClickOutside = (e: MouseEvent) => {
+      if (saveAsMenuRef.current && !saveAsMenuRef.current.contains(e.target as Node)) {
+        setShowSaveAsMenu(false);
+      }
+    };
+    window.addEventListener("mousedown", onClickOutside);
+    return () => window.removeEventListener("mousedown", onClickOutside);
+  }, [showSaveAsMenu]);
   const [playheadMs, setPlayheadMs] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -1142,14 +1158,40 @@ export default function VideoTrimmer({
           >
             {busy ? t("videoTrimmer.saving") : t("videoTrimmer.overwrite")}
           </button>
-          <button
-            style={saveAsBtn}
-            disabled={busy}
-            onClick={onSaveAs}
-            title={t("videoTrimmer.saveAsNew")}
-          >
-            {t("videoTrimmer.saveAsNewButton")}
-          </button>
+          {/* "Lưu thành video mới": split button — bấm chính auto lưu vào
+              `saveDir` (tên mặc định `Recording_<timestamp>.mp4`, giống
+              trước); "▾" mở popover "Chọn nơi lưu…" để chọn thư mục + sửa tên
+              file qua dialog Save As, cùng pattern split-button Save/▾ ở
+              `Toolbar.tsx` (chế độ ảnh). */}
+          <div ref={saveAsMenuRef} style={saveAsSplitGroup}>
+            <button
+              style={saveAsBtn}
+              disabled={busy}
+              onClick={() => onSaveAs()}
+              title={t("videoTrimmer.saveAsNew")}
+            >
+              {t("videoTrimmer.saveAsNewButton")}
+            </button>
+            <button
+              style={saveAsCaretBtn}
+              disabled={busy}
+              onClick={(e) => { e.stopPropagation(); setShowSaveAsMenu((v) => !v); }}
+              title={t("videoTrimmer.saveAsOptions")}
+              aria-label={t("videoTrimmer.saveAsOptions")}
+            >
+              ▾
+            </button>
+            {showSaveAsMenu && (
+              <div style={saveAsMenuPopover}>
+                <button
+                  style={saveAsMenuItem}
+                  onClick={() => { setShowSaveAsMenu(false); onSaveAs(true); }}
+                >
+                  {t("videoTrimmer.saveAsPickLocation")}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1815,17 +1857,73 @@ const saveOverwriteBtn: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
+/** Bọc nút "Lưu thành video mới" + mũi tên "▾" thành 1 split button — cùng
+ * pattern `splitGroup` ở `Toolbar.tsx` (chế độ ảnh), làm điểm neo cho popover
+ * "Chọn nơi lưu…" bên dưới. */
+const saveAsSplitGroup: React.CSSProperties = {
+  position: "relative",
+  display: "flex",
+  alignItems: "stretch",
+};
+
 /** Nút "Lưu thành video mới" — cùng chiều cao/kiểu chữ với `saveOverwriteBtn`
  * nhưng viền/nền nhẹ hơn (không phải hành động phá huỷ, không cần nhấn mạnh
  * bằng màu accent) — cùng phân cấp thị giác với `resetBtn` cạnh nó. */
 const saveAsBtn: React.CSSProperties = {
   height: 26,
   padding: "0 14px",
-  borderRadius: 7,
+  borderRadius: "7px 0 0 7px",
   border: "1px solid var(--border)",
+  borderRight: "none",
   background: "transparent",
   color: "var(--text)",
   fontWeight: 600,
   fontSize: 13,
   whiteSpace: "nowrap",
+};
+
+/** Mũi tên nhỏ mở popover "Chọn nơi lưu…" — cùng viền/nền với `saveAsBtn`,
+ * tách biệt bằng viền mảnh, đúng hình dáng split button quen thuộc. */
+const saveAsCaretBtn: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  height: 26,
+  padding: "0 8px",
+  borderRadius: "0 7px 7px 0",
+  border: "1px solid var(--border)",
+  background: "transparent",
+  color: "var(--text)",
+  fontSize: 11,
+  opacity: 0.85,
+  whiteSpace: "nowrap",
+};
+
+const saveAsMenuPopover: React.CSSProperties = {
+  position: "absolute",
+  top: "calc(100% + 6px)",
+  right: 0,
+  background: "rgba(30,30,36,0.99)",
+  border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 10,
+  padding: 4,
+  display: "flex",
+  flexDirection: "column",
+  gap: 1,
+  boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
+  zIndex: 100,
+  whiteSpace: "nowrap",
+};
+
+const saveAsMenuItem: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  padding: "7px 12px",
+  borderRadius: 6,
+  fontSize: 12,
+  color: "#fff",
+  background: "transparent",
+  border: "none",
+  cursor: "pointer",
+  textAlign: "left",
 };

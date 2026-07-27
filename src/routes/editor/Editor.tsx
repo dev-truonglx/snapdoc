@@ -8,7 +8,14 @@ import HistoryStrip from "./HistoryStrip";
 import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 import { useEditor } from "../../features/annotation/store";
-import { copyToClipboard, saveToFile, saveAsToFile } from "../../features/output/useOutput";
+import {
+  copyToClipboard,
+  saveToFile,
+  saveAsToFile,
+  promptSaveVideoPath,
+  stampVideoName,
+  dirnameOf,
+} from "../../features/output/useOutput";
 import { ipc, type Pending, type HistoryItem } from "../../lib/ipc";
 import { editorToolFromKey } from "../../lib/toolShortcuts";
 import StitchDialog from "../../features/annotation/compose/StitchDialog";
@@ -176,11 +183,34 @@ export default function Editor() {
   // 1 record MỚI trong Library, giữ nguyên bản gốc. Không đóng Editor, không
   // đụng gì tới `videoDoc`/`videoTrimState` hiện tại (đang xem/sửa) — bản gốc
   // không hề đổi, chỉ có thêm 1 item mới xuất hiện trong dải "Gần đây".
-  const doSaveAsVideo = async () => {
+  // `pickLocation` = true → dropdown "Chọn nơi lưu…" ở nút "Lưu thành video
+  // mới" (VideoTrimmer): mở dialog Save As để user chọn thư mục VÀ sửa tên
+  // file, thay vì auto lưu vào `saveDir` với tên `Recording_<timestamp>.mp4`.
+  const doSaveAsVideo = async (pickLocation = false) => {
     if (!videoDoc) return;
+    let outputPath: string | undefined;
+    if (pickLocation) {
+      const settings = await ipc.getSettings().catch(() => null);
+      const dir = settings?.lastVideoSaveAsDir || settings?.saveDir || (await ipc.defaultSaveDir());
+      const path = await promptSaveVideoPath(dir ? `${dir}/${stampVideoName()}.mp4` : `${stampVideoName()}.mp4`);
+      if (!path) {
+        flash(t("editorMain.videoSaveAsCancelled"));
+        return;
+      }
+      outputPath = path;
+    }
     setBusy(true);
     try {
-      await ipc.trimHistoryVideo(videoDoc.historyId, videoTrimState.keepRanges, videoTrimState.removeAudio);
+      await ipc.trimHistoryVideo(
+        videoDoc.historyId,
+        videoTrimState.keepRanges,
+        videoTrimState.removeAudio,
+        outputPath,
+      );
+      if (outputPath) {
+        const settings = await ipc.getSettings().catch(() => null);
+        if (settings) ipc.setSettings({ ...settings, lastVideoSaveAsDir: dirnameOf(outputPath) }).catch(() => {});
+      }
       flash(t("editorMain.videoSavedNew"));
     } catch (e) {
       flash(String(e));

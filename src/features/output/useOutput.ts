@@ -10,6 +10,16 @@ export function stampName(): string {
   )}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
+/** Tên file mặc định cho video, cùng template `Recording_...` với video quay
+ * màn hình bình thường (`record::new_output_path` bên Rust). */
+export function stampVideoName(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `Recording_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(
+    d.getHours(),
+  )}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
 export async function copyToClipboard(dataUrl: string): Promise<void> {
   await ipc.copyImage(dataUrl);
 }
@@ -27,6 +37,15 @@ export async function promptSavePath(defaultPath: string): Promise<string | null
   return await save({
     defaultPath,
     filters: [{ name: "PNG", extensions: ["png"] }],
+  });
+}
+
+/** Mở dialog lưu file cho video (.mp4) — dùng cho dropdown "Chọn nơi lưu…"
+ * của nút "Lưu thành video mới" ở VideoTrimmer. */
+export async function promptSaveVideoPath(defaultPath: string): Promise<string | null> {
+  return await save({
+    defaultPath,
+    filters: [{ name: "MP4", extensions: ["mp4"] }],
   });
 }
 

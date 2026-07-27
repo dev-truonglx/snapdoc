@@ -287,6 +287,7 @@
     "copiedClipboard": "Copied to clipboard",
     "videoOverwritten": "Video overwritten",
     "videoSavedNew": "Video saved as new",
+    "videoSaveAsCancelled": "Save cancelled",
     "noImagesToStitch": "No images to stitch",
     "imageStitched": "Images stitched — Ctrl/Cmd+Z to undo",
     "flattened": "Flattened — annotations applied to image",
@@ -375,6 +376,8 @@
     "overwrite": "Overwrite",
     "saveAsNew": "Save as new video, keep original (Ctrl/Cmd+Shift+S)",
     "saveAsNewButton": "Save as new",
+    "saveAsOptions": "Save as new video options",
+    "saveAsPickLocation": "Choose location…",
     "exitFullscreen": "Exit fullscreen",
     "enterFullscreen": "Enter fullscreen",
     "resetButton": "Reset"

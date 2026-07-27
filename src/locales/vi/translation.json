@@ -287,6 +287,7 @@
     "copiedClipboard": "Đã copy vào clipboard",
     "videoOverwritten": "Đã lưu đè video",
     "videoSavedNew": "Đã lưu thành video mới",
+    "videoSaveAsCancelled": "Đã huỷ lưu",
     "noImagesToStitch": "Chưa có ảnh để nối",
     "imageStitched": "Đã nối ảnh — Ctrl/Cmd+Z để hoàn tác",
     "flattened": "Đã flatten — annotation đã được ghi vào ảnh",
@@ -375,6 +376,8 @@
     "overwrite": "Lưu đè",
     "saveAsNew": "Lưu thành video mới, giữ nguyên bản gốc (Ctrl/Cmd+Shift+S)",
     "saveAsNewButton": "Lưu thành video mới",
+    "saveAsOptions": "Tuỳ chọn lưu thành video mới",
+    "saveAsPickLocation": "Chọn nơi lưu…",
     "exitFullscreen": "Thoát toàn màn hình",
     "enterFullscreen": "Phóng to toàn màn hình",
     "resetButton": "Đặt lại"

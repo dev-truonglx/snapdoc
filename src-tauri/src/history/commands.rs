@@ -309,6 +309,7 @@ fn trim_history_video_sync(
     id: &str,
     keep_ranges_ms: &[(i64, i64)],
     remove_audio: bool,
+    output_path: Option<&str>,
 ) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type != "video" {
@@ -316,7 +317,21 @@ fn trim_history_video_sync(
     }
 
     let asset_path = std::path::Path::new(&rec.asset_path);
-    let new_path = crate::record::new_output_path(app)?;
+    // `output_path` do user tự chọn qua dropdown "Chọn nơi lưu…" (dialog Save
+    // As ở VideoTrimmer) — khác đường mặc định `new_output_path` (auto vào
+    // `saveDir`/Pictures), nên phải tự tạo thư mục + mở asset scope cho ĐÚNG
+    // thư mục đó (khác `saveDir` đã được mở sẵn từ trước).
+    let new_path = match output_path {
+        Some(p) => {
+            let p = std::path::PathBuf::from(p);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("Không tạo được thư mục lưu: {e}"))?;
+                crate::record::allow_asset_scope(app, parent);
+            }
+            p
+        }
+        None => crate::record::new_output_path(app)?,
+    };
     // Báo tiến độ % cho Editor (chế độ video) qua event toàn app — xem
     // doc-comment `encoder::trim` + listener ở `Editor.tsx`.
     let progress_app = app.clone();
@@ -558,10 +573,11 @@ pub async fn trim_history_video(
     id: String,
     ranges: Vec<(i64, i64)>,
     remove_audio: bool,
+    output_path: Option<String>,
 ) -> Result<HistoryRecord, String> {
     let app_for_blocking = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        trim_history_video_sync(&app_for_blocking, &id, &ranges, remove_audio)
+        trim_history_video_sync(&app_for_blocking, &id, &ranges, remove_audio, output_path.as_deref())
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))??;

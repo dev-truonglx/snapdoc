@@ -197,7 +197,7 @@ pub(crate) fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
 /// `saveDir` vừa đổi trong Settings) VÀ lúc khởi động app (phòng người dùng
 /// mở lại History để xem video đã quay ở phiên trước, khi scope runtime của
 /// phiên cũ không còn — xem `allow_asset_scope_at_startup`).
-fn allow_asset_scope(app: &AppHandle, dir: &std::path::Path) {
+pub(crate) fn allow_asset_scope(app: &AppHandle, dir: &std::path::Path) {
     if let Err(e) = app.asset_protocol_scope().allow_directory(dir, true) {
         eprintln!("[SnapDoc][record] Không mở được asset scope cho {}: {e}", dir.display());
     }
