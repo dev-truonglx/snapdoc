@@ -204,6 +204,25 @@ function RegionSelect() {
   // hình, giúp canh mép vùng chọn theo cửa sổ/nội dung bên dưới — giống vạch
   // dóng của Snagit). `null` khi con trỏ rời khỏi màn hình này.
   const [cursorPos, setCursorPos] = useState<Vec2 | null>(null);
+  // Vùng (CSS px) THẬT của nút "Chụp toàn màn hình" — đo bằng
+  // `getBoundingClientRect()` (xem `RegionFullscreenButton`), CÙNG hệ toạ độ
+  // overlay-relative mà Rust phát qua `overlay-press`/`overlay-release`.
+  //
+  // Trước đây thử chặn bằng cách bắt sự kiện `pointerdown` NATIVE trên DOM để
+  // suy luận "cú bấm này có rơi trúng nút không" — không đáng tin cậy: không
+  // có gì đảm bảo overlay window (transparent, always-on-top, không giữ focus
+  // cố định) thật sự nhận + xử lý sự kiện DOM đúng lúc, đặc biệt trên Windows.
+  // Cách chắc chắn hơn: dùng THẲNG toạ độ (x, y) mà chính pipeline
+  // press/release đang dùng — pipeline này ĐÃ CHỨNG MINH nhận toạ độ đúng
+  // (chính là nguyên nhân gây bug ban đầu: toạ độ đó khớp với 1 cửa sổ đang
+  // hover). Chỉ cần kiểm tra (x, y) có rơi trong vùng nút hay không TRƯỚC khi
+  // chạy logic kéo-chọn/chụp-cửa-sổ, không phụ thuộc gì vào việc DOM có thật
+  // sự nhận được click hay không.
+  const fsBtnRef = useRef<Sel | null>(null);
+  const inFsBtn = (x: number, y: number) => {
+    const r = fsBtnRef.current;
+    return !!r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  };
 
   useEffect(() => {
     ipc.listWindows().then((w) => { winsRef.current = w; }).catch(() => {});
@@ -225,10 +244,13 @@ function RegionSelect() {
         if (active) setSel(rectFrom(startRef.current[0], startRef.current[1], x, y));
         return;
       }
-      setHoverWin(active ? pickWindow(winsRef.current, x, y) : null);
+      // Đang hover đúng vùng nút "Chụp toàn màn hình" → tắt gợi ý cửa sổ (nếu
+      // vùng đó tình cờ nằm trong 1 cửa sổ đang mở) để không vẽ 2 lớp gợi ý
+      // chồng nhau.
+      setHoverWin(active && !inFsBtn(x, y) ? pickWindow(winsRef.current, x, y) : null);
     },
     (x, y) => {
-      if (scrollRect) return;
+      if (scrollRect || inFsBtn(x, y)) return;
       startRef.current = [x, y];
       pressWinRef.current = hoverWin;
       setHoverWin(null);
@@ -236,6 +258,14 @@ function RegionSelect() {
     },
     (x, y) => {
       if (scrollRect) return;
+      if (inFsBtn(x, y)) {
+        // Click trúng nút "Chụp toàn màn hình" — press đã chặn không cho bắt
+        // đầu kéo/chọn cửa sổ (`startRef.current` vẫn null), chỉ cần gọi thẳng
+        // action ở đây, không phụ thuộc DOM `onClick` của nút có thật sự nhận
+        // được click hay không.
+        ipc.finalizeMonitor().catch((e) => alert(String(e)));
+        return;
+      }
       const s = startRef.current;
       startRef.current = null;
       setSel(null);
@@ -297,6 +327,12 @@ function RegionSelect() {
     );
   }
 
+  // Con trỏ đang ở đúng vùng nút "Chụp toàn màn hình" → đổi sang con trỏ tay
+  // để user biết đây là chỗ bấm được, dù nút đã set `pointerEvents: "none"`
+  // (không tự đổi cursor qua CSS :hover được nữa — phải tự tính ở đây, dùng
+  // đúng `cursorPos` + `inFsBtn` đang dùng để xử lý click).
+  const overFsBtn = !!cursorPos && inFsBtn(cursorPos[0], cursorPos[1]);
+
   const rootStyle: React.CSSProperties = {
     ...root,
     // Ẩn hoàn toàn cho đến khi frozen image load xong — tránh flash transparent.
@@ -306,7 +342,7 @@ function RegionSelect() {
       backgroundSize: "100% 100%",
       backgroundRepeat: "no-repeat",
     } : {}),
-    cursor: CROSSHAIR_CURSOR,
+    cursor: overFsBtn ? "pointer" : CROSSHAIR_CURSOR,
   };
 
   return (
@@ -361,7 +397,7 @@ function RegionSelect() {
         </div>
       )}
       {!sel && (
-        <RegionFullscreenButton onClick={() => ipc.finalizeMonitor().catch((e) => alert(String(e)))} />
+        <RegionFullscreenButton rectRef={fsBtnRef} />
       )}
       {/* Đường dóng ngang/dọc nét đứt kéo dài hết màn hình theo vị trí con
           trỏ — giúp canh mép vùng chọn theo nội dung bên dưới, giống vạch
@@ -398,14 +434,36 @@ function RegionSelect() {
   );
 }
 
-/** Nút nổi "Chụp toàn màn hình" trên overlay Region — gọi thẳng action đã có
- * (`ipc.finalizeMonitor`, giống `MonitorPick`) để người dùng đổi ý sang chụp
- * toàn màn hình ngay trong lúc đang thao tác, không cần đóng overlay quay lại
- * capture bar. */
-function RegionFullscreenButton({ onClick }: { onClick: () => void }) {
+/** Nút nổi "Chụp toàn màn hình" trên overlay Region/Quick Capture — THUẦN
+ * HIỂN THỊ + báo cáo vùng của chính nó qua `rectRef` (đo bằng
+ * `getBoundingClientRect()`, tự cập nhật khi kích thước đổi). KHÔNG tự xử lý
+ * click — caller (`RegionSelect`/`QuickAnnotate`) kiểm tra toạ độ (x, y) từ
+ * chính pipeline `overlay-press`/`overlay-release` đang dùng cho kéo-chọn có
+ * rơi vào `rectRef` hay không rồi tự gọi action tương ứng. Lý do: không có gì
+ * đảm bảo DOM `onClick` của 1 button trong overlay window (transparent,
+ * always-on-top, không giữ focus cố định) luôn được webview giao đúng lúc —
+ * đặc biệt trên Windows — nên không thể dựa vào đó làm đường dẫn DUY NHẤT cho
+ * một hành động quan trọng. */
+function RegionFullscreenButton({ rectRef }: { rectRef: React.MutableRefObject<Sel | null> }) {
   const { t } = useTranslation();
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const el = btnRef.current;
+    if (!el) return;
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      rectRef.current = { x: r.left, y: r.top, w: r.width, h: r.height };
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => { ro.disconnect(); rectRef.current = null; };
+  }, [rectRef]);
+
   return (
     <button
+      ref={btnRef}
       style={{
         position: "fixed",
         top: 64,
@@ -420,9 +478,8 @@ function RegionFullscreenButton({ onClick }: { onClick: () => void }) {
         fontWeight: 600,
         cursor: "pointer",
         boxShadow: "0 4px 16px rgba(0,0,0,0.45)",
+        pointerEvents: "none",
       }}
-      onPointerDown={(e) => e.stopPropagation()}
-      onClick={onClick}
     >
       {t("overlay.captureFullscreen")}
     </button>
@@ -903,6 +960,15 @@ function QuickAnnotate() {
     pressInfoRef.current = { onBackdrop: e.target === rootRef.current, t: performance.now() };
   };
 
+  // Vùng (CSS px) THẬT của nút "Chụp toàn màn hình", đo bằng
+  // `getBoundingClientRect()` — xem lý do dùng toạ độ thay vì DOM `onClick` ở
+  // doc-comment `RegionFullscreenButton`.
+  const fsBtnRef = useRef<Sel | null>(null);
+  const inFsBtn = (x: number, y: number) => {
+    const r = fsBtnRef.current;
+    return !!r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  };
+
   // ── Chọn vùng qua global input loop — CHẠY SUỐT PHIÊN trên MỌI màn hình,
   // dùng cho cả chọn lần đầu lẫn chọn lại (kể cả sang màn hình khác). ──
   useInput(
@@ -910,11 +976,12 @@ function QuickAnnotate() {
       setCursorHere(active);
       const stillSelecting = active && phase === "selecting" && !startRef.current;
       setCursorPos(active && phase === "selecting" ? [x, y] : null);
-      setHoverWin(stillSelecting ? pickWindow(winsRef.current, x, y) : null);
+      setHoverWin(stillSelecting && !inFsBtn(x, y) ? pickWindow(winsRef.current, x, y) : null);
       if (!active || !startRef.current) return;
       setSel(rectFrom(startRef.current[0], startRef.current[1], x, y));
     },
     (x, y) => {
+      if (phase === "selecting" && !sel && inFsBtn(x, y)) return; // nút "Chụp toàn màn hình" — xử lý ở release
       // Đang có khung: CHỈ chọn lại khi bấm NGOÀI khung VÀ NGOÀI cả hai thanh
       // công cụ (phải + dưới). Kiểm tra theo HÌNH HỌC vùng (khớp đúng vùng
       // toolbar render). Popup chọn màu bung ra ngoài thanh → thêm guard target
@@ -938,6 +1005,16 @@ function QuickAnnotate() {
       setPhase("selecting");
     },
     (x, y) => {
+      if (phase === "selecting" && !sel && inFsBtn(x, y)) {
+        // Click trúng nút "Chụp toàn màn hình" — nạp thẳng khung = toàn màn
+        // hình, cùng pipeline (x, y) đã dùng cho kéo-chọn/chọn cửa sổ, không
+        // phụ thuộc DOM `onClick` của nút.
+        setSel({ x: 0, y: 0, w: winW, h: winH });
+        setPhase("adjusting");
+        loadDoc({ image: transparentPng(1, 1), imgW: 1, imgH: 1, scaleFactor: SCALE, annotations: [] });
+        getCurrentWindow().setFocus().catch(() => {});
+        return;
+      }
       const s = startRef.current;
       startRef.current = null;
       const hovered = pressWinRef.current;
@@ -1138,7 +1215,12 @@ function QuickAnnotate() {
           backgroundSize: "100% 100%",
           backgroundRepeat: "no-repeat",
         } : {}),
-        cursor: phase === "selecting" ? CROSSHAIR_CURSOR : "default",
+        // Con trỏ đang ở đúng vùng nút "Chụp toàn màn hình" → đổi sang con trỏ
+        // tay để user biết bấm được (nút đã `pointerEvents: "none"` nên không
+        // tự đổi qua CSS :hover được nữa).
+        cursor: phase === "selecting"
+          ? (cursorPos && inFsBtn(cursorPos[0], cursorPos[1]) ? "pointer" : CROSSHAIR_CURSOR)
+          : "default",
       }}
       onPointerDownCapture={onDownCapture}
       onPointerMove={onPointerMove}
@@ -1197,14 +1279,7 @@ function QuickAnnotate() {
         </div>
       )}
       {phase === "selecting" && !sel && (
-        <RegionFullscreenButton
-          onClick={() => {
-            setSel({ x: 0, y: 0, w: winW, h: winH });
-            setPhase("adjusting");
-            loadDoc({ image: transparentPng(1, 1), imgW: 1, imgH: 1, scaleFactor: SCALE, annotations: [] });
-            getCurrentWindow().setFocus().catch(() => {});
-          }}
-        />
+        <RegionFullscreenButton rectRef={fsBtnRef} />
       )}
 
       {/* Canvas chú thích phủ đúng khung (trong suốt → thấy frozen image bên dưới) */}
