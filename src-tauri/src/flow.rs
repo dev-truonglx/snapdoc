@@ -51,6 +51,24 @@ fn hide_bar_for_freeze(app: &AppHandle) {
     hide_bar(app);
 }
 
+/// Ẩn editor (nếu đang mở) rồi chờ compositor bỏ frame cũ TRƯỚC KHI freeze/
+/// chụp màn hình — tránh race "chưa kịp ẩn thì overlay đã xuất hiện": nếu
+/// frozen screenshot được chụp ngay sau `hide()`, macOS/Window Server có thể
+/// chưa kịp compositor bỏ frame chứa editor ra khỏi màn hình, khiến ảnh frozen
+/// (hoặc ảnh chụp toàn màn hình) vẫn còn "dính" editor. Chỉ sleep khi editor
+/// THẬT SỰ đang visible (tránh delay thừa mỗi lần chụp khi editor đã ẩn sẵn).
+fn hide_editor_for_freeze(app: &AppHandle) {
+    let was_visible = app
+        .get_webview_window("editor")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    windows::hide_editor(app);
+    if was_visible {
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 fn bar_is_visible(app: &AppHandle) -> bool {
     app.get_webview_window("capture-bar")
         .map(|w| {
@@ -168,8 +186,12 @@ fn get_editor_window_monitor_ids(app: &AppHandle) -> Vec<u32> {
     
     // Kiểm tra tất cả cửa sổ webview
     for (label, win) in app.webview_windows() {
-        // Chỉ quan tâm cửa sổ editor (editor, editor-ow-N)
-        if label.starts_with("editor") {
+        // Chỉ quan tâm cửa sổ editor (editor, editor-ow-N) ĐANG HIỂN THỊ —
+        // `prewarm_editor` tạo sẵn cửa sổ "editor" ẩn từ lúc khởi động (nằm ở
+        // màn hình chính) và `hide_editor` chỉ `hide()` chứ không destroy, nên
+        // nếu không lọc theo visible thì màn hình chính sẽ LUÔN bị loại khỏi
+        // frozen screens (kể cả khi editor chưa từng được mở ra).
+        if label.starts_with("editor") && win.is_visible().unwrap_or(false) {
             // Lấy vị trí cửa sổ để xác định monitor chứa nó
             if let Ok(pos) = win.outer_position() {
                 // Dùng xcap để tìm monitor tại vị trí đó
@@ -524,7 +546,7 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
     // Lưu chế độ trước khi chụp (kể cả "full" → overlay monitor)
     app.state::<AppState>().last_capture.set(mode, output);
     // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
-    windows::hide_editor(app);
+    hide_editor_for_freeze(app);
     set_output(app, output);
 
     // "window": dialog "Chọn cửa sổ" dạng lưới thumbnail (tham khảo dialog
@@ -575,7 +597,7 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
 /// + `finish()` như bình thường.
 pub fn run_record_picker(app: &AppHandle, mode: &str) {
     // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
-    windows::hide_editor(app);
+    hide_editor_for_freeze(app);
 
     // "window": dùng chung dialog "Chọn cửa sổ" dạng lưới thumbnail với chụp
     // ảnh (xem nhánh tương ứng ở `run()`) — set `pending_record` để
@@ -974,7 +996,7 @@ pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> 
     }
     app.state::<AppState>().last_capture.set("all", output);
     // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
-    windows::hide_editor(app);
+    hide_editor_for_freeze(app);
     if bar_is_visible(app) {
         hide_bar_for_freeze(app);
     }
@@ -994,7 +1016,7 @@ pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> 
 /// xong chưa chụp, di chuyển được, tới lúc lưu/copy mới chụp".
 pub fn start_quick(app: &AppHandle) {
     // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
-    windows::hide_editor(app);
+    hide_editor_for_freeze(app);
     // KHÔNG còn gọi `snapshot_product_windows` ở đây (khác `run()`/
     // `capture_all_screens`): cơ chế content-protection (`with_product_windows_protected`)
     // dựa vào nó chỉ là lưới an toàn YẾU cho hiện tượng "cửa sổ occluded bị hệ

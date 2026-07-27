@@ -19,7 +19,7 @@ use image::RgbaImage;
 use objc2::AllocAnyThread;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGDataProvider, CGImage};
-use objc2_foundation::NSError;
+use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration,
 };
@@ -110,6 +110,99 @@ pub fn capture_rect(x: f64, y: f64, w: f64, h: f64) -> CapResult {
     });
     unsafe {
         SCScreenshotManager::captureImageInRect_completionHandler(rect, Some(&handler));
+    }
+    rx.recv_timeout(TIMEOUT)
+        .map_err(|_| "Hết thời gian chờ ScreenCaptureKit".to_string())?
+}
+
+/// Chụp toàn bộ 1 màn hình (theo `display_id`/`CGDirectDisplayID`) nhưng LOẠI
+/// TRỪ HẲN mọi cửa sổ thuộc về TIẾN TRÌNH HIỆN TẠI (chính app SnapDoc) khỏi
+/// ảnh — dùng `SCContentFilter(initWithDisplay:excludingApplications:...)`
+/// thay vì `captureImageInRect` (vốn chụp nguyên trạng compositor, "thấy gì
+/// chụp nấy").
+///
+/// Lý do cần hàm riêng cho freeze: trước đây freeze dựa vào `hide()` cửa sổ
+/// editor/capture-bar rồi `sleep` một khoảng ngắn trước khi chụp, NHƯNG đây là
+/// cách "đoán thời gian" — Window Server có thể chưa kịp bỏ frame cũ ra khỏi
+/// compositor đúng lúc SCK chụp, để lại "bóng mờ" của cửa sổ vừa ẩn trong ảnh
+/// frozen. Loại trừ theo ỨNG DỤNG ở tầng content-filter (thay vì tầng
+/// window-ordering) triệt tiêu hẳn race này: SCK không bao giờ composite cửa
+/// sổ của chính app vào ảnh trả về, bất kể nó đang hiện/ẩn/đang animate.
+///
+/// Yêu cầu macOS 14+ (đã là baseline `minimumSystemVersion` của app, xem
+/// module-doc đầu file).
+pub fn capture_display_excluding_own_app(display_id: u32) -> CapResult {
+    let (tx, rx) = mpsc::channel::<CapResult>();
+    let my_pid = std::process::id();
+
+    let handler = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
+        if content.is_null() {
+            let _ = tx.send(Err(format!(
+                "Không lấy được nội dung chia sẻ: {}",
+                unsafe { err_msg(err) }
+            )));
+            return;
+        }
+        let content: &SCShareableContent = unsafe { &*content };
+
+        let displays = unsafe { content.displays() };
+        let Some(display) = displays.iter().find(|d| unsafe { d.displayID() } == display_id) else {
+            let _ = tx.send(Err("Không tìm thấy màn hình để chụp".to_string()));
+            return;
+        };
+
+        // Mọi SCRunningApplication có processID == pid hiện tại — tất cả cửa
+        // sổ (editor, editor-ow-N, capture-bar, settings, history, ...) đều
+        // thuộc CÙNG 1 tiến trình nên chỉ có tối đa 1 phần tử trong thực tế,
+        // nhưng vẫn duyệt hết cho chắc.
+        let apps = unsafe { content.applications() };
+        let own_apps: Vec<_> = apps
+            .iter()
+            .filter(|a| unsafe { a.processID() } as u32 == my_pid)
+            .collect();
+        let own_apps = NSArray::from_retained_slice(&own_apps);
+        let no_exceptions = NSArray::from_slice(&[]);
+
+        let filter = unsafe {
+            SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
+                SCContentFilter::alloc(),
+                &display,
+                &own_apps,
+                &no_exceptions,
+            )
+        };
+        let scale = unsafe { filter.pointPixelScale() } as f64;
+        let content_rect = unsafe { filter.contentRect() };
+        let px_w = ((content_rect.size.width * scale).round() as usize).max(1);
+        let px_h = ((content_rect.size.height * scale).round() as usize).max(1);
+
+        let config = unsafe { SCStreamConfiguration::new() };
+        unsafe {
+            config.setWidth(px_w);
+            config.setHeight(px_h);
+            config.setShowsCursor(false);
+        }
+
+        let tx_inner = tx.clone();
+        let inner = RcBlock::new(move |img: *mut CGImage, err2: *mut NSError| {
+            let r = if img.is_null() {
+                Err(format!("Chụp màn hình lỗi: {}", unsafe { err_msg(err2) }))
+            } else {
+                unsafe { cgimage_to_rgba(img) }
+            };
+            let _ = tx_inner.send(r);
+        });
+        unsafe {
+            SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+                &filter,
+                &config,
+                Some(&inner),
+            );
+        }
+    });
+
+    unsafe {
+        SCShareableContent::getShareableContentWithCompletionHandler(&handler);
     }
     rx.recv_timeout(TIMEOUT)
         .map_err(|_| "Hết thời gian chờ ScreenCaptureKit".to_string())?

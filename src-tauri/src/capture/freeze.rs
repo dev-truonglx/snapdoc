@@ -42,8 +42,14 @@ pub fn capture_frozen_screens_ex(exclude_monitor_ids: &[u32]) -> HashMap<usize, 
         .enumerate()
         .filter_map(|(i, m)| match (m.x(), m.y(), m.id()) {
             (Ok(x), Ok(y), Ok(id)) => {
-                // Bỏ qua màn hình chứa editor/settings/history
-                if exclude_monitor_ids.contains(&id) {
+                // Bỏ qua màn hình chứa editor/settings/history — CHỈ áp dụng
+                // ngoài macOS. Trên macOS, `capture_raw` dùng
+                // `mac_sck::capture_display_excluding_own_app` để loại trừ
+                // TOÀN BỘ cửa sổ của chính app khỏi ảnh ở tầng ScreenCaptureKit
+                // (không phụ thuộc `hide()`/timing), nên màn hình chứa editor
+                // vẫn freeze bình thường — chỉ là không "lộ" cửa sổ app vào
+                // ảnh, không cần bỏ qua nguyên màn hình như trước nữa.
+                if !cfg!(target_os = "macos") && exclude_monitor_ids.contains(&id) {
                     eprintln!("[SnapDoc][freeze] Bỏ qua màn hình {i} (display_id={id}) vì chứa cửa sổ editor");
                     return None;
                 }
@@ -109,15 +115,14 @@ fn capture_one_jpeg(m: &Monitor) -> Result<String, String> {
 fn capture_raw(m: &Monitor) -> Result<image::RgbaImage, String> {
     #[cfg(target_os = "macos")]
     {
-        // macOS: dùng ScreenCaptureKit qua `capture_rect` (toàn bộ frame màn
-        // hình theo POINTS global) để phủ cả menu bar (mặc dù SCK không include
-        // menu bar theo mặc định khi dùng display filter, `captureImageInRect`
-        // với rect = toàn màn hình SẼ include menu bar).
-        let x = m.x().map_err(|e| format!("Lỗi đọc x: {e}"))? as f64;
-        let y = m.y().map_err(|e| format!("Lỗi đọc y: {e}"))? as f64;
-        let w = m.width().map_err(|e| format!("Lỗi đọc width: {e}"))? as f64;
-        let h = m.height().map_err(|e| format!("Lỗi đọc height: {e}"))? as f64;
-        super::mac_sck::capture_rect(x, y, w, h)
+        // macOS: dùng ScreenCaptureKit qua `capture_display_excluding_own_app`
+        // — loại trừ TOÀN BỘ cửa sổ của chính app (editor, capture-bar, ...)
+        // khỏi ảnh ở tầng content-filter thay vì dựa vào `hide()` + sleep, nên
+        // freeze KHÔNG BAO GIỜ dính "bóng mờ" của cửa sổ app dù nó vừa ẩn/đang
+        // animate. Vẫn include menu bar (mặc định của filter dạng
+        // `excludingApplications`, xem doc `SCContentFilter`).
+        let id = m.id().map_err(|e| format!("Lỗi đọc id: {e}"))?;
+        super::mac_sck::capture_display_excluding_own_app(id)
     }
 
     #[cfg(not(target_os = "macos"))]
