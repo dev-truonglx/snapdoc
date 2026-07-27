@@ -116,6 +116,11 @@ windows-sys = { version = "0.59", features = [
     # trước khi frame đầu tiên từ WGC tới.
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
+    # GetMonitorInfoW(rcWork)/MonitorFromPoint — vùng làm việc THẬT của màn
+    # hình (đã trừ taskbar), dùng để full-màn-hình Editor/History/Settings
+    # không bị taskbar che (xem `windows_work_area_physical`). `monitor.size()`
+    # của xcap/Tauri chỉ trả kích thước MÀN HÌNH ĐẦY ĐỦ, không có API work-area.
+    "Win32_Graphics_Gdi",
     # GetWindowRect/SetWindowPos — resize capture-bar bằng 1 lệnh Win32 atomic
     # duy nhất (set cả size+position cùng lúc), tương đương NSWindow.setFrame
     # bên macOS, tránh nháy do set_size/set_position riêng lẻ của Tauri là 2

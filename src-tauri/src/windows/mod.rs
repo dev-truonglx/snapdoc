@@ -264,6 +264,34 @@ fn url(win: &str) -> WebviewUrl {
     WebviewUrl::App(format!("index.html?win={win}").into())
 }
 
+/// Vùng làm việc THẬT của màn hình chứa điểm `(px, py)` (physical px, hệ toạ
+/// độ màn hình Win32) — đã TRỪ taskbar (và mọi appbar khác neo cạnh màn
+/// hình), khác `GetMonitorInfoW().rcMonitor`/xcap `Monitor::size()` chỉ trả
+/// kích thước MÀN HÌNH ĐẦY ĐỦ. Không có API nào của xcap/Tauri/tao lộ ra work
+/// area này — phải gọi thẳng Win32. Trả `None` nếu không tìm được monitor tại
+/// điểm đó (hiếm, vd toạ độ ngoài mọi màn hình đang bật).
+#[cfg(target_os = "windows")]
+fn windows_work_area_physical(px: i32, py: i32) -> Option<(i32, i32, i32, i32)> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows_sys::Win32::Foundation::POINT;
+    unsafe {
+        let pt = POINT { x: px, y: py };
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        if hmon == 0 {
+            return None;
+        }
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(hmon, &mut mi) == 0 {
+            return None;
+        }
+        let rc = mi.rcWork;
+        Some((rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top))
+    }
+}
+
 /// Vùng (x, y, width, height) theo LOGICAL/points của màn hình đang chứa con
 /// trỏ chuột. Dùng để mở cửa sổ (capture bar, thumbnail, recording
 /// indicator, và cả Editor/History/Settings) đúng
@@ -282,7 +310,9 @@ fn url(win: &str) -> WebviewUrl {
 /// khoảng cách thật (đúng hiện tượng "FullHD lệch phải, Retina thì đúng" đã
 /// gặp). Dùng `Position::Logical` bỏ HẲN bước quy đổi này — giá trị Logical
 /// chỉ được cast, không bị chia lại theo bất kỳ scale nào — an toàn tuyệt
-/// đối bất kể cửa sổ đang ở màn nào lúc gọi.
+/// đối bất kể cửa sổ đang ở màn nào lúc gọi. Trên Windows, ưu tiên work area
+/// (trừ taskbar) qua `windows_work_area_physical` thay vì kích thước màn hình
+/// đầy đủ — lý do gây bug "Editor full màn hình bị taskbar che".
 fn cursor_or_primary_monitor_logical_rect(app: &AppHandle) -> Option<(f64, f64, f64, f64)> {
     if let Some((cx, cy)) = read_cursor(app) {
         if let Ok(m) = crate::capture::monitor::at_point(cx as i32, cy as i32) {
@@ -298,6 +328,21 @@ fn cursor_or_primary_monitor_logical_rect(app: &AppHandle) -> Option<(f64, f64, 
             #[cfg(not(target_os = "macos"))]
             let rect = {
                 let scale = (m.scale_factor().unwrap_or(1.0).max(1.0)) as f64;
+                // Windows: ưu tiên work area (trừ taskbar) qua Win32 thẳng —
+                // `cx`/`cy` (từ `app.cursor_position()`) đã là physical px, cùng
+                // hệ toạ độ Win32 dùng cho `MonitorFromPoint`. Rơi về kích thước
+                // màn hình đầy đủ của xcap nếu Win32 lỗi (hiếm).
+                #[cfg(target_os = "windows")]
+                let full = windows_work_area_physical(cx as i32, cy as i32);
+                #[cfg(target_os = "windows")]
+                if let Some((wx, wy, ww, wh)) = full {
+                    return Some((
+                        wx as f64 / scale,
+                        wy as f64 / scale,
+                        ww as f64 / scale,
+                        wh as f64 / scale,
+                    ));
+                }
                 (
                     m.x().unwrap_or(0) as f64 / scale,
                     m.y().unwrap_or(0) as f64 / scale,
@@ -310,6 +355,17 @@ fn cursor_or_primary_monitor_logical_rect(app: &AppHandle) -> Option<(f64, f64, 
     }
     let pm = app.primary_monitor().ok().flatten()?;
     let scale = pm.scale_factor() as f64;
+    #[cfg(target_os = "windows")]
+    if let Some((wx, wy, ww, wh)) =
+        windows_work_area_physical(pm.position().x, pm.position().y)
+    {
+        return Some((
+            wx as f64 / scale,
+            wy as f64 / scale,
+            ww as f64 / scale,
+            wh as f64 / scale,
+        ));
+    }
     Some((
         pm.position().x as f64 / scale,
         pm.position().y as f64 / scale,
