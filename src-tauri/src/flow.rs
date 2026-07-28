@@ -134,30 +134,64 @@ fn capture_delay_seconds(app: &AppHandle) -> u64 {
 /// được vì gốc rễ nằm ở tầng OS/app đích, ngoài tầm code SnapDoc).
 ///
 /// Emit `capture-countdown-tick` (số giây còn lại, kể cả giây đầu = tổng số
-/// giây) mỗi giây cho capture-bar hiển thị đếm ngược. Trả `false` nếu bị huỷ
-/// giữa chừng (`cancel_capture_countdown` — Esc, hoặc 1 phiên đếm khác đè lên)
+/// giây) mỗi giây — hiển thị ở cửa sổ riêng `capture-timer`
+/// (`windows::open_capture_timer`/`close_capture_timer`), TÁCH HẲN khỏi
+/// capture-bar nên hoạt động đúng bất kể bar đang ẩn hay hiện. Nếu bar ĐANG
+/// hiện lúc bắt đầu đếm (user bấm hẹn giờ ngay từ bar) thì ẩn luôn bar đi —
+/// tránh 2 cửa sổ nổi cùng lúc (bar + capture-timer) — và hiện lại nếu bị huỷ
+/// giữa chừng, còn nếu đếm xong xuôi thì cứ để ẩn (dòng chảy chụp phía sau vốn
+/// đã ẩn bar trước khi freeze). Trả `false` nếu bị huỷ giữa chừng (Esc — đọc
+/// phím TOÀN CỤC qua `crate::input::escape_down`, KHÔNG qua keydown của 1 cửa
+/// sổ cụ thể, vì cửa sổ `capture-timer` cố tình `focused(false)` để không
+/// cướp focus nên sẽ không bao giờ nhận được phím qua kênh đó — cùng kỹ thuật
+/// `input_loop` đã dùng cho overlay chọn vùng; hoặc 1 phiên đếm khác đè lên)
 /// — caller phải BỎ QUA bước chụp thật khi nhận `false`.
 fn wait_capture_delay(app: &AppHandle) -> bool {
     let secs = capture_delay_seconds(app);
     if secs == 0 {
         return true;
     }
+    let bar_was_visible = bar_is_visible(app);
+    if bar_was_visible {
+        hide_bar(app);
+    }
+    let _ = windows::open_capture_timer(app, secs);
     let my_gen = app.state::<AppState>().countdown_gen.fetch_add(1, Ordering::SeqCst) + 1;
     let _ = app.emit("capture-countdown-tick", secs);
+
+    const POLL_MS: u64 = 40;
+    let ticks_per_sec = (1000 / POLL_MS).max(1);
+    let mut prev_esc = crate::input::escape_down();
     for remaining in (0..secs).rev() {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        if app.state::<AppState>().countdown_gen.load(Ordering::SeqCst) != my_gen {
-            return false;
+        for _ in 0..ticks_per_sec {
+            std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+            if app.state::<AppState>().countdown_gen.load(Ordering::SeqCst) != my_gen {
+                windows::close_capture_timer(app);
+                return false;
+            }
+            let esc = crate::input::escape_down();
+            if esc && !prev_esc {
+                cancel_capture_countdown(app);
+                windows::close_capture_timer(app);
+                if bar_was_visible {
+                    let _ = windows::open_capture_bar(app);
+                }
+                return false;
+            }
+            prev_esc = esc;
         }
         let _ = app.emit("capture-countdown-tick", remaining);
     }
+    windows::close_capture_timer(app);
     true
 }
 
-/// Huỷ phiên đếm ngược "hẹn giờ chụp" đang chạy (nếu có) — gọi khi user bấm
-/// Esc trên capture-bar trong lúc đang đếm. No-op an toàn nếu không có phiên
-/// nào đang chạy (chỉ bump generation, phiên `wait_capture_delay` nào đang
-/// `sleep` sẽ tự thoát ở vòng lặp kế tiếp, chậm nhất 1s).
+/// Huỷ phiên đếm ngược "hẹn giờ chụp" đang chạy (nếu có) — tự gọi từ
+/// `wait_capture_delay` khi phát hiện Esc (đọc phím toàn cục), đồng thời vẫn
+/// lộ ra ngoài qua command `cancel_capture_countdown` (`ipc.cancelCaptureCountdown`)
+/// cho các nơi khác gọi nếu cần. No-op an toàn nếu không có phiên nào đang
+/// chạy (chỉ bump generation, phiên `wait_capture_delay` nào đang chờ sẽ tự
+/// thoát ở vòng lặp kế tiếp).
 pub fn cancel_capture_countdown(app: &AppHandle) {
     app.state::<AppState>().countdown_gen.fetch_add(1, Ordering::SeqCst);
     let _ = app.emit("capture-countdown-cancel", ());

@@ -996,6 +996,51 @@ pub fn close_record_border(app: &AppHandle) {
     }
 }
 
+/// Cửa sổ nhỏ nổi hiển thị số đếm ngược "hẹn giờ chụp" (`flow::wait_capture_delay`)
+/// — TÁCH HẲN khỏi capture-bar để hoạt động đúng bất kể bar đang ẩn hay hiện
+/// (chụp qua hotkey toàn cục / nút "New" ở Editor đều chủ đích KHÔNG hiện bar,
+/// nên trước đây số đếm ngược — vốn render bên trong bar — không có nơi nào để
+/// hiển thị). Đặt ĐÚNG vị trí capture-bar (`place_bottom_center`, cùng kích
+/// thước xấp xỉ pill của bar) để trải nghiệm giữ nguyên như trước, chỉ khác là
+/// luôn hiện được kể cả khi bar đang ẩn. Build mới mỗi lần đếm rồi đóng ngay
+/// sau khi xong/huỷ, không prewarm vì không nằm trên hot path như overlay.
+/// `secs` (số giây ban đầu) được nhúng thẳng vào query string để component
+/// render đúng số ngay từ frame đầu tiên, né race lúc webview mới tạo có thể
+/// chưa kịp gắn listener khi tick `capture-countdown-tick` đầu tiên được emit.
+pub fn open_capture_timer(app: &AppHandle, secs: u64) -> Result<(), String> {
+    close_capture_timer(app);
+    let win = WebviewWindowBuilder::new(
+        app,
+        "capture-timer",
+        WebviewUrl::App(format!("index.html?win=capture-timer&secs={secs}").into()),
+    )
+    .title("SnapDoc")
+    .inner_size(280.0, 80.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    // Không giành focus của cửa sổ đang key hiện tại — cùng lý do các cửa sổ
+    // nổi khác (`open_record_border`, `open_recording_indicator`).
+    .focused(false)
+    .build()
+    .map_err(|e| format!("Không tạo được cửa sổ đếm ngược: {e}"))?;
+    let _ = win.set_ignore_cursor_events(true);
+    let _ = win.set_content_protected(true);
+    place_bottom_center(app, &win);
+    let _ = win.show();
+    Ok(())
+}
+
+/// Đóng cửa sổ đếm ngược (nếu có) — an toàn khi gọi dù chưa từng mở.
+pub fn close_capture_timer(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("capture-timer") {
+        let _ = win.close();
+    }
+}
+
 /// Popup nổi "đang quay" trên Windows — chấm đỏ + đồng hồ đếm mm:ss, bấm vào
 /// để dừng quay ngay (`commands::stop_recording`). Thay cho vai trò của
 /// `NSStatusItem.title` bên macOS (hiện text cạnh icon tray) — tray icon Win32
