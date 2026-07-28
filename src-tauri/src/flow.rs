@@ -7,18 +7,12 @@ use crate::{
 };
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
-#[cfg(target_os = "windows")]
-use windows::Win32::Foundation::HWND;
 
 #[cfg(target_os = "windows")]
-pub fn get_hwnd(app: &tauri::AppHandle, label: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
-    use tauri::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+fn get_hwnd(app: &tauri::AppHandle, label: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
     let win = app.get_webview_window(label)?;
-    let handle = win.window_handle().ok()?;
-    match handle.as_raw() {
-        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as windows_sys::Win32::Foundation::HWND),
-        _ => None,
-    }
+    let hwnd = win.hwnd().ok()?; // Tauri's built-in, trả về windows::Win32::Foundation::HWND
+    Some(hwnd.0 as windows_sys::Win32::Foundation::HWND)
 }
 
 fn hide_bar(app: &AppHandle) {
@@ -80,7 +74,7 @@ fn hide_editor_for_freeze(app: &AppHandle) {
         use crate::capture::win_affinity;
         // Set EXCLUDE trước khi hide — DWM loại ngay lập tức
         for label in &labels {
-            if let Some(hwnd) = crate::windows_utils::get_hwnd(app, label) {
+            if let Some(hwnd) = get_hwnd(app, label) {
                 let _ = win_affinity::exclude_from_capture(hwnd);
             }
         }
@@ -1187,7 +1181,7 @@ fn restore_capture_affinity(app: &AppHandle) {
     {
         use crate::capture::win_affinity;
         for label in &["editor", "capture-bar"] {
-            if let Some(hwnd) = crate::windows_utils::get_hwnd(app, label) {
+            if let Some(hwnd) = get_hwnd(app, label) {
                 let _ = win_affinity::include_in_capture(hwnd);
             }
         }
