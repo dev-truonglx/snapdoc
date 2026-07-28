@@ -1181,3 +1181,15 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
+/// Gọi sau khi freeze xong để restore cửa sổ trở lại bình thường
+fn restore_capture_affinity(app: &AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        use crate::capture::win_affinity;
+        for label in &["editor", "capture-bar"] {
+            if let Some(hwnd) = crate::windows_utils::get_hwnd(app, label) {
+                let _ = win_affinity::include_in_capture(hwnd);
+            }
+        }
+    }
+}
