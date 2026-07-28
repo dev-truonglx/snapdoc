@@ -10,6 +10,8 @@ pub mod mac_sck;
 pub mod mac_stream;
 #[cfg(target_os = "windows")]
 pub mod windows_stream;
+#[cfg(target_os = "windows")]
+pub mod win_affinity;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
