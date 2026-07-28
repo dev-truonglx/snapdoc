@@ -11,12 +11,12 @@ use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use windows::Win32::Foundation::HWND;
 
 #[cfg(target_os = "windows")]
-pub fn get_hwnd(app: &tauri::AppHandle, label: &str) -> Option<HWND> {
+pub fn get_hwnd(app: &tauri::AppHandle, label: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
     use tauri::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let win = app.get_webview_window(label)?;
     let handle = win.window_handle().ok()?;
     match handle.as_raw() {
-        RawWindowHandle::Win32(h) => Some(HWND(h.hwnd.get() as _)),
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as windows_sys::Win32::Foundation::HWND),
         _ => None,
     }
 }
