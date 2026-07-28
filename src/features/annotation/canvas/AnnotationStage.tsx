@@ -218,7 +218,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       // dụng khi còn ở chế độ auto (`autoZoomRef`) — nếu không, resize sẽ ghi
       // đè zoom user vừa tự chỉnh tay.
       if (autoZoomRef.current) {
-        setZoom(doc.captureMode === "region" && s ? (s < 1 ? 1 : clampZoom(1 / s)) : 1);
+        setZoom(s ? (s < 1 ? 1 : clampZoom(1 / s)) : 1);
       }
     };
     measure();
