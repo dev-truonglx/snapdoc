@@ -7,6 +7,19 @@ use crate::{
 };
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::HWND;
+
+#[cfg(target_os = "windows")]
+pub fn get_hwnd(app: &tauri::AppHandle, label: &str) -> Option<HWND> {
+    use tauri::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let win = app.get_webview_window(label)?;
+    let handle = win.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(h) => Some(HWND(h.hwnd.get() as _)),
+        _ => None,
+    }
+}
 
 fn hide_bar(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("capture-bar") {
@@ -58,14 +71,35 @@ fn hide_bar_for_freeze(app: &AppHandle) {
 /// (hoặc ảnh chụp toàn màn hình) vẫn còn "dính" editor. Chỉ sleep khi editor
 /// THẬT SỰ đang visible (tránh delay thừa mỗi lần chụp khi editor đã ẩn sẵn).
 fn hide_editor_for_freeze(app: &AppHandle) {
-    let was_visible = app
-        .get_webview_window("editor")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false);
+
+    // Danh sách tất cả labels cần loại khỏi capture
+    let labels = ["editor", "capture-bar"]; // thêm "settings", "history" nếu cần
+
+    #[cfg(target_os = "windows")]
+    {
+        use crate::capture::win_affinity;
+        // Set EXCLUDE trước khi hide — DWM loại ngay lập tức
+        for label in &labels {
+            if let Some(hwnd) = crate::windows_utils::get_hwnd(app, label) {
+                let _ = win_affinity::exclude_from_capture(hwnd);
+            }
+        }
+        // Chờ DWM commit frame (thay thế sleep cố định)
+        win_affinity::dwm_flush();
+    }
+
     windows::hide_editor(app);
-    if was_visible {
-        #[cfg(target_os = "macos")]
-        std::thread::sleep(std::time::Duration::from_millis(50));
+
+    #[cfg(target_os = "macos")]
+    {
+        let was_visible = app
+            .get_webview_window("editor")
+            .map(|w| w.is_visible().unwrap_or(false))
+            .unwrap_or(false);
+        if was_visible {
+            #[cfg(target_os = "macos")]
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }
 
@@ -174,6 +208,10 @@ fn save_last_region(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h:
 fn take_frozen_screens(app: &AppHandle) {
     let exclude_ids = get_editor_window_monitor_ids(app);
     let screens = capture::freeze::capture_frozen_screens_ex(&exclude_ids);
+    
+    #[cfg(target_os = "windows")]
+    restore_capture_affinity(app);
+    
     if let Ok(mut g) = app.state::<AppState>().frozen_screens.lock() {
         *g = screens;
     }
