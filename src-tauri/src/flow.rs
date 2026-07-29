@@ -152,6 +152,7 @@ fn wait_capture_delay(app: &AppHandle) -> bool {
         return true;
     }
     let bar_was_visible = bar_is_visible(app);
+    hide_editor_for_freeze(app);
     if bar_was_visible {
         hide_bar(app);
     }
