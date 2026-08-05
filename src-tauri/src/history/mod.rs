@@ -38,6 +38,12 @@ pub fn spawn_ingest_worker(app: AppHandle) -> std::sync::mpsc::Sender<IngestJob>
     tx
 }
 
+/// `now_ms` cho các module ngoài `history` (vd `commands::save_snapdoc_file`
+/// ghi `updatedAt` vào manifest) — cùng một mốc thời gian, khỏi định nghĩa lại.
+pub(crate) fn now_ms_pub() -> i64 {
+    now_ms()
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -58,6 +64,12 @@ pub(crate) fn decode_image_data(data: &str) -> Result<Vec<u8>, String> {
 pub(crate) fn strip_data_url_prefix(data: &str) -> &str {
     data.split(',').next_back().unwrap_or(data)
 }
+
+/// `doc.json` cho ảnh chưa có annotation nào. Phải khớp shape mà frontend đọc
+/// (`sessions.ts`/`Editor.tsx`) — `payloadV` tách khỏi `formatVersion` của
+/// container để thêm loại annotation mới không cần bump định dạng file.
+pub(crate) const EMPTY_DOC_JSON: &str =
+    r#"{"payloadV":1,"kind":"image","annotations":[],"stepCounter":1,"arrowCounter":1}"#;
 
 /// Ghi 1 capture vào Library — CHIA 2 PHA để không chặn đường mở editor/copy/save:
 ///
@@ -137,10 +149,26 @@ pub fn ingest(
 fn ingest_finish_bg(app: &AppHandle, id: String, asset_path: PathBuf, thumb_path: PathBuf, base64: &str) {
     let write_result = (|| -> Result<i64, String> {
         let bytes = decode_image_data(base64)?;
-        std::fs::write(&asset_path, &bytes).map_err(|e| format!("Ghi asset thất bại: {e}"))?;
+        // Ảnh mới chụp chưa có annotation nào → `doc.json` rỗng, và `preview`
+        // trùng `base` (không có gì để ghép). Ghi container ngay từ đầu thay vì
+        // ghi PNG rồi chuyển sau, để mọi capture mới nhất quán một định dạng.
+        let now = now_ms();
+        crate::snapdoc_file::write_snapdoc(
+            &asset_path,
+            crate::snapdoc_file::WriteSnapdoc {
+                base_png: &bytes,
+                doc_json: EMPTY_DOC_JSON,
+                draft_json: None,
+                preview_png: &bytes,
+                created_at: now,
+                updated_at: now,
+            },
+        )?;
         let thumb_bytes = thumbnail::generate(&bytes)?;
         std::fs::write(&thumb_path, &thumb_bytes).map_err(|e| format!("Ghi thumbnail thất bại: {e}"))?;
-        Ok(bytes.len() as i64)
+        std::fs::metadata(&asset_path)
+            .map(|m| m.len() as i64)
+            .map_err(|e| format!("Không đọc được kích thước asset: {e}"))
     })();
 
     let Some(state) = app.try_state::<HistoryState>() else { return };

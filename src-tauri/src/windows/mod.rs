@@ -1923,6 +1923,49 @@ pub fn hide_editor(app: &AppHandle) {
     }
 }
 
+/// Hiện lại cửa sổ editor NẾU phiên chụp vừa rồi đã ẩn nó trong lúc nó đang
+/// có thay đổi chưa lưu (cờ `AppState.editor_hidden_dirty`, set ở
+/// `flow::hide_editor_for_freeze`). No-op nếu cờ không bật.
+///
+/// Vì sao cần: `hide_editor_for_freeze` ẩn editor cho MỌI lần chụp, nhưng
+/// không phải nhánh nào cũng mở lại nó — `output = "clipboard"`/`"save"` chỉ
+/// mở cửa sổ thumbnail, còn huỷ overlay (Esc) thì không mở lại gì. Khi đó cửa
+/// sổ chứa việc chưa lưu bị ẩn và KHÔNG CÓ đường nào mở lại: tray không có
+/// mục "Mở editor", `RunEvent::Reopen` mở capture-bar.
+///
+/// Chỉ `show()`, CỐ TÌNH không `set_focus()` và cố tình KHÔNG dùng
+/// `open_editor`: hàm đó force focus + `fill_monitor()` + emit
+/// `refresh-capture` (sẽ nạp đè ảnh mới lên đúng việc chưa lưu ta đang cứu),
+/// và sẽ đánh nhau với phần khôi phục focus/activation-policy tinh tế của
+/// macOS ở `flow::cancel_overlay` / `restore_hidden_product_windows`.
+///
+/// Cờ đọc-và-xoá bằng `swap(false)` nên gọi nhiều lần trong cùng một phiên là
+/// idempotent — cần thiết vì `flow::run` gọi `hide_editor_for_freeze` hai lần
+/// (một lần trong `wait_capture_delay` khi bật hẹn giờ).
+pub fn show_editor_if_hidden_dirty(app: &AppHandle) {
+    if !app
+        .state::<AppState>()
+        .editor_hidden_dirty
+        .swap(false, Ordering::SeqCst)
+    {
+        return;
+    }
+    let Some(win) = app.get_webview_window("editor") else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+    #[cfg(target_os = "windows")]
+    let _ = win.set_skip_taskbar(false);
+    let _ = win.show();
+    // Windows: bỏ cờ WDA_EXCLUDEFROMCAPTURE mà `hide_editor_for_freeze` đã đặt
+    // — nếu không, cửa sổ vừa hiện lại sẽ vô hình trong MỌI lần chụp sau đó.
+    crate::flow::restore_capture_affinity(app);
+}
+
 /// Tạo sẵn editor (ẩn) lúc khởi động để lần chụp đầu hiện ngay, không phải
 /// chờ tạo webview + nạp Konva.
 pub fn prewarm_editor(app: &AppHandle) -> Result<(), String> {
@@ -1962,6 +2005,13 @@ fn force_to_foreground(win: &tauri::WebviewWindow) {
 
 /// Editor chú thích.
 pub fn open_editor(app: &AppHandle) -> Result<(), String> {
+    // Đường này tự hiện + focus editor rồi, nên cờ "đã ẩn editor đang dirty"
+    // hết ý nghĩa — xoá để `show_editor_if_hidden_dirty` chạy sau đó (vd
+    // `cancel_overlay` trong `finally` của Chụp nhanh) thành no-op.
+    app.state::<AppState>()
+        .editor_hidden_dirty
+        .store(false, Ordering::SeqCst);
+
     // macOS: chuyển về Regular khi editor hiển thị → icon xuất hiện trên Dock,
     // cmd+Tab hoạt động, app có titlebar menu chuẩn.
     #[cfg(target_os = "macos")]

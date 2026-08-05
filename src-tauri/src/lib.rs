@@ -7,6 +7,7 @@ mod hotkey;
 mod input;
 mod permissions;
 mod record;
+mod snapdoc_file;
 mod state;
 mod storage;
 mod tray;
@@ -96,6 +97,8 @@ pub fn run() {
             commands::open_editor,
             commands::open_settings,
             commands::close_self,
+            commands::set_editor_dirty,
+            commands::save_snapdoc_file,
             commands::hide_thumbnail,
             commands::open_file_dialog,
             commands::open_files_dialog,
@@ -139,7 +142,12 @@ pub fn run() {
             history::commands::rename_history_item,
             history::commands::open_history_item_in_editor,
             history::commands::get_history_asset_bytes,
-            history::commands::update_history_asset,
+            history::commands::save_history_doc,
+            history::commands::get_history_preview_bytes,
+            history::commands::put_history_draft,
+            history::commands::discard_history_draft,
+            history::commands::get_history_doc_json,
+            history::commands::list_items_with_draft,
             history::commands::trim_history_video,
             history::commands::overwrite_history_video,
             history::commands::copy_history_item,

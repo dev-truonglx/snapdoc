@@ -12,6 +12,7 @@ export interface PendingVideo {
 }
 
 export interface Pending {
+  /** Pixel NỀN (chưa ghép annotation) — base64 trần, không prefix data URL. */
   base64: string;
   width: number;
   height: number;
@@ -23,6 +24,22 @@ export interface Pending {
   /** Mode đã chụp ra ảnh này ("region"/"window"/"full"/"all"/"scroll"/"quick"/
    * "file") — Editor dùng để chọn zoom mặc định, xem `AnnotationStage.tsx`. */
   capture_mode: string;
+  /** Lớp annotation đi kèm (`doc.json` hiệu lực trong container `.snapdoc`,
+   * tức `draft.json` nếu có) — Editor dựng lại đúng trạng thái đang sửa. `null`
+   * cho ảnh vừa chụp (chưa có annotation) và item PNG thế hệ cũ. */
+  docJson?: string | null;
+  /** `true` khi `docJson` là BẢN NHÁP chưa lưu — Editor phải đánh dấu tài liệu
+   * là chưa lưu (nếu để clean thì badge tắt và autosave ngừng ghi) và hỏi user
+   * muốn tiếp tục hay bỏ. */
+  docIsDraft?: boolean;
+  /** Đường dẫn file `.snapdoc` nguồn — có giá trị → Save ghi thẳng lại file đó. */
+  filePath?: string | null;
+}
+
+/** Lớp annotation kèm cờ "là bản nháp chưa lưu". */
+export interface DocLayer {
+  json: string;
+  isDraft: boolean;
 }
 
 // ── History / Library ────────────────────────────────────────────────────────
@@ -125,6 +142,17 @@ export interface Settings {
   language?: string;
 }
 
+/** Kết quả mở file từ dialog. Không chỉ là data URL vì `.snapdoc` mang thêm lớp
+ * annotation và đường dẫn gốc (Save ghi thẳng lại file đó). */
+export interface OpenedFile {
+  /** Data URL của pixel NỀN (với ảnh thường: chính nội dung file). */
+  dataUrl: string;
+  /** Lớp annotation — chỉ có với `.snapdoc`. */
+  docJson: string | null;
+  /** Đường dẫn file — chỉ có với `.snapdoc` (tài liệu file-backed). */
+  filePath: string | null;
+}
+
 export interface UpdateInfo {
   available: boolean;
   version: string;
@@ -184,8 +212,16 @@ export const ipc = {
   openEditor: () => invoke<void>("open_editor"),
   openSettings: () => invoke<void>("open_settings"),
   closeSelf: () => invoke<void>("close_self"),
+  /** Báo Rust cửa sổ editor này đang có / không còn thay đổi chưa lưu. Rust
+   * dùng để đặt title cửa sổ VÀ để biết có phải hiện lại editor sau những
+   * nhánh chụp không tự mở editor (xem `windows::show_editor_if_hidden_dirty`). */
+  setEditorDirty: (dirty: boolean) => invoke<void>("set_editor_dirty", { dirty }),
   hideThumbnail: () => invoke<void>("hide_thumbnail"),
-  openFile: () => invoke<string | null>("open_file_dialog"),
+  openFile: () => invoke<OpenedFile | null>("open_file_dialog"),
+  /** Ghi lại một file `.snapdoc` trên đĩa — Save cho tài liệu file-backed (mở
+   * qua "Open with"/Cmd+O). `base` chỉ truyền khi ảnh nền thật sự đổi. */
+  saveSnapdocFile: (path: string, docJson: string, preview: string, base?: string) =>
+    invoke<void>("save_snapdoc_file", { path, docJson, preview, base }),
   /** Chọn nhiều ảnh cùng lúc (cho tính năng nối ảnh) → mảng data URL theo thứ tự chọn. */
   openFiles: () => invoke<string[]>("open_files_dialog"),
   defaultSaveDir: () => invoke<string>("default_save_dir"),
@@ -226,7 +262,27 @@ export const ipc = {
    * Editor (xem `HistoryStrip.tsx`), tránh chi phí base64+JSON của
    * `openHistoryItemInEditor`. */
   getHistoryAssetBytes: (id: string) => invoke<ArrayBuffer>("get_history_asset_bytes", { id }),
-  updateHistoryAsset: (id: string, data: string) => invoke<HistoryItem>("update_history_asset", { id, data }),
+  /** Bản ĐÃ ghép annotation của một item ảnh (`preview.png` trong container
+   * `.snapdoc`) — raw bytes. Cửa sổ History dùng để render `<img>` qua Blob:
+   * `.snapdoc` là ZIP nên `convertFileSrc(assetPath)` không render được. */
+  getHistoryPreviewBytes: (id: string) => invoke<ArrayBuffer>("get_history_preview_bytes", { id }),
+  /** Lớp annotation hiệu lực (nháp nếu có, ngược lại bản đã lưu) của một item.
+   * `null` cho video và cho item PNG thế hệ cũ. */
+  getHistoryDocJson: (id: string) => invoke<DocLayer | null>("get_history_doc_json", { id }),
+  /** Editor Save — PHI HUỶ: giữ nguyên pixel nền, lưu annotation thành JSON
+   * cạnh nó, xoá bản nháp, render lại preview + thumbnail. `base` chỉ truyền
+   * khi ẢNH NỀN thật sự đổi (crop/stitch/flatten) để một lần Save
+   * chỉ-annotation không phải đẩy vài MB base64 qua IPC. */
+  saveHistoryDoc: (id: string, docJson: string, preview: string, base?: string) =>
+    invoke<HistoryItem>("save_history_doc", { id, docJson, preview, base }),
+  /** Autosave bản nháp. `false` = chưa ghi được (container chưa tồn tại, hoặc
+   * item còn ở định dạng PNG cũ) — KHÔNG phải lỗi, xem `put_history_draft_sync`. */
+  putHistoryDraft: (id: string, docJson: string) =>
+    invoke<boolean>("put_history_draft", { id, docJson }),
+  discardHistoryDraft: (id: string) => invoke<void>("discard_history_draft", { id }),
+  /** Id các item còn bản nháp chưa lưu — badge ở dải "Gần đây" sau khi khởi
+   * động lại app (phiên trong RAM đã mất nhưng nháp trên đĩa còn). */
+  listItemsWithDraft: () => invoke<string[]>("list_items_with_draft"),
   copyHistoryItem: (id: string) => invoke<void>("copy_history_item", { id }),
   revealHistoryItem: (id: string) => invoke<void>("reveal_history_item", { id }),
   /** Ghi lại đường dẫn bản Save/Save As gần nhất ra thư mục tuỳ chọn — gọi

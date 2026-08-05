@@ -119,8 +119,18 @@ fn run_action(app: &AppHandle, action: &str) {
                 let monitor_count = xcap::Monitor::all().map(|m| m.len()).unwrap_or(1);
                 if monitor_count > 1 {
                     flow::run_record_picker(&app, "full");
-                } else if let Err(e) = crate::record::start_recording(&app) {
-                    eprintln!("[SnapDoc] Bắt đầu quay (phím tắt) thất bại: {e}");
+                } else {
+                    // 1 màn hình → quay THẲNG, không qua overlay chọn màn nào.
+                    // Nhưng vẫn phải ẩn editor/capture-bar trước: đường
+                    // `run_record_picker` ở trên tự làm việc này, còn đường này
+                    // thì trước đây không — nên cửa sổ editor bị quay luôn vào
+                    // video.
+                    flow::hide_editor_for_freeze(&app);
+                    if let Err(e) = crate::record::start_recording(&app) {
+                        eprintln!("[SnapDoc] Bắt đầu quay (phím tắt) thất bại: {e}");
+                        // Quay không khởi động được → không có gì mở lại editor.
+                        windows::show_editor_if_hidden_dirty(&app);
+                    }
                 }
             });
         }

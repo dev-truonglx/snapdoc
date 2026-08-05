@@ -3,7 +3,12 @@ import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import { ipc, type HistoryItem } from "../../lib/ipc";
-import { useEditor } from "../../features/annotation/store";
+import {
+  dirtySessionKeys,
+  openLibraryImage,
+  suspendActive,
+  tryResume,
+} from "../../features/annotation/sessions";
 import { fmtDuration } from "../history/formatUtils";
 
 const LIMIT = 20;
@@ -27,6 +32,7 @@ interface Props {
 export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenImage }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<HistoryItem[]>([]);
+  const [draftIds, setDraftIds] = useState<string[]>([]);
   const [copyingId, setCopyingId] = useState<string | null>(null);
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -36,19 +42,21 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
   // lúc menu mở, tra lại theo id khi cần).
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  // URL blob của ảnh đang hiển thị trong Editor (nếu nạp qua đường tắt bên
-  // dưới) — cần revoke khi đổi ảnh khác để không rò rỉ memory.
-  const lastBlobUrlRef = useRef<string | null>(null);
-  // Id của lần bấm gần nhất — bấm nhanh 2 ảnh khác nhau trước khi ảnh đầu tải
-  // xong có thể khiến 2 promise resolve KHÔNG đúng thứ tự bấm; so khớp id
-  // này sau await để bỏ qua kết quả đã cũ, tránh hiện sai ảnh + gắn nhầm
-  // `historyId` (Save sẽ ghi đè nhầm record).
+  // Id của lần bấm gần nhất — chỉ để quản spinner theo id. Việc chống race
+  // "2 promise resolve sai thứ tự bấm" (từng gây hiện sai ảnh + gắn nhầm
+  // `historyId`, khiến Save ghi đè nhầm record) nay do bộ đếm thế hệ DÙNG
+  // CHUNG trong `sessions.ts` đảm nhiệm — xem `beginSwitch`/`isCurrentSwitch`.
   const latestRequestRef = useRef<string | null>(null);
 
   const load = useCallback(() => {
     if (!("__TAURI_INTERNALS__" in window)) return; // dev-mode ngoài Tauri: bỏ qua
     ipc.listHistory({ limit: LIMIT, offset: 0, trashOnly: false })
       .then((page) => setItems(page.items))
+      .catch(() => {});
+    // Item nào còn bản nháp CHƯA LƯU trên đĩa — nguồn duy nhất cho badge sau
+    // khi khởi động lại app (phiên trong RAM đã mất, nháp thì còn).
+    ipc.listItemsWithDraft()
+      .then(setDraftIds)
       .catch(() => {});
   }, []);
 
@@ -61,17 +69,17 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
     // nạp lại pending ảnh và mất video đang xem) — nghe riêng event ingest xong
     // để dải này vẫn tự cập nhật ngay.
     const unAdded = listen("history:item-added", load);
+    // Autosave / Save / bỏ nháp đổi trạng thái nháp của một item → cập nhật
+    // badge ngay, không cần poll (cùng pattern với "history:item-added").
+    const unSnapdoc = listen("snapdoc:changed", () => {
+      ipc.listItemsWithDraft().then(setDraftIds).catch(() => {});
+    });
     return () => {
       un.then((f) => f());
       unAdded.then((f) => f());
+      unSnapdoc.then((f) => f());
     };
   }, [load]);
-
-  useEffect(() => {
-    return () => {
-      if (lastBlobUrlRef.current) URL.revokeObjectURL(lastBlobUrlRef.current);
-    };
-  }, []);
 
   // Đóng menu chuột phải khi click ra ngoài hoặc nhấn Escape — cùng pattern
   // `showSaveMenu` ở `Toolbar.tsx`.
@@ -100,27 +108,36 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
   // Editor đang mở, vốn là nguồn gây lag/giật khi bấm chọn ảnh ở dải này).
   const openImageInEditor = async (id: string) => {
     if (id === currentId) return;
+    // Treo tài liệu đang mở NGAY, đồng bộ, trước mọi `await` — nếu không thì
+    // `loadDoc` bên dưới ghi đè thẳng lên việc user đang làm dở.
+    try {
+      suspendActive();
+    } catch (e) {
+      console.error("[SnapDoc] Treo phiên sửa thất bại:", e);
+    }
     onOpenImage();
+
+    // Phiên còn trong RAM → khôi phục TỨC THÌ, đầy đủ cả undo stack, không cần
+    // đọc lại file. Đi trước `beginSwitch`-rồi-await nên cũng không có race.
+    if (tryResume(id)) {
+      latestRequestRef.current = id;
+      setOpeningId(null);
+      return;
+    }
+
+    // Việc nạp thật đi qua `openLibraryImage` — ĐƯỜNG DUY NHẤT mở ảnh từ
+    // Library (dùng chung với nút "Quay lại" ở banner), nơi gom token thế hệ +
+    // quyền sở hữu object URL + cờ `markClean` khi nạp từ nháp.
+    // `latestRequestRef` giữ lại chỉ để quản spinner theo id.
     latestRequestRef.current = id;
     setOpeningId(id);
     try {
-      const [item, bytes] = await Promise.all([ipc.getHistoryItem(id), ipc.getHistoryAssetBytes(id)]);
-      if (latestRequestRef.current !== id) return; // đã bấm ảnh khác trong lúc chờ — bỏ kết quả này
-      const url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
-      if (lastBlobUrlRef.current) URL.revokeObjectURL(lastBlobUrlRef.current);
-      lastBlobUrlRef.current = url;
-      useEditor.getState().loadDoc({
-        image: url,
-        imgW: item.width,
-        imgH: item.height,
-        scaleFactor: item.scaleFactor,
-        annotations: [],
-        historyId: item.id,
-        captureMode: item.captureMode,
-      });
+      await openLibraryImage(id);
     } catch (e) {
-      if (latestRequestRef.current === id) onFlash(String(e));
+      onFlash(String(e));
     } finally {
+      // So theo id thay vì token: `openLibraryImage` tự quản token bên trong,
+      // còn ở đây chỉ cần biết spinner đang là của lượt bấm nào.
       if (latestRequestRef.current === id) setOpeningId(null);
     }
   };
@@ -185,19 +202,39 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
     ipc.revealHistoryItem(id).catch((err) => onFlash(String(err)));
   };
 
+  // Các item còn việc dở: phiên đang treo trong RAM, HỢP với bản nháp trên đĩa
+  // (`draftIds` — sống qua cả khởi động lại app, xem `list_items_with_draft`).
+  // Phần RAM tính lại mỗi render: `currentId` đổi ở đúng mọi lần đổi tài liệu,
+  // nên không cần cơ chế subscribe riêng cho registry.
+  // Cố tình KHÔNG gồm tài liệu đang mở: trạng thái chưa lưu của nó đã có chỉ
+  // báo riêng trên toolbar, badge ở đây mang nghĩa "việc dở đang ở nền".
+  const dirtyKeys = new Set(
+    [...dirtySessionKeys(), ...draftIds].filter((k) => k !== currentId),
+  );
+
   return (
     <div style={strip}>
       <span style={label}>{t("historyStrip.recent")}</span>
       <div style={scrollRow}>
         {items.map((item) => {
           const isVideo = item.mediaType === "video";
+          const hasDirtySession = dirtyKeys.has(item.id);
           return (
             <div
               key={item.id}
               className="history-thumb"
               style={{
                 ...thumbBtn,
-                outline: item.id === currentId ? "2px solid var(--accent)" : "2px solid transparent",
+                // Đang mở → viền LIỀN accent; có việc dở ở nền → viền GẠCH
+                // amber. Hai trạng thái khác nhau về bản chất nên phải phân
+                // biệt được bằng mắt, và item đang mở không bao giờ nằm trong
+                // `dirtyKeys` nên không có ca tranh nhau.
+                outline:
+                  item.id === currentId
+                    ? "2px solid var(--accent)"
+                    : hasDirtySession
+                      ? "2px dashed #f59e0b"
+                      : "2px solid transparent",
                 opacity: openingId === item.id ? 0.55 : 1,
                 // Chặn double-click gây race giữa 2 lần nạp ảnh trong lúc 1
                 // ảnh khác đang nạp — không chặn hover/click ảnh đang mở (item
@@ -209,9 +246,20 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                 e.preventDefault();
                 setMenu({ id: item.id, x: e.clientX, y: e.clientY });
               }}
-              title={isVideo ? t("historyStrip.openVideoEditor") : t("historyStrip.reopenEditor")}
+              title={
+                hasDirtySession
+                  ? t("historyStrip.hasUnsavedEdit")
+                  : isVideo
+                    ? t("historyStrip.openVideoEditor")
+                    : t("historyStrip.reopenEditor")
+              }
             >
               <img src={convertFileSrc(item.thumbPath)} alt="" style={thumbImg} loading="lazy" />
+              {hasDirtySession && (
+                <span style={editBadge} aria-hidden>
+                  ✎
+                </span>
+              )}
               {/* `.history-thumb-action`: ẩn mặc định, chỉ hiện khi hover vào
                   `.history-thumb` (xem CSS ở `global.css`) — dùng class thay vì
                   style JS vì đây thuần hiệu ứng hover, không cần biết state ở
@@ -401,6 +449,21 @@ const playBadge: React.CSSProperties = {
   pointerEvents: "none",
 };
 
+// Dấu "còn bản chỉnh sửa chưa lưu" — góc dưới-trái, chỗ duy nhất không đụng
+// nút xoá/copy (hover, 2 góc trên) lẫn nhãn thời lượng video (dưới-phải).
+const editBadge: React.CSSProperties = {
+  position: "absolute",
+  bottom: 3,
+  left: 3,
+  background: "rgba(245,158,11,0.92)",
+  color: "#1c1917",
+  fontSize: 10,
+  fontWeight: 700,
+  lineHeight: 1,
+  padding: "2px 4px",
+  borderRadius: 3,
+  pointerEvents: "none",
+};
 const durationBadge: React.CSSProperties = {
   position: "absolute",
   bottom: 3,

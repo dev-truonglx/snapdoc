@@ -5,7 +5,7 @@ use crate::state::{AppState, PendingCapture, PendingVideo};
 use crate::windows;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::ToSql;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 fn state(app: &AppHandle) -> Result<tauri::State<'_, HistoryState>, String> {
     app.try_state::<HistoryState>()
@@ -206,7 +206,46 @@ fn read_history_asset_bytes_sync(app: &AppHandle, id: &str) -> Result<Vec<u8>, S
     if rec.media_type == "video" {
         return Err("Video chưa hỗ trợ mở trong Editor".to_string());
     }
-    std::fs::read(&rec.asset_path).map_err(|e| format!("Không đọc được asset: {e}"))
+    Ok(load_asset(&rec)?.0)
+}
+
+/// Đọc asset của một item ẢNH → `(pixel nền, doc.json hiệu lực)`.
+///
+/// Che khác biệt giữa hai thế hệ định dạng bằng MAGIC BYTES, không bằng phần mở
+/// rộng: Library của các bản trước còn đầy `{id}.png` trần, và viết lại toàn bộ
+/// dữ liệu người dùng một lượt là rủi ro không cần thiết khi chỉ cần sniff 4
+/// byte là đọc đúng cả hai. Item PNG cũ chỉ chuyển sang `.snapdoc` khi user Save
+/// nó lần đầu (xem `save_history_doc_sync`).
+///
+/// "doc.json hiệu lực" = `draft.json` nếu có, ngược lại `doc.json` — tức luôn
+/// mở ra đúng thứ user đang làm dở, kể cả sau khi app bị kill.
+fn load_asset(rec: &HistoryRecord) -> Result<(Vec<u8>, String, bool), String> {
+    let path = std::path::Path::new(&rec.asset_path);
+    if crate::snapdoc_file::is_snapdoc(path) {
+        let f = crate::snapdoc_file::read_snapdoc(path)?;
+        let is_draft = f.draft_json.is_some();
+        let doc = f.effective_doc().to_string();
+        return Ok((f.base_png, doc, is_draft));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Không đọc được asset: {e}"))?;
+    Ok((bytes, super::EMPTY_DOC_JSON.to_string(), false))
+}
+
+/// Bytes để đưa vào clipboard / xuất ra ngoài: bản ĐÃ GHÉP annotation
+/// (`preview.png`), không phải nền sạch — đúng cái user thấy trên màn hình.
+/// Ảnh PNG cũ thì bản thân file đã là "cái thấy được".
+fn load_asset_preview(rec: &HistoryRecord) -> Result<Vec<u8>, String> {
+    let path = std::path::Path::new(&rec.asset_path);
+    if crate::snapdoc_file::is_snapdoc(path) {
+        if let Some(bytes) =
+            crate::snapdoc_file::read_snapdoc_entry(path, crate::snapdoc_file::PREVIEW_PNG)?
+        {
+            return Ok(bytes);
+        }
+        // Container thiếu preview (không nên xảy ra) → thà trả nền còn hơn lỗi.
+        return Ok(crate::snapdoc_file::read_snapdoc(path)?.base_png);
+    }
+    std::fs::read(path).map_err(|e| format!("Không đọc được asset: {e}"))
 }
 
 /// Tìm id của ảnh (không phải video) mới nhất chưa bị xoá — dùng để mở
@@ -253,8 +292,10 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
         drop(g);
         return windows::open_editor(app);
     }
-    let bytes = std::fs::read(&rec.asset_path).map_err(|e| format!("Không đọc được asset: {e}"))?;
-    let base64 = STANDARD.encode(&bytes);
+    // Nền + lớp annotation cùng đi qua `PendingCapture`, để editor dựng lại
+    // đúng trạng thái đang sửa chứ không chỉ mở ảnh trống.
+    let (base_bytes, doc_json, is_draft) = load_asset(&rec)?;
+    let base64 = STANDARD.encode(&base_bytes);
     {
         let state = app.state::<AppState>();
         let mut g = state.pending.lock().map_err(|_| "Lock error".to_string())?;
@@ -266,34 +307,257 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
             scale_factor: rec.scale_factor,
             history_id: Some(id.to_string()),
             capture_mode: rec.capture_mode.clone(),
+            doc_json: Some(doc_json),
+            doc_is_draft: is_draft,
+            // Đến từ Library → Save ghi vào record, không phải vào file ngoài.
+            file_path: None,
         });
     }
     windows::open_editor(app)
 }
 
-fn update_history_asset_sync(app: &AppHandle, id: &str, data: &str) -> Result<HistoryRecord, String> {
+/// Lưu tài liệu của một item ảnh — **PHI HUỶ**.
+///
+/// Khác hẳn hành vi trước đây (`update_history_asset` cũ ghi đè `asset_path`
+/// bằng ảnh ĐÃ GHÉP, tức annotation biến thành pixel vĩnh viễn và bản gốc sạch
+/// mất luôn): ở đây pixel nền được GIỮ NGUYÊN, annotation lưu thành JSON cạnh
+/// nó, nên mở lại lúc nào cũng di chuyển/đổi màu/xoá từng annotation được.
+/// Thao tác phá huỷ duy nhất còn lại là Flatten (có dialog xác nhận riêng), và
+/// nó đi qua đây với `base_data = Some(...)`.
+///
+/// - `doc_json`: trạng thái annotation sẽ trở thành bản ĐÃ LƯU. `draft.json`
+///   bị XOÁ (write_snapdoc chỉ ghi entry nào được truyền) → cờ "chưa lưu" tắt.
+/// - `preview_data`: bản đã ghép, dùng cho clipboard/xem nhanh + sinh thumbnail.
+/// - `base_data`: chỉ truyền khi ẢNH NỀN thật sự đổi (crop/stitch/flatten —
+///   frontend theo dõi qua `baseRev`). `None` → giữ nguyên nền đang có, nên
+///   một lần Save chỉ-annotation không phải đẩy vài MB base64 qua IPC.
+///
+/// Item PNG cũ (định dạng thế hệ trước) được CHUYỂN sang `.snapdoc` ngay tại
+/// đây: ghi file mới, cập nhật `asset_path`, xoá PNG cũ.
+fn save_history_doc_sync(
+    app: &AppHandle,
+    id: &str,
+    doc_json: &str,
+    preview_data: &str,
+    base_data: Option<&str>,
+) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type == "video" {
         return Err("Video chưa hỗ trợ chỉnh sửa".to_string());
     }
-    let bytes = decode_image_data(data)?;
-    std::fs::write(&rec.asset_path, &bytes).map_err(|e| format!("Ghi asset thất bại: {e}"))?;
-    let thumb_bytes = super::thumbnail::generate(&bytes)?;
-    std::fs::write(&rec.thumb_path, &thumb_bytes).map_err(|e| format!("Ghi thumbnail thất bại: {e}"))?;
+    let preview_bytes = decode_image_data(preview_data)?;
 
-    let img = image::load_from_memory(&bytes).map_err(|e| format!("Ảnh không hợp lệ: {e}"))?;
-    let (w, h) = (img.width(), img.height());
+    let old_path = std::path::Path::new(&rec.asset_path).to_path_buf();
+    let was_snapdoc = crate::snapdoc_file::is_snapdoc(&old_path);
+
+    // Nền: ưu tiên bản mới do frontend gửi lên, nếu không thì đọc lại nền đang
+    // có. Với PNG cũ thì "nền đang có" chính là cả file.
+    let (base_bytes, created_at) = match base_data {
+        Some(d) => (
+            decode_image_data(d)?,
+            if was_snapdoc {
+                crate::snapdoc_file::read_snapdoc(&old_path)
+                    .map(|f| f.created_at)
+                    .unwrap_or_else(|_| rec.created_at)
+            } else {
+                rec.created_at
+            },
+        ),
+        None if was_snapdoc => {
+            let f = crate::snapdoc_file::read_snapdoc(&old_path)?;
+            (f.base_png, f.created_at)
+        }
+        None => (
+            std::fs::read(&old_path).map_err(|e| format!("Không đọc được asset: {e}"))?,
+            rec.created_at,
+        ),
+    };
+
+    // Kích thước ghi vào DB lấy từ NỀN (không phải preview): đó mới là khung
+    // toạ độ mà annotation trong `doc.json` bám vào, và cũng là thứ Editor nạp.
+    let base_img =
+        image::load_from_memory(&base_bytes).map_err(|e| format!("Ảnh nền không hợp lệ: {e}"))?;
+    let (w, h) = (base_img.width(), base_img.height());
+
+    let new_path = super::assets::snapdoc_path_for(app, id)?;
+    crate::snapdoc_file::write_snapdoc(
+        &new_path,
+        crate::snapdoc_file::WriteSnapdoc {
+            base_png: &base_bytes,
+            doc_json,
+            // Save = chốt bản nháp thành bản chính → KHÔNG ghi lại draft.
+            draft_json: None,
+            preview_png: &preview_bytes,
+            created_at,
+            updated_at: now_ms(),
+        },
+    )?;
+
+    // Thumbnail sinh từ PREVIEW để lưới History/dải "Gần đây" hiện đúng cái
+    // user thấy (có annotation), không phải nền trống.
+    let thumb_bytes = super::thumbnail::generate(&preview_bytes)?;
+    std::fs::write(&rec.thumb_path, &thumb_bytes)
+        .map_err(|e| format!("Ghi thumbnail thất bại: {e}"))?;
+
+    // Chuyển item PNG cũ sang `.snapdoc`: chỉ xoá file cũ SAU KHI file mới đã
+    // ghi xong (write_snapdoc là atomic), để một lần lỗi không mất cả hai.
+    let asset_path_str = new_path.to_string_lossy().to_string();
+    if asset_path_str != rec.asset_path {
+        let _ = std::fs::remove_file(&old_path);
+    }
+    let file_size = std::fs::metadata(&new_path).ok().map(|m| m.len() as i64);
 
     let st = state(app)?;
     {
         let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
         conn.execute(
-            "UPDATE history SET updated_at = ?1, width = ?2, height = ?3, file_size = ?4, is_edited = 1 WHERE id = ?5",
-            rusqlite::params![now_ms(), w, h, bytes.len() as i64, id],
+            "UPDATE history SET updated_at = ?1, width = ?2, height = ?3, file_size = ?4, asset_path = ?5, is_edited = 1 WHERE id = ?6",
+            rusqlite::params![now_ms(), w, h, file_size, asset_path_str, id],
         )
         .map_err(|e| e.to_string())?;
     }
+    let _ = app.emit("snapdoc:changed", id);
     get_history_item_sync(app, id)
+}
+
+/// Ghi bản nháp (autosave) — chỉ đổi `draft.json` bên trong container, giữ
+/// nguyên `doc.json`/`preview.png`/thumbnail.
+///
+/// Cố tình KHÔNG chạm thumbnail và KHÔNG set `is_edited`: đây là việc đang làm
+/// dở, chưa phải nội dung chính thức của ảnh. Nhờ tách 2 slot như vậy mà nút
+/// Save và chỉ báo "chưa lưu" vẫn giữ được ý nghĩa dù có autosave.
+///
+/// # Race với ingest
+///
+/// `ingest` INSERT row TRƯỚC rồi `ingest_finish_bg` mới ghi file ở thread nền.
+/// Autosave (debounce ~2s) hoàn toàn có thể chạy trước khi file kịp tồn tại
+/// trên một cái đĩa chậm. Khi đó KHÔNG được lỗi — chỉ bỏ qua lượt này; lượt
+/// debounce sau (hoặc lần flush lúc rời/đóng) sẽ ghi được. Bản nháp mất tối đa
+/// 2 giây đầu của một ảnh vừa chụp, còn state trong RAM thì vẫn nguyên.
+fn put_history_draft_sync(app: &AppHandle, id: &str, doc_json: &str) -> Result<bool, String> {
+    let rec = get_history_item_sync(app, id)?;
+    if rec.media_type == "video" {
+        return Ok(false);
+    }
+    let path = std::path::Path::new(&rec.asset_path).to_path_buf();
+    if !crate::snapdoc_file::is_snapdoc(&path) {
+        // Chưa ghi xong (race ở trên), hoặc là item PNG thế hệ cũ. Cả 2 ca đều
+        // chờ tới lần Save (khi đó `save_history_doc_sync` dựng container).
+        return Ok(false);
+    }
+    let f = crate::snapdoc_file::read_snapdoc(&path)?;
+    let preview = crate::snapdoc_file::read_snapdoc_entry(&path, crate::snapdoc_file::PREVIEW_PNG)?
+        .unwrap_or_else(|| f.base_png.clone());
+    crate::snapdoc_file::write_snapdoc(
+        &path,
+        crate::snapdoc_file::WriteSnapdoc {
+            base_png: &f.base_png,
+            doc_json: &f.doc_json,
+            draft_json: Some(doc_json),
+            preview_png: &preview,
+            created_at: f.created_at,
+            updated_at: now_ms(),
+        },
+    )?;
+    // CỐ TÌNH không emit "snapdoc:changed" ở đây, khác `save_history_doc_sync`
+    // và `discard_history_draft_sync`: autosave chạy mỗi ~2s trong lúc user
+    // đang vẽ, mà listener của event này cho dải "Gần đây" lại quét lại toàn bộ
+    // container để dựng danh sách badge → 2 giây một lần mở hàng trăm file zip.
+    //
+    // Không mất gì: item đang sửa chính là `currentId`, vốn bị LOẠI khỏi badge
+    // theo thiết kế (trạng thái chưa lưu của nó đã có chỉ báo riêng trên
+    // toolbar), còn các item ở nền lấy badge từ registry trong RAM ngay lập
+    // tức. Danh sách trên đĩa chỉ cần đúng sau khi khởi động lại app.
+    Ok(true)
+}
+
+/// Bỏ bản nháp → tài liệu trở về đúng bản đã Save gần nhất.
+fn discard_history_draft_sync(app: &AppHandle, id: &str) -> Result<(), String> {
+    let rec = get_history_item_sync(app, id)?;
+    let path = std::path::Path::new(&rec.asset_path).to_path_buf();
+    if !crate::snapdoc_file::is_snapdoc(&path) {
+        return Ok(());
+    }
+    let f = crate::snapdoc_file::read_snapdoc(&path)?;
+    if f.draft_json.is_none() {
+        return Ok(());
+    }
+    let preview = crate::snapdoc_file::read_snapdoc_entry(&path, crate::snapdoc_file::PREVIEW_PNG)?
+        .unwrap_or_else(|| f.base_png.clone());
+    crate::snapdoc_file::write_snapdoc(
+        &path,
+        crate::snapdoc_file::WriteSnapdoc {
+            base_png: &f.base_png,
+            doc_json: &f.doc_json,
+            draft_json: None,
+            preview_png: &preview,
+            created_at: f.created_at,
+            updated_at: now_ms(),
+        },
+    )?;
+    let _ = app.emit("snapdoc:changed", id);
+    Ok(())
+}
+
+/// `doc.json` hiệu lực (`draft.json` nếu có) của một item — chuỗi nhỏ, tách
+/// khỏi đường đọc pixel để `HistoryStrip` lấy song song mà không tốn gì.
+fn get_history_doc_json_sync(app: &AppHandle, id: &str) -> Result<Option<DocLayer>, String> {
+    let rec = get_history_item_sync(app, id)?;
+    if rec.media_type == "video" {
+        return Ok(None);
+    }
+    let path = std::path::Path::new(&rec.asset_path);
+    if !crate::snapdoc_file::is_snapdoc(path) {
+        return Ok(None);
+    }
+    let f = crate::snapdoc_file::read_snapdoc(path)?;
+    Ok(Some(DocLayer {
+        is_draft: f.draft_json.is_some(),
+        json: f.effective_doc().to_string(),
+    }))
+}
+
+/// Lớp annotation + cờ "đây là bản nháp chưa lưu" — Editor cần cờ này để đánh
+/// dấu tài liệu là chưa lưu và để hỏi user muốn tiếp tục hay bỏ.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocLayer {
+    pub json: String,
+    pub is_draft: bool,
+}
+
+/// Id các item đang có bản nháp chưa lưu — dải "Gần đây" dùng để gắn badge sau
+/// khi khởi động lại app (phiên trong RAM đã mất, nhưng nháp trên đĩa còn).
+fn list_items_with_draft_sync(app: &AppHandle) -> Result<Vec<String>, String> {
+    let st = state(app)?;
+    // KHÔNG lọc `is_edited = 1`: autosave cố tình không set cờ đó (nháp là việc
+    // đang làm dở, chưa phải nội dung chính thức của ảnh), nên lọc theo nó sẽ
+    // bỏ sót đúng trường hợp hàm này cần tìm.
+    //
+    // Chặn ở `LIMIT` thay vì quét cả Library: badge chỉ hiện được trên các item
+    // mà UI thật sự vẽ ra (dải "Gần đây" lấy 20 item mới nhất), nên quét vài
+    // trăm item gần nhất là đủ và không phải mở hàng nghìn file.
+    let rows: Vec<(String, String)> = {
+        let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, asset_path FROM history \
+                 WHERE deleted_at IS NULL AND media_type != 'video' \
+                 ORDER BY created_at DESC LIMIT 200",
+            )
+            .map_err(|e| e.to_string())?;
+        let it = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| e.to_string())?;
+        it.filter_map(Result::ok).collect()
+    };
+    Ok(rows
+        .into_iter()
+        // `has_draft` chỉ đọc central directory của ZIP — không giải nén
+        // `base.png`, nên vòng lặp này rẻ dù chạy qua vài trăm file.
+        .filter(|(_, asset_path)| crate::snapdoc_file::has_draft(std::path::Path::new(asset_path)))
+        .map(|(id, _)| id)
+        .collect())
 }
 
 /// Cắt 1 video đã lưu trong Library — tạo 1 record MỚI cho bản đã cắt, GIỮ
@@ -436,7 +700,9 @@ fn copy_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     if rec.media_type == "video" {
         return Err("Video chưa hỗ trợ copy vào clipboard".to_string());
     }
-    let bytes = std::fs::read(&rec.asset_path).map_err(|e| format!("Không đọc được asset: {e}"))?;
+    // `preview.png` — bản ĐÃ ghép annotation, tức đúng cái user thấy. Copy nền
+    // sạch ra clipboard sẽ là mất annotation một cách im lặng.
+    let bytes = load_asset_preview(&rec)?;
     crate::clipboard::copy_png_bytes(&bytes)
 }
 
@@ -550,11 +816,76 @@ pub async fn get_history_asset_bytes(app: AppHandle, id: String) -> Result<tauri
     .map_err(|e| format!("Task join error: {e}"))?
 }
 
-/// Editor Save-in-place: ghi đè asset + thumbnail của đúng record, bump
-/// `updated_at`, đánh dấu `is_edited`. KHÔNG tạo record mới.
+/// Editor Save: lưu tài liệu vào đúng record, PHI HUỶ — xem
+/// `save_history_doc_sync`. KHÔNG tạo record mới.
 #[tauri::command]
-pub async fn update_history_asset(app: AppHandle, id: String, data: String) -> Result<HistoryRecord, String> {
-    tauri::async_runtime::spawn_blocking(move || update_history_asset_sync(&app, &id, &data))
+pub async fn save_history_doc(
+    app: AppHandle,
+    id: String,
+    doc_json: String,
+    preview: String,
+    base: Option<String>,
+) -> Result<HistoryRecord, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_history_doc_sync(&app, &id, &doc_json, &preview, base.as_deref())
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Autosave bản nháp. Trả `false` (KHÔNG lỗi) khi container chưa tồn tại hoặc
+/// item còn ở định dạng PNG cũ — xem `put_history_draft_sync`.
+#[tauri::command]
+pub async fn put_history_draft(app: AppHandle, id: String, doc_json: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || put_history_draft_sync(&app, &id, &doc_json))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Bỏ bản nháp → về đúng bản đã Save gần nhất.
+#[tauri::command]
+pub async fn discard_history_draft(app: AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || discard_history_draft_sync(&app, &id))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Bản ĐÃ GHÉP annotation của một item ảnh (`preview.png`), raw bytes.
+///
+/// Cửa sổ History không render trực tiếp `asset_path` được nữa: `.snapdoc` là
+/// container ZIP nên `<img src={convertFileSrc(assetPath)}>` sẽ hỏng. Trả raw
+/// `Response` (không base64/JSON) theo đúng lý do của `get_history_asset_bytes`
+/// — ảnh gốc có thể vài chục MB trên màn Retina.
+#[tauri::command]
+pub async fn get_history_preview_bytes(
+    app: AppHandle,
+    id: String,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        let rec = get_history_item_sync(&app, &id)?;
+        if rec.media_type == "video" {
+            return Err("Video không có preview ảnh".to_string());
+        }
+        load_asset_preview(&rec)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Lớp annotation hiệu lực của một item (nháp nếu có, ngược lại bản đã lưu).
+#[tauri::command]
+pub async fn get_history_doc_json(app: AppHandle, id: String) -> Result<Option<DocLayer>, String> {
+    tauri::async_runtime::spawn_blocking(move || get_history_doc_json_sync(&app, &id))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Id các item còn bản nháp chưa lưu — dải "Gần đây" gắn badge sau khi app khởi
+/// động lại (phiên trong RAM đã mất nhưng nháp trên đĩa còn).
+#[tauri::command]
+pub async fn list_items_with_draft(app: AppHandle) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_items_with_draft_sync(&app))
         .await
         .map_err(|e| format!("Task join error: {e}"))?
 }

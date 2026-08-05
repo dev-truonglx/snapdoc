@@ -281,7 +281,9 @@
     "saveCopy": "Save + Copy (Ctrl/Cmd+Alt+S)",
     "copy": "Copy to clipboard (Ctrl/Cmd+C)",
     "strokeWidth": "Stroke {{n}}px",
-    "color": "Color"
+    "color": "Color",
+    "unsaved": "Unsaved",
+    "unsavedHint": "You have unsaved changes — press Ctrl/Cmd+S to save"
   },
   "editorMain": {
     "copiedClipboard": "Copied to clipboard",
@@ -298,7 +300,15 @@
     "flattenItem3": "The flattened image is still <1>not saved</1> — you need to click Save to save it.",
     "flattenCancel": "Cancel",
     "flattenConfirm": "Flatten",
-    "errorOpeningFile": "Error opening file: {{error}}"
+    "errorOpeningFile": "Error opening file: {{error}}",
+    "previousEditKept": "Your previous edit was kept",
+    "resumePreviousEdit": "Go back",
+    "resumeUnavailable": "That edit is no longer kept (too many sessions held)",
+    "saved": "Saved",
+    "draftFoundPrompt": "Found unsaved edits from earlier.",
+    "draftKeep": "Continue",
+    "draftDiscard": "Discard",
+    "draftDiscarded": "Unsaved edits discarded"
   },
   "historyStrip": {
     "recent": "Recent",
@@ -310,7 +320,8 @@
     "viewAll": "View all →",
     "quickCopy": "Quick copy to clipboard",
     "viewInFolder": "Show file in folder",
-    "deletePermanent": "Permanently delete (file too)"
+    "deletePermanent": "Permanently delete (file too)",
+    "hasUnsavedEdit": "Has unsaved edits — click to continue"
   },
   "quickToolbar": {
     "selectColor": "Select color",
