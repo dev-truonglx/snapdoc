@@ -111,6 +111,10 @@ const FILMSTRIP_BAND_H = 44;
  * 72/64 trước, chỉ 4px mỗi bên) khiến phần playhead tràn ra gần như không
  * nhìn thấy được. */
 const TRACK_H = 60;
+/** Khoảng cách nhỏ chèn giữa 2 đoạn giữ lại liền nhau (mỗi bên inset
+ * `SEGMENT_GAP_PX / 2`) — để lộ nền track ở giữa, giúp ranh giới điểm cắt rõ
+ * ràng hơn là chỉ dựa vào `borderRight` khi 2 khối chạm sát nhau. */
+const SEGMENT_GAP_PX = 4;
 /** Chiều cao dải thước thời gian (ruler) phía trên track — hiện mốc giờ:phút
  * dọc theo timeline, mật độ tự đổi theo zoom (xem `NICE_TICK_INTERVALS_MS`). */
 const RULER_H = 22;
@@ -1253,21 +1257,44 @@ export default function VideoTrimmer({
             })}
           </div>
 
-          {/* Từng đoạn giữ lại — ghép liền nhau, đoạn đã xoá đóng khoảng trống
-              (khác bản cũ làm mờ tại chỗ). Thuần hiển thị (pointerEvents:none),
-              mọi tương tác xử lý ở track cha. */}
-          {laidOut.map(({ seg, startMs, lenMs }, i) => (
+          {/* Lớp phủ ĐỤC tại mỗi khoảng cách giữa 2 đoạn — che hẳn filmstrip
+              bên dưới (nếu không, khoảng hở của segmentBlock vẫn lộ khung
+              hình phía dưới do `filmstripLayer` trải liên tục suốt track,
+              trông như 2 đoạn còn dính liền). Render TRƯỚC segmentBlock để
+              nằm dưới border/outline của segment khi cần, nhưng vẫn trên
+              `filmstripLayer` (theo thứ tự DOM). */}
+          {laidOut.slice(0, -1).map(({ seg, startMs, lenMs }) => (
             <div
-              key={seg.id}
-              style={{
-                ...segmentBlock,
-                left: `${pct(startMs)}%`,
-                width: `${pct(startMs + lenMs) - pct(startMs)}%`,
-                ...(seg.id === selectedSegmentId ? segmentSelected : null),
-                ...(i < laidOut.length - 1 ? { borderRight: "1px solid rgba(0,0,0,0.5)" } : null),
-              }}
+              key={`gap-${seg.id}`}
+              style={{ ...segmentGapCover, left: `calc(${pct(startMs + lenMs)}% - ${SEGMENT_GAP_PX / 2}px)` }}
             />
           ))}
+
+          {/* Từng đoạn giữ lại — ghép liền nhau, đoạn đã xoá đóng khoảng trống
+              (khác bản cũ làm mờ tại chỗ). Cách nhau `SEGMENT_GAP_PX` ở mỗi
+              điểm cắt (trừ 2 đầu timeline) + viền phải trên đoạn trước gap,
+              để ranh giới giữa các đoạn rõ ràng hơn khi nhìn. Thuần hiển thị
+              (pointerEvents:none), mọi tương tác xử lý ở track cha. */}
+          {laidOut.map(({ seg, startMs, lenMs }, i) => {
+            const leftPct = pct(startMs);
+            const rightPct = pct(startMs + lenMs);
+            const isFirst = i === 0;
+            const isLast = i === laidOut.length - 1;
+            const leftInset = isFirst ? 0 : SEGMENT_GAP_PX / 2;
+            const rightInset = isLast ? 0 : SEGMENT_GAP_PX / 2;
+            return (
+              <div
+                key={seg.id}
+                style={{
+                  ...segmentBlock,
+                  left: `calc(${leftPct}% + ${leftInset}px)`,
+                  width: `calc(${rightPct - leftPct}% - ${leftInset + rightInset}px)`,
+                  ...(seg.id === selectedSegmentId ? segmentSelected : null),
+                  ...(!isLast ? { borderRight: "1px solid rgba(0,0,0,0.5)" } : null),
+                }}
+              />
+            );
+          })}
 
           {/* Vạch phát hiện tại. */}
           <div style={{ ...playhead, left: `${pct(playheadMs)}%` }} />
@@ -1814,6 +1841,19 @@ const segmentSelected: React.CSSProperties = {
   outline: "2px solid var(--accent)",
   outlineOffset: -2,
   background: "rgba(255,255,255,0.16)",
+};
+
+// Che ĐỤC khoảng cách giữa 2 đoạn — `segmentBlock` chỉ tô translucent
+// (rgba trắng 8%) nên không đủ che khung hình filmstrip phía dưới, phải
+// dùng màu nền ĐẶC (không alpha) mới thấy tách bạch hẳn khỏi nội dung video.
+// `var(--bg-elevated)` khớp màu track lúc chưa có filmstrip (xem `track`).
+const segmentGapCover: React.CSSProperties = {
+  position: "absolute",
+  top: 0,
+  bottom: 0,
+  width: SEGMENT_GAP_PX,
+  background: "var(--bg)",
+  pointerEvents: "none",
 };
 
 // Đỏ cam (thay vì trắng cũ) — clip quay màn hình rất hay có nền trắng, vạch
