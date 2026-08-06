@@ -986,3 +986,42 @@ pub async fn finish_quick_capture(
         .await
         .map_err(|e| format!("Task join error: {e}"))?
 }
+
+/// Cập nhật thumbnail của một item ảnh từ preview PNG đã ghép annotation.
+/// Chỉ ghi file thumbnail — không đụng asset, doc.json, DB hay preview.png.
+/// Dùng cho tính năng live-update thumbnail khi user vẽ annotation trong Editor.
+///
+/// Best-effort: lỗi chỉ log, không báo lại caller vì đây là cập nhật UI phụ
+/// (thumbnail hiện sai chỉ mất thẩm mỹ, không mất dữ liệu).
+fn update_history_thumb_sync(app: &AppHandle, id: &str, preview_data: &str) -> Result<(), String> {
+    let rec = get_history_item_sync(app, id)?;
+    if rec.media_type == "video" {
+        return Ok(());
+    }
+    let preview_bytes = decode_image_data(preview_data)?;
+    let thumb_bytes = super::thumbnail::generate(&preview_bytes)?;
+    std::fs::write(&rec.thumb_path, &thumb_bytes)
+        .map_err(|e| format!("Ghi thumbnail thất bại: {e}"))?;
+    // Emit để HistoryStrip biết cần reload thumbnail của item này.
+    let _ = app.emit("history:thumb-updated", id);
+    Ok(())
+}
+
+/// Cập nhật thumbnail live khi user vẽ annotation — chỉ ghi file thumbnail,
+/// không đụng dữ liệu chính. async + spawn_blocking vì ghi file không được
+/// block Tokio event loop.
+#[tauri::command]
+pub async fn update_history_thumb(
+    app: AppHandle,
+    id: String,
+    preview_data: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = update_history_thumb_sync(&app, &id, &preview_data) {
+            eprintln!("[SnapDoc][history] update_history_thumb thất bại (bỏ qua): {e}");
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
+}

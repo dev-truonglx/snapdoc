@@ -31,19 +31,33 @@ pub fn take_pending_video(state: State<AppState>) -> Option<PendingVideo> {
 }
 
 /// Ghi đè ảnh đang chờ với output="editor" — dùng cho nút "Mở Editor" ở
-/// "Chụp nhanh" (ảnh đã flatten annotation vào pixel) để bàn giao sang cửa
-/// sổ Editor đầy đủ qua đúng pipeline `take_pending` có sẵn.
+/// "Chụp nhanh" để bàn giao sang cửa sổ Editor đầy đủ qua đúng pipeline
+/// `take_pending` có sẵn.
 /// `data`: data URL đầy đủ (`data:image/png;base64,...`) hoặc base64 trần —
 /// tách bỏ phần prefix nếu có, giữ đúng quy ước của `PendingCapture.base64`.
+/// `doc_json`: lớp annotation đã serialize (DocPayload JSON) — khi có, Editor
+/// dựng lại đúng các annotation object để user chỉnh tiếp, thay vì nhận ảnh
+/// phẳng mà không còn annotation nào. `None` = không có annotation, ảnh sạch.
 #[tauri::command]
-pub fn set_pending_image(app: AppHandle, state: State<AppState>, data: String, width: u32, height: u32) {
+pub fn set_pending_image(
+    app: AppHandle,
+    state: State<AppState>,
+    data: String,
+    width: u32,
+    height: u32,
+    doc_json: Option<String>,
+    scale_factor: Option<f64>,
+) {
     let base64 = data.split(',').next_back().unwrap_or(&data).to_string();
+    let scale = scale_factor.unwrap_or(1.0);
 
     // "Mở Editor" từ Quick Capture cũng là một capture hoàn chỉnh (đối xứng với
     // nhánh `_ => open_editor` của `flow::finish`) — ingest ngay để History
     // ghi nhận mọi đường ra editor, không chỉ Copy/Save.
+    // Ảnh ingest là ảnh NỀN THÔ (screenshot chưa ghép annotation): annotation
+    // đi riêng qua doc_json và được lưu non-destructive, giữ pixel nền sạch.
     let cap = crate::capture::Capture { base64: base64.clone(), width, height };
-    let history_id = match crate::history::ingest(&app, &cap, "quick", 1.0) {
+    let history_id = match crate::history::ingest(&app, &cap, "quick", scale) {
         Ok(rec) => Some(rec.id),
         Err(e) => {
             eprintln!("[SnapDoc][history] ingest (set_pending_image) thất bại: {e}");
@@ -57,11 +71,10 @@ pub fn set_pending_image(app: AppHandle, state: State<AppState>, data: String, w
             width,
             height,
             output: "editor".to_string(),
-            scale_factor: 1.0,
+            scale_factor: scale,
             history_id,
             capture_mode: "quick".to_string(),
-            // "Chụp nhanh" đã flatten annotation vào pixel trước khi bàn giao.
-            doc_json: None,
+            doc_json,
             doc_is_draft: false,
             file_path: None,
         });

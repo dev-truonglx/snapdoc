@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
-import { useEditor, useIsDirty } from "../../features/annotation/store";
+import { useEditor } from "../../features/annotation/store";
 import { PRESET_COLORS, HIGHLIGHT_COLORS, STROKE_WIDTHS, SOLID_COLORS, type Tool } from "../../features/annotation/model";
 
 /** Icon 18×18, dùng currentColor để kế thừa màu nút. */
@@ -261,11 +261,6 @@ export default function Toolbar({
   mode, onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy,
 }: Props) {
   const { t } = useTranslation();
-  // Đọc trực tiếp từ store (hook riêng, selector hẹp) thay vì nhận qua prop —
-  // dirty là state toàn cục của tài liệu, không phải thứ `Editor` phải chuyền
-  // xuống, và selector hẹp nên chỉ re-render khi CỜ đổi, không phải mỗi
-  // mutation annotation.
-  const dirty = useIsDirty();
 
   // Initialize tool groups with translations
   const TOOLS_GROUP1: { id: Tool; label: string; hint: string }[] = [
@@ -648,18 +643,6 @@ export default function Toolbar({
 
       <div style={{ flex: 1 }} />
 
-      {/* Chỉ báo "chưa lưu" — đặt SAU spacer (dồn về phải, ngay trước nhóm
-          Save) và NGOÀI khối `mode === "image"` bên dưới, để ở cả 2 chế độ nó
-          luôn xuất hiện cùng một vị trí. Ở chế độ video điều này càng quan
-          trọng: toolbar không có nút Save nào (2 nút lưu nằm trong
-          `editToolbar` của `VideoTrimmer`) nên đây là chỉ báo duy nhất. */}
-      {dirty && (
-        <span style={dirtyBadge} title={t("editorToolbar.unsavedHint")}>
-          <span style={dirtyDot} aria-hidden />
-          {t("editorToolbar.unsaved")}
-        </span>
-      )}
-
       {/* Output — nhóm Save (chính) / Save+Copy / Copy, chỉ ở chế độ ảnh.
           Video: 2 nút "Lưu đè"/"Lưu thành video mới" nay nằm trong
           `editToolbar` của `VideoTrimmer` (cạnh chia/xoá/cắt đầu-cuối), không
@@ -752,32 +735,6 @@ const newBtn: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 const group: React.CSSProperties = { display: "flex", alignItems: "center", gap: 3 };
-
-// Chỉ báo "chưa lưu" — amber (cảnh báo nhẹ, không phải lỗi nên không đỏ).
-const dirtyBadge: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  height: 30,
-  padding: "0 10px",
-  borderRadius: 6,
-  border: "1px solid rgba(245,158,11,0.35)",
-  background: "rgba(245,158,11,0.12)",
-  color: "#fbbf24",
-  fontSize: 12,
-  fontWeight: 600,
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-  cursor: "default",
-  userSelect: "none",
-};
-const dirtyDot: React.CSSProperties = {
-  width: 7,
-  height: 7,
-  borderRadius: "50%",
-  background: "#fbbf24",
-  flexShrink: 0,
-};
 
 // Bọc nút Save + mũi tên "▾" — cùng khối để trông như 1 nút "split button"
 // (Save | ▾) thay vì 2 nút rời, và làm điểm neo `position: relative` cho

@@ -7,21 +7,15 @@ import Toolbar from "./Toolbar";
 import HistoryStrip from "./HistoryStrip";
 import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
-import { useEditor, useIsDirty } from "../../features/annotation/store";
+import { useEditor } from "../../features/annotation/store";
 import {
   beginSwitch,
-  flushDraft,
   isCurrentSwitch,
   noteActiveKey,
-  openLibraryImage,
   initAutosave,
   parseDocPayload,
-  serializeDoc,
   suspendActive,
-  tryResume,
-  type SuspendResult,
 } from "../../features/annotation/sessions";
-import ResumeBanner from "./ResumeBanner";
 import { uid } from "../../features/annotation/model";
 import {
   copyToClipboard,
@@ -59,6 +53,7 @@ export default function Editor() {
   const stageRef = useRef<StageHandle>(null);
   const loadDoc = useEditor((s) => s.loadDoc);
   const docHistoryId = useEditor((s) => s.doc?.historyId);
+  const docAnnotations = useEditor((s) => s.doc?.annotations);
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showFlattenConfirm, setShowFlattenConfirm] = useState(false);
@@ -75,122 +70,45 @@ export default function Editor() {
   // Signature của trạng thái cắt tại lần lưu gần nhất (`null` = chưa lưu lần
   // nào cho video đang mở). Xem `trimSig`.
   const [videoSavedSig, setVideoSavedSig] = useState<string | null>(null);
-  // Key của phiên sửa vừa bị đẩy sang nền trong lúc còn thay đổi chưa lưu —
-  // `null` = không có gì để báo. Xem `announceKept` / `ResumeBanner`.
-  const [keptKey, setKeptKey] = useState<string | null>(null);
-  // Id item vừa được nạp TỪ BẢN NHÁP TRÊN ĐĨA (sau khi app khởi động lại) —
-  // hỏi user tiếp tục hay bỏ. `null` = không có gì để hỏi.
-  const [draftPromptId, setDraftPromptId] = useState<string | null>(null);
 
-  // Video dirty = có thay đổi VÀ thay đổi đó khác lần lưu gần nhất. Đẩy vào
-  // store để `isDirty()` là nguồn sự thật duy nhất cho cả ảnh lẫn video.
+  // Video dirty = có thay đổi VÀ thay đổi đó khác lần lưu gần nhất.
   const videoDirty =
     !!videoDoc && videoTrimState.hasChanges && trimSig(videoTrimState) !== videoSavedSig;
   useEffect(() => {
     useEditor.getState().setVideoDirty(videoDirty);
   }, [videoDirty]);
 
-  // Mirror cờ dirty xuống Rust — DEBOUNCE BẤT ĐỐI XỨNG: `true` gửi NGAY,
-  // `false` gửi trễ 300ms. Lý do bất đối xứng: cờ `true` còn sót lại chỉ gây
-  // 1 cảnh báo thừa, còn cờ `false` còn sót lại thì Rust tưởng editor sạch và
-  // để nó bị ẩn mất cùng việc chưa lưu. Sai về phía an toàn.
-  const dirty = useIsDirty();
+  // Live-update thumbnail dải "Gần đây" khi annotation thay đổi.
+  // Debounce 1.5s — đủ thưa để không gọi liên tục khi đang kéo vẽ,
+  // đủ dày để thumbnail cập nhật nhanh sau khi dừng tay.
+  const thumbTimerRef = useRef<number | null>(null);
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
-    if (dirty) {
-      ipc.setEditorDirty(true).catch(() => {});
-      return;
-    }
-    const id = window.setTimeout(() => {
-      ipc.setEditorDirty(false).catch(() => {});
-    }, 300);
-    return () => window.clearTimeout(id);
-  }, [dirty]);
+    if (thumbTimerRef.current !== null) window.clearTimeout(thumbTimerRef.current);
+    thumbTimerRef.current = window.setTimeout(() => {
+      thumbTimerRef.current = null;
+      const historyId = useEditor.getState().doc?.historyId;
+      if (!historyId) return;
+      const preview = stageRef.current?.exportPng();
+      if (!preview) return;
+      ipc.updateHistoryThumb(historyId, preview).catch(() => {});
+    }, 1500);
+    return () => {
+      if (thumbTimerRef.current !== null) window.clearTimeout(thumbTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docAnnotations]);
 
   const flash = (msg: string) => {
     setToast(msg);
     window.setTimeout(() => setToast(null), 2200);
   };
 
-  /** Báo cho user biết bản chỉnh sửa vừa rồi ĐÃ ĐƯỢC GIỮ LẠI, kèm nút quay về.
-   *
-   * Đây là mảnh quan trọng nhất về mặt UX: nó xuất hiện đúng vào khoảnh khắc
-   * mà hành vi cũ phá dữ liệu, nên nó dạy user cơ chế mới ngay tại chỗ thay vì
-   * để user tự phát hiện. Cố tình KHÔNG chặn (không modal): chụp ảnh không bao
-   * giờ bị chặn lại để hỏi.
-   *
-   * Chỉ hiện khi tài liệu vừa treo THẬT SỰ có thay đổi chưa lưu, và tài liệu
-   * mới khác tài liệu cũ. */
-  const announceKept = (suspended: SuspendResult | null, newKey: string | null) => {
-    if (!suspended?.dirty) return;
-    if (suspended.key === newKey) return;
-    setKeptKey(suspended.key);
-  };
-
-  /** Bỏ bản nháp → tài liệu về đúng bản đã Save gần nhất. */
-  const discardDraft = async (id: string) => {
-    setBusy(true);
-    try {
-      await ipc.discardHistoryDraft(id);
-      const layer = await ipc.getHistoryDocJson(id).catch(() => null);
-      const payload = parseDocPayload(layer?.json);
-      const st = useEditor.getState();
-      if (st.doc) {
-        // Chỉ thay lớp annotation — nền không đổi khi bỏ nháp (nháp chưa bao giờ
-        // ghi vào `base.png`), nên giữ nguyên `image` đang hiển thị.
-        st.loadDoc({ ...st.doc, annotations: payload?.annotations ?? [] }, true);
-        if (payload) {
-          useEditor.getState().setStepCounter(payload.stepCounter);
-          useEditor.getState().setArrowCounter(payload.arrowCounter);
-        }
-      }
-      setDraftPromptId(null);
-      flash(t("editorMain.draftDiscarded"));
-    } catch (e) {
-      flash(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /** Quay về một phiên sửa đang treo (nút "Quay lại" ở banner, hoặc bấm item
-   * có badge ở dải "Gần đây"). Treo tài liệu hiện tại trước để đi-về được. */
-  const resumeSession = async (key: string) => {
-    beginSwitch();
-    try {
-      suspendActive();
-    } catch (e) {
-      console.error("[SnapDoc] Treo phiên sửa thất bại:", e);
-    }
-    if (tryResume(key)) {
-      // Phiên còn trong RAM → về đầy đủ, kể cả undo stack.
-      setVideoDoc(null);
-      setKeptKey(null);
-      return true;
-    }
-    // Đã bị evict khỏi RAM (quá `MAX_SESSIONS`) → rơi về tầng đĩa: bản nháp
-    // vẫn nằm trong `.snapdoc` (autosave), chỉ mất undo stack. Ảnh mở từ file
-    // ngoài (`file:` key) thì không có gì trên đĩa để lấy.
-    setKeptKey(null);
-    if (key.startsWith("file:")) {
-      flash(t("editorMain.resumeUnavailable"));
-      return false;
-    }
-    setVideoDoc(null);
-    await openLibraryImage(key);
-    return true;
-  };
-
   const loadPending = (p: Pending | null) => {
     if (!p) return false;
-    // `base64` là pixel NỀN (chưa ghép annotation); lớp annotation đi riêng qua
-    // `doc_json` — có giá trị khi mở lại một item đã sửa từ Library, `null` cho
-    // ảnh vừa chụp và cho item PNG thế hệ cũ.
     const payload = parseDocPayload(p.docJson);
-    // Nạp từ BẢN NHÁP → tài liệu đúng nghĩa là CHƯA LƯU (`markClean = false`).
-    // Nếu để clean thì badge "chưa lưu" tắt, autosave ngừng ghi, và user tưởng
-    // việc đã được lưu trong khi bản chính thức trên đĩa vẫn là bản cũ.
-    const fromDraft = !!p.docIsDraft && !!payload;
+    // Nạp từ bản nháp hay ảnh mới: luôn markClean=true — annotation được autosave
+    // liên tục, không cần phân biệt "đã lưu" hay "chưa lưu".
     loadDoc(
       {
         image: `data:image/png;base64,${p.base64}`,
@@ -202,20 +120,12 @@ export default function Editor() {
         captureMode: p.capture_mode,
         filePath: p.filePath,
       },
-      !fromDraft,
+      true,
     );
     if (payload) {
       useEditor.getState().setStepCounter(payload.stepCounter);
       useEditor.getState().setArrowCounter(payload.arrowCounter);
     }
-    // Không lặng lẽ đắp annotation cũ lên một ảnh mà user tưởng còn nguyên —
-    // hỏi. Chỉ ở đường này (nạp từ đĩa sau khi app khởi động lại); quay lại
-    // trong CÙNG phiên thì `tryResume` bắt trước nên phục hồi im lặng, vì user
-    // vừa rời đi và quay lại, badge ở dải "Gần đây" đã báo rồi.
-    if (fromDraft && p.history_id) setDraftPromptId(p.history_id);
-    // Ảnh vừa chụp/mở luôn có `history_id` thật (`flow::finish` ingest vào
-    // Library TRƯỚC khi mở editor). Fallback `file:` chỉ để phòng đường
-    // `set_pending_image` nếu sau này không ingest.
     noteActiveKey(p.history_id ?? `file:${uid()}`);
     return true;
   };
@@ -270,16 +180,13 @@ export default function Editor() {
     // History trước khi tới đây, xem `record::stop_recording_impl`) LUÔN
     // được kiểm tra TRƯỚC ảnh — chỉ 1 trong 2 loại pending chờ tại 1 thời điểm.
     const loadAnyPending = async () => {
-      // Treo tài liệu đang mở NGAY — đồng bộ, TRƯỚC mọi `await` bên dưới. Đây
-      // là chỗ trước đây mất dữ liệu: `loadDoc` ghi đè thẳng lên việc đang làm.
-      // Bọc try/catch vì nếu bước này lỗi mà làm hỏng cả hàm thì ảnh vừa chụp
-      // sẽ không bao giờ hiện ra — tệ hơn hẳn bug đang sửa.
-      let suspended: SuspendResult | null = null;
+      let suspended = null;
       try {
         suspended = suspendActive();
       } catch (e) {
         console.error("[SnapDoc] Treo phiên sửa thất bại, vẫn nạp ảnh mới:", e);
       }
+      void suspended; // không dùng nữa, giữ lại để suspendActive vẫn chạy
       const token = beginSwitch();
 
       const pv = await ipc.takePendingVideo();
@@ -293,23 +200,13 @@ export default function Editor() {
         });
         setVideoTrimState(EMPTY_TRIM_STATE);
         setVideoSavedSig(null);
-        // `null`, KHÔNG phải `pv.historyId`: chuyển sang chế độ video chỉ set
-        // `videoDoc` chứ không gọi `loadDoc`, nên `doc` trong store VẪN GIỮ ảnh
-        // trước đó. Nếu đặt activeKey = id của video thì lần treo phiên kế tiếp
-        // sẽ lưu ẢNH CŨ dưới khoá của VIDEO — sai nội dung, và badge "chưa lưu"
-        // sẽ hiện trên item video. Trạng thái cắt video được giữ lại là việc
-        // của GĐ4 (`VideoTrimmer` cần prop `initialState`), chưa làm ở đây.
         noteActiveKey(null);
-        announceKept(suspended, pv.historyId);
         return;
       }
       const p = await ipc.takePending();
       if (!isCurrentSwitch(token)) return;
       if (p) setVideoDoc(null);
-      // `loadPending` trả `false` khi không có gì chờ (vd `refresh-capture` bắn
-      // ra mà pending đã bị lấy) — khi đó KHÔNG báo "đã giữ lại", vì chẳng có
-      // gì thay thế tài liệu đang mở cả.
-      if (loadPending(p)) announceKept(suspended, p?.history_id ?? null);
+      loadPending(p);
     };
 
     loadAnyPending();
@@ -414,49 +311,29 @@ export default function Editor() {
     }
   };
 
-  /** Save — **PHI HUỶ**: giữ nguyên pixel nền, lưu lớp annotation thành JSON
-   * cạnh nó trong container `.snapdoc`. Nhờ vậy mở lại ảnh lúc nào cũng di
-   * chuyển / đổi màu / xoá từng annotation được, thay vì bị burn thành pixel
-   * vĩnh viễn như hành vi cũ (`update_history_asset` ghi đè asset bằng ảnh đã
-   * ghép, mất luôn bản gốc sạch).
-   *
-   * KHÔNG còn đóng editor sau khi lưu: "lưu rồi sửa tiếp" mới là điểm của việc
-   * này, mà đóng cửa sổ thì mâu thuẫn trực tiếp với nó. Muốn đóng thì bấm X. */
+  /** Save — xuất PNG (ghép annotation vào pixel) ra file/clipboard.
+   * Annotation được tự động lưu non-destructive qua autosave riêng.
+   * Với ảnh mở từ Library (historyId có giá trị): mở dialog chọn nơi lưu PNG.
+   * Với ảnh mở từ file ngoài: mở dialog chọn nơi lưu PNG rồi đóng editor. */
   const doSave = async (alsoCopy = false) => {
     if (videoDoc) return doSaveVideo();
     const preview = stageRef.current?.exportPng();
     if (!preview) return;
     setBusy(true);
     try {
-      const st = useEditor.getState();
-      const historyId = st.doc?.historyId;
-      const filePath = st.doc?.filePath;
-      const docJson = serializeDoc();
-      // Tài liệu `.snapdoc` mở từ đĩa: ghi THẲNG lại chính file đó, không dialog,
-      // không đụng Library — như mọi trình soạn tài liệu.
-      if (filePath && docJson) {
-        const base = st.baseDirty ? st.doc?.image : undefined;
-        await ipc.saveSnapdocFile(filePath, docJson, preview, base);
-        useEditor.getState().markSaved();
-        if (alsoCopy) await copyToClipboard(preview);
+      if (alsoCopy) {
+        // Save+Copy: lưu PNG ra thư mục mặc định và copy vào clipboard cùng lúc.
+        const { saveToFileAuto } = await import("../../features/output/useOutput");
+        await saveToFileAuto(preview, true);
         flash(t("editorMain.saved"));
         return;
       }
-      if (historyId && docJson) {
-        // Nền chỉ gửi lên khi thật sự đã đổi (crop / stitch / flatten) —
-        // Save chỉ-annotation khỏi phải đẩy vài MB base64 qua IPC.
-        const base = st.baseDirty ? st.doc?.image : undefined;
-        await ipc.saveHistoryDoc(historyId, docJson, preview, base);
-        useEditor.getState().markSaved();
-        if (alsoCopy) await copyToClipboard(preview);
-        flash(t("editorMain.saved"));
-        return;
-      }
-      // Ảnh mở từ file ngoài (chưa có mặt trong Library) → hỏi nơi lưu như cũ.
-      const saved = await saveToFile(preview, alsoCopy);
+      // Save / Save As: mở dialog chọn nơi lưu.
+      const saved = await saveToFile(preview, false);
       if (saved) {
-        useEditor.getState().markSaved();
-        ipc.closeSelf();
+        const historyId = useEditor.getState().doc?.historyId;
+        if (historyId) ipc.setHistoryExportedPath(historyId, saved).catch(() => {});
+        flash(t("editorMain.saved"));
       }
     } catch (e) {
       flash(String(e));
@@ -465,10 +342,7 @@ export default function Editor() {
     }
   };
 
-  // "Save As…" — LUÔN mở dialog chọn file (kể cả khi ảnh có `historyId`, tức
-  // ảnh chụp/mở từ Library), khác `doSave` (ghi đè tại chỗ record History nếu
-  // có). Xuất ra 1 file mới ở vị trí tuỳ chọn, KHÔNG đụng tới record History
-  // gốc (giống "Save As" của các phần mềm khác: tạo bản sao, giữ nguyên bản gốc).
+  // "Save As…" — LUÔN mở dialog chọn file, xuất PNG ra vị trí tuỳ chọn.
   const doSaveAs = async () => {
     if (videoDoc) return doSaveAsVideo();
     const url = stageRef.current?.exportPng();
@@ -477,19 +351,9 @@ export default function Editor() {
     try {
       const saved = await saveAsToFile(url);
       if (saved) {
-        // Ghi lại đường dẫn vừa export — "Xem file trong Thư mục" ở dải "Gần
-        // đây"/Library sau này sẽ mở đúng chỗ này thay vì file gốc nội bộ.
-        // Không chặn `closeSelf()` nếu lệnh này lỗi (mất tính năng phụ, không
-        // phải mất dữ liệu — ảnh đã lưu ra đĩa thành công rồi).
         const historyId = useEditor.getState().doc?.historyId;
         if (historyId) ipc.setHistoryExportedPath(historyId, saved).catch(() => {});
-        // "Save As" chỉ XUẤT một file PNG mới, KHÔNG lưu tài liệu — bản chỉnh
-        // sửa trong Library vẫn là chưa lưu. Nên cố tình KHÔNG `markSaved()`,
-        // mà phải FLUSH bản nháp xuống đĩa TRƯỚC khi đóng: `closeSelf` huỷ
-        // webview (đường DUY NHẤT thật sự xoá heap), autosave debounce đang chờ
-        // sẽ không bao giờ chạy nữa.
-        await flushDraft();
-        ipc.closeSelf();
+        flash(t("editorMain.saved"));
       }
     } finally {
       setBusy(false);
@@ -672,24 +536,6 @@ export default function Editor() {
         onStitch={doStitch}
         busy={busy}
       />
-      {keptKey && (
-        <ResumeBanner
-          sessionKey={keptKey}
-          onResume={() => resumeSession(keptKey)}
-          onDismiss={() => setKeptKey(null)}
-        />
-      )}
-      {draftPromptId && (
-        <div style={draftPromptBar} role="status">
-          <span style={{ flex: 1, minWidth: 0 }}>{t("editorMain.draftFoundPrompt")}</span>
-          <button style={draftKeepBtn} disabled={busy} onClick={() => setDraftPromptId(null)}>
-            {t("editorMain.draftKeep")}
-          </button>
-          <button style={draftDropBtn} disabled={busy} onClick={() => discardDraft(draftPromptId)}>
-            {t("editorMain.draftDiscard")}
-          </button>
-        </div>
-      )}
       <div style={{ flex: 1, minHeight: 0, background: "#161619", display: "flex", ...(videoDoc ? { padding: 10, boxSizing: "border-box" } : null) }}>
         {videoDoc ? (
           <VideoTrimmer
@@ -798,45 +644,6 @@ function FlattenConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; 
     </div>
   );
 }
-
-// Thanh hỏi "phục hồi bản nháp?" — cùng ngôn ngữ màu amber với `ResumeBanner`
-// và badge "chưa lưu": đều là "có việc dở", không phải lỗi.
-const draftPromptBar: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 10,
-  padding: "7px 10px",
-  background: "rgba(245,158,11,0.12)",
-  borderBottom: "1px solid rgba(245,158,11,0.3)",
-  color: "#fbbf24",
-  fontSize: 12.5,
-  flexShrink: 0,
-};
-
-const draftKeepBtn: React.CSSProperties = {
-  padding: "4px 12px",
-  borderRadius: 6,
-  border: "1px solid rgba(245,158,11,0.45)",
-  background: "rgba(245,158,11,0.2)",
-  color: "#fcd34d",
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: "pointer",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
-
-const draftDropBtn: React.CSSProperties = {
-  padding: "4px 12px",
-  borderRadius: 6,
-  border: "1px solid var(--border)",
-  background: "transparent",
-  color: "var(--text-dim)",
-  fontSize: 12,
-  cursor: "pointer",
-  flexShrink: 0,
-  whiteSpace: "nowrap",
-};
 
 const overlayStyle: React.CSSProperties = {
   position: "fixed",

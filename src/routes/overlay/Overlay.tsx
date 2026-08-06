@@ -8,6 +8,7 @@ import { useEditor } from "../../features/annotation/store";
 import { PRESET_COLORS, type Tool } from "../../features/annotation/model";
 import { quickToolFromKey } from "../../lib/toolShortcuts";
 import QuickToolbar, { quickToolbarLayout } from "../quick-capture/QuickToolbar";
+import { serializeDoc } from "../../features/annotation/sessions";
 
 /**
  * Lấy ảnh "đóng băng màn hình" từ Rust (JPEG base64) khi mount overlay.
@@ -1152,15 +1153,26 @@ function QuickAnnotate() {
   const doOpenEditor = async () => {
     setBusy(true);
     try {
-      const r = await doExport();
-      if (r) {
-        // Giữ SnapDoc frontmost để hiện Editor — huỷ việc `cancelOverlay`
-        // (chạy trong finally) trả focus về app cũ (chỉ áp dụng cho
-        // copy/save/hủy). Xem `flow::keep_capture_focus`.
-        await ipc.keepCaptureFocus();
-        await ipc.setPendingImage(r.url, r.w, r.h);
-        await ipc.openEditor();
-      }
+      if (!sel) return;
+      // Chụp ảnh nền THÔ (chưa ghép annotation) — để Editor nhận pixel gốc sạch,
+      // annotation đi riêng qua docJson và được lưu non-destructive.
+      const b64 = await ipc.captureQuickRegion(sel.x, sel.y, sel.w, sel.h);
+      // Đo kích thước vật lý từ ảnh chụp (không dùng sel.w/h vì là CSS px).
+      const baseImg = await loadImg(`data:image/png;base64,${b64}`);
+      const w = baseImg.naturalWidth;
+      const h = baseImg.naturalHeight;
+      const baseUrl = `data:image/png;base64,${b64}`;
+
+      // Serialize annotation hiện tại (nếu đang ở pha annotating) — Editor dùng
+      // để dựng lại đúng các annotation objects, user chỉnh tiếp được ngay.
+      const docJson = phase === "annotating" ? serializeDoc() : null;
+
+      // Giữ SnapDoc frontmost để hiện Editor — huỷ việc `cancelOverlay`
+      // (chạy trong finally) trả focus về app cũ (chỉ áp dụng cho
+      // copy/save/hủy). Xem `flow::keep_capture_focus`.
+      await ipc.keepCaptureFocus();
+      await ipc.setPendingImage(baseUrl, w, h, docJson, SCALE);
+      await ipc.openEditor();
     }
     finally { ipc.cancelOverlay(); }
   };

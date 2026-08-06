@@ -155,6 +155,7 @@ pub fn run() {
             history::commands::set_history_exported_path,
             history::commands::open_history,
             history::commands::finish_quick_capture,
+            history::commands::update_history_thumb,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

@@ -172,9 +172,12 @@ export const ipc = {
   takePending: () => invoke<Pending | null>("take_pending"),
   peekPendingVideo: () => invoke<PendingVideo | null>("peek_pending_video"),
   takePendingVideo: () => invoke<PendingVideo | null>("take_pending_video"),
-  /** Ghi đè ảnh đang chờ (output="editor") — dùng khi "Chụp nhanh" bàn giao ảnh đã annotate sang Editor. */
-  setPendingImage: (data: string, width: number, height: number) =>
-    invoke<void>("set_pending_image", { data, width, height }),
+  /** Ghi đè ảnh đang chờ (output="editor") — dùng khi "Chụp nhanh" bàn giao sang Editor.
+   * `docJson`: lớp annotation serialize (DocPayload JSON) — khi có, Editor dựng lại
+   * annotation objects để user chỉnh tiếp; `null` = ảnh sạch không có annotation.
+   * `scaleFactor`: DPI scale factor của màn hình nguồn (1.0 = normal, 2.0 = Retina 2×). */
+  setPendingImage: (data: string, width: number, height: number, docJson?: string | null, scaleFactor?: number) =>
+    invoke<void>("set_pending_image", { data, width, height, docJson: docJson ?? null, scaleFactor: scaleFactor ?? 1.0 }),
   /** macOS: lấy data URL ảnh "Open with" của chính cửa sổ editor này (theo label). */
   takeOpenFile: () => invoke<string | null>("take_open_file"),
   captureNow: (mode: CaptureMode, output: OutputMode) =>
@@ -290,6 +293,10 @@ export const ipc = {
    * mục" mở đúng chỗ user đã lưu thay vì file gốc nội bộ. */
   setHistoryExportedPath: (id: string, path: string) => invoke<HistoryItem>("set_history_exported_path", { id, path }),
   openHistory: () => invoke<void>("open_history"),
+  /** Cập nhật thumbnail của một item ảnh từ preview đã ghép annotation —
+   * dùng để live-update dải "Gần đây" khi user vẽ. Best-effort, lỗi chỉ log. */
+  updateHistoryThumb: (id: string, previewData: string) =>
+    invoke<void>("update_history_thumb", { id, previewData }),
   finishQuickCapture: (data: string, width: number, height: number, output: string) =>
     invoke<string | null>("finish_quick_capture", { data, width, height, output }),
   // Quay màn hình — dừng quay/xem trạng thái chủ yếu vẫn qua tray icon (menu

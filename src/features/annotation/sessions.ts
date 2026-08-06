@@ -382,8 +382,8 @@ const isTauri = () => "__TAURI_INTERNALS__" in window;
 
 /** Ghi ngay bản nháp của tài liệu đang mở (nếu có gì để ghi).
  *
- * Chỉ ghi khi ĐANG dirty: một tài liệu vừa mở/vừa Save mà cũng ghi draft thì
- * badge "chưa lưu" sẽ bật sai sau khi khởi động lại app.
+ * Ghi mỗi khi có thay đổi annotation — không check dirty vì annotation
+ * được lưu hoàn toàn tự động, không phụ thuộc trạng thái "đã lưu" của user.
  *
  * Ảnh mở từ file ngoài (`file:` key) chưa có mặt trong Library nên chưa có
  * container nào để ghi vào — chờ tới lần Save đầu (khi đó nó được ingest).
@@ -406,9 +406,7 @@ function pendingDraftWrite(): { key: SessionKey; json: string } | null {
   // ghi vào; chờ tới lần Save đầu (khi đó nó được ingest).
   if (!key || key.startsWith("file:")) return null;
   const s = useEditor.getState();
-  // Chỉ ghi khi ĐANG dirty: tài liệu vừa mở / vừa Save mà cũng ghi draft thì
-  // badge "chưa lưu" sẽ bật sai sau khi khởi động lại app.
-  if (!s.doc || s.doc === s.savedRef) return null;
+  if (!s.doc) return null;
   const json = serializeDoc();
   return json ? { key, json } : null;
 }
