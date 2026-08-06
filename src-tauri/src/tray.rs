@@ -38,6 +38,7 @@ fn tr<'a>(lang: &str, key: &'a str) -> &'a str {
         "captureScroll" => if vi { "Chụp cuộn" } else { "Capture scrolling" },
         "openCaptureBar" => if vi { "Mở thanh chụp…" } else { "Open capture bar…" },
         "openHistory" => if vi { "Thư viện (History)…" } else { "Library (History)…" },
+        "openEditor"  => if vi { "Mở Editor…" } else { "Open Editor…" },
         "openSettings" => if vi { "Cài đặt…" } else { "Settings…" },
         "quitApp" => if vi { "Thoát SnapDoc" } else { "Quit SnapDoc" },
         "recordScreen" => if vi { "Quay màn hình" } else { "Record screen" },
@@ -100,6 +101,14 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "history" => {
                 let _ = windows::open_history(app);
             }
+            "editor" => {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = crate::history::commands::open_latest_capture_in_editor_sync(&app) {
+                        eprintln!("[SnapDoc] Mở Editor từ tray thất bại: {e}");
+                    }
+                });
+            }
             "quit" => {
                 // Đang quay mà thoát ngay sẽ giết ffmpeg giữa chừng → mp4
                 // thiếu moov atom, KHÔNG phát được (mất trắng bản quay).
@@ -142,7 +151,8 @@ fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<t
     let window = MenuItem::with_id(app, "window", tr(&lang, "captureWindow"), true, sc("window").as_deref())?;
     let scroll = MenuItem::with_id(app, "scroll", tr(&lang, "captureScroll"), true, sc("scroll").as_deref())?;
     let bar    = MenuItem::with_id(app, "bar",    tr(&lang, "openCaptureBar"), true, sc("bar").as_deref())?;
-    let history = MenuItem::with_id(app, "history", tr(&lang, "openHistory"), true, None::<&str>)?;
+    let editor  = MenuItem::with_id(app, "editor",  tr(&lang, "openEditor"),    true, None::<&str>)?;
+    let history = MenuItem::with_id(app, "history", tr(&lang, "openHistory"),   true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", tr(&lang, "openSettings"), true, None::<&str>)?;
     let quit   = MenuItem::with_id(app, "quit",   tr(&lang, "quitApp"),        true, None::<&str>)?;
     let sep1   = PredefinedMenuItem::separator(app)?;
@@ -165,9 +175,9 @@ fn build_menu_inner(app: &AppHandle, show_restart: bool) -> tauri::Result<Menu<t
     if show_restart {
         let restart = MenuItem::with_id(app, "restart_update", tr(&lang, "restartUpdate"), true, None::<&str>)?;
         let sep3    = PredefinedMenuItem::separator(app)?;
-        Menu::with_items(app, &[&restart, &sep3, &quick, &full, &region, &window, &scroll, &all, &record_menu, &sep1, &bar, &history, &settings, &sep2, &quit])
+        Menu::with_items(app, &[&restart, &sep3, &quick, &full, &region, &window, &scroll, &all, &record_menu, &sep1, &bar, &editor, &history, &settings, &sep2, &quit])
     } else {
-        Menu::with_items(app, &[&quick, &full, &region, &window, &scroll, &all, &record_menu, &sep1, &bar, &history, &settings, &sep2, &quit])
+        Menu::with_items(app, &[&quick, &full, &region, &window, &scroll, &all, &record_menu, &sep1, &bar, &editor, &history, &settings, &sep2, &quit])
     }
 }
 
