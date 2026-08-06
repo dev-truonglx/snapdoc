@@ -1122,33 +1122,59 @@ function QuickAnnotate() {
   const pickToolRef = useRef(pickTool);
   pickToolRef.current = pickTool;
 
-  // ── Xuất ảnh: chụp đúng vùng (ẩn overlay) rồi ghép lớp chú thích ──
-  const doExport = useCallback(async (): Promise<{ url: string; w: number; h: number } | null> => {
-    if (!sel) return null;
-    const layer = phase === "annotating" ? (stageRef.current?.exportPng() ?? null) : null;
-    const b64 = await ipc.captureQuickRegion(sel.x, sel.y, sel.w, sel.h);
-    const base = await loadImg(`data:image/png;base64,${b64}`);
-    const c = document.createElement("canvas");
-    c.width = base.naturalWidth;
-    c.height = base.naturalHeight;
-    const g = c.getContext("2d")!;
-    g.drawImage(base, 0, 0);
-    if (layer) {
-      const l = await loadImg(layer);
-      g.drawImage(l, 0, 0, c.width, c.height);
-    }
-    return { url: c.toDataURL("image/png"), w: c.width, h: c.height };
-  }, [sel, phase]);
-
   const doCopy = async () => {
     setBusy(true);
-    try { const r = await doExport(); if (r) await ipc.finishQuickCapture(r.url, r.w, r.h, "clipboard"); }
-    finally { ipc.cancelOverlay(); }
+    try {
+      if (!sel) return;
+      const b64 = await ipc.captureQuickRegion(sel.x, sel.y, sel.w, sel.h);
+      const baseUrl = `data:image/png;base64,${b64}`;
+      const baseImg = await loadImg(baseUrl);
+      const w = baseImg.naturalWidth;
+      const h = baseImg.naturalHeight;
+
+      // Ghép annotation vào ảnh để copy/lưu đúng cái user thấy
+      const layer = phase === "annotating" ? (stageRef.current?.exportPng() ?? null) : null;
+      let flatUrl = baseUrl;
+      if (layer) {
+        const c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        const g = c.getContext("2d")!;
+        g.drawImage(baseImg, 0, 0);
+        g.drawImage(await loadImg(layer), 0, 0, w, h);
+        flatUrl = c.toDataURL("image/png");
+      }
+
+      const docJson = phase === "annotating" ? serializeDoc() : null;
+      await ipc.finishQuickCapture(flatUrl, w, h, "clipboard",
+        docJson ? baseUrl : null, docJson);
+    } finally { ipc.cancelOverlay(); }
   };
+
   const doSave = async () => {
     setBusy(true);
-    try { const r = await doExport(); if (r) await ipc.finishQuickCapture(r.url, r.w, r.h, "save"); }
-    finally { ipc.cancelOverlay(); }
+    try {
+      if (!sel) return;
+      const b64 = await ipc.captureQuickRegion(sel.x, sel.y, sel.w, sel.h);
+      const baseUrl = `data:image/png;base64,${b64}`;
+      const baseImg = await loadImg(baseUrl);
+      const w = baseImg.naturalWidth;
+      const h = baseImg.naturalHeight;
+
+      const layer = phase === "annotating" ? (stageRef.current?.exportPng() ?? null) : null;
+      let flatUrl = baseUrl;
+      if (layer) {
+        const c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        const g = c.getContext("2d")!;
+        g.drawImage(baseImg, 0, 0);
+        g.drawImage(await loadImg(layer), 0, 0, w, h);
+        flatUrl = c.toDataURL("image/png");
+      }
+
+      const docJson = phase === "annotating" ? serializeDoc() : null;
+      await ipc.finishQuickCapture(flatUrl, w, h, "save",
+        docJson ? baseUrl : null, docJson);
+    } finally { ipc.cancelOverlay(); }
   };
   const doOpenEditor = async () => {
     setBusy(true);

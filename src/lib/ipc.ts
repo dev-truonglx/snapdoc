@@ -297,8 +297,8 @@ export const ipc = {
    * dùng để live-update dải "Gần đây" khi user vẽ. Best-effort, lỗi chỉ log. */
   updateHistoryThumb: (id: string, previewData: string) =>
     invoke<void>("update_history_thumb", { id, previewData }),
-  finishQuickCapture: (data: string, width: number, height: number, output: string) =>
-    invoke<string | null>("finish_quick_capture", { data, width, height, output }),
+  finishQuickCapture: (data: string, width: number, height: number, output: string, baseData?: string | null, docJson?: string | null) =>
+    invoke<string | null>("finish_quick_capture", { data, width, height, output, baseData: baseData ?? null, docJson: docJson ?? null }),
   // Quay màn hình — dừng quay/xem trạng thái chủ yếu vẫn qua tray icon (menu
   // bar, xem src-tauri/src/tray.rs); `stopRecording`/`recordingStatus` bên
   // dưới chỉ thêm 1 đường nữa cho popup "đang quay" trên Windows.

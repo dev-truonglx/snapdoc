@@ -974,6 +974,8 @@ pub fn open_history(app: AppHandle) -> Result<(), String> {
 /// Hoàn tất Quick Capture (copy/save ảnh đã flatten annotation) + ingest vào
 /// history. async + spawn_blocking để không block Tokio event loop trong lúc
 /// ghi file/DB.
+/// `base_data`: ảnh nền THÔ (chưa ghép annotation) — khi user có vẽ annotation.
+/// `doc_json`: annotation JSON (DocPayload) — đi kèm `base_data`.
 #[tauri::command]
 pub async fn finish_quick_capture(
     app: AppHandle,
@@ -981,10 +983,22 @@ pub async fn finish_quick_capture(
     width: u32,
     height: u32,
     output: String,
+    base_data: Option<String>,
+    doc_json: Option<String>,
 ) -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || super::ingest_quick(&app, &data, width, height, &output))
-        .await
-        .map_err(|e| format!("Task join error: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        super::ingest_quick(
+            &app,
+            &data,
+            width,
+            height,
+            &output,
+            base_data.as_deref(),
+            doc_json.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// Cập nhật thumbnail của một item ảnh từ preview PNG đã ghép annotation.
