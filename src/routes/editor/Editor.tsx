@@ -9,6 +9,15 @@ import AnnotationStage, { type StageHandle } from "../../features/annotation/can
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 import { useEditor } from "../../features/annotation/store";
 import {
+  beginSwitch,
+  isCurrentSwitch,
+  noteActiveKey,
+  initAutosave,
+  parseDocPayload,
+  suspendActive,
+} from "../../features/annotation/sessions";
+import { uid } from "../../features/annotation/model";
+import {
   copyToClipboard,
   saveToFile,
   saveAsToFile,
@@ -30,11 +39,21 @@ interface VideoDoc {
 
 const EMPTY_TRIM_STATE = { hasChanges: false, keepRanges: [] as [number, number][], removeAudio: false };
 
+/** "Dấu vân tay" của trạng thái cắt video — dùng để so với lần lưu gần nhất.
+ *
+ * KHÔNG dùng thẳng `videoTrimState.hasChanges` (= `past.length > 0` bên
+ * `VideoTrimmer`) làm "chưa lưu": sau "Lưu thành video mới" (`doSaveAsVideo`)
+ * bản gốc không hề đổi nên `hasChanges` vẫn `true` → user bị nhắc về đúng
+ * việc vừa export xong. (Sau "Lưu đè" thì đã đúng sẵn vì `doSaveVideo` reset
+ * `videoTrimState` và bump `videoVersion` để remount trimmer.) */
+const trimSig = (s: typeof EMPTY_TRIM_STATE) => JSON.stringify([s.keepRanges, s.removeAudio]);
+
 export default function Editor() {
   const { t } = useTranslation();
   const stageRef = useRef<StageHandle>(null);
   const loadDoc = useEditor((s) => s.loadDoc);
   const docHistoryId = useEditor((s) => s.doc?.historyId);
+  const docAnnotations = useEditor((s) => s.doc?.annotations);
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showFlattenConfirm, setShowFlattenConfirm] = useState(false);
@@ -48,23 +67,67 @@ export default function Editor() {
   // thời lượng/nội dung MỚI, trong khi `historyId` không đổi (cùng record) —
   // segments/zoom/cache filmstrip cũ của lần mount trước không còn khớp.
   const [videoVersion, setVideoVersion] = useState(0);
+  // Signature của trạng thái cắt tại lần lưu gần nhất (`null` = chưa lưu lần
+  // nào cho video đang mở). Xem `trimSig`.
+  const [videoSavedSig, setVideoSavedSig] = useState<string | null>(null);
+
+  // Video dirty = có thay đổi VÀ thay đổi đó khác lần lưu gần nhất.
+  const videoDirty =
+    !!videoDoc && videoTrimState.hasChanges && trimSig(videoTrimState) !== videoSavedSig;
+  useEffect(() => {
+    useEditor.getState().setVideoDirty(videoDirty);
+  }, [videoDirty]);
+
+  // Live-update thumbnail dải "Gần đây" khi annotation thay đổi.
+  // Debounce 1.5s — đủ thưa để không gọi liên tục khi đang kéo vẽ,
+  // đủ dày để thumbnail cập nhật nhanh sau khi dừng tay.
+  const thumbTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    if (thumbTimerRef.current !== null) window.clearTimeout(thumbTimerRef.current);
+    thumbTimerRef.current = window.setTimeout(() => {
+      thumbTimerRef.current = null;
+      const historyId = useEditor.getState().doc?.historyId;
+      if (!historyId) return;
+      const preview = stageRef.current?.exportPng();
+      if (!preview) return;
+      ipc.updateHistoryThumb(historyId, preview).catch(() => {});
+    }, 1500);
+    return () => {
+      if (thumbTimerRef.current !== null) window.clearTimeout(thumbTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docAnnotations]);
 
   const flash = (msg: string) => {
     setToast(msg);
     window.setTimeout(() => setToast(null), 2200);
   };
 
-  const loadPending = async (p: Pending | null) => {
-    if (!p) return;
-    loadDoc({
-      image: `data:image/png;base64,${p.base64}`,
-      imgW: p.width,
-      imgH: p.height,
-      scaleFactor: p.scale_factor ?? 1,
-      annotations: [],
-      historyId: p.history_id,
-      captureMode: p.capture_mode,
-    });
+  const loadPending = (p: Pending | null) => {
+    if (!p) return false;
+    const payload = parseDocPayload(p.docJson);
+    // Nạp từ bản nháp hay ảnh mới: luôn markClean=true — annotation được autosave
+    // liên tục, không cần phân biệt "đã lưu" hay "chưa lưu".
+    loadDoc(
+      {
+        image: `data:image/png;base64,${p.base64}`,
+        imgW: p.width,
+        imgH: p.height,
+        scaleFactor: p.scale_factor ?? 1,
+        annotations: payload?.annotations ?? [],
+        historyId: p.history_id,
+        captureMode: p.capture_mode,
+        filePath: p.filePath,
+      },
+      true,
+    );
+    if (payload) {
+      useEditor.getState().setStepCounter(payload.stepCounter);
+      useEditor.getState().setArrowCounter(payload.arrowCounter);
+    }
+    noteActiveKey(p.history_id ?? `file:${uid()}`);
+    return true;
   };
 
   const loadFromUrl = (dataUrl: string) => {
@@ -77,6 +140,9 @@ export default function Editor() {
         scaleFactor: 1,
         annotations: [],
       });
+      // Ảnh từ file ngoài chưa có mặt trong Library → khoá tổng hợp, chỉ sống
+      // trong phiên app này (xem `sessions.ts`).
+      noteActiveKey(`file:${uid()}`);
     };
     img.src = dataUrl;
   };
@@ -101,6 +167,9 @@ export default function Editor() {
     // KHÔNG nghe event chụp — tránh bị thay ảnh khi user chụp màn hình mới.
     const label = getCurrentWebviewWindow().label;
     if (label.startsWith("editor-ow")) {
+      // Cố tình KHÔNG bật autosave ở cửa sổ này: ảnh "Open with" không có mặt
+      // trong Library nên chẳng có container nào để ghi nháp, và 2 cửa sổ cùng
+      // ghi vào một file là điều phải tránh.
       ipc.takeOpenFile().then((url) => {
         if (url) loadFromUrl(url);
       });
@@ -111,7 +180,17 @@ export default function Editor() {
     // History trước khi tới đây, xem `record::stop_recording_impl`) LUÔN
     // được kiểm tra TRƯỚC ảnh — chỉ 1 trong 2 loại pending chờ tại 1 thời điểm.
     const loadAnyPending = async () => {
+      let suspended = null;
+      try {
+        suspended = suspendActive();
+      } catch (e) {
+        console.error("[SnapDoc] Treo phiên sửa thất bại, vẫn nạp ảnh mới:", e);
+      }
+      void suspended; // không dùng nữa, giữ lại để suspendActive vẫn chạy
+      const token = beginSwitch();
+
       const pv = await ipc.takePendingVideo();
+      if (!isCurrentSwitch(token)) return;
       if (pv) {
         setVideoDoc({
           historyId: pv.historyId,
@@ -120,22 +199,30 @@ export default function Editor() {
           durationMs: pv.durationMs,
         });
         setVideoTrimState(EMPTY_TRIM_STATE);
+        setVideoSavedSig(null);
+        noteActiveKey(null);
         return;
       }
       const p = await ipc.takePending();
+      if (!isCurrentSwitch(token)) return;
       if (p) setVideoDoc(null);
       loadPending(p);
     };
 
     loadAnyPending();
+    // Bật autosave TƯỜNG MINH ở đây (không phải side-effect của module) — chỉ
+    // cửa sổ `editor` được ghi nháp, xem `initAutosave`.
+    const stopAutosave = initAutosave();
     const un = listen("refresh-capture", loadAnyPending);
     // Windows "Open with" / double-click: Rust emit event này với data URL đầy đủ,
     // không cần round-trip IPC takePending (timing an toàn hơn).
     const unOpenFile = listen<string>("open-file", (e) => {
+      suspendActive();
       setVideoDoc(null);
       loadFromUrl(e.payload);
     });
     return () => {
+      stopAutosave();
       un.then((f) => f());
       unOpenFile.then((f) => f());
     };
@@ -170,6 +257,7 @@ export default function Editor() {
         durationMs: updated.durationMs ?? 0,
       });
       setVideoTrimState(EMPTY_TRIM_STATE);
+      setVideoSavedSig(null);
       setVideoVersion((v) => v + 1);
       flash(t("editorMain.videoOverwritten"));
     } catch (e) {
@@ -211,6 +299,10 @@ export default function Editor() {
         const settings = await ipc.getSettings().catch(() => null);
         if (settings) ipc.setSettings({ ...settings, lastVideoSaveAsDir: dirnameOf(outputPath) }).catch(() => {});
       }
+      // Bản gốc KHÔNG đổi (chỉ thêm 1 record mới) nên `videoTrimState` giữ
+      // nguyên — chốt signature lại để trạng thái cắt hiện tại được coi là
+      // "đã lưu", tránh nhắc user về đúng việc vừa export xong.
+      setVideoSavedSig(trimSig(videoTrimState));
       flash(t("editorMain.videoSavedNew"));
     } catch (e) {
       flash(String(e));
@@ -219,34 +311,38 @@ export default function Editor() {
     }
   };
 
+  /** Save — xuất PNG (ghép annotation vào pixel) ra file/clipboard.
+   * Annotation được tự động lưu non-destructive qua autosave riêng.
+   * Với ảnh mở từ Library (historyId có giá trị): mở dialog chọn nơi lưu PNG.
+   * Với ảnh mở từ file ngoài: mở dialog chọn nơi lưu PNG rồi đóng editor. */
   const doSave = async (alsoCopy = false) => {
     if (videoDoc) return doSaveVideo();
-    const url = stageRef.current?.exportPng();
-    if (!url) return;
+    const preview = stageRef.current?.exportPng();
+    if (!preview) return;
     setBusy(true);
     try {
-      const historyId = useEditor.getState().doc?.historyId;
-      if (historyId) {
-        // Ảnh gắn với 1 record History (chụp mới hoặc mở lại từ Library) →
-        // ghi đè tại chỗ đúng record thay vì save-as ra vị trí khác.
-        await ipc.updateHistoryAsset(historyId, url);
-        if (alsoCopy) await copyToClipboard(url);
-        ipc.closeSelf();
+      if (alsoCopy) {
+        // Save+Copy: lưu PNG ra thư mục mặc định và copy vào clipboard cùng lúc.
+        const { saveToFileAuto } = await import("../../features/output/useOutput");
+        await saveToFileAuto(preview, true);
+        flash(t("editorMain.saved"));
         return;
       }
-      const saved = await saveToFile(url, alsoCopy);
+      // Save / Save As: mở dialog chọn nơi lưu.
+      const saved = await saveToFile(preview, false);
       if (saved) {
-        ipc.closeSelf();
+        const historyId = useEditor.getState().doc?.historyId;
+        if (historyId) ipc.setHistoryExportedPath(historyId, saved).catch(() => {});
+        flash(t("editorMain.saved"));
       }
+    } catch (e) {
+      flash(String(e));
     } finally {
       setBusy(false);
     }
   };
 
-  // "Save As…" — LUÔN mở dialog chọn file (kể cả khi ảnh có `historyId`, tức
-  // ảnh chụp/mở từ Library), khác `doSave` (ghi đè tại chỗ record History nếu
-  // có). Xuất ra 1 file mới ở vị trí tuỳ chọn, KHÔNG đụng tới record History
-  // gốc (giống "Save As" của các phần mềm khác: tạo bản sao, giữ nguyên bản gốc).
+  // "Save As…" — LUÔN mở dialog chọn file, xuất PNG ra vị trí tuỳ chọn.
   const doSaveAs = async () => {
     if (videoDoc) return doSaveAsVideo();
     const url = stageRef.current?.exportPng();
@@ -255,13 +351,9 @@ export default function Editor() {
     try {
       const saved = await saveAsToFile(url);
       if (saved) {
-        // Ghi lại đường dẫn vừa export — "Xem file trong Thư mục" ở dải "Gần
-        // đây"/Library sau này sẽ mở đúng chỗ này thay vì file gốc nội bộ.
-        // Không chặn `closeSelf()` nếu lệnh này lỗi (mất tính năng phụ, không
-        // phải mất dữ liệu — ảnh đã lưu ra đĩa thành công rồi).
         const historyId = useEditor.getState().doc?.historyId;
         if (historyId) ipc.setHistoryExportedPath(historyId, saved).catch(() => {});
-        ipc.closeSelf();
+        flash(t("editorMain.saved"));
       }
     } finally {
       setBusy(false);
@@ -342,20 +434,34 @@ export default function Editor() {
   // "Open" — mở file dialog chọn ảnh, load vào editor
   const doOpen = async () => {
     try {
-      const dataUrl = await ipc.openFile();
-      if (!dataUrl) return;
+      // Treo trước khi mở dialog: dialog là blocking, user có thể mất một lúc
+      // mới chọn xong file.
+      suspendActive();
+      const opened = await ipc.openFile();
+      if (!opened) return;
+      // `.snapdoc` mang theo lớp annotation + đường dẫn gốc → mở ra là sửa tiếp
+      // được ngay, và Save sẽ ghi thẳng lại chính file đó.
+      const payload = parseDocPayload(opened.docJson);
       const img = new Image();
       img.onload = () => {
         setVideoDoc(null);
         loadDoc({
-          image: dataUrl,
+          image: opened.dataUrl,
           imgW: img.naturalWidth,
           imgH: img.naturalHeight,
           scaleFactor: 1,
-          annotations: [],
+          annotations: payload?.annotations ?? [],
+          filePath: opened.filePath,
         });
+        if (payload) {
+          useEditor.getState().setStepCounter(payload.stepCounter);
+          useEditor.getState().setArrowCounter(payload.arrowCounter);
+        }
+        // File-backed thì lấy chính đường dẫn làm khoá phiên (ổn định, mở lại
+        // cùng file là về đúng phiên cũ); ảnh thường thì khoá tổng hợp.
+        noteActiveKey(opened.filePath ? `file:${opened.filePath}` : `file:${uid()}`);
       };
-      img.src = dataUrl;
+      img.src = opened.dataUrl;
     } catch (e) {
       flash(t("editorMain.errorOpeningFile", { error: e }));
     }
@@ -389,14 +495,28 @@ export default function Editor() {
     // Đo kích thước ảnh đã flatten qua Image element
     const el = new Image();
     el.onload = () => {
-      useEditor.getState().loadDoc({
-        image: url,
-        imgW: el.naturalWidth,
-        imgH: el.naturalHeight,
-        scaleFactor: doc.scaleFactor,
-        annotations: [],
-        historyId: doc.historyId,
-      });
+      useEditor.getState().loadDoc(
+        {
+          image: url,
+          imgW: el.naturalWidth,
+          imgH: el.naturalHeight,
+          scaleFactor: doc.scaleFactor,
+          annotations: [],
+          historyId: doc.historyId,
+          // Giữ đường về file gốc — mất nó thì `.snapdoc` mở từ đĩa sau khi
+          // flatten sẽ không ghi lại được chính file đó nữa.
+          filePath: doc.filePath,
+        },
+        // `markClean = false`: ảnh vừa flatten CHƯA được lưu ở đâu cả (chính
+        // dialog xác nhận cũng nói vậy — `editorMain.flattenItem3`). Nếu để
+        // mặc định `true` thì chỉ báo "chưa lưu" tắt ngay sau khi flatten và
+        // user đóng editor là mất trắng thao tác vừa rồi.
+        false,
+      );
+      // Ảnh nền đã bị thay (annotation burn vào pixel) → đường lưu draft phải
+      // biết mà gửi kèm base image mới, nếu không nó sẽ đắp annotation CŨ lên
+      // nền đã burn → mở lại thấy vẽ đôi.
+      useEditor.getState().markBaseDirty();
       flash(t("editorMain.flattened"));
     };
     el.src = url;
@@ -437,6 +557,14 @@ export default function Editor() {
         onFlash={flash}
         currentId={videoDoc ? videoDoc.historyId : docHistoryId}
         onOpenVideo={(item: HistoryItem) => {
+          // `HistoryStrip.openItem` chỉ gọi `suspendActive` ở nhánh ẢNH
+          // (`openImageInEditor`), nhánh video đi thẳng vào đây — nên treo ở
+          // đây, nếu không đổi từ ảnh-đang-sửa sang video là mất việc.
+          try {
+            suspendActive();
+          } catch (e) {
+            console.error("[SnapDoc] Treo phiên sửa thất bại:", e);
+          }
           setVideoDoc({
             historyId: item.id,
             filePath: item.assetPath,
@@ -444,6 +572,10 @@ export default function Editor() {
             durationMs: item.durationMs ?? 0,
           });
           setVideoTrimState(EMPTY_TRIM_STATE);
+          setVideoSavedSig(null);
+          // `null` chứ không phải `item.id` — xem giải thích ở nhánh video của
+          // `loadAnyPending`: `doc` trong store vẫn là ảnh cũ.
+          noteActiveKey(null);
         }}
         onOpenImage={() => setVideoDoc(null)}
       />

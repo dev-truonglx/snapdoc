@@ -8,6 +8,7 @@ import { useEditor } from "../../features/annotation/store";
 import { PRESET_COLORS, type Tool } from "../../features/annotation/model";
 import { quickToolFromKey } from "../../lib/toolShortcuts";
 import QuickToolbar, { quickToolbarLayout } from "../quick-capture/QuickToolbar";
+import { serializeDoc } from "../../features/annotation/sessions";
 
 /**
  * Lấy ảnh "đóng băng màn hình" từ Rust (JPEG base64) khi mount overlay.
@@ -1121,46 +1122,83 @@ function QuickAnnotate() {
   const pickToolRef = useRef(pickTool);
   pickToolRef.current = pickTool;
 
-  // ── Xuất ảnh: chụp đúng vùng (ẩn overlay) rồi ghép lớp chú thích ──
-  const doExport = useCallback(async (): Promise<{ url: string; w: number; h: number } | null> => {
-    if (!sel) return null;
-    const layer = phase === "annotating" ? (stageRef.current?.exportPng() ?? null) : null;
-    const b64 = await ipc.captureQuickRegion(sel.x, sel.y, sel.w, sel.h);
-    const base = await loadImg(`data:image/png;base64,${b64}`);
-    const c = document.createElement("canvas");
-    c.width = base.naturalWidth;
-    c.height = base.naturalHeight;
-    const g = c.getContext("2d")!;
-    g.drawImage(base, 0, 0);
-    if (layer) {
-      const l = await loadImg(layer);
-      g.drawImage(l, 0, 0, c.width, c.height);
-    }
-    return { url: c.toDataURL("image/png"), w: c.width, h: c.height };
-  }, [sel, phase]);
-
   const doCopy = async () => {
     setBusy(true);
-    try { const r = await doExport(); if (r) await ipc.finishQuickCapture(r.url, r.w, r.h, "clipboard"); }
-    finally { ipc.cancelOverlay(); }
+    try {
+      if (!sel) return;
+      const b64 = await ipc.captureQuickRegion(sel.x, sel.y, sel.w, sel.h);
+      const baseUrl = `data:image/png;base64,${b64}`;
+      const baseImg = await loadImg(baseUrl);
+      const w = baseImg.naturalWidth;
+      const h = baseImg.naturalHeight;
+
+      // Ghép annotation vào ảnh để copy/lưu đúng cái user thấy
+      const layer = phase === "annotating" ? (stageRef.current?.exportPng() ?? null) : null;
+      let flatUrl = baseUrl;
+      if (layer) {
+        const c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        const g = c.getContext("2d")!;
+        g.drawImage(baseImg, 0, 0);
+        g.drawImage(await loadImg(layer), 0, 0, w, h);
+        flatUrl = c.toDataURL("image/png");
+      }
+
+      const docJson = phase === "annotating" ? serializeDoc() : null;
+      await ipc.finishQuickCapture(flatUrl, w, h, "clipboard",
+        docJson ? baseUrl : null, docJson);
+    } finally { ipc.cancelOverlay(); }
   };
+
   const doSave = async () => {
     setBusy(true);
-    try { const r = await doExport(); if (r) await ipc.finishQuickCapture(r.url, r.w, r.h, "save"); }
-    finally { ipc.cancelOverlay(); }
+    try {
+      if (!sel) return;
+      const b64 = await ipc.captureQuickRegion(sel.x, sel.y, sel.w, sel.h);
+      const baseUrl = `data:image/png;base64,${b64}`;
+      const baseImg = await loadImg(baseUrl);
+      const w = baseImg.naturalWidth;
+      const h = baseImg.naturalHeight;
+
+      const layer = phase === "annotating" ? (stageRef.current?.exportPng() ?? null) : null;
+      let flatUrl = baseUrl;
+      if (layer) {
+        const c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        const g = c.getContext("2d")!;
+        g.drawImage(baseImg, 0, 0);
+        g.drawImage(await loadImg(layer), 0, 0, w, h);
+        flatUrl = c.toDataURL("image/png");
+      }
+
+      const docJson = phase === "annotating" ? serializeDoc() : null;
+      await ipc.finishQuickCapture(flatUrl, w, h, "save",
+        docJson ? baseUrl : null, docJson);
+    } finally { ipc.cancelOverlay(); }
   };
   const doOpenEditor = async () => {
     setBusy(true);
     try {
-      const r = await doExport();
-      if (r) {
-        // Giữ SnapDoc frontmost để hiện Editor — huỷ việc `cancelOverlay`
-        // (chạy trong finally) trả focus về app cũ (chỉ áp dụng cho
-        // copy/save/hủy). Xem `flow::keep_capture_focus`.
-        await ipc.keepCaptureFocus();
-        await ipc.setPendingImage(r.url, r.w, r.h);
-        await ipc.openEditor();
-      }
+      if (!sel) return;
+      // Chụp ảnh nền THÔ (chưa ghép annotation) — để Editor nhận pixel gốc sạch,
+      // annotation đi riêng qua docJson và được lưu non-destructive.
+      const b64 = await ipc.captureQuickRegion(sel.x, sel.y, sel.w, sel.h);
+      // Đo kích thước vật lý từ ảnh chụp (không dùng sel.w/h vì là CSS px).
+      const baseImg = await loadImg(`data:image/png;base64,${b64}`);
+      const w = baseImg.naturalWidth;
+      const h = baseImg.naturalHeight;
+      const baseUrl = `data:image/png;base64,${b64}`;
+
+      // Serialize annotation hiện tại (nếu đang ở pha annotating) — Editor dùng
+      // để dựng lại đúng các annotation objects, user chỉnh tiếp được ngay.
+      const docJson = phase === "annotating" ? serializeDoc() : null;
+
+      // Giữ SnapDoc frontmost để hiện Editor — huỷ việc `cancelOverlay`
+      // (chạy trong finally) trả focus về app cũ (chỉ áp dụng cho
+      // copy/save/hủy). Xem `flow::keep_capture_focus`.
+      await ipc.keepCaptureFocus();
+      await ipc.setPendingImage(baseUrl, w, h, docJson, SCALE);
+      await ipc.openEditor();
     }
     finally { ipc.cancelOverlay(); }
   };

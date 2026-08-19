@@ -19,6 +19,30 @@ interface EditorState {
   past: Doc[];
   future: Doc[];
 
+  /** ĐÚNG object `Doc` đang khớp với bản đã persist (Save / vừa nạp xong).
+   *
+   * Dùng SO SÁNH REFERENCE để tính "chưa lưu" thay vì `past.length > 0`:
+   * mọi mutation đều tạo object `Doc` MỚI (xem `commit`), còn `undo`/`redo`
+   * trả về ĐÚNG object cũ lấy ra từ `past`/`future` — nên `doc !== savedRef`
+   * là phép thử O(1) chính xác, tự xử lý luôn ca "user undo về đúng trạng
+   * thái đã lưu thì hết dirty". Còn `past.length > 0` thì sau khi Save mà
+   * sửa tiếp vẫn sai (không reset được), và undo về đầu cũng không sạch.
+   *
+   * Đổi style khi KHÔNG chọn annotation nào (vd `setColor`) chỉ set field
+   * style, không đụng `doc` → cùng reference → tự động không dirty, không
+   * cần đặc-cách gì. */
+  savedRef: Doc | null;
+  /** Video (`VideoTrimmer`) không dùng store này — `Editor.tsx` tự tính rồi
+   * đẩy lên đây, để `isDirty()` là nguồn sự thật DUY NHẤT cho cả 2 chế độ. */
+  videoDirty: boolean;
+  /** `true` khi ẢNH NỀN trong RAM đã khác nền trên đĩa — tức đã crop / stitch /
+   * flatten, khác với chỉ sửa annotation.
+   *
+   * Đường Save dùng cờ này để quyết định có gửi kèm base image lên Rust hay
+   * không: một lần Save chỉ-annotation thì nền không đổi, khỏi phải đẩy vài MB
+   * base64 qua IPC. */
+  baseDirty: boolean;
+
   tool: Tool;
   color: string;
   /** Màu nền highlight (riêng biệt với color stroke). */
@@ -39,7 +63,35 @@ interface EditorState {
   editingTextId: string | null;
 
   // setup
-  loadDoc: (doc: Doc) => void;
+  /** `markClean` = doc vừa nạp có coi như "đã lưu" hay không. Mặc định `true`
+   * (ảnh vừa chụp / vừa mở từ Library → đúng bằng bản trên đĩa). Đường
+   * FLATTEN phải truyền `false`: nó `loadDoc` lại với ảnh đã burn nhưng CHƯA
+   * hề được lưu — chính app cũng nói vậy (xem `editorMain.flattenItem3`). */
+  loadDoc: (doc: Doc, markClean?: boolean) => void;
+  /** Khôi phục một phiên sửa đã bị treo (xem `sessions.ts`) — khác `loadDoc` ở
+   * chỗ nó KHÔI PHỤC undo stack thay vì xoá.
+   *
+   * Cố tình là `set()` đa-field DUY NHẤT ở đây thay vì để `sessions.ts` tự gọi
+   * `useEditor.setState({...})`: giữ mọi hiểu biết về hình dạng state bên
+   * trong store, và không phải nới ngữ nghĩa `loadDoc` (vốn còn được cửa sổ
+   * overlay Chụp nhanh dùng, xem `routes/overlay/Overlay.tsx`). */
+  hydrateSession: (s: {
+    doc: Doc;
+    past: Doc[];
+    future: Doc[];
+    stepCounter: number;
+    arrowCounter: number;
+    baseDirty: boolean;
+    savedRef: Doc | null;
+  }) => void;
+  /** Đánh dấu trạng thái hiện tại là đã persist — gọi sau Save thành công. */
+  markSaved: () => void;
+  setVideoDirty: (v: boolean) => void;
+  /** Báo ảnh nền vừa bị thay ngoài `applyCrop`/`applyStitch` (hiện chỉ có
+   * đường FLATTEN, vốn đi qua `loadDoc` chứ không qua `commit`). */
+  markBaseDirty: () => void;
+  /** Nguồn sự thật duy nhất cho "có việc chưa lưu" (cả ảnh lẫn video). */
+  isDirty: () => boolean;
 
   // tool / style
   setEditingText: (id: string | null) => void;
@@ -100,6 +152,9 @@ export const useEditor = create<EditorState>((set, get) => ({
   doc: null,
   past: [],
   future: [],
+  savedRef: null,
+  videoDirty: false,
+  baseDirty: false,
   tool: "select",
   color: "#ef4444",
   highlightColor: HIGHLIGHT_COLORS[0],
@@ -115,8 +170,55 @@ export const useEditor = create<EditorState>((set, get) => ({
   _lastCommitKey: null,
   _lastCommitAt: 0,
 
-  loadDoc: (doc) =>
-    set({ doc, past: [], future: [], selectedId: null, stepCounter: 1, arrowCounter: 1, tool: "select", editingTextId: null }),
+  loadDoc: (doc, markClean = true) =>
+    set({
+      doc,
+      savedRef: markClean ? doc : null,
+      // Reset theo `markClean`: nạp ảnh mới thì nền trong RAM ĐÚNG bằng nền trên
+      // đĩa (`false`); còn đường FLATTEN (`markClean = false`) vừa thay nền bằng
+      // ảnh đã burn nên phải là `true`, nếu không lần Save sau sẽ không gửi nền
+      // mới lên và annotation cũ sẽ được đắp lại lên nền đã burn — VẼ ĐÔI.
+      baseDirty: !markClean,
+      past: [],
+      future: [],
+      selectedId: null,
+      stepCounter: 1,
+      arrowCounter: 1,
+      tool: "select",
+      editingTextId: null,
+    }),
+
+  hydrateSession: (s) =>
+    set({
+      doc: s.doc,
+      past: s.past,
+      future: s.future,
+      stepCounter: s.stepCounter,
+      arrowCounter: s.arrowCounter,
+      baseDirty: s.baseDirty,
+      savedRef: s.savedRef,
+      // Reset phần state phù du: chọn/đang gõ text/metadata gộp undo không
+      // thuộc về nội dung tài liệu, khôi phục lại chỉ gây trạng thái lơ lửng
+      // (vd transformer bám vào annotation đã bị undo mất).
+      selectedId: null,
+      editingTextId: null,
+      tool: "select",
+      _lastCommitKey: null,
+      _lastCommitAt: 0,
+    }),
+
+  // Save xong thì cả annotation LẪN nền đều đã khớp đĩa.
+  markSaved: () => set((s) => ({ savedRef: s.doc, baseDirty: false })),
+
+  setVideoDirty: (videoDirty) => set({ videoDirty }),
+
+  markBaseDirty: () => set({ baseDirty: true }),
+
+  isDirty: () => {
+    const s = get();
+    if (s.videoDirty) return true;
+    return s.doc != null && s.doc !== s.savedRef;
+  },
 
   setEditingText: (editingTextId) => set({ editingTextId }),
   setTool: (tool) => set({ tool, selectedId: tool === "select" ? get().selectedId : null }),
@@ -279,8 +381,12 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((s) => {
       if (!s.doc) return {};
       return {
-        ...commit(s, { image, imgW, imgH, scaleFactor: s.doc.scaleFactor, annotations, historyId: s.doc.historyId }),
+        // `filePath` phải đi theo: mất nó thì tài liệu `.snapdoc` mở từ đĩa sau
+        // khi crop sẽ không còn biết đường về file gốc, và Save rơi xuống nhánh
+        // "xuất PNG mới" thay vì ghi lại chính file đó.
+        ...commit(s, { image, imgW, imgH, scaleFactor: s.doc.scaleFactor, annotations, historyId: s.doc.historyId, filePath: s.doc.filePath }),
         selectedId: null,
+        baseDirty: true,
       };
     }),
 
@@ -290,8 +396,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       // Ảnh ghép ở pixel vật lý (không gắn với DPI nguồn nào) → scaleFactor 1.
       // commit() đẩy doc hiện tại vào past → undo khôi phục lại trạng thái trước nối.
       return {
-        ...commit(s, { image, imgW, imgH, scaleFactor: 1, annotations: [], historyId: s.doc.historyId }),
+        // Giữ `filePath` — xem giải thích ở `applyCrop`.
+        ...commit(s, { image, imgW, imgH, scaleFactor: 1, annotations: [], historyId: s.doc.historyId, filePath: s.doc.filePath }),
         selectedId: null,
+        baseDirty: true,
       };
     }),
 
@@ -348,3 +456,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       return { ...commit(s, { ...s.doc, annotations }), arrowCounter: n + 1 };
     }),
 }));
+
+/** Hook render-safe cho "có việc chưa lưu" — dùng ở component thay vì tự viết
+ * lại biểu thức, để chỉ có MỘT định nghĩa dirty trong toàn bộ codebase.
+ * (`isDirty()` là bản gọi-được-ngoài-React, cho guard/side-effect.) */
+export const useIsDirty = (): boolean =>
+  useEditor((s) => s.videoDirty || (s.doc != null && s.doc !== s.savedRef));

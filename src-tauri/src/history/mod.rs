@@ -23,6 +23,10 @@ pub struct IngestJob {
     asset_path: PathBuf,
     thumb_path: PathBuf,
     base64: String,
+    /// doc.json kèm theo (nếu có annotation) — ghi vào container thay vì EMPTY_DOC_JSON.
+    doc_json: Option<String>,
+    /// Preview đã ghép annotation (nếu có) — dùng cho thumbnail. None → dùng base64.
+    preview_base64: Option<String>,
 }
 
 /// Spawn DUY NHẤT 1 worker thread xử lý tuần tự mọi job ghi nền — gọi 1 lần
@@ -32,10 +36,24 @@ pub fn spawn_ingest_worker(app: AppHandle) -> std::sync::mpsc::Sender<IngestJob>
     let (tx, rx) = std::sync::mpsc::channel::<IngestJob>();
     std::thread::spawn(move || {
         for job in rx {
-            ingest_finish_bg(&app, job.id, job.asset_path, job.thumb_path, &job.base64);
+            ingest_finish_bg(
+                &app,
+                job.id,
+                job.asset_path,
+                job.thumb_path,
+                &job.base64,
+                job.doc_json.as_deref(),
+                job.preview_base64.as_deref(),
+            );
         }
     });
     tx
+}
+
+/// `now_ms` cho các module ngoài `history` (vd `commands::save_snapdoc_file`
+/// ghi `updatedAt` vào manifest) — cùng một mốc thời gian, khỏi định nghĩa lại.
+pub(crate) fn now_ms_pub() -> i64 {
+    now_ms()
 }
 
 fn now_ms() -> i64 {
@@ -58,6 +76,12 @@ pub(crate) fn decode_image_data(data: &str) -> Result<Vec<u8>, String> {
 pub(crate) fn strip_data_url_prefix(data: &str) -> &str {
     data.split(',').next_back().unwrap_or(data)
 }
+
+/// `doc.json` cho ảnh chưa có annotation nào. Phải khớp shape mà frontend đọc
+/// (`sessions.ts`/`Editor.tsx`) — `payloadV` tách khỏi `formatVersion` của
+/// container để thêm loại annotation mới không cần bump định dạng file.
+pub(crate) const EMPTY_DOC_JSON: &str =
+    r#"{"payloadV":1,"kind":"image","annotations":[],"stepCounter":1,"arrowCounter":1}"#;
 
 /// Ghi 1 capture vào Library — CHIA 2 PHA để không chặn đường mở editor/copy/save:
 ///
@@ -117,30 +141,115 @@ pub fn ingest(
     };
 
     // Đẩy việc ghi file nặng (I/O) qua worker cố định thay vì spawn thread mới
-    // — nếu queue gửi lỗi (worker đã thoát, không nên xảy ra khi app còn chạy),
-    // record vẫn tồn tại trong DB nhưng file_size sẽ mãi NULL; chấp nhận được
-    // vì đây là tình huống app đang shutdown.
     if let Ok(tx) = state.ingest_tx.lock() {
-        let _ = tx.send(IngestJob { id, asset_path, thumb_path, base64: cap.base64.clone() });
+        let _ = tx.send(IngestJob {
+            id,
+            asset_path,
+            thumb_path,
+            base64: cap.base64.clone(),
+            doc_json: None,
+            preview_base64: None,
+        });
     }
 
     // KHÔNG emit "history:item-added" ở đây — thumbnail còn chưa được ghi
     // (chạy nền ở `ingest_finish_bg`), cửa sổ History có thể race và hiện
-    // "Không tải được ảnh" vĩnh viễn (thẻ ảnh không tự retry sau khi lỗi).
-    // Emit sau khi thumbnail đã tồn tại trên đĩa, xem `ingest_finish_bg`.
+    // "Không tải được ảnh" vĩnh viễn. Emit sau khi thumbnail đã tồn tại.
+    Ok(record)
+}
+
+/// Như `ingest` nhưng ghi kèm `doc_json` (annotation) và `preview_data`
+/// (ảnh đã ghép, dùng cho thumbnail). Dùng cho Quick Capture copy/save khi
+/// có annotation — giữ nền sạch trong asset, annotation trong doc.json.
+pub fn ingest_with_doc(
+    app: &AppHandle,
+    cap: &capture::Capture,
+    mode: &str,
+    scale_factor: f64,
+    doc_json: &str,
+    preview_data: Option<&str>,
+) -> Result<HistoryRecord, String> {
+    let state = app
+        .try_state::<HistoryState>()
+        .ok_or_else(|| "History chưa sẵn sàng".to_string())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = now_ms();
+    let (asset_path, thumb_path) = assets::paths_for(app, &id)?;
+    let asset_path_str = asset_path.to_string_lossy().to_string();
+    let thumb_path_str = thumb_path.to_string_lossy().to_string();
+
+    {
+        let conn = state.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+        conn.execute(
+            "INSERT INTO history (id, created_at, updated_at, capture_mode, width, height, scale_factor, asset_path, thumb_path) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            rusqlite::params![id, now, now, mode, cap.width, cap.height, scale_factor, asset_path_str, thumb_path_str],
+        )
+        .map_err(|e| format!("Insert history thất bại: {e}"))?;
+    }
+
+    let record = HistoryRecord {
+        id: id.clone(),
+        created_at: now,
+        updated_at: now,
+        capture_mode: mode.to_string(),
+        media_type: "image".to_string(),
+        width: cap.width,
+        height: cap.height,
+        scale_factor,
+        duration_ms: None,
+        asset_path: asset_path_str,
+        thumb_path: thumb_path_str,
+        file_size: None,
+        source_app: None,
+        title: None,
+        is_edited: false,
+        deleted_at: None,
+        exported_path: None,
+    };
+
+    if let Ok(tx) = state.ingest_tx.lock() {
+        let _ = tx.send(IngestJob {
+            id,
+            asset_path,
+            thumb_path,
+            base64: cap.base64.clone(),
+            doc_json: Some(doc_json.to_string()),
+            preview_base64: preview_data.map(|s| s.to_string()),
+        });
+    }
 
     Ok(record)
 }
 
 /// Pha 2 của `ingest`: ghi asset + thumbnail (chạy nền), rồi cập nhật
 /// `file_size`. Lỗi → soft-delete record thay vì để row mồ côi.
-fn ingest_finish_bg(app: &AppHandle, id: String, asset_path: PathBuf, thumb_path: PathBuf, base64: &str) {
+fn ingest_finish_bg(app: &AppHandle, id: String, asset_path: PathBuf, thumb_path: PathBuf, base64: &str, doc_json: Option<&str>, preview_base64: Option<&str>) {
     let write_result = (|| -> Result<i64, String> {
         let bytes = decode_image_data(base64)?;
-        std::fs::write(&asset_path, &bytes).map_err(|e| format!("Ghi asset thất bại: {e}"))?;
-        let thumb_bytes = thumbnail::generate(&bytes)?;
+        let effective_doc = doc_json.unwrap_or(EMPTY_DOC_JSON);
+        // Preview cho thumbnail: ưu tiên bản đã ghép annotation nếu có,
+        // ngược lại dùng chính ảnh nền (không có annotation).
+        let preview_bytes = match preview_base64 {
+            Some(p) => decode_image_data(p)?,
+            None    => bytes.clone(),
+        };
+        let now = now_ms();
+        crate::snapdoc_file::write_snapdoc(
+            &asset_path,
+            crate::snapdoc_file::WriteSnapdoc {
+                base_png: &bytes,
+                doc_json: effective_doc,
+                draft_json: None,
+                preview_png: &preview_bytes,
+                created_at: now,
+                updated_at: now,
+            },
+        )?;
+        let thumb_bytes = thumbnail::generate(&preview_bytes)?;
         std::fs::write(&thumb_path, &thumb_bytes).map_err(|e| format!("Ghi thumbnail thất bại: {e}"))?;
-        Ok(bytes.len() as i64)
+        std::fs::metadata(&asset_path)
+            .map(|m| m.len() as i64)
+            .map_err(|e| format!("Không đọc được kích thước asset: {e}"))
     })();
 
     let Some(state) = app.try_state::<HistoryState>() else { return };
@@ -266,8 +375,14 @@ pub fn attach_pending_id(app: &AppHandle, id: &str) {
     };
 }
 
-/// Ghi output "clipboard"/"save"/"save_copy" cho Quick Capture (ảnh đã
-/// flatten annotation ở frontend), rồi ingest vào history với mode="quick".
+/// Ghi output "clipboard"/"save"/"save_copy" cho Quick Capture, rồi ingest
+/// vào history với mode="quick".
+///
+/// - `data`: ảnh đã ghép annotation (flattened) — dùng cho clipboard/file/thumbnail.
+/// - `base_data`: ảnh nền THÔ (chưa ghép annotation) — nếu có, ingest nền sạch
+///   vào asset + lưu `doc_json` vào container để user mở lại còn sửa annotation.
+///   `None` thì ingest `data` (flattened) như cũ.
+/// - `doc_json`: annotation JSON (DocPayload) — chỉ dùng khi `base_data` có.
 ///
 /// KHÔNG dùng chung `flow::finish()` — quick-capture cố tình giữ UX hiện có
 /// (không mở PendingCapture/thumbnail popup, overlay tự đóng ngay). Copy/Save
@@ -279,6 +394,8 @@ pub fn ingest_quick(
     width: u32,
     height: u32,
     output: &str,
+    base_data: Option<&str>,
+    doc_json: Option<&str>,
 ) -> Result<Option<String>, String> {
     match output {
         "clipboard" => crate::clipboard::copy_png(data)?,
@@ -290,12 +407,19 @@ pub fn ingest_quick(
         _ => {}
     }
 
+    // Có ảnh nền riêng → ingest nền sạch, lưu doc_json + preview (đã ghép)
+    // vào container để user mở lại sửa annotation được.
+    // Không có → ingest ảnh flattened như cũ (backward compat).
+    let base_str = base_data.unwrap_or(data);
+    let effective_doc = doc_json.unwrap_or(EMPTY_DOC_JSON);
+    let preview_str = if base_data.is_some() { Some(data) } else { None };
+
     let cap = capture::Capture {
-        base64: strip_data_url_prefix(data).to_string(),
+        base64: strip_data_url_prefix(base_str).to_string(),
         width,
         height,
     };
-    match ingest(app, &cap, "quick", 1.0) {
+    match ingest_with_doc(app, &cap, "quick", 1.0, effective_doc, preview_str) {
         Ok(rec) => Ok(Some(rec.id)),
         Err(e) => {
             eprintln!("[SnapDoc][history] ingest_quick thất bại (output đã thực hiện xong): {e}");

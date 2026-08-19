@@ -3,7 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import { ipc, type HistoryItem } from "../../lib/ipc";
-import { useEditor } from "../../features/annotation/store";
+import {
+  openLibraryImage,
+  suspendActive,
+  tryResume,
+} from "../../features/annotation/sessions";
 import { fmtDuration } from "../history/formatUtils";
 
 const LIMIT = 20;
@@ -27,6 +31,9 @@ interface Props {
 export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenImage }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<HistoryItem[]>([]);
+  // Cache-bust counter theo id — tăng lên mỗi khi Rust báo thumbnail item đó
+  // vừa được cập nhật, buộc <img> reload file mới từ đĩa thay vì dùng cache cũ.
+  const [thumbVersions, setThumbVersions] = useState<Record<string, number>>({});
   const [copyingId, setCopyingId] = useState<string | null>(null);
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -36,17 +43,14 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
   // lúc menu mở, tra lại theo id khi cần).
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  // URL blob của ảnh đang hiển thị trong Editor (nếu nạp qua đường tắt bên
-  // dưới) — cần revoke khi đổi ảnh khác để không rò rỉ memory.
-  const lastBlobUrlRef = useRef<string | null>(null);
-  // Id của lần bấm gần nhất — bấm nhanh 2 ảnh khác nhau trước khi ảnh đầu tải
-  // xong có thể khiến 2 promise resolve KHÔNG đúng thứ tự bấm; so khớp id
-  // này sau await để bỏ qua kết quả đã cũ, tránh hiện sai ảnh + gắn nhầm
-  // `historyId` (Save sẽ ghi đè nhầm record).
+  // Id của lần bấm gần nhất — chỉ để quản spinner theo id. Việc chống race
+  // "2 promise resolve sai thứ tự bấm" (từng gây hiện sai ảnh + gắn nhầm
+  // `historyId`, khiến Save ghi đè nhầm record) nay do bộ đếm thế hệ DÙNG
+  // CHUNG trong `sessions.ts` đảm nhiệm — xem `beginSwitch`/`isCurrentSwitch`.
   const latestRequestRef = useRef<string | null>(null);
 
   const load = useCallback(() => {
-    if (!("__TAURI_INTERNALS__" in window)) return; // dev-mode ngoài Tauri: bỏ qua
+    if (!("__TAURI_INTERNALS__" in window)) return;
     ipc.listHistory({ limit: LIMIT, offset: 0, trashOnly: false })
       .then((page) => setItems(page.items))
       .catch(() => {});
@@ -54,24 +58,19 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
 
   useEffect(() => {
     load();
-    // Capture mới (vd hotkey trong lúc Editor đang mở, hoặc nút "New") → nạp lại dải.
     const un = listen("refresh-capture", load);
-    // Chụp khung hình từ video đang xem trong Editor (chế độ "in-place", xem
-    // `VideoTrimmer.doCaptureFrame`) KHÔNG emit "refresh-capture" (tránh Editor
-    // nạp lại pending ảnh và mất video đang xem) — nghe riêng event ingest xong
-    // để dải này vẫn tự cập nhật ngay.
     const unAdded = listen("history:item-added", load);
+    // Thumbnail của item vừa được cập nhật (user vẽ annotation) — bump version
+    // để <img> buộc reload file mới từ đĩa, không dùng cache cũ.
+    const unThumb = listen<string>("history:thumb-updated", (e) => {
+      setThumbVersions((prev) => ({ ...prev, [e.payload]: (prev[e.payload] ?? 0) + 1 }));
+    });
     return () => {
       un.then((f) => f());
       unAdded.then((f) => f());
+      unThumb.then((f) => f());
     };
   }, [load]);
-
-  useEffect(() => {
-    return () => {
-      if (lastBlobUrlRef.current) URL.revokeObjectURL(lastBlobUrlRef.current);
-    };
-  }, []);
 
   // Đóng menu chuột phải khi click ra ngoài hoặc nhấn Escape — cùng pattern
   // `showSaveMenu` ở `Toolbar.tsx`.
@@ -100,27 +99,36 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
   // Editor đang mở, vốn là nguồn gây lag/giật khi bấm chọn ảnh ở dải này).
   const openImageInEditor = async (id: string) => {
     if (id === currentId) return;
+    // Treo tài liệu đang mở NGAY, đồng bộ, trước mọi `await` — nếu không thì
+    // `loadDoc` bên dưới ghi đè thẳng lên việc user đang làm dở.
+    try {
+      suspendActive();
+    } catch (e) {
+      console.error("[SnapDoc] Treo phiên sửa thất bại:", e);
+    }
     onOpenImage();
+
+    // Phiên còn trong RAM → khôi phục TỨC THÌ, đầy đủ cả undo stack, không cần
+    // đọc lại file. Đi trước `beginSwitch`-rồi-await nên cũng không có race.
+    if (tryResume(id)) {
+      latestRequestRef.current = id;
+      setOpeningId(null);
+      return;
+    }
+
+    // Việc nạp thật đi qua `openLibraryImage` — ĐƯỜNG DUY NHẤT mở ảnh từ
+    // Library (dùng chung với nút "Quay lại" ở banner), nơi gom token thế hệ +
+    // quyền sở hữu object URL + cờ `markClean` khi nạp từ nháp.
+    // `latestRequestRef` giữ lại chỉ để quản spinner theo id.
     latestRequestRef.current = id;
     setOpeningId(id);
     try {
-      const [item, bytes] = await Promise.all([ipc.getHistoryItem(id), ipc.getHistoryAssetBytes(id)]);
-      if (latestRequestRef.current !== id) return; // đã bấm ảnh khác trong lúc chờ — bỏ kết quả này
-      const url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
-      if (lastBlobUrlRef.current) URL.revokeObjectURL(lastBlobUrlRef.current);
-      lastBlobUrlRef.current = url;
-      useEditor.getState().loadDoc({
-        image: url,
-        imgW: item.width,
-        imgH: item.height,
-        scaleFactor: item.scaleFactor,
-        annotations: [],
-        historyId: item.id,
-        captureMode: item.captureMode,
-      });
+      await openLibraryImage(id);
     } catch (e) {
-      if (latestRequestRef.current === id) onFlash(String(e));
+      onFlash(String(e));
     } finally {
+      // So theo id thay vì token: `openLibraryImage` tự quản token bên trong,
+      // còn ở đây chỉ cần biết spinner đang là của lượt bấm nào.
       if (latestRequestRef.current === id) setOpeningId(null);
     }
   };
@@ -197,11 +205,11 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
               className="history-thumb"
               style={{
                 ...thumbBtn,
-                outline: item.id === currentId ? "2px solid var(--accent)" : "2px solid transparent",
+                outline:
+                  item.id === currentId
+                    ? "2px solid var(--accent)"
+                    : "2px solid transparent",
                 opacity: openingId === item.id ? 0.55 : 1,
-                // Chặn double-click gây race giữa 2 lần nạp ảnh trong lúc 1
-                // ảnh khác đang nạp — không chặn hover/click ảnh đang mở (item
-                // đó bấm lại chỉ no-op, xem `openImageInEditor`).
                 cursor: openingId ? "wait" : "pointer",
               }}
               onClick={() => openItem(item)}
@@ -209,9 +217,20 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                 e.preventDefault();
                 setMenu({ id: item.id, x: e.clientX, y: e.clientY });
               }}
-              title={isVideo ? t("historyStrip.openVideoEditor") : t("historyStrip.reopenEditor")}
+              title={
+                isVideo
+                  ? t("historyStrip.openVideoEditor")
+                  : t("historyStrip.reopenEditor")
+              }
             >
-              <img src={convertFileSrc(item.thumbPath)} alt="" style={thumbImg} loading="lazy" />
+              <img
+                src={thumbVersions[item.id]
+                  ? `${convertFileSrc(item.thumbPath)}?v=${thumbVersions[item.id]}`
+                  : convertFileSrc(item.thumbPath)}
+                alt=""
+                style={thumbImg}
+                loading="lazy"
+              />
               {/* `.history-thumb-action`: ẩn mặc định, chỉ hiện khi hover vào
                   `.history-thumb` (xem CSS ở `global.css`) — dùng class thay vì
                   style JS vì đây thuần hiệu ứng hover, không cần biết state ở

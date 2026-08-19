@@ -31,19 +31,33 @@ pub fn take_pending_video(state: State<AppState>) -> Option<PendingVideo> {
 }
 
 /// Ghi đè ảnh đang chờ với output="editor" — dùng cho nút "Mở Editor" ở
-/// "Chụp nhanh" (ảnh đã flatten annotation vào pixel) để bàn giao sang cửa
-/// sổ Editor đầy đủ qua đúng pipeline `take_pending` có sẵn.
+/// "Chụp nhanh" để bàn giao sang cửa sổ Editor đầy đủ qua đúng pipeline
+/// `take_pending` có sẵn.
 /// `data`: data URL đầy đủ (`data:image/png;base64,...`) hoặc base64 trần —
 /// tách bỏ phần prefix nếu có, giữ đúng quy ước của `PendingCapture.base64`.
+/// `doc_json`: lớp annotation đã serialize (DocPayload JSON) — khi có, Editor
+/// dựng lại đúng các annotation object để user chỉnh tiếp, thay vì nhận ảnh
+/// phẳng mà không còn annotation nào. `None` = không có annotation, ảnh sạch.
 #[tauri::command]
-pub fn set_pending_image(app: AppHandle, state: State<AppState>, data: String, width: u32, height: u32) {
+pub fn set_pending_image(
+    app: AppHandle,
+    state: State<AppState>,
+    data: String,
+    width: u32,
+    height: u32,
+    doc_json: Option<String>,
+    scale_factor: Option<f64>,
+) {
     let base64 = data.split(',').next_back().unwrap_or(&data).to_string();
+    let scale = scale_factor.unwrap_or(1.0);
 
     // "Mở Editor" từ Quick Capture cũng là một capture hoàn chỉnh (đối xứng với
     // nhánh `_ => open_editor` của `flow::finish`) — ingest ngay để History
     // ghi nhận mọi đường ra editor, không chỉ Copy/Save.
+    // Ảnh ingest là ảnh NỀN THÔ (screenshot chưa ghép annotation): annotation
+    // đi riêng qua doc_json và được lưu non-destructive, giữ pixel nền sạch.
     let cap = crate::capture::Capture { base64: base64.clone(), width, height };
-    let history_id = match crate::history::ingest(&app, &cap, "quick", 1.0) {
+    let history_id = match crate::history::ingest(&app, &cap, "quick", scale) {
         Ok(rec) => Some(rec.id),
         Err(e) => {
             eprintln!("[SnapDoc][history] ingest (set_pending_image) thất bại: {e}");
@@ -57,9 +71,12 @@ pub fn set_pending_image(app: AppHandle, state: State<AppState>, data: String, w
             width,
             height,
             output: "editor".to_string(),
-            scale_factor: 1.0,
+            scale_factor: scale,
             history_id,
             capture_mode: "quick".to_string(),
+            doc_json,
+            doc_is_draft: false,
+            file_path: None,
         });
     }
 }
@@ -301,6 +318,36 @@ pub fn close_self(window: tauri::WebviewWindow) {
     let _ = window.close();
 }
 
+/// Frontend báo cửa sổ editor này đang có / không còn thay đổi chưa lưu.
+///
+/// Tự đọc `window.label()` (không nhận label qua tham số) để một cửa sổ không
+/// thể khai hộ cửa sổ khác — cùng kỹ thuật với `take_open_file`. Quan trọng
+/// trên macOS vì "Open with" mở thêm các cửa sổ `editor-ow-N` độc lập.
+///
+/// Đặt luôn title cửa sổ ở ĐÂY (Rust) chứ không gọi `setTitle()` bên JS:
+/// `core:default` chỉ cho `core:window:allow-title` (getter), KHÔNG cho
+/// `allow-set-title`, nên làm bên JS sẽ phải nới ACL trong
+/// `capabilities/default.json` cho `windows: ["*"]` — đổi bề mặt quyền của mọi
+/// webview (kể cả overlay) chỉ để đổi một dòng chữ. Phía Rust không qua ACL.
+#[tauri::command]
+pub fn set_editor_dirty(window: WebviewWindow, state: State<AppState>, dirty: bool) {
+    let label = window.label().to_string();
+    if let Ok(mut map) = state.editor_dirty.lock() {
+        if dirty {
+            map.insert(label, true);
+        } else {
+            // Xoá hẳn key thay vì set `false` — cửa sổ editor bị destroy sẽ
+            // không để lại rác trong map (không có hook nào dọn theo label).
+            map.remove(&label);
+        }
+    }
+    let _ = window.set_title(if dirty {
+        "• SnapDoc — Editor"
+    } else {
+        "SnapDoc — Editor"
+    });
+}
+
 /// Ẩn thumbnail window (giữ pre-warmed, không destroy).
 #[tauri::command]
 pub fn hide_thumbnail(app: AppHandle) {
@@ -328,9 +375,90 @@ pub fn take_open_file(window: tauri::WebviewWindow, app: AppHandle) -> Option<St
         .remove(&label)
 }
 
+/// Mở một file `.snapdoc` từ đĩa: nạp nền + lớp annotation vào editor, và ghi
+/// nhớ đường dẫn để Save ghi THẲNG lại chính file đó (không dialog, không đụng
+/// Library) — đúng ngữ nghĩa một trình soạn tài liệu.
+///
+/// Cố tình KHÔNG ingest vào Library như ảnh PNG ngoài: đây đã là định dạng tài
+/// liệu của app, ingest chỉ tạo ra một bản sao thứ hai để user phải tự hỏi bản
+/// nào là thật.
+fn open_snapdoc_path(app: &AppHandle, path: &str) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let f = crate::snapdoc_file::read_snapdoc(std::path::Path::new(path))?;
+    let img = image::load_from_memory(&f.base_png)
+        .map_err(|e| format!("Ảnh nền trong .snapdoc không hợp lệ: {e}"))?;
+    let doc_is_draft = f.draft_json.is_some();
+    let doc_json = f.effective_doc().to_string();
+    {
+        let state = app.state::<AppState>();
+        let mut guard = state.pending.lock().map_err(|_| "Lock error".to_string())?;
+        *guard = Some(PendingCapture {
+            base64: STANDARD.encode(&f.base_png),
+            width: img.width(),
+            height: img.height(),
+            output: "editor".to_string(),
+            scale_factor: 1.0,
+            history_id: None,
+            capture_mode: "file".to_string(),
+            doc_json: Some(doc_json),
+            doc_is_draft,
+            file_path: Some(path.to_string()),
+        });
+    }
+    windows::open_editor(app)
+}
+
+/// Ghi lại một file `.snapdoc` trên đĩa (Editor Save cho tài liệu file-backed).
+///
+/// `base` chỉ truyền khi ảnh nền thật sự đổi (crop/stitch/flatten); `None` thì
+/// giữ nguyên nền đang có trong file, khỏi đẩy vài MB base64 qua IPC.
+#[tauri::command]
+pub async fn save_snapdoc_file(
+    path: String,
+    doc_json: String,
+    preview: String,
+    base: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = std::path::Path::new(&path);
+        let preview_bytes = crate::history::decode_image_data(&preview)?;
+        let (base_bytes, created_at) = match &base {
+            Some(d) => (
+                crate::history::decode_image_data(d)?,
+                crate::snapdoc_file::read_snapdoc(p).map(|f| f.created_at).unwrap_or(0),
+            ),
+            None => {
+                let f = crate::snapdoc_file::read_snapdoc(p)?;
+                (f.base_png, f.created_at)
+            }
+        };
+        crate::snapdoc_file::write_snapdoc(
+            p,
+            crate::snapdoc_file::WriteSnapdoc {
+                base_png: &base_bytes,
+                doc_json: &doc_json,
+                // Save = chốt bản nháp thành bản chính.
+                draft_json: None,
+                preview_png: &preview_bytes,
+                created_at,
+                updated_at: crate::history::now_ms_pub(),
+            },
+        )
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
+}
+
 /// Hàm nội bộ — gọi được từ lib.rs (RunEvent::Opened, Windows argv).
 pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
+
+    // Tài liệu `.snapdoc` đi đường riêng: nó là container ZIP, `image::load_from_memory`
+    // bên dưới sẽ fail. Nhận dạng bằng magic bytes chứ không bằng phần mở rộng.
+    if crate::snapdoc_file::is_snapdoc(std::path::Path::new(&path)) {
+        return open_snapdoc_path(app, &path);
+    }
 
     let bytes = std::fs::read(&path)
         .map_err(|e| format!("Không đọc được file: {e}"))?;
@@ -377,6 +505,9 @@ pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> 
                 // app tự chụp) — history_id luôn None cho luồng này.
                 history_id: None,
                 capture_mode: "file".to_string(),
+                doc_json: None,
+                doc_is_draft: false,
+                file_path: None,
             });
         }
         windows::open_editor(app)?;
@@ -388,17 +519,29 @@ pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> 
     }
 }
 
-/// Mở file dialog để chọn ảnh PNG/JPG, đọc nội dung và trả về base64 data URL.
-/// Trả về None nếu user huỷ.
+/// Kết quả mở file từ dialog. Không còn chỉ là một data URL vì `.snapdoc` mang
+/// thêm lớp annotation và đường dẫn gốc (Save ghi thẳng lại file đó).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenedFile {
+    /// Data URL của pixel NỀN (với ảnh thường: chính nội dung file).
+    pub data_url: String,
+    /// Lớp annotation — chỉ có với `.snapdoc`.
+    pub doc_json: Option<String>,
+    /// Đường dẫn file — chỉ đặt cho `.snapdoc` (tài liệu file-backed).
+    pub file_path: Option<String>,
+}
+
+/// Mở file dialog chọn ảnh hoặc tài liệu `.snapdoc`. `None` nếu user huỷ.
 #[tauri::command]
-pub async fn open_file_dialog(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn open_file_dialog(app: AppHandle) -> Result<Option<OpenedFile>, String> {
     use tauri_plugin_dialog::DialogExt;
     use base64::{engine::general_purpose::STANDARD, Engine};
 
     let path = app
         .dialog()
         .file()
-        .add_filter("Ảnh", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
+        .add_filter("Ảnh & tài liệu SnapDoc", &["snapdoc", "png", "jpg", "jpeg", "webp", "bmp", "gif"])
         .blocking_pick_file();
 
     let path = match path {
@@ -407,6 +550,18 @@ pub async fn open_file_dialog(app: AppHandle) -> Result<Option<String>, String> 
     };
 
     let path_str = path.to_string();
+
+    // `.snapdoc` là container ZIP — nhận dạng bằng magic bytes, không bằng phần
+    // mở rộng (user có thể đổi tên file).
+    if crate::snapdoc_file::is_snapdoc(std::path::Path::new(&path_str)) {
+        let f = crate::snapdoc_file::read_snapdoc(std::path::Path::new(&path_str))?;
+        return Ok(Some(OpenedFile {
+            data_url: format!("data:image/png;base64,{}", STANDARD.encode(&f.base_png)),
+            doc_json: Some(f.effective_doc().to_string()),
+            file_path: Some(path_str),
+        }));
+    }
+
     let bytes = std::fs::read(&path_str)
         .map_err(|e| format!("Không đọc được file: {e}"))?;
 
@@ -420,7 +575,11 @@ pub async fn open_file_dialog(app: AppHandle) -> Result<Option<String>, String> 
     };
 
     let b64 = STANDARD.encode(&bytes);
-    Ok(Some(format!("data:{mime};base64,{b64}")))
+    Ok(Some(OpenedFile {
+        data_url: format!("data:{mime};base64,{b64}"),
+        doc_json: None,
+        file_path: None,
+    }))
 }
 
 /// Mở dialog chọn NHIỀU ảnh cùng lúc → trả về danh sách data URL (theo thứ tự

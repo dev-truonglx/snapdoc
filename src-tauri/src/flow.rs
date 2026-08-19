@@ -64,7 +64,29 @@ fn hide_bar_for_freeze(app: &AppHandle) {
 /// chưa kịp compositor bỏ frame chứa editor ra khỏi màn hình, khiến ảnh frozen
 /// (hoặc ảnh chụp toàn màn hình) vẫn còn "dính" editor. Chỉ sleep khi editor
 /// THẬT SỰ đang visible (tránh delay thừa mỗi lần chụp khi editor đã ẩn sẵn).
-fn hide_editor_for_freeze(app: &AppHandle) {
+pub(crate) fn hide_editor_for_freeze(app: &AppHandle) {
+    // Nhớ lại việc ta sắp ẩn một editor ĐANG có thay đổi chưa lưu, để các
+    // nhánh chụp không tự mở lại editor (`output = "clipboard"`/`"save"`, huỷ
+    // overlay bằng Esc) vẫn hiện nó lại — xem
+    // `windows::show_editor_if_hidden_dirty`. Chỉ set khi cửa sổ THẬT SỰ đang
+    // hiện và THẬT SỰ đang dirty, để diff này vô hình với editor sạch.
+    {
+        let visible = app
+            .get_webview_window("editor")
+            .map(|w| w.is_visible().unwrap_or(false))
+            .unwrap_or(false);
+        let dirty = app
+            .state::<AppState>()
+            .editor_dirty
+            .lock()
+            .map(|m| m.get("editor").copied().unwrap_or(false))
+            .unwrap_or(false);
+        if visible && dirty {
+            app.state::<AppState>()
+                .editor_hidden_dirty
+                .store(true, Ordering::SeqCst);
+        }
+    }
 
     // Danh sách tất cả labels cần loại khỏi capture
     let labels = ["editor", "capture-bar"]; // thêm "settings", "history" nếu cần
@@ -177,6 +199,10 @@ fn wait_capture_delay(app: &AppHandle) -> bool {
                 if bar_was_visible {
                     let _ = windows::open_capture_bar(app);
                 }
+                // Huỷ hẹn giờ → không có lần chụp nào, nên không có gì mở lại
+                // editor. Nếu ta vừa ẩn một editor đang dở việc thì phải hiện
+                // lại, nếu không user mất đường vào chính việc của mình.
+                windows::show_editor_if_hidden_dirty(app);
                 return false;
             }
             prev_esc = esc;
@@ -465,6 +491,10 @@ fn store(app: &AppHandle, cap: &capture::Capture, output: &str, scale_factor: f6
         scale_factor,
         history_id: None,
         capture_mode: mode.to_string(),
+        // Ảnh vừa chụp chưa có annotation nào.
+        doc_json: None,
+        doc_is_draft: false,
+        file_path: None,
     });
 }
 
@@ -533,6 +563,9 @@ pub fn finish(
         "clipboard" => {
             clipboard::copy_png(&cap.base64)?;
             auto_export_copy(app, &cap, ingested_id.as_deref());
+            // Nhánh này mở THUMBNAIL, không mở editor — nên phải tự hiện lại
+            // editor nếu vừa ẩn nó lúc nó đang dở việc.
+            windows::show_editor_if_hidden_dirty(app);
             windows::open_thumbnail(app)
         }
         "copy_editor" => {
@@ -564,6 +597,8 @@ pub fn finish(
                     p.output = format!("saved:{saved}");
                 }
             }
+            // Như nhánh "clipboard": mở thumbnail chứ không mở editor.
+            windows::show_editor_if_hidden_dirty(app);
             windows::open_thumbnail(app)
         }
         _ => {
@@ -998,6 +1033,14 @@ pub fn cancel_overlay(app: &AppHandle) {
     windows::close_overlays(app);
     windows::restore_regular_activation(app);
 
+    // Huỷ overlay (Esc) = không có lần chụp nào, nên không có gì mở lại editor.
+    // Hiện lại nếu ta vừa ẩn một editor đang dở việc. Gọi TRƯỚC khối khôi phục
+    // focus macOS bên dưới (và bản thân hàm này không `set_focus()`) nên editor
+    // hiện ra mà KHÔNG giành frontmost khỏi app user đang dùng.
+    // No-op ở đường "Mở trong Editor" của Chụp nhanh: `open_editor` chạy trước
+    // `cancel_overlay` ở đó và đã xoá cờ.
+    windows::show_editor_if_hidden_dirty(app);
+
     // macOS: dọn dẹp trạng thái focus/ẩn của phiên Chụp nhanh (no-op nếu
     // phiên này không phải Chụp nhanh — cả 2 field chỉ được set trong
     // `start_quick`). THỨ TỰ BẮT BUỘC: trả frontmost về app cũ TRƯỚC (nếu
@@ -1210,8 +1253,10 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
-/// Gọi sau khi freeze xong để restore cửa sổ trở lại bình thường
-fn restore_capture_affinity(app: &AppHandle) {
+/// Gọi sau khi freeze xong để restore cửa sổ trở lại bình thường —
+/// bỏ cờ `WDA_EXCLUDEFROMCAPTURE` mà `hide_editor_for_freeze` đã đặt, nếu
+/// không thì cửa sổ hiện lại sẽ vô hình trong mọi lần chụp sau đó.
+pub(crate) fn restore_capture_affinity(app: &AppHandle) {
     #[cfg(target_os = "windows")]
     {
         use crate::capture::win_affinity;

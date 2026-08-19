@@ -28,6 +28,40 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
     setTitleDraft(item?.title ?? "");
   }, [item?.id]);
 
+  // Ảnh xem trước phải đi qua IPC → Blob → object URL, KHÔNG dùng
+  // `convertFileSrc(assetPath)` như trước: asset của ảnh giờ là container
+  // `.snapdoc` (ZIP chứa nền + lớp annotation), `<img>` không render được. Bytes
+  // lấy về là `preview.png` — bản ĐÃ ghép annotation, tức đúng cái user thấy
+  // trong Editor và trên thumbnail. Video thì `asset_path` vẫn là file .mp4
+  // thật nên giữ nguyên đường asset protocol.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const previewKey = item && item.mediaType !== "video" ? `${item.id}:${item.updatedAt}` : null;
+  useEffect(() => {
+    if (!previewKey) {
+      setPreviewUrl(null);
+      return;
+    }
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let url: string | null = null;
+    let alive = true;
+    ipc
+      .getHistoryPreviewBytes(previewKey.split(":")[0])
+      .then((bytes) => {
+        if (!alive) return;
+        url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+        setPreviewUrl(url);
+      })
+      .catch(() => {
+        if (alive) setPreviewUrl(null);
+      });
+    // Revoke ngay khi đổi item / unmount — thiếu bước này là rò memory ở cửa
+    // sổ History (mỗi lần chọn ảnh giữ lại một bản ảnh gốc trong RAM).
+    return () => {
+      alive = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [previewKey]);
+
   if (!item) {
     return <div style={{ ...panel, alignItems: "center", justifyContent: "center", color: "var(--text-dim)" }}>{t("history.selectItem")}</div>;
   }
@@ -95,11 +129,15 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
             style={previewImg}
             controls
           />
+        ) : previewUrl ? (
+          // Object URL mới mỗi lần đổi item/`updatedAt` nên KHÔNG cần `?v=`
+          // bust cache như trước (asset ghi đè tại chỗ từng khiến webview hiện
+          // bản cũ trong cache).
+          <img src={previewUrl} alt="" style={previewImg} />
         ) : (
-          // `?v=` bust cache như HistoryItemCard: sửa ảnh từ Editor ghi đè
-          // TẠI CHỖ cùng asset_path — thiếu query này preview hiện bản cũ
-          // trong cache của webview.
-          <img src={`${convertFileSrc(item.assetPath)}?v=${item.updatedAt}`} alt="" style={previewImg} />
+          <div style={{ ...previewImg, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
+            …
+          </div>
         )}
       </div>
 

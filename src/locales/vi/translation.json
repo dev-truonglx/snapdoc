@@ -281,7 +281,9 @@
     "saveCopy": "Lưu + Copy (Ctrl/Cmd+Alt+S)",
     "copy": "Copy vào clipboard (Ctrl/Cmd+C)",
     "strokeWidth": "Nét {{n}}px",
-    "color": "Màu"
+    "color": "Màu",
+    "unsaved": "Chưa lưu",
+    "unsavedHint": "Có thay đổi chưa lưu — nhấn Ctrl/Cmd+S để lưu"
   },
   "editorMain": {
     "copiedClipboard": "Đã copy vào clipboard",
@@ -298,7 +300,15 @@
     "flattenItem3": "Ảnh sau khi flatten vẫn <1>chưa được lưu</1> — bạn cần bấm Save để lưu tiếp.",
     "flattenCancel": "Huỷ",
     "flattenConfirm": "Flatten",
-    "errorOpeningFile": "Lỗi mở file: {{error}}"
+    "errorOpeningFile": "Lỗi mở file: {{error}}",
+    "previousEditKept": "Bản chỉnh sửa trước đã được giữ lại",
+    "resumePreviousEdit": "Quay lại",
+    "resumeUnavailable": "Không còn giữ được bản chỉnh sửa đó (đã quá số phiên lưu tạm)",
+    "saved": "Đã lưu",
+    "draftFoundPrompt": "Tìm thấy bản chỉnh sửa chưa lưu từ trước.",
+    "draftKeep": "Tiếp tục",
+    "draftDiscard": "Bỏ",
+    "draftDiscarded": "Đã bỏ bản chỉnh sửa chưa lưu"
   },
   "historyStrip": {
     "recent": "Gần đây",
@@ -310,7 +320,8 @@
     "viewAll": "Xem tất cả →",
     "quickCopy": "Copy nhanh vào clipboard",
     "viewInFolder": "Xem file trong Thư mục",
-    "deletePermanent": "Xoá vĩnh viễn (cả file trên máy)"
+    "deletePermanent": "Xoá vĩnh viễn (cả file trên máy)",
+    "hasUnsavedEdit": "Đang có bản chỉnh sửa chưa lưu — bấm để tiếp tục"
   },
   "quickToolbar": {
     "selectColor": "Chọn màu",

@@ -25,6 +25,7 @@ pub struct MonitorSnap {
 /// Ảnh vừa chụp đang chờ xử lý (editor / clipboard / thumbnail).
 #[derive(Clone, serde::Serialize)]
 pub struct PendingCapture {
+    /// Pixel NỀN (chưa ghép annotation) — base64 trần, không prefix data URL.
     pub base64: String,
     pub width: u32,
     pub height: u32,
@@ -40,6 +41,25 @@ pub struct PendingCapture {
     /// còn lại → fit cả chiều rộng/cao (xem `AnnotationStage.tsx`).
     #[serde(default)]
     pub capture_mode: String,
+    /// Lớp annotation đi kèm (`doc.json` hiệu lực trong container `.snapdoc`,
+    /// tức `draft.json` nếu có) — Editor dựng lại đúng trạng thái đang sửa thay
+    /// vì mở ảnh trống. `None` cho ảnh vừa chụp (chưa có annotation nào) và cho
+    /// item PNG thế hệ cũ.
+    #[serde(default, rename = "docJson")]
+    pub doc_json: Option<String>,
+    /// `true` khi `doc_json` là BẢN NHÁP (`draft.json`) chứ không phải bản đã
+    /// lưu. Editor phải biết để (a) đánh dấu tài liệu là CHƯA LƯU — nháp phục
+    /// hồi thì đúng nghĩa là chưa lưu, để clean thì badge tắt và autosave ngừng
+    /// ghi — và (b) hỏi user muốn tiếp tục hay bỏ, thay vì lặng lẽ đắp annotation
+    /// cũ lên một ảnh mà user tưởng còn nguyên.
+    #[serde(default, rename = "docIsDraft")]
+    pub doc_is_draft: bool,
+    /// Đường dẫn file `.snapdoc` trên đĩa mà tài liệu này ĐẾN TỪ (mở qua "Open
+    /// with"/Cmd+O). Có giá trị → Editor Save ghi THẲNG lại chính file đó, không
+    /// mở dialog và không đụng Library — đúng ngữ nghĩa một trình soạn tài liệu.
+    /// `None` cho mọi thứ đến từ Library hoặc vừa chụp.
+    #[serde(default, rename = "filePath")]
+    pub file_path: Option<String>,
 }
 
 /// Video đang chờ mở trong Editor — đã CÓ SẴN trong History (`history_id`
@@ -178,4 +198,23 @@ pub struct AppState {
     /// `flow::wait_capture_delay`) — bump lên để huỷ đếm ngược đang chạy dở
     /// (user bấm Esc, hoặc trigger 1 lần chụp mới trong lúc đang đếm).
     pub countdown_gen: AtomicU64,
+    /// Cờ "cửa sổ editor này đang có thay đổi chưa lưu", key = LABEL cửa sổ.
+    ///
+    /// Phải theo label chứ không phải 1 `AtomicBool` chung: trên macOS "Open
+    /// with" mở thêm các cửa sổ `editor-ow-N` (xem `windows::open_editor_with_file`)
+    /// nên một cửa sổ đang dở việc mà dùng cờ chung sẽ khoá cả các cửa sổ khác.
+    ///
+    /// Frontend đẩy lên qua `commands::set_editor_dirty` với debounce BẤT ĐỐI
+    /// XỨNG: `true` gửi ngay (leading edge), `false` gửi trễ. Cờ `true` cũ đi
+    /// quá hạn chỉ tốn 1 lần cảnh báo thừa; cờ `false` cũ đi quá hạn thì mất
+    /// việc của user.
+    pub editor_dirty: Mutex<HashMap<String, bool>>,
+    /// `true` khi phiên chụp hiện tại đã ẩn một cửa sổ editor ĐANG dirty (xem
+    /// `flow::hide_editor_for_freeze`). Có những nhánh chụp KHÔNG bao giờ mở
+    /// lại editor — `output = "clipboard"`/`"save"` chỉ mở cửa sổ thumbnail,
+    /// còn huỷ overlay (Esc) thì không hiện lại gì cả — nên nếu không có cờ
+    /// này thì cửa sổ chứa việc chưa lưu bị ẩn và KHÔNG CÓ CÁCH NÀO mở lại
+    /// (tray không có mục "Mở editor", `RunEvent::Reopen` mở capture-bar).
+    /// Đọc-và-xoá bằng `swap(false)` trong `windows::show_editor_if_hidden_dirty`.
+    pub editor_hidden_dirty: AtomicBool,
 }

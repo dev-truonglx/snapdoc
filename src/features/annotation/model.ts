@@ -111,6 +111,11 @@ export interface Doc {
    * "region" → 100%, còn lại → fit cả chiều rộng/cao. `undefined` cho ảnh mở
    * từ file ngoài (không có khái niệm "mode", fit như bình thường). */
   captureMode?: string;
+  /** Đường dẫn file `.snapdoc` trên đĩa mà tài liệu này đến từ (mở qua "Open
+   * with"/Cmd+O). Có giá trị → Save ghi THẲNG lại chính file đó, không mở dialog
+   * và không đụng Library, đúng ngữ nghĩa một trình soạn tài liệu.
+   * `undefined` cho mọi thứ đến từ Library hoặc vừa chụp. */
+  filePath?: string | null;
 }
 
 export const uid = (): string =>

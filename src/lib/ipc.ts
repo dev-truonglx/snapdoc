@@ -12,6 +12,7 @@ export interface PendingVideo {
 }
 
 export interface Pending {
+  /** Pixel NỀN (chưa ghép annotation) — base64 trần, không prefix data URL. */
   base64: string;
   width: number;
   height: number;
@@ -23,6 +24,22 @@ export interface Pending {
   /** Mode đã chụp ra ảnh này ("region"/"window"/"full"/"all"/"scroll"/"quick"/
    * "file") — Editor dùng để chọn zoom mặc định, xem `AnnotationStage.tsx`. */
   capture_mode: string;
+  /** Lớp annotation đi kèm (`doc.json` hiệu lực trong container `.snapdoc`,
+   * tức `draft.json` nếu có) — Editor dựng lại đúng trạng thái đang sửa. `null`
+   * cho ảnh vừa chụp (chưa có annotation) và item PNG thế hệ cũ. */
+  docJson?: string | null;
+  /** `true` khi `docJson` là BẢN NHÁP chưa lưu — Editor phải đánh dấu tài liệu
+   * là chưa lưu (nếu để clean thì badge tắt và autosave ngừng ghi) và hỏi user
+   * muốn tiếp tục hay bỏ. */
+  docIsDraft?: boolean;
+  /** Đường dẫn file `.snapdoc` nguồn — có giá trị → Save ghi thẳng lại file đó. */
+  filePath?: string | null;
+}
+
+/** Lớp annotation kèm cờ "là bản nháp chưa lưu". */
+export interface DocLayer {
+  json: string;
+  isDraft: boolean;
 }
 
 // ── History / Library ────────────────────────────────────────────────────────
@@ -125,6 +142,17 @@ export interface Settings {
   language?: string;
 }
 
+/** Kết quả mở file từ dialog. Không chỉ là data URL vì `.snapdoc` mang thêm lớp
+ * annotation và đường dẫn gốc (Save ghi thẳng lại file đó). */
+export interface OpenedFile {
+  /** Data URL của pixel NỀN (với ảnh thường: chính nội dung file). */
+  dataUrl: string;
+  /** Lớp annotation — chỉ có với `.snapdoc`. */
+  docJson: string | null;
+  /** Đường dẫn file — chỉ có với `.snapdoc` (tài liệu file-backed). */
+  filePath: string | null;
+}
+
 export interface UpdateInfo {
   available: boolean;
   version: string;
@@ -144,9 +172,12 @@ export const ipc = {
   takePending: () => invoke<Pending | null>("take_pending"),
   peekPendingVideo: () => invoke<PendingVideo | null>("peek_pending_video"),
   takePendingVideo: () => invoke<PendingVideo | null>("take_pending_video"),
-  /** Ghi đè ảnh đang chờ (output="editor") — dùng khi "Chụp nhanh" bàn giao ảnh đã annotate sang Editor. */
-  setPendingImage: (data: string, width: number, height: number) =>
-    invoke<void>("set_pending_image", { data, width, height }),
+  /** Ghi đè ảnh đang chờ (output="editor") — dùng khi "Chụp nhanh" bàn giao sang Editor.
+   * `docJson`: lớp annotation serialize (DocPayload JSON) — khi có, Editor dựng lại
+   * annotation objects để user chỉnh tiếp; `null` = ảnh sạch không có annotation.
+   * `scaleFactor`: DPI scale factor của màn hình nguồn (1.0 = normal, 2.0 = Retina 2×). */
+  setPendingImage: (data: string, width: number, height: number, docJson?: string | null, scaleFactor?: number) =>
+    invoke<void>("set_pending_image", { data, width, height, docJson: docJson ?? null, scaleFactor: scaleFactor ?? 1.0 }),
   /** macOS: lấy data URL ảnh "Open with" của chính cửa sổ editor này (theo label). */
   takeOpenFile: () => invoke<string | null>("take_open_file"),
   captureNow: (mode: CaptureMode, output: OutputMode) =>
@@ -184,8 +215,16 @@ export const ipc = {
   openEditor: () => invoke<void>("open_editor"),
   openSettings: () => invoke<void>("open_settings"),
   closeSelf: () => invoke<void>("close_self"),
+  /** Báo Rust cửa sổ editor này đang có / không còn thay đổi chưa lưu. Rust
+   * dùng để đặt title cửa sổ VÀ để biết có phải hiện lại editor sau những
+   * nhánh chụp không tự mở editor (xem `windows::show_editor_if_hidden_dirty`). */
+  setEditorDirty: (dirty: boolean) => invoke<void>("set_editor_dirty", { dirty }),
   hideThumbnail: () => invoke<void>("hide_thumbnail"),
-  openFile: () => invoke<string | null>("open_file_dialog"),
+  openFile: () => invoke<OpenedFile | null>("open_file_dialog"),
+  /** Ghi lại một file `.snapdoc` trên đĩa — Save cho tài liệu file-backed (mở
+   * qua "Open with"/Cmd+O). `base` chỉ truyền khi ảnh nền thật sự đổi. */
+  saveSnapdocFile: (path: string, docJson: string, preview: string, base?: string) =>
+    invoke<void>("save_snapdoc_file", { path, docJson, preview, base }),
   /** Chọn nhiều ảnh cùng lúc (cho tính năng nối ảnh) → mảng data URL theo thứ tự chọn. */
   openFiles: () => invoke<string[]>("open_files_dialog"),
   defaultSaveDir: () => invoke<string>("default_save_dir"),
@@ -226,7 +265,27 @@ export const ipc = {
    * Editor (xem `HistoryStrip.tsx`), tránh chi phí base64+JSON của
    * `openHistoryItemInEditor`. */
   getHistoryAssetBytes: (id: string) => invoke<ArrayBuffer>("get_history_asset_bytes", { id }),
-  updateHistoryAsset: (id: string, data: string) => invoke<HistoryItem>("update_history_asset", { id, data }),
+  /** Bản ĐÃ ghép annotation của một item ảnh (`preview.png` trong container
+   * `.snapdoc`) — raw bytes. Cửa sổ History dùng để render `<img>` qua Blob:
+   * `.snapdoc` là ZIP nên `convertFileSrc(assetPath)` không render được. */
+  getHistoryPreviewBytes: (id: string) => invoke<ArrayBuffer>("get_history_preview_bytes", { id }),
+  /** Lớp annotation hiệu lực (nháp nếu có, ngược lại bản đã lưu) của một item.
+   * `null` cho video và cho item PNG thế hệ cũ. */
+  getHistoryDocJson: (id: string) => invoke<DocLayer | null>("get_history_doc_json", { id }),
+  /** Editor Save — PHI HUỶ: giữ nguyên pixel nền, lưu annotation thành JSON
+   * cạnh nó, xoá bản nháp, render lại preview + thumbnail. `base` chỉ truyền
+   * khi ẢNH NỀN thật sự đổi (crop/stitch/flatten) để một lần Save
+   * chỉ-annotation không phải đẩy vài MB base64 qua IPC. */
+  saveHistoryDoc: (id: string, docJson: string, preview: string, base?: string) =>
+    invoke<HistoryItem>("save_history_doc", { id, docJson, preview, base }),
+  /** Autosave bản nháp. `false` = chưa ghi được (container chưa tồn tại, hoặc
+   * item còn ở định dạng PNG cũ) — KHÔNG phải lỗi, xem `put_history_draft_sync`. */
+  putHistoryDraft: (id: string, docJson: string) =>
+    invoke<boolean>("put_history_draft", { id, docJson }),
+  discardHistoryDraft: (id: string) => invoke<void>("discard_history_draft", { id }),
+  /** Id các item còn bản nháp chưa lưu — badge ở dải "Gần đây" sau khi khởi
+   * động lại app (phiên trong RAM đã mất nhưng nháp trên đĩa còn). */
+  listItemsWithDraft: () => invoke<string[]>("list_items_with_draft"),
   copyHistoryItem: (id: string) => invoke<void>("copy_history_item", { id }),
   revealHistoryItem: (id: string) => invoke<void>("reveal_history_item", { id }),
   /** Ghi lại đường dẫn bản Save/Save As gần nhất ra thư mục tuỳ chọn — gọi
@@ -234,8 +293,12 @@ export const ipc = {
    * mục" mở đúng chỗ user đã lưu thay vì file gốc nội bộ. */
   setHistoryExportedPath: (id: string, path: string) => invoke<HistoryItem>("set_history_exported_path", { id, path }),
   openHistory: () => invoke<void>("open_history"),
-  finishQuickCapture: (data: string, width: number, height: number, output: string) =>
-    invoke<string | null>("finish_quick_capture", { data, width, height, output }),
+  /** Cập nhật thumbnail của một item ảnh từ preview đã ghép annotation —
+   * dùng để live-update dải "Gần đây" khi user vẽ. Best-effort, lỗi chỉ log. */
+  updateHistoryThumb: (id: string, previewData: string) =>
+    invoke<void>("update_history_thumb", { id, previewData }),
+  finishQuickCapture: (data: string, width: number, height: number, output: string, baseData?: string | null, docJson?: string | null) =>
+    invoke<string | null>("finish_quick_capture", { data, width, height, output, baseData: baseData ?? null, docJson: docJson ?? null }),
   // Quay màn hình — dừng quay/xem trạng thái chủ yếu vẫn qua tray icon (menu
   // bar, xem src-tauri/src/tray.rs); `stopRecording`/`recordingStatus` bên
   // dưới chỉ thêm 1 đường nữa cho popup "đang quay" trên Windows.

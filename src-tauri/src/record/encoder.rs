@@ -542,8 +542,10 @@ mod tests {
 
         let out = tmp_dir.join("trimmed.mp4");
         // Giữ 0–1.5s và 3.5–5s (xoá đoạn giữa 1.5–3.5s) → kết quả ~3s.
-        let mut last_progress = 0.0;
-        trim(&src, &[(0, 1_500), (3_500, 5_000)], &out, |p| last_progress = p)
+        let mut last_progress: f64 = 0.0;
+        // `remove_audio = false`: video test không có audio track, và test này
+        // kiểm cú pháp ffmpeg của đường cắt, không kiểm nhánh bỏ audio.
+        trim(&src, &[(0, 1_500), (3_500, 5_000)], &out, false, |p| last_progress = p)
             .expect("trim() thất bại — kiểm tra cú pháp ffmpeg");
         assert!((last_progress - 1.0).abs() < 1e-9, "progress cuối phải là 1.0, thấy {last_progress}");
 
