@@ -176,7 +176,9 @@
   },
   "recordStop": {
     "stopping": "Stopping…",
-    "stopRecording": "■ Stop recording"
+    "stopRecording": "■ Stop recording",
+    "pause": "Pause",
+    "resume": "Resume"
   },
   "scroll": {
     "title": "Capture scroll",
@@ -395,7 +397,11 @@
   },
   "recordingIndicator": {
     "clickToStop": "Click to stop recording",
-    "stopping": "Stopping…"
+    "clickToToggle": "Click time to stop · Click ⏸ to pause",
+    "stopping": "Stopping…",
+    "paused": "Paused",
+    "pause": "Pause",
+    "resume": "Resume"
   },
   "historyView": {
     "noCaptures": "No captures in this range.",

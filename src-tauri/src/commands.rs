@@ -899,6 +899,27 @@ pub fn recording_status(app: AppHandle) -> Option<u64> {
     crate::record::status(&app)
 }
 
+/// Tạm dừng phiên quay hiện tại — writer thread video/audio sẽ drop
+/// frame/chunk trong lúc paused, đồng hồ đếm cũng đứng yên. No-op nếu đã
+/// paused. `spawn_blocking` không cần (chỉ set cờ atomic, không blocking).
+#[tauri::command]
+pub fn pause_recording(app: AppHandle) -> Result<(), String> {
+    crate::record::pause_recording(&app)
+}
+
+/// Tiếp tục phiên quay sau khi tạm dừng. No-op nếu đang chạy. `spawn_blocking`
+/// không cần — chỉ set cờ atomic và cộng thêm elapsed vào accumulated.
+#[tauri::command]
+pub fn resume_recording(app: AppHandle) -> Result<(), String> {
+    crate::record::resume_recording(&app)
+}
+
+/// Trạng thái tạm dừng hiện tại — `None` nếu không có phiên quay.
+#[tauri::command]
+pub fn recording_paused_state(app: AppHandle) -> Option<bool> {
+    crate::record::paused_state(&app)
+}
+
 #[derive(serde::Deserialize)]
 pub struct StitchInstruction {
     #[serde(rename = "sliceIndex")]

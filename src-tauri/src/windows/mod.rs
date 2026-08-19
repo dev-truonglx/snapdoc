@@ -882,7 +882,7 @@ pub fn prewarm_stop_control(app: &AppHandle) -> Result<(), String> {
     if app.get_webview_window("record-stop-control").is_some() {
         return Ok(());
     }
-    WebviewWindowBuilder::new(app, "record-stop-control", url("record-stop-control"))
+    let win = WebviewWindowBuilder::new(app, "record-stop-control", url("record-stop-control"))
         .title("SnapDoc — Dừng quay")
         .inner_size(200.0, 56.0)
         .resizable(false)
@@ -895,6 +895,10 @@ pub fn prewarm_stop_control(app: &AppHandle) -> Result<(), String> {
         .focused(false)
         .build()
         .map_err(|e| format!("Không tạo được nút dừng quay: {e}"))?;
+    // Loại cửa sổ này khỏi video đang quay — cùng kỹ thuật `open_record_border`
+    // và `open_recording_indicator` dùng: SCK/WGC bỏ qua cửa sổ content-protected
+    // nên nút "Dừng quay" không lọt vào frame nào của bản ghi.
+    let _ = win.set_content_protected(true);
     Ok(())
 }
 

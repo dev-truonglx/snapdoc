@@ -28,12 +28,21 @@ mod audio_mic;
 mod audio_wasapi;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::{AppHandle, Manager};
 use crate::state::{AppState, PendingVideo};
+
+/// Payload của event `recording-tick` — emit mỗi giây từ `spawn_tray_ticker`.
+/// `ms`: thời gian ghi thật (không kể thời gian paused). `paused`: trạng thái
+/// tạm dừng hiện tại — UI dùng để hiện/ẩn icon pause và đóng băng đồng hồ.
+#[derive(Clone, serde::Serialize)]
+pub struct RecordingTick {
+    pub ms: u64,
+    pub paused: bool,
+}
 
 /// Cảnh báo người dùng về sự cố KHÔNG làm hỏng cả phiên quay (mic lỗi, drop
 /// frame, ghép audio thất bại...) — trước đây chỉ `eprintln!` (vô hình trong
@@ -149,6 +158,18 @@ pub struct ActiveRecording {
     /// (xem `flow::run_record_picker`), để History coi quay và chụp cùng 1
     /// khái niệm "phạm vi" thay vì tạo thêm 1 tập giá trị capture_mode riêng.
     capture_mode: &'static str,
+    // ── Pause / Resume ────────────────────────────────────────────────────
+    /// `true` khi phiên quay đang tạm dừng — writer thread video và writer
+    /// thread audio đều kiểm tra cờ này để skip frame/chunk.
+    pub paused: Arc<AtomicBool>,
+    /// Tổng số millisecond đã ở trạng thái paused (tích luỹ qua nhiều lần
+    /// pause) — `status()` trừ giá trị này ra khỏi `started_at.elapsed()`
+    /// để đồng hồ không chạy trong lúc tạm dừng.
+    paused_accumulated_ms: Arc<AtomicU64>,
+    /// Thời điểm bắt đầu đoạn pause HIỆN TẠI — `Some` khi đang paused,
+    /// `None` khi đang chạy. Dùng để tính thêm khoảng ms cho
+    /// `paused_accumulated_ms` khi resume (xem `resume_recording`).
+    pause_started_at: Arc<Mutex<Option<Instant>>>,
 }
 
 #[derive(Default)]
@@ -244,7 +265,16 @@ pub fn cleanup_stale_temp(app: &AppHandle) {
 /// tiếp trong lúc quay nên `file.write_all` không bao giờ bị chặn bởi ffmpeg
 /// hay bất kỳ ai khác (khác hẳn hướng fifo cũ). Ghép vào video xảy ra SAU
 /// khi dừng quay (xem `encoder::mux_audio`, `stop_recording`).
-fn spawn_pcm_file_writer(path: PathBuf, rx: Receiver<Vec<u8>>) -> std::thread::JoinHandle<()> {
+///
+/// `paused`: cờ dùng chung với `pause_recording`/`resume_recording` — khi
+/// `true`, chunk được DROP thay vì ghi ra file, giữ audio đồng bộ với video
+/// (video cũng drop frame trong cùng khoảng thời gian đó, xem writer thread
+/// trong `start_with_target`). Dùng `Arc<AtomicBool>` để đọc không cần lock.
+fn spawn_pcm_file_writer(
+    path: PathBuf,
+    rx: Receiver<Vec<u8>>,
+    paused: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use std::io::Write;
         let mut file = match std::fs::File::create(&path) {
@@ -255,6 +285,13 @@ fn spawn_pcm_file_writer(path: PathBuf, rx: Receiver<Vec<u8>>) -> std::thread::J
             }
         };
         while let Ok(chunk) = rx.recv() {
+            // Khi đang paused: drop chunk âm thanh — không ghi vào file,
+            // giữ đồng bộ với video (video cũng bị drop cùng khoảng thời
+            // gian này trong writer thread). ffmpeg mux_audio sau này nhận
+            // 2 file có cùng "khoảng trắng" nên timeline khớp.
+            if paused.load(Ordering::Relaxed) {
+                continue;
+            }
             if let Err(e) = file.write_all(&chunk) {
                 eprintln!("[SnapDoc][record] Lỗi ghi file audio tạm {}: {e}", path.display());
                 break;
@@ -433,6 +470,12 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
         })
     };
 
+    // Cờ pause dùng chung giữa writer thread video, writer thread audio, và
+    // ticker — khởi tạo `false` (đang chạy bình thường).
+    let paused = Arc::new(AtomicBool::new(false));
+    let paused_accumulated_ms = Arc::new(AtomicU64::new(0));
+    let pause_started_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+
     // Có audio: video quay ra 1 file TẠM trong `tmp_dir` (ghép audio vào sau
     // mới ra `output_path` thật, xem `stop_recording`). Không audio: video
     // quay THẲNG ra `output_path` — giữ nguyên đường đi ngắn nhất của v1.
@@ -443,7 +486,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
                 .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
             let raw_path = tmp_dir.join("audio.pcm");
             let video_tmp_path = tmp_dir.join("video.mp4");
-            let writer = spawn_pcm_file_writer(raw_path.clone(), producer.rx);
+            let writer = spawn_pcm_file_writer(raw_path.clone(), producer.rx, paused.clone());
             let final_path = new_output_path(app)?;
             (
                 video_tmp_path,
@@ -465,12 +508,21 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
     };
 
     let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
+    let paused_for_writer = paused.clone();
 
     // Luồng riêng: kéo frame liên tục cho tới khi channel đóng (xảy ra khi
     // `stop_recording` gọi `stream.stop()` → drop sender bên trong
     // `mac_stream`), rồi TỰ gọi `encoder.finish()` để đóng stdin/mux file.
     let writer = std::thread::spawn(move || -> Result<(), String> {
         while let Ok(frame) = frame_rx.recv() {
+            // Khi paused: drop frame, không ghi vào encoder — video giữ nguyên
+            // timestamp liên tục (ffmpeg đếm frame theo fps cố định) nên đoạn
+            // paused sẽ bị "đứng hình" hoặc nối liền tuỳ frame cuối cùng trước
+            // pause. Đây là hành vi mong muốn: video output chỉ chứa nội dung
+            // thật sự được ghi, không có khoảng trống thời gian.
+            if paused_for_writer.load(Ordering::Relaxed) {
+                continue;
+            }
             // ffmpeg nhận rawvideo với -s cố định từ lúc start() — 1 frame
             // lệch kích thước (vd đổi độ phân giải màn hình giữa lúc quay) sẽ
             // làm lệch byte-offset của MỌI frame sau, hỏng cả file. Bỏ qua
@@ -499,6 +551,9 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
             width,
             height,
             capture_mode,
+            paused,
+            paused_accumulated_ms,
+            pause_started_at,
         });
     }
 
@@ -538,8 +593,13 @@ fn spawn_tray_ticker(app: AppHandle) {
         }
         match status(&app) {
             Some(ms) => {
-                crate::tray::update_recording_time(ms);
-                let _ = app.emit("recording-tick", ms);
+                let is_paused = paused_state(&app).unwrap_or(false);
+                // Khi paused: không cập nhật đồng hồ tray (giữ nguyên giá trị
+                // cuối trước lúc pause, thay vì nhảy số lên rồi reset khi resume).
+                if !is_paused {
+                    crate::tray::update_recording_time(ms);
+                }
+                let _ = app.emit("recording-tick", RecordingTick { ms, paused: is_paused });
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
             None => break,
@@ -661,6 +721,11 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
         AudioSource::Off => None,
     };
 
+    // Cờ pause dùng chung giữa writer thread video, writer thread audio, và ticker.
+    let paused = Arc::new(AtomicBool::new(false));
+    let paused_accumulated_ms = Arc::new(AtomicU64::new(0));
+    let pause_started_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+
     let (video_path, output_path, audio) = match audio_producer {
         Some(producer) => {
             let tmp_dir = std::env::temp_dir().join(format!("snapdoc-rec-audio-{}", uuid::Uuid::new_v4()));
@@ -668,7 +733,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
                 .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
             let raw_path = tmp_dir.join("audio.pcm");
             let video_tmp_path = tmp_dir.join("video.mp4");
-            let writer = spawn_pcm_file_writer(raw_path.clone(), producer.rx);
+            let writer = spawn_pcm_file_writer(raw_path.clone(), producer.rx, paused.clone());
             let final_path = new_output_path(app)?;
             let (mic, system_audio) = match producer.capture {
                 AudioCapture::Mic(m) => (Some(m), None),
@@ -695,9 +760,13 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
     };
 
     let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
+    let paused_for_writer = paused.clone();
 
     let writer = std::thread::spawn(move || -> Result<(), String> {
         while let Ok(frame) = frame_rx.recv() {
+            if paused_for_writer.load(Ordering::Relaxed) {
+                continue;
+            }
             if frame.width != width || frame.height != height {
                 eprintln!(
                     "[SnapDoc][record] Bỏ qua frame sai kích thước ({}x{}, cần {width}x{height})",
@@ -722,6 +791,9 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
             width,
             height,
             capture_mode,
+            paused,
+            paused_accumulated_ms,
+            pause_started_at,
         });
     }
 
@@ -756,8 +828,11 @@ fn spawn_tray_ticker(app: AppHandle) {
         }
         match status(&app) {
             Some(ms) => {
-                crate::tray::update_recording_time(ms);
-                let _ = app.emit("recording-tick", ms);
+                let is_paused = paused_state(&app).unwrap_or(false);
+                if !is_paused {
+                    crate::tray::update_recording_time(ms);
+                }
+                let _ = app.emit("recording-tick", RecordingTick { ms, paused: is_paused });
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
             None => break,
@@ -849,9 +924,16 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
         return Ok(String::new());
     };
 
-    // Thời lượng thật của video = đúng khoảng thời gian SCStream đã chạy —
-    // tính TRƯỚC khi `stream.stop()` tiêu thụ field `stream` (partial move).
-    let duration_ms = active.started_at.elapsed().as_millis() as i64;
+    // Thời lượng thật của video = đúng khoảng thời gian ghi thật sự (không kể
+    // thời gian đã tạm dừng). Tính TRƯỚC khi `stream.stop()` tiêu thụ field
+    // `stream` (partial move). Nếu đang pause tại thời điểm dừng, cộng thêm
+    // khoảng pause dở đó vào accumulated trước khi trừ.
+    let extra_paused_ms = if let Ok(guard) = active.pause_started_at.lock() {
+        guard.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0)
+    } else { 0 };
+    let total_paused_ms = active.paused_accumulated_ms.load(Ordering::Relaxed) + extra_paused_ms;
+    let duration_ms = (active.started_at.elapsed().as_millis() as i64)
+        .saturating_sub(total_paused_ms as i64);
 
     // Dừng mic/audio hệ thống (Windows) TRƯỚC `stream.stop()` — đóng kênh PCM
     // để `spawn_pcm_file_writer` thấy channel đóng mà tự kết thúc (đóng
@@ -981,8 +1063,76 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
 
 /// Thời gian đã quay (ms) nếu đang có phiên quay — cửa sổ chỉ báo poll hàm
 /// này định kỳ để hiện đồng hồ đếm, tránh cần thêm 1 ticker thread ở Rust.
+/// Trả về thời gian GHI THẬT (không kể thời gian đã tạm dừng).
 pub fn status(app: &AppHandle) -> Option<u64> {
     let state = app.state::<RecordingState>();
     let guard = state.0.lock().ok()?;
-    guard.as_ref().map(|r| r.started_at.elapsed().as_millis() as u64)
+    guard.as_ref().map(|r| {
+        let raw_ms = r.started_at.elapsed().as_millis() as u64;
+        let accumulated = r.paused_accumulated_ms.load(Ordering::Relaxed);
+        // Nếu đang paused thì cũng cộng thêm khoảng pause dở vào để đồng hồ
+        // đứng yên hoàn toàn (không nhích thêm giây nào trong lúc paused).
+        let current_pause_ms = if r.paused.load(Ordering::Relaxed) {
+            if let Ok(g) = r.pause_started_at.lock() {
+                g.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0)
+            } else { 0 }
+        } else { 0 };
+        raw_ms.saturating_sub(accumulated + current_pause_ms)
+    })
+}
+
+/// Trạng thái tạm dừng hiện tại — `None` nếu không có phiên quay, `Some(true)`
+/// nếu đang paused, `Some(false)` nếu đang chạy.
+pub fn paused_state(app: &AppHandle) -> Option<bool> {
+    let state = app.state::<RecordingState>();
+    let guard = state.0.lock().ok()?;
+    guard.as_ref().map(|r| r.paused.load(Ordering::Relaxed))
+}
+
+/// Tạm dừng phiên quay hiện tại. No-op nếu không có phiên hoặc đã paused.
+pub fn pause_recording(app: &AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    let state = app.state::<RecordingState>();
+    let guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
+    let Some(active) = guard.as_ref() else {
+        return Err("Không có phiên quay nào đang chạy".to_string());
+    };
+    if active.paused.load(Ordering::Relaxed) {
+        return Ok(()); // đã paused rồi
+    }
+    // Ghi lại mốc thời điểm bắt đầu pause TRƯỚC khi set cờ — nếu set cờ
+    // trước thì `status()` có thể đọc cờ=true nhưng `pause_started_at` vẫn
+    // None (race nhỏ giữa 2 thao tác), dẫn đến đồng hồ nhích thêm 1 tick.
+    if let Ok(mut g) = active.pause_started_at.lock() {
+        *g = Some(Instant::now());
+    }
+    active.paused.store(true, Ordering::Relaxed);
+    let _ = app.emit("recording-paused", true);
+    Ok(())
+}
+
+/// Tiếp tục phiên quay sau khi tạm dừng. No-op nếu không có phiên hoặc đang
+/// chạy.
+pub fn resume_recording(app: &AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    let state = app.state::<RecordingState>();
+    let guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
+    let Some(active) = guard.as_ref() else {
+        return Err("Không có phiên quay nào đang chạy".to_string());
+    };
+    if !active.paused.load(Ordering::Relaxed) {
+        return Ok(()); // đang chạy rồi
+    }
+    // Cộng thêm khoảng thời gian vừa pause vào accumulated TRƯỚC khi xoá cờ
+    // — nếu xoá cờ trước, `status()` sẽ không cộng `current_pause_ms` nữa
+    // nhưng `accumulated` chưa được cộng thêm → đồng hồ nhảy vọt.
+    if let Ok(mut g) = active.pause_started_at.lock() {
+        if let Some(t) = g.take() {
+            let elapsed = t.elapsed().as_millis() as u64;
+            active.paused_accumulated_ms.fetch_add(elapsed, Ordering::Relaxed);
+        }
+    }
+    active.paused.store(false, Ordering::Relaxed);
+    let _ = app.emit("recording-paused", false);
+    Ok(())
 }

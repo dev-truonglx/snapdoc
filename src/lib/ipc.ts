@@ -313,6 +313,12 @@ export const ipc = {
   confirmRegionRecordStart: () => invoke<void>("confirm_region_record_start"),
   /** Dừng quay — dùng cho popup "đang quay" trên Windows (bấm vào để dừng). */
   stopRecording: () => invoke<string>("stop_recording"),
+  /** Tạm dừng phiên quay đang chạy — writer thread video/audio sẽ drop frame/chunk. */
+  pauseRecording: () => invoke<void>("pause_recording"),
+  /** Tiếp tục phiên quay sau khi tạm dừng. */
+  resumeRecording: () => invoke<void>("resume_recording"),
+  /** Trạng thái tạm dừng hiện tại, `null` nếu không có phiên quay. */
+  recordingPausedState: () => invoke<boolean | null>("recording_paused_state"),
   /** Thời lượng đã quay (ms), `null` nếu không có phiên quay — popup "đang quay" poll mỗi giây. */
   recordingStatus: () => invoke<number | null>("recording_status"),
   /** Cắt 1 video ĐÃ LƯU trong History, tạo THÀNH 1 ITEM MỚI trong Library
