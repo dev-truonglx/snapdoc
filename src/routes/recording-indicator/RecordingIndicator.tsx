@@ -23,9 +23,9 @@ interface RecordingTick {
  * nghe event `recording-tick` (do `record::spawn_tray_ticker` bắn mỗi giây)
  * thay vì tự poll `recording_status` riêng 1 vòng lặp khác.
  *
- * Click trái vào popup: toggle tạm dừng / tiếp tục. Click phải (hoặc double-
- * click): dừng quay. Cửa sổ đã được content-protected ở phía Rust nên popup
- * này không lọt vào chính video đang quay. */
+ * Layout: [⏸/▶ Pause] [divider] [● 00:00] [divider] [■ Stop]
+ * Nút Pause và Stop được tách biệt nhau bằng divider + khoảng trống để tránh
+ * bấm nhầm khi quay full màn hình trên Windows. */
 export default function RecordingIndicator() {
   const { t } = useTranslation();
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -72,29 +72,50 @@ export default function RecordingIndicator() {
     });
   };
 
-  const label = stopping
-    ? t("recordingIndicator.stopping")
-    : paused
-    ? t("recordingIndicator.paused")
-    : fmt(elapsedMs);
+  const timeLabel = paused ? t("recordingIndicator.paused") : fmt(elapsedMs);
 
   return (
-    <div style={wrap} title={t("recordingIndicator.clickToToggle")}>
-      {/* Nút tạm dừng / tiếp tục */}
-      <span
-        style={{ ...pauseBtn, opacity: pauseBusy || stopping ? 0.5 : 1 }}
+    <div style={wrap}>
+      {/* Nút Tạm dừng / Tiếp tục — tách biệt hoàn toàn với nút Stop */}
+      <button
+        style={{
+          ...pauseBtn,
+          opacity: pauseBusy || stopping ? 0.5 : 1,
+          background: paused ? "rgba(34,197,94,0.2)" : "transparent",
+          color: paused ? "#22c55e" : "rgba(255,255,255,0.8)",
+        }}
         onClick={togglePause}
+        disabled={pauseBusy || stopping}
         title={paused ? t("recordingIndicator.resume") : t("recordingIndicator.pause")}
       >
         {paused ? "▶" : "⏸"}
+      </button>
+
+      {/* Divider ngăn cách Pause với phần giữa */}
+      <span style={divider} />
+
+      {/* Chấm đỏ nhấp nháy + đồng hồ — phần giữa chỉ hiển thị, không bấm được */}
+      <span style={centerGroup}>
+        {!paused && <span style={dot} />}
+        {paused && <span style={pausedDot} />}
+        <span style={time}>{timeLabel}</span>
       </span>
 
-      {/* Chấm đỏ nhấp nháy (ẩn khi paused) */}
-      {!paused && <span style={dot} />}
-      {paused && <span style={pausedDot} />}
+      {/* Divider ngăn cách phần giữa với nút Stop */}
+      <span style={divider} />
 
-      {/* Thời gian / trạng thái */}
-      <span style={time} onClick={stop}>{label}</span>
+      {/* Nút Dừng quay — tách biệt hoàn toàn với nút Pause */}
+      <button
+        style={{
+          ...stopBtn,
+          opacity: stopping ? 0.5 : 1,
+        }}
+        onClick={stop}
+        disabled={stopping}
+        title={t("recordingIndicator.stop")}
+      >
+        {stopping ? "…" : "■"}
+      </button>
 
       <style>{`
         @keyframes sd-rec-dot-pulse {
@@ -102,6 +123,8 @@ export default function RecordingIndicator() {
           70%  { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
           100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
         }
+        button { cursor: pointer; border: none; }
+        button:disabled { cursor: not-allowed; }
       `}</style>
     </div>
   );
@@ -113,26 +136,48 @@ const wrap: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  gap: 7,
+  gap: 0,
   boxSizing: "border-box",
   background: "rgba(28,28,32,0.96)",
   border: "1px solid rgba(255,255,255,0.12)",
   borderRadius: 22,
   boxShadow: "0 6px 22px rgba(0,0,0,0.45)",
   userSelect: "none",
+  padding: "0 6px",
 };
 
+/** Nút Pause/Resume — hình tròn nhỏ, màu xanh khi đang paused */
 const pauseBtn: React.CSSProperties = {
-  fontSize: 12,
-  cursor: "pointer",
-  color: "rgba(255,255,255,0.75)",
-  padding: "0 2px",
+  width: 30,
+  height: 30,
+  borderRadius: "50%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontSize: 11,
   lineHeight: 1,
+  flexShrink: 0,
+  transition: "background 0.15s, color 0.15s, opacity 0.15s",
+};
+
+const divider: React.CSSProperties = {
+  width: 1,
+  height: 20,
+  background: "rgba(255,255,255,0.15)",
+  flexShrink: 0,
+  margin: "0 4px",
+};
+
+const centerGroup: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 5,
+  padding: "0 4px",
 };
 
 const dot: React.CSSProperties = {
-  width: 10,
-  height: 10,
+  width: 8,
+  height: 8,
   borderRadius: "50%",
   background: "#ef4444",
   flexShrink: 0,
@@ -140,8 +185,8 @@ const dot: React.CSSProperties = {
 };
 
 const pausedDot: React.CSSProperties = {
-  width: 10,
-  height: 10,
+  width: 8,
+  height: 8,
   borderRadius: "50%",
   background: "#f59e0b",
   flexShrink: 0,
@@ -149,8 +194,23 @@ const pausedDot: React.CSSProperties = {
 
 const time: React.CSSProperties = {
   color: "#fff",
-  fontSize: 13,
+  fontSize: 12,
   fontWeight: 600,
   fontVariantNumeric: "tabular-nums",
-  cursor: "pointer",
+  whiteSpace: "nowrap",
+};
+
+/** Nút Stop — hình vuông đỏ, tách biệt hoàn toàn với nút Pause */
+const stopBtn: React.CSSProperties = {
+  width: 30,
+  height: 30,
+  borderRadius: 8,
+  background: "#ef4444",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontSize: 11,
+  color: "#fff",
+  flexShrink: 0,
+  transition: "opacity 0.15s",
 };

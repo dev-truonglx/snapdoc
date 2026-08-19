@@ -401,7 +401,8 @@
     "stopping": "Đang dừng…",
     "paused": "Đang tạm dừng",
     "pause": "Tạm dừng",
-    "resume": "Tiếp tục"
+    "resume": "Tiếp tục",
+    "stop": "Dừng quay"
   },
   "historyView": {
     "noCaptures": "Chưa có capture nào trong khoảng lọc này.",

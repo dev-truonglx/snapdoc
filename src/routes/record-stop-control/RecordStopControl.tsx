@@ -23,6 +23,10 @@ interface RecordingTick {
  * qua nhiều lần quay. Phải nghe event `record-stop-control-reset` (bắn từ
  * `open_stop_control` mỗi lần show lại) để reset state — nếu không, state
  * còn sót lại từ lần quay trước sẽ khiến phiên quay MỚI mở ra bất thường.
+ *
+ * Layout: [⏸/▶ Pause]  ·····divider·····  [■ Dừng quay]
+ * Hai nút được tách biệt bằng divider + khoảng cách rõ ràng để tránh bấm nhầm
+ * khi quay toàn màn hình trên Windows.
  */
 export default function RecordStopControl() {
   const { t } = useTranslation();
@@ -82,17 +86,7 @@ export default function RecordStopControl() {
   };
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 8,
-        background: "transparent",
-      }}
-    >
+    <div style={container}>
       {/* Nút Tạm dừng / Tiếp tục */}
       <button
         onClick={doTogglePause}
@@ -101,12 +95,12 @@ export default function RecordStopControl() {
         style={{
           border: "none",
           borderRadius: 8,
-          width: 36,
-          height: 36,
-          fontSize: 16,
+          width: 40,
+          height: 40,
+          fontSize: 17,
           cursor: "pointer",
           color: "#fff",
-          background: paused ? "#22c55e" : "rgba(255,255,255,0.18)",
+          background: paused ? "#22c55e" : "rgba(255,255,255,0.15)",
           boxShadow: "0 4px 16px rgba(0,0,0,0.35)",
           display: "flex",
           alignItems: "center",
@@ -120,14 +114,18 @@ export default function RecordStopControl() {
         {paused ? "▶" : "⏸"}
       </button>
 
-      {/* Nút Dừng quay */}
+      {/* Divider ngăn cách rõ ràng 2 nút — giảm nguy cơ bấm nhầm */}
+      <div style={divider} />
+
+      {/* Nút Dừng quay — tách biệt hẳn về vị trí và visual */}
       <button
         onClick={doStop}
         disabled={busy}
+        title={t("recordStop.stopRecording")}
         style={{
           border: "none",
           borderRadius: 8,
-          padding: "10px 18px",
+          padding: "10px 16px",
           fontSize: 13,
           fontWeight: 600,
           cursor: "pointer",
@@ -144,3 +142,21 @@ export default function RecordStopControl() {
     </div>
   );
 }
+
+const container: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  // Gap lớn hơn và có divider để user khó bấm nhầm hơn
+  gap: 10,
+  background: "transparent",
+};
+
+const divider: React.CSSProperties = {
+  width: 1,
+  height: 28,
+  background: "rgba(255,255,255,0.2)",
+  flexShrink: 0,
+};

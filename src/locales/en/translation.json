@@ -401,7 +401,8 @@
     "stopping": "Stopping…",
     "paused": "Paused",
     "pause": "Pause",
-    "resume": "Resume"
+    "resume": "Resume",
+    "stop": "Stop recording"
   },
   "historyView": {
     "noCaptures": "No captures in this range.",
