@@ -176,7 +176,9 @@
   },
   "recordStop": {
     "stopping": "Đang dừng…",
-    "stopRecording": "■ Dừng quay"
+    "stopRecording": "■ Dừng quay",
+    "pause": "Tạm dừng",
+    "resume": "Tiếp tục"
   },
   "scroll": {
     "title": "Chụp cuộn",
@@ -395,7 +397,12 @@
   },
   "recordingIndicator": {
     "clickToStop": "Bấm để dừng quay",
-    "stopping": "Đang dừng…"
+    "clickToToggle": "Bấm giờ để dừng · Bấm ⏸ để tạm dừng",
+    "stopping": "Đang dừng…",
+    "paused": "Đang tạm dừng",
+    "pause": "Tạm dừng",
+    "resume": "Tiếp tục",
+    "stop": "Dừng quay"
   },
   "historyView": {
     "noCaptures": "Chưa có capture nào trong khoảng lọc này.",

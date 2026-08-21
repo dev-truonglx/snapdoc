@@ -882,9 +882,9 @@ pub fn prewarm_stop_control(app: &AppHandle) -> Result<(), String> {
     if app.get_webview_window("record-stop-control").is_some() {
         return Ok(());
     }
-    WebviewWindowBuilder::new(app, "record-stop-control", url("record-stop-control"))
+    let win = WebviewWindowBuilder::new(app, "record-stop-control", url("record-stop-control"))
         .title("SnapDoc — Dừng quay")
-        .inner_size(200.0, 56.0)
+        .inner_size(260.0, 56.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -895,6 +895,10 @@ pub fn prewarm_stop_control(app: &AppHandle) -> Result<(), String> {
         .focused(false)
         .build()
         .map_err(|e| format!("Không tạo được nút dừng quay: {e}"))?;
+    // Loại cửa sổ này khỏi video đang quay — cùng kỹ thuật `open_record_border`
+    // và `open_recording_indicator` dùng: SCK/WGC bỏ qua cửa sổ content-protected
+    // nên nút "Dừng quay" không lọt vào frame nào của bản ghi.
+    let _ = win.set_content_protected(true);
     Ok(())
 }
 
@@ -922,7 +926,7 @@ pub fn open_stop_control(app: &AppHandle, s: &MonitorSnap, rx: f64, ry: f64, _rw
     let (l_x, l_y, l_w_mon, l_h_mon) = (logical(s.x), logical(s.y), logical(s.w), logical(s.h));
     let (l_rx, l_ry, l_rh) = (logical(rx), logical(ry), logical(rh));
 
-    const CTRL_W: f64 = 200.0;
+    const CTRL_W: f64 = 260.0;
     const CTRL_H: f64 = 56.0;
     const MARGIN: f64 = 12.0;
 
@@ -1057,7 +1061,7 @@ pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
 
     let win = WebviewWindowBuilder::new(app, "recording-indicator", url("recording-indicator"))
         .title("SnapDoc — Đang quay")
-        .inner_size(148.0, 44.0)
+        .inner_size(240.0, 44.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)

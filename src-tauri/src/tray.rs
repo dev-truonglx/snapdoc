@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
-    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
+    tray::{TrayIcon, TrayIconBuilder},
     AppHandle, Emitter, Manager,
 };
 
@@ -228,10 +228,37 @@ fn format_elapsed(ms: u64) -> String {
     format!("{:02}:{:02}", total_secs / 60, total_secs % 60)
 }
 
+/// Tạo menu cho recording tray: Pause/Resume + Stop.
+fn build_recording_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> {
+    let lang = current_lang(app);
+    let paused = crate::record::paused_state(app).unwrap_or(false);
+    let pause_label = if paused {
+        if lang != "en" { "▶ Tiếp tục" } else { "▶ Resume" }
+    } else {
+        if lang != "en" { "⏸ Tạm dừng" } else { "⏸ Pause" }
+    };
+    let stop_label = if lang != "en" { "■ Dừng quay" } else { "■ Stop Recording" };
+    
+    let pause_item = MenuItem::with_id(app, "pause-resume-recording", pause_label, true, None::<&str>)?;
+    let stop_item = MenuItem::with_id(app, "stop-recording-tray", stop_label, true, None::<&str>)?;
+    
+    Menu::with_items(app, &[&pause_item, &stop_item])
+}
+
+/// Cập nhật menu recording tray (sau khi pause/resume) để đổi label.
+fn update_recording_tray_menu(app: &AppHandle) {
+    if let Ok(guard) = RECORDING_TRAY.lock() {
+        if let Some(tray) = guard.as_ref() {
+            if let Ok(menu) = build_recording_menu(app) {
+                let _ = tray.set_menu(Some(menu));
+            }
+        }
+    }
+}
+
 /// Hiện icon "đang quay" riêng biệt trên menu bar — gọi từ
 /// `record::start_recording` ngay sau khi phiên quay khởi động thành công.
-/// Không set menu (`show_menu_on_left_click(false)`): click trái là hành
-/// động DỪNG NGAY, không phải mở danh sách lựa chọn.
+/// Menu có 2 item: Pause/Resume (toggle) và Stop Recording.
 pub fn show_recording_tray(app: &AppHandle) {
     let mut guard = match RECORDING_TRAY.lock() {
         Ok(g) => g,
@@ -243,23 +270,57 @@ pub fn show_recording_tray(app: &AppHandle) {
     let lang = current_lang(app);
     let rgba = recording_dot_rgba();
     let icon = Image::new(&rgba, DOT_SIZE, DOT_SIZE);
-    let result = TrayIconBuilder::with_id("recording-tray")
+    
+    // Tạo menu cho recording tray: Pause/Resume + Stop
+    let menu = match build_recording_menu(app) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("[SnapDoc][record] Không tạo được menu cho recording tray: {e}");
+            None
+        }
+    };
+    
+    let mut builder = TrayIconBuilder::with_id("recording-tray")
         .icon(icon)
         .icon_as_template(false)
-        .tooltip(tr(&lang, "recordingTooltip"))
-        .show_menu_on_left_click(false)
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
-                let app = tray.app_handle().clone();
-                std::thread::spawn(move || {
-                    if let Err(e) = crate::record::stop_recording(&app) {
-                        eprintln!("[SnapDoc][record] Dừng quay từ tray icon thất bại: {e}");
-                        let lang = current_lang(&app);
-                        let vi = lang != "en";
-                        let msg = if vi { format!("Dừng quay thất bại: {e}") } else { format!("Stop recording failed: {e}") };
-                        let _ = app.emit("snapdoc-error", msg);
-                    }
-                });
+        .tooltip(tr(&lang, "recordingTooltip"));
+    
+    if let Some(ref m) = menu {
+        builder = builder.menu(m);
+    }
+    
+    let result = builder
+        .on_menu_event(|app, event| {
+            match event.id().as_ref() {
+                "pause-resume-recording" => {
+                    let app_clone = app.clone();
+                    std::thread::spawn(move || {
+                        let paused = crate::record::paused_state(&app_clone).unwrap_or(false);
+                        let result = if paused {
+                            crate::record::resume_recording(&app_clone)
+                        } else {
+                            crate::record::pause_recording(&app_clone)
+                        };
+                        if let Err(e) = result {
+                            eprintln!("[SnapDoc][record] Pause/resume từ tray thất bại: {e}");
+                        }
+                        // Rebuild menu để cập nhật label "Pause" <-> "Resume"
+                        update_recording_tray_menu(&app_clone);
+                    });
+                }
+                "stop-recording-tray" => {
+                    let app_clone = app.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = crate::record::stop_recording(&app_clone) {
+                            eprintln!("[SnapDoc][record] Dừng quay từ tray menu thất bại: {e}");
+                            let lang = current_lang(&app_clone);
+                            let vi = lang != "en";
+                            let msg = if vi { format!("Dừng quay thất bại: {e}") } else { format!("Stop recording failed: {e}") };
+                            let _ = app_clone.emit("snapdoc-error", msg);
+                        }
+                    });
+                }
+                _ => {}
             }
         })
         .build(app);
