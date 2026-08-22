@@ -151,6 +151,7 @@
     "timerSection": "Timer",
     "aboutToCapture": "About to capture… (Esc to cancel)",
     "quickCaptureHint": "Quick capture — select area and annotate immediately",
+    "options": "Options",
     "close": "Close"
   },
   "overlay": {

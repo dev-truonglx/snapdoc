@@ -217,9 +217,9 @@ export default function CaptureBar() {
         <button
           style={optBtn}
           onClick={toggleOptions}
-          title={t("captureBar.options") || "Options"}
+          title={t("captureBar.options")}
         >
-          <span>Options</span>
+          <span>{t("captureBar.options")}</span>
           <span style={{ fontSize: 10, opacity: 0.5, marginLeft: 2 }}>▾</span>
         </button>
 
