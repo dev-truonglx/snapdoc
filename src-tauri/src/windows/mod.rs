@@ -910,6 +910,7 @@ pub fn prewarm_stop_control(app: &AppHandle) -> Result<(), String> {
 /// không bị nhảy chỗ. Tái dùng cửa sổ pre-warm — chỉ reposition rồi show +
 /// focus (bấm 1 lần là ăn ngay, không cửa sổ nào khác giành mất vì mọi cửa sổ
 /// tạo sau nó đều đã `.focused(false)`).
+#[allow(dead_code)]
 pub fn open_stop_control(app: &AppHandle, s: &MonitorSnap, rx: f64, ry: f64, _rw: f64, rh: f64) -> Result<(), String> {
     if app.get_webview_window("record-stop-control").is_none() {
         prewarm_stop_control(app)?;

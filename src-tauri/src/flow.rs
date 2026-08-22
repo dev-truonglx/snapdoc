@@ -831,13 +831,12 @@ pub fn finalize_region(
         // Vì không có bất kỳ thao tác cửa sổ nào xảy ra, khung đỏ + nền mờ
         // hiển thị Y NGUYÊN PIXEL suốt từ pha "adjusting" sang lúc quay —
         // không một khung hình nào bị bỏ lỡ, loại bỏ HOÀN TOÀN nguồn gây
-        // nháy hình (2 cửa sổ khác nhau luôn có độ trễ dù chỉ 1 khung hình do
-        // compositor xử lý độc lập, dù đã pre-warm để giảm thời gian tải).
+        // nháy hình.
         let _ = win.set_ignore_cursor_events(true);
-        // Thanh "Dừng quay" là cửa sổ NHỎ, RIÊNG (không click-through) — nổi
-        // đúng ngay vị trí nút "Bắt đầu quay" vừa hiện, xem
-        // `windows::open_stop_control`.
-        windows::open_stop_control(app, &s, rx, ry, rw, rh)?;
+        // KHÔNG mở nút dừng quay nổi (`open_stop_control`) để tránh che khuất giao
+        // diện và chặn thao tác chuột của người dùng trong lúc quay. Việc dừng/tạm
+        // dừng quay được thực hiện tiện lợi và sạch sẽ qua Tray Icon trên Menu Bar
+        // hoặc Hotkey.
         return Ok(());
     }
 
