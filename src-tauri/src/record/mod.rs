@@ -260,6 +260,32 @@ pub fn cleanup_stale_temp(app: &AppHandle) {
     }
 }
 
+/// Khớp kích thước frame về đúng (dst_w, dst_h) đã khai với encoder khi bắt đầu quay.
+/// Nếu cửa sổ đang quay bị co giãn (resize) giữa chừng, hàm này tự động crop hoặc
+/// pad viền đen thay vì bỏ qua frame khiến video bị đứng hình (dùng chung cho cả macOS và Windows).
+fn fit_frame_to_target(
+    src_bgra: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+) -> Vec<u8> {
+    let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
+    let copy_w = src_w.min(dst_w) as usize;
+    let copy_h = src_h.min(dst_h) as usize;
+    let src_row_len = (src_w * 4) as usize;
+    let dst_row_len = (dst_w * 4) as usize;
+    let copy_bytes = copy_w * 4;
+    for y in 0..copy_h {
+        let src_off = y * src_row_len;
+        let dst_off = y * dst_row_len;
+        if src_off + copy_bytes <= src_bgra.len() && dst_off + copy_bytes <= dst.len() {
+            dst[dst_off..dst_off + copy_bytes].copy_from_slice(&src_bgra[src_off..src_off + copy_bytes]);
+        }
+    }
+    dst
+}
+
 /// Ghi liên tục PCM thô (mic hoặc audio hệ thống — cùng dạng `Vec<u8>` s16le)
 /// ra 1 FILE THƯỜNG trong lúc quay. KHÔNG phải fifo — không có gì đọc trực
 /// tiếp trong lúc quay nên `file.write_all` không bao giờ bị chặn bởi ffmpeg
@@ -509,32 +535,6 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
 
     let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
     let paused_for_writer = paused.clone();
-
-/// Khớp kích thước frame về đúng (dst_w, dst_h) đã khai với encoder khi bắt đầu quay.
-/// Nếu cửa sổ đang quay bị co giãn (resize) giữa chừng, hàm này tự động crop hoặc
-/// pad viền đen thay vì bỏ qua frame khiến video bị đứng hình.
-fn fit_frame_to_target(
-    src_bgra: &[u8],
-    src_w: u32,
-    src_h: u32,
-    dst_w: u32,
-    dst_h: u32,
-) -> Vec<u8> {
-    let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
-    let copy_w = src_w.min(dst_w) as usize;
-    let copy_h = src_h.min(dst_h) as usize;
-    let src_row_len = (src_w * 4) as usize;
-    let dst_row_len = (dst_w * 4) as usize;
-    let copy_bytes = copy_w * 4;
-    for y in 0..copy_h {
-        let src_off = y * src_row_len;
-        let dst_off = y * dst_row_len;
-        if src_off + copy_bytes <= src_bgra.len() && dst_off + copy_bytes <= dst.len() {
-            dst[dst_off..dst_off + copy_bytes].copy_from_slice(&src_bgra[src_off..src_off + copy_bytes]);
-        }
-    }
-    dst
-}
 
     // Luồng riêng: kéo frame liên tục cho tới khi channel đóng (xảy ra khi
     // `stop_recording` gọi `stream.stop()` → drop sender bên trong
