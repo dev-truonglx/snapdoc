@@ -312,7 +312,14 @@ pub fn close_self(window: tauri::WebviewWindow) {
     // Bấm "X"/Escape chỉ minimize; `windows::open_capture_bar` tự unminimize
     // khi mở lại.
     if label == "capture-bar" {
+        if let Some(popover) = window.app_handle().get_webview_window("capture-bar-popover") {
+            let _ = popover.hide();
+        }
         let _ = window.minimize();
+        return;
+    }
+    if label == "capture-bar-popover" {
+        let _ = window.hide();
         return;
     }
     let _ = window.close();

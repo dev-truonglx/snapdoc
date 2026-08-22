@@ -15,11 +15,13 @@ import RecordStopControl from "./routes/record-stop-control/RecordStopControl";
 import RecordBorder from "./routes/record-border/RecordBorder";
 import WindowPickerDialog from "./routes/window-picker/WindowPickerDialog";
 import CaptureTimer from "./routes/capture-timer/CaptureTimer";
+import CaptureBarPopover from "./routes/capture-bar/CaptureBarPopover";
 
 const which = new URLSearchParams(window.location.search).get("win") ?? "capture-bar";
 
 const routes: Record<string, React.ComponentType> = {
   "capture-bar": CaptureBar,
+  "capture-bar-popover": CaptureBarPopover,
   overlay: Overlay,
   editor: Editor,
   thumbnail: Thumbnail,

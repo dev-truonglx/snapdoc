@@ -137,3 +137,8 @@ select,
 .history-thumb:hover .history-thumb-action {
   opacity: 1;
 }
+
+.popover-btn:hover {
+  background: rgba(255, 255, 255, 0.12) !important;
+  color: #ffffff !important;
+}

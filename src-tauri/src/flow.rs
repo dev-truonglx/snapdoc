@@ -16,6 +16,9 @@ fn get_hwnd(app: &tauri::AppHandle, label: &str) -> Option<windows_sys::Win32::F
 }
 
 fn hide_bar(app: &AppHandle) {
+    if let Some(popover) = app.get_webview_window("capture-bar-popover") {
+        let _ = popover.hide();
+    }
     if let Some(win) = app.get_webview_window("capture-bar") {
         #[cfg(target_os = "windows")]
         {
@@ -88,12 +91,11 @@ pub(crate) fn hide_editor_for_freeze(app: &AppHandle) {
         }
     }
 
-    // Danh sách tất cả labels cần loại khỏi capture
-    let labels = ["editor", "capture-bar"]; // thêm "settings", "history" nếu cần
-
     #[cfg(target_os = "windows")]
     {
         use crate::capture::win_affinity;
+        // Danh sách tất cả labels cần loại khỏi capture
+        let labels = ["editor", "capture-bar"]; // thêm "settings", "history" nếu cần
         // Set EXCLUDE trước khi hide — DWM loại ngay lập tức
         for label in &labels {
             if let Some(hwnd) = get_hwnd(app, label) {
@@ -1255,12 +1257,12 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 /// Gọi sau khi freeze xong để restore cửa sổ trở lại bình thường —
 /// bỏ cờ `WDA_EXCLUDEFROMCAPTURE` mà `hide_editor_for_freeze` đã đặt, nếu
 /// không thì cửa sổ hiện lại sẽ vô hình trong mọi lần chụp sau đó.
-pub(crate) fn restore_capture_affinity(app: &AppHandle) {
+pub(crate) fn restore_capture_affinity(_app: &AppHandle) {
     #[cfg(target_os = "windows")]
     {
         use crate::capture::win_affinity;
         for label in &["editor", "capture-bar"] {
-            if let Some(hwnd) = get_hwnd(app, label) {
+            if let Some(hwnd) = get_hwnd(_app, label) {
                 let _ = win_affinity::include_in_capture(hwnd);
             }
         }

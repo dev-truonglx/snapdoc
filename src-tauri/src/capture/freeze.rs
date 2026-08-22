@@ -16,6 +16,7 @@ use xcap::Monitor;
 ///
 /// Lỗi trên một màn hình cụ thể được bỏ qua lặng lẽ (overlay vẫn mở, chỉ là
 /// không có frozen background cho màn đó) thay vì huỷ cả phiên.
+#[allow(dead_code)]
 pub fn capture_frozen_screens() -> HashMap<usize, String> {
     capture_frozen_screens_ex(&[])
 }
