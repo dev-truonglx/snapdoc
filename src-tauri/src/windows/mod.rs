@@ -1901,8 +1901,10 @@ pub fn close_overlays_except(app: &AppHandle, keep_label: &str) {
 ///    nhân sâu xa là gì).
 pub fn end_scroll_session(app: &AppHandle) {
     close_overlays(app);
-    app.state::<AppState>().overlay_gen.fetch_add(1, Ordering::SeqCst);
-    app.state::<AppState>().last_capture.clear_mode();
+    let state = app.state::<AppState>();
+    state.overlay_gen.fetch_add(1, Ordering::SeqCst);
+    state.last_capture.clear_mode();
+    let _ = state.scroll_slices.lock().map(|mut s| s.clear());
 }
 
 /// Ẩn editor và trả về Accessory policy (ẩn Dock) / ẩn icon khỏi taskbar (Windows).

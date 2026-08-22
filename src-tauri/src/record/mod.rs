@@ -510,6 +510,32 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
     let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
     let paused_for_writer = paused.clone();
 
+/// Khớp kích thước frame về đúng (dst_w, dst_h) đã khai với encoder khi bắt đầu quay.
+/// Nếu cửa sổ đang quay bị co giãn (resize) giữa chừng, hàm này tự động crop hoặc
+/// pad viền đen thay vì bỏ qua frame khiến video bị đứng hình.
+fn fit_frame_to_target(
+    src_bgra: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+) -> Vec<u8> {
+    let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
+    let copy_w = src_w.min(dst_w) as usize;
+    let copy_h = src_h.min(dst_h) as usize;
+    let src_row_len = (src_w * 4) as usize;
+    let dst_row_len = (dst_w * 4) as usize;
+    let copy_bytes = copy_w * 4;
+    for y in 0..copy_h {
+        let src_off = y * src_row_len;
+        let dst_off = y * dst_row_len;
+        if src_off + copy_bytes <= src_bgra.len() && dst_off + copy_bytes <= dst.len() {
+            dst[dst_off..dst_off + copy_bytes].copy_from_slice(&src_bgra[src_off..src_off + copy_bytes]);
+        }
+    }
+    dst
+}
+
     // Luồng riêng: kéo frame liên tục cho tới khi channel đóng (xảy ra khi
     // `stop_recording` gọi `stream.stop()` → drop sender bên trong
     // `mac_stream`), rồi TỰ gọi `encoder.finish()` để đóng stdin/mux file.
@@ -523,18 +549,15 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
             if paused_for_writer.load(Ordering::Relaxed) {
                 continue;
             }
-            // ffmpeg nhận rawvideo với -s cố định từ lúc start() — 1 frame
-            // lệch kích thước (vd đổi độ phân giải màn hình giữa lúc quay) sẽ
-            // làm lệch byte-offset của MỌI frame sau, hỏng cả file. Bỏ qua
-            // thay vì ghi nhầm.
+            // ffmpeg nhận rawvideo với -s cố định từ lúc start(). Nếu cửa sổ
+            // hoặc màn hình bị đổi kích thước giữa lúc quay, tự động fit/crop/pad
+            // về đúng (width, height) thay vì bỏ qua frame khiến video đứng hình.
             if frame.width != width || frame.height != height {
-                eprintln!(
-                    "[SnapDoc][record] Bỏ qua frame sai kích thước ({}x{}, cần {width}x{height})",
-                    frame.width, frame.height
-                );
-                continue;
+                let fit_data = fit_frame_to_target(&frame.bgra, frame.width, frame.height, width, height);
+                encoder.write_frame(&fit_data)?;
+            } else {
+                encoder.write_frame(&frame.bgra)?;
             }
-            encoder.write_frame(&frame.bgra)?;
         }
         encoder.finish()
     });
@@ -768,13 +791,11 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
                 continue;
             }
             if frame.width != width || frame.height != height {
-                eprintln!(
-                    "[SnapDoc][record] Bỏ qua frame sai kích thước ({}x{}, cần {width}x{height})",
-                    frame.width, frame.height
-                );
-                continue;
+                let fit_data = fit_frame_to_target(&frame.bgra, frame.width, frame.height, width, height);
+                encoder.write_frame(&fit_data)?;
+            } else {
+                encoder.write_frame(&frame.bgra)?;
             }
-            encoder.write_frame(&frame.bgra)?;
         }
         encoder.finish()
     });
@@ -967,21 +988,19 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
         (a.raw_path, a.sample_rate, a.channels, a.tmp_dir)
     });
 
-    let write_result = active
-        .writer
-        .join()
-        .map_err(|_| "Luồng ghi video bị panic".to_string())?;
+    let write_join_res = active.writer.join();
 
+    // Luôn dọn dẹp giao diện UI (khung viền, overlay, thanh dừng quay, tray icon)
+    // TRƯỚC khi kiểm tra kết quả ghi video — tránh rủi ro kẹt UI trên màn hình
+    // nếu luồng ghi video bị lỗi broken pipe/disk full/panic.
     crate::tray::hide_recording_tray(app);
-    // Đóng overlay (khung + nền mờ, vẫn đang hiển thị/click-through suốt lúc
-    // quay — xem `flow::finalize_region`) + thanh "Dừng quay" riêng (nếu
-    // phiên quay này bắt đầu từ `RecordRegionSelect`). No-op nếu không có.
     crate::windows::close_overlays(app);
     crate::windows::close_stop_control(app);
     crate::windows::close_record_border(app);
     #[cfg(target_os = "windows")]
     crate::windows::close_recording_indicator(app);
 
+    let write_result = write_join_res.map_err(|_| "Luồng ghi video bị panic".to_string())?;
     write_result?;
 
     // Có audio: ghép vào `output_path` thật bằng 1 lần chạy ffmpeg TĨNH (2
