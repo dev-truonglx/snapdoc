@@ -297,6 +297,7 @@ pub fn run() {
             // (macOS)/Taskbar (Windows) hiện diện xuyên suốt vòng đời app kể
             // từ lúc mở app, không còn im lặng ở tray như trước.
             let _ = windows::prewarm_capture_bar(&handle);
+            let _ = windows::prewarm_capture_bar_popover(&handle);
 
             // Lần đầu chạy sau khi cài: tự động bật "khởi động cùng hệ thống".
             // Phát hiện "lần đầu" bằng việc FILE settings.json đã tồn tại

@@ -633,10 +633,33 @@ pub fn record_popover_closed() {
     LAST_POPOVER_CLOSE_MS.store(now_millis(), Ordering::Relaxed);
 }
 
+pub fn prewarm_capture_bar_popover(app: &AppHandle) -> Result<(), String> {
+    if app.get_webview_window("capture-bar-popover").is_some() {
+        return Ok(());
+    }
+    let _win = WebviewWindowBuilder::new(app, "capture-bar-popover", url("capture-bar-popover"))
+        .title("SnapDoc Options")
+        .inner_size(220.0, 390.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .visible(false)
+        .build()
+        .map_err(|e| format!("Không tạo được capture bar popover: {e}"))?;
+
+    #[cfg(target_os = "windows")]
+    disable_overlay_transitions(&_win);
+
+    Ok(())
+}
+
 /// Mở hoặc ẩn popover của capture-bar.
 /// `anchor_x`, `anchor_y`, `anchor_w`, `anchor_h` là toạ độ logic của nút Options (tương đối so với capture-bar).
 #[tauri::command]
-pub fn toggle_capture_bar_popover(
+pub async fn toggle_capture_bar_popover(
     app: AppHandle,
     anchor_x: f64,
     anchor_y: f64,
@@ -662,7 +685,7 @@ pub fn toggle_capture_bar_popover(
 
 /// Ẩn popover của capture-bar.
 #[tauri::command]
-pub fn hide_capture_bar_popover(app: AppHandle) -> Result<(), String> {
+pub async fn hide_capture_bar_popover(app: AppHandle) -> Result<(), String> {
     if let Some(popover) = app.get_webview_window("capture-bar-popover") {
         let _ = popover.hide();
         record_popover_closed();
@@ -692,35 +715,30 @@ pub fn open_capture_bar_popover(
     let pop_x = (bar_pos.x + anchor_x + anchor_w - popover_w).max(bar_pos.x);
     let pop_y = bar_pos.y - popover_h - 6.0;
 
-    let _popover = match app.get_webview_window("capture-bar-popover") {
-        Some(w) => {
-            let _ = w.set_position(tauri::LogicalPosition::new(pop_x, pop_y));
-            let _ = w.show();
-            let _ = w.set_focus();
-            w
-        }
-        None => {
-            let win = WebviewWindowBuilder::new(app, "capture-bar-popover", url("capture-bar-popover"))
-                .title("SnapDoc Options")
-                .inner_size(popover_w, popover_h)
-                .resizable(false)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .shadow(false)
-                .position(pop_x, pop_y)
-                .build()
-                .map_err(|e| format!("Không tạo được capture bar popover: {e}"))?;
+    if let Some(w) = app.get_webview_window("capture-bar-popover") {
+        let _ = w.set_position(tauri::LogicalPosition::new(pop_x, pop_y));
+        let _ = w.show();
+        let _ = w.set_focus();
+    } else {
+        let win = WebviewWindowBuilder::new(app, "capture-bar-popover", url("capture-bar-popover"))
+            .title("SnapDoc Options")
+            .inner_size(popover_w, popover_h)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .position(pop_x, pop_y)
+            .build()
+            .map_err(|e| format!("Không tạo được capture bar popover: {e}"))?;
 
-            #[cfg(target_os = "windows")]
-            disable_overlay_transitions(&win);
+        #[cfg(target_os = "windows")]
+        disable_overlay_transitions(&win);
 
-            let _ = win.show();
-            let _ = win.set_focus();
-            win
-        }
-    };
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
 
     Ok(())
 }
