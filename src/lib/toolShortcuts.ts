@@ -5,7 +5,8 @@ export function editorToolFromKey(e: KeyboardEvent): Tool | null {
   if (e.metaKey || e.ctrlKey || e.altKey) return null;
   switch (e.code) {
     case "KeyV": return "select";
-    case "KeyR": return "rect";
+    case "KeyR": return e.shiftKey ? "numbered-rect" : "rect";
+    case "KeyE": return "numbered-rect";
     case "KeyO": return "ellipse";
     case "KeyT": return "text";
     case "KeyN": return "step";
@@ -24,7 +25,8 @@ export function quickToolFromKey(e: KeyboardEvent): Tool | null {
   if (e.metaKey || e.ctrlKey || e.altKey) return null;
   switch (e.code) {
     case "KeyV": return "select";
-    case "KeyR": return "rect";
+    case "KeyR": return e.shiftKey ? "numbered-rect" : "rect";
+    case "KeyE": return "numbered-rect";
     case "KeyT": return "text";
     case "KeyN": return "step";
     case "KeyH": return "highlight";

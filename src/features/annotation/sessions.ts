@@ -40,6 +40,7 @@ interface ImageSession {
   future: Doc[];
   stepCounter: number;
   arrowCounter: number;
+  rectCounter?: number;
   baseDirty: boolean;
   savedRef: Doc | null;
   /** Các object URL do phiên này SỞ HỮU — chỉ revoke khi phiên bị evict.
@@ -174,6 +175,7 @@ export function suspendActive(): SuspendResult | null {
     future: s.future,
     stepCounter: s.stepCounter,
     arrowCounter: s.arrowCounter,
+    rectCounter: s.rectCounter,
     baseDirty: s.baseDirty,
     savedRef: s.savedRef,
     blobUrls,
@@ -195,6 +197,7 @@ export function tryResume(key: SessionKey): boolean {
     future: s.future,
     stepCounter: s.stepCounter,
     arrowCounter: s.arrowCounter,
+    rectCounter: s.rectCounter,
     baseDirty: s.baseDirty,
     savedRef: s.savedRef,
   });
@@ -268,6 +271,7 @@ export interface DocPayload {
   annotations: Annotation[];
   stepCounter: number;
   arrowCounter: number;
+  rectCounter?: number;
   imgW: number;
   imgH: number;
   scaleFactor: number;
@@ -286,6 +290,7 @@ export function serializeDoc(): string | null {
     annotations: s.doc.annotations,
     stepCounter: s.stepCounter,
     arrowCounter: s.arrowCounter,
+    rectCounter: s.rectCounter,
     imgW: s.doc.imgW,
     imgH: s.doc.imgH,
     scaleFactor: s.doc.scaleFactor,
@@ -360,6 +365,7 @@ export async function openLibraryImage(
   if (payload) {
     useEditor.getState().setStepCounter(payload.stepCounter);
     useEditor.getState().setArrowCounter(payload.arrowCounter);
+    if (payload.rectCounter) useEditor.getState().setRectCounter(payload.rectCounter);
   }
   noteActiveKey(item.id);
   // Quyền sở hữu URL giao cho registry — KHÔNG revoke URL của ảnh trước ở đây:

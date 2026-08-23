@@ -125,6 +125,7 @@ export default function Editor() {
     if (payload) {
       useEditor.getState().setStepCounter(payload.stepCounter);
       useEditor.getState().setArrowCounter(payload.arrowCounter);
+      if (payload.rectCounter) useEditor.getState().setRectCounter(payload.rectCounter);
     }
     noteActiveKey(p.history_id ?? `file:${uid()}`);
     return true;
@@ -398,6 +399,9 @@ export default function Editor() {
       } else if (mod && e.key.toLowerCase() === "c") {
         e.preventDefault();
         doCopy();
+      } else if (mod && (e.key === "a" || e.key === "A")) {
+        e.preventDefault();
+        s.selectAll();
       } else if (mod && (e.key === "=" || e.key === "+")) {
         e.preventDefault();
         stageRef.current?.zoomIn();
@@ -407,7 +411,7 @@ export default function Editor() {
       } else if (mod && e.key === "0") {
         e.preventDefault();
         stageRef.current?.zoomFit();
-      } else if ((e.key === "Delete" || e.key === "Backspace") && s.selectedId) {
+      } else if ((e.key === "Delete" || e.key === "Backspace") && (s.selectedId || s.selectedIds.length > 0)) {
         e.preventDefault();
         s.removeSelected();
       } else if (!mod) {
@@ -456,6 +460,7 @@ export default function Editor() {
         if (payload) {
           useEditor.getState().setStepCounter(payload.stepCounter);
           useEditor.getState().setArrowCounter(payload.arrowCounter);
+          if (payload.rectCounter) useEditor.getState().setRectCounter(payload.rectCounter);
         }
         // File-backed thì lấy chính đường dẫn làm khoá phiên (ổn định, mở lại
         // cùng file là về đúng phiên cũ); ảnh thường thì khoá tổng hợp.
