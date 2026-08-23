@@ -288,6 +288,7 @@ export default function Settings() {
               <option value="off">{t("settings.audioOff")}</option>
               <option value="mic">{t("settings.audioMic")}</option>
               <option value="system">{t("settings.audioSystem")}</option>
+              <option value="both">{t("settings.audioBoth")}</option>
             </select>
           </Field>
           <p style={hint}>

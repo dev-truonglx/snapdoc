@@ -22,6 +22,7 @@ export default function CaptureBarPopover() {
     { id: "off",    label: t("captureBar.audioOff")    },
     { id: "mic",    label: t("captureBar.audioMic")    },
     { id: "system", label: t("captureBar.audioSystem") },
+    { id: "both",   label: t("captureBar.audioBoth")   },
   ];
 
   const CAPTURE_DELAYS: { id: 0 | 5 | 10; label: string }[] = [

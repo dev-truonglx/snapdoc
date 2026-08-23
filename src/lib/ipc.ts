@@ -113,10 +113,8 @@ export interface WindowMetaInfo {
  * chụp lỗi (vd cửa sổ vừa đóng giữa chừng). */
 export type WindowThumbReady = [id: number, thumb: string | null];
 
-/** Nguồn audio ghi kèm khi quay màn hình — chỉ chọn 1, không trộn (xem lý do
- * ở record/mod.rs: ghép audio+video "sống" qua ffmpeg từng gây bug video bị
- * cắt cụt sau vài giây). */
-export type AudioSource = "off" | "mic" | "system";
+/** Nguồn audio ghi kèm khi quay màn hình: Tắt, Microphone, Âm thanh hệ thống hoặc Cả hai. */
+export type AudioSource = "off" | "mic" | "system" | "both";
 
 export interface Settings {
   saveDir: string;
@@ -126,7 +124,7 @@ export interface Settings {
   timerSeconds: number;
   rememberLastRegion: boolean;
   launchAtLogin: boolean;
-  /** Nguồn audio ghi kèm khi quay màn hình — chỉ 1 trong 3, mặc định "off". */
+  /** Nguồn audio ghi kèm khi quay màn hình — mặc định "off". */
   recordAudioSource: AudioSource;
   shortcuts: Record<string, string>;
   /** Thư mục lần cuối user chọn qua "Save As…" ở editor (ảnh) — dùng làm mặc
