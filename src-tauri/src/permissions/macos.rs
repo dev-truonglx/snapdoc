@@ -1,26 +1,18 @@
 /// Kiểm tra quyền Screen Recording bằng API hệ thống chuẩn
 /// `CGPreflightScreenCaptureAccess` — không gây side-effect (không thử chụp),
 /// đúng với cơ chế TCC mà ScreenCaptureKit dùng.
-#[cfg(target_os = "macos")]
 pub fn screen_recording_ok() -> bool {
     objc2_core_graphics::CGPreflightScreenCaptureAccess()
 }
 
 /// Yêu cầu cấp quyền Screen Recording (mở prompt hệ thống lần đầu).
-#[cfg(target_os = "macos")]
 pub fn request_screen_recording() -> bool {
     objc2_core_graphics::CGRequestScreenCaptureAccess()
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn screen_recording_ok() -> bool {
-    true
 }
 
 /// Kiểm tra quyền Accessibility (Trợ năng) — cần để `windows::bring_app_to_front`
 /// raise ĐÚNG 1 cửa sổ cụ thể (không phải cả app) khi bắt đầu quay 1 cửa sổ,
 /// xem `capture/window.rs::ax_raise_window`. Không side-effect (không mở prompt).
-#[cfg(target_os = "macos")]
 pub fn accessibility_ok() -> bool {
     unsafe { accessibility_sys::AXIsProcessTrusted() }
 }
@@ -32,7 +24,6 @@ pub fn accessibility_ok() -> bool {
 /// macOS mới hiện hộp thoại xin quyền + tự thêm app vào danh sách System
 /// Settings > Privacy & Security > Accessibility (ở trạng thái CHƯA bật, user
 /// tự bật). Trả `true` nếu đã được cấp NGAY (hiếm khi đúng ở lần gọi đầu).
-#[cfg(target_os = "macos")]
 pub fn request_accessibility() -> bool {
     use accessibility_sys::{AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt};
     use core_foundation_sys::{
@@ -57,14 +48,4 @@ pub fn request_accessibility() -> bool {
         CFRelease(dict as CFTypeRef);
         trusted
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn accessibility_ok() -> bool {
-    true
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn request_accessibility() -> bool {
-    true
 }
