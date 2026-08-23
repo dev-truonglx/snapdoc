@@ -91,11 +91,12 @@ pub const FPS: u32 = 30;
 /// Nguồn audio ghi kèm khi quay — CHỈ được chọn 1 trong 3, không trộn (xem
 /// doc-comment đầu file để hiểu vì sao). Đọc từ setting `recordAudioSource`
 /// (`"off" | "mic" | "system"`, mặc định `"off"` — xem `storage::settings`).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AudioSource {
     Off,
     Mic,
     System,
+    Both,
 }
 
 fn audio_source_setting(app: &AppHandle) -> AudioSource {
@@ -104,31 +105,31 @@ fn audio_source_setting(app: &AppHandle) -> AudioSource {
     match settings.get("recordAudioSource").and_then(|v| v.as_str()) {
         Some("mic") => AudioSource::Mic,
         Some("system") => AudioSource::System,
+        Some("both") => AudioSource::Both,
         _ => AudioSource::Off,
     }
 }
 
-/// 1 phiên ghi audio đang chạy song song với video — `writer` ghi PCM thô
-/// nhận từ `mac_stream`/`audio_mic` ra `raw_path` (file thường, KHÔNG phải
-/// fifo — xem doc-comment đầu file).
-struct ActiveAudio {
-    /// `Some` khi nguồn là mic — cần dừng TRƯỚC `stream.stop()` ở
-    /// `stop_recording` để đóng kênh PCM, cho `writer` thấy channel đóng mà
-    /// tự kết thúc (đóng file). Audio hệ thống trên macOS dùng chung sender
-    /// với video (`RecordingHandle`) nên tự đóng theo `stream.stop()`, không
-    /// cần field riêng; audio hệ thống trên Windows là 1 capture ĐỘC LẬP
-    /// (WASAPI loopback qua `audio_wasapi.rs`) nên cần field riêng bên dưới.
-    mic: Option<audio_mic::MicCapture>,
-    /// `Some` khi nguồn là audio hệ thống TRÊN WINDOWS — xem giải thích ở
-    /// field `mic` phía trên.
-    #[cfg(target_os = "windows")]
-    system_audio: Option<audio_wasapi::SystemAudioCapture>,
+/// 1 track audio ghi PCM thô nhận từ `mac_stream`/`audio_mic`/`audio_wasapi`.
+struct AudioTrack {
     writer: std::thread::JoinHandle<()>,
     raw_path: PathBuf,
     sample_rate: u32,
     channels: u16,
-    /// Thư mục tạm chứa `raw_path` + video tạm (`ActiveRecording::video_path`
-    /// khi có audio) — dọn ở `stop_recording` sau khi ghép xong.
+}
+
+/// 1 phiên ghi audio đang chạy song song với video — lưu riêng từng nguồn (mic / audio hệ thống)
+/// để căn chỉnh gain boost và balance âm lượng chính xác khi mux.
+struct ActiveAudio {
+    /// `Some` khi có thu mic — cần dừng TRƯỚC `stream.stop()` ở
+    /// `stop_recording` để đóng kênh PCM.
+    mic: Option<audio_mic::MicCapture>,
+    /// `Some` khi có thu audio hệ thống TRÊN WINDOWS.
+    #[cfg(target_os = "windows")]
+    system_audio: Option<audio_wasapi::SystemAudioCapture>,
+    mic_track: Option<AudioTrack>,
+    system_track: Option<AudioTrack>,
+    /// Thư mục tạm chứa các file PCM + video tạm — dọn ở `stop_recording` sau khi ghép xong.
     tmp_dir: PathBuf,
 }
 
@@ -313,9 +314,9 @@ fn spawn_pcm_file_writer(
         while let Ok(chunk) = rx.recv() {
             // Khi đang paused: drop chunk âm thanh — không ghi vào file,
             // giữ đồng bộ với video (video cũng bị drop cùng khoảng thời
-            // gian này trong writer thread). ffmpeg mux_audio sau này nhận
-            // 2 file có cùng "khoảng trắng" nên timeline khớp.
-            if paused.load(Ordering::Relaxed) {
+            // gian này trong writer thread). ffmpeg mux_audio / mux_dual_audio
+            // sau này nhận các file có cùng "khoảng trắng" nên timeline khớp tuyệt đối.
+            if paused.load(Ordering::SeqCst) {
                 continue;
             }
             if let Err(e) = file.write_all(&chunk) {
@@ -451,7 +452,8 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
     let border_rect = record_border_rect(&target);
 
     let audio_source = audio_source_setting(app);
-    let want_system_audio = audio_source == AudioSource::System;
+    let want_system_audio = audio_source == AudioSource::System || audio_source == AudioSource::Both;
+    let want_mic = audio_source == AudioSource::Mic || audio_source == AudioSource::Both;
 
     let (stream, frame_rx, system_audio_rx) =
         crate::capture::mac_stream::start(target, FPS, want_system_audio)?;
@@ -459,41 +461,17 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
 
     // Mic là nguồn ĐỘC LẬP với SCStream (xem `audio_mic.rs`) — lỗi ở đây
     // (vd không có quyền micro) không nên làm hỏng cả phiên quay: log rồi
-    // tiếp tục quay KHÔNG audio, còn hơn để người dùng mất trắng bản quay.
-    let mic_result = if audio_source == AudioSource::Mic {
+    // tiếp tục quay, còn hơn để người dùng mất trắng bản quay.
+    let mic_result = if want_mic {
         match audio_mic::start() {
             Ok(m) => Some(m),
             Err(e) => {
-                notify_warning(app, &format!("Không ghi được mic — vẫn tiếp tục quay KHÔNG có tiếng: {e}"));
+                notify_warning(app, &format!("Không ghi được mic — vẫn tiếp tục quay: {e}"));
                 None
             }
         }
     } else {
         None
-    };
-
-    // Chuẩn hoá về ĐÚNG 1 nguồn PCM (bất kể mic hay audio hệ thống) — chỉ 1
-    // trong 2 có thể khác `None` vì `audio_source` đã loại trừ lẫn nhau.
-    struct AudioProducer {
-        rx: Receiver<Vec<u8>>,
-        sample_rate: u32,
-        channels: u16,
-        mic: Option<audio_mic::MicCapture>,
-    }
-    let audio_producer = if let Some(rx) = system_audio_rx {
-        Some(AudioProducer {
-            rx,
-            sample_rate: crate::capture::mac_stream::AUDIO_SAMPLE_RATE,
-            channels: crate::capture::mac_stream::AUDIO_CHANNELS,
-            mic: None,
-        })
-    } else {
-        mic_result.map(|(mic, rx, sample_rate, channels)| AudioProducer {
-            rx,
-            sample_rate,
-            channels: channels as u16,
-            mic: Some(mic),
-        })
     };
 
     // Cờ pause dùng chung giữa writer thread video, writer thread audio, và
@@ -502,35 +480,55 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
     let paused_accumulated_ms = Arc::new(AtomicU64::new(0));
     let pause_started_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
-    // Có audio: video quay ra 1 file TẠM trong `tmp_dir` (ghép audio vào sau
-    // mới ra `output_path` thật, xem `stop_recording`). Không audio: video
-    // quay THẲNG ra `output_path` — giữ nguyên đường đi ngắn nhất của v1.
-    let (video_path, output_path, audio) = match audio_producer {
-        Some(producer) => {
-            let tmp_dir = std::env::temp_dir().join(format!("snapdoc-rec-audio-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&tmp_dir)
-                .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
-            let raw_path = tmp_dir.join("audio.pcm");
-            let video_tmp_path = tmp_dir.join("video.mp4");
-            let writer = spawn_pcm_file_writer(raw_path.clone(), producer.rx, paused.clone());
-            let final_path = new_output_path(app)?;
+    let has_any_audio = system_audio_rx.is_some() || mic_result.is_some();
+    let (video_path, output_path, audio) = if has_any_audio {
+        let tmp_dir = std::env::temp_dir().join(format!("snapdoc-rec-audio-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir)
+            .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
+        let video_tmp_path = tmp_dir.join("video.mp4");
+        let final_path = new_output_path(app)?;
+        let system_track = if let Some(sys_rx) = system_audio_rx {
+            let sys_raw_path = tmp_dir.join("system.pcm");
+            let writer = spawn_pcm_file_writer(sys_raw_path.clone(), sys_rx, paused.clone());
+            Some(AudioTrack {
+                writer,
+                raw_path: sys_raw_path,
+                sample_rate: crate::capture::mac_stream::AUDIO_SAMPLE_RATE,
+                channels: crate::capture::mac_stream::AUDIO_CHANNELS,
+            })
+        } else {
+            None
+        };
+
+        let (mic_capture, mic_track) = if let Some((mic, mic_rx, sample_rate, channels)) = mic_result {
+            let mic_raw_path = tmp_dir.join("mic.pcm");
+            let writer = spawn_pcm_file_writer(mic_raw_path.clone(), mic_rx, paused.clone());
             (
-                video_tmp_path,
-                final_path,
-                Some(ActiveAudio {
-                    mic: producer.mic,
+                Some(mic),
+                Some(AudioTrack {
                     writer,
-                    raw_path,
-                    sample_rate: producer.sample_rate,
-                    channels: producer.channels,
-                    tmp_dir,
+                    raw_path: mic_raw_path,
+                    sample_rate,
+                    channels: channels as u16,
                 }),
             )
-        }
-        None => {
-            let final_path = new_output_path(app)?;
-            (final_path.clone(), final_path, None)
-        }
+        } else {
+            (None, None)
+        };
+
+        (
+            video_tmp_path,
+            final_path,
+            Some(ActiveAudio {
+                mic: mic_capture,
+                mic_track,
+                system_track,
+                tmp_dir,
+            }),
+        )
+    } else {
+        let final_path = new_output_path(app)?;
+        (final_path.clone(), final_path, None)
     };
 
     let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
@@ -703,45 +701,39 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
     let border_rect = record_border_rect(&target);
 
     let audio_source = audio_source_setting(app);
+    let want_system_audio = audio_source == AudioSource::System || audio_source == AudioSource::Both;
+    let want_mic = audio_source == AudioSource::Mic || audio_source == AudioSource::Both;
 
     let (stream, frame_rx, _system_audio_rx) =
         crate::capture::windows_stream::start(target, FPS, false)?;
     let (width, height) = (stream.width, stream.height);
 
-    // Chuẩn hoá về ĐÚNG 1 nguồn PCM (mic hoặc audio hệ thống) — lỗi lúc mở
-    // thiết bị (vd không có quyền micro, hoặc cpal không mở được loopback)
-    // không nên làm hỏng cả phiên quay: log rồi tiếp tục quay KHÔNG audio,
-    // còn hơn để người dùng mất trắng bản quay (giống hệt lý do bên macOS).
-    enum AudioCapture {
-        Mic(audio_mic::MicCapture),
-        System(audio_wasapi::SystemAudioCapture),
-    }
-    struct AudioProducer {
-        rx: Receiver<Vec<u8>>,
-        sample_rate: u32,
-        channels: u16,
-        capture: AudioCapture,
-    }
-    let audio_producer: Option<AudioProducer> = match audio_source {
-        AudioSource::Mic => match audio_mic::start() {
+    let mic_result = if want_mic {
+        match audio_mic::start() {
             Ok((mic, rx, sample_rate, channels)) => {
-                Some(AudioProducer { rx, sample_rate, channels: channels as u16, capture: AudioCapture::Mic(mic) })
+                Some((mic, rx, sample_rate, channels as u16))
             }
             Err(e) => {
-                notify_warning(app, &format!("Không ghi được mic — vẫn tiếp tục quay KHÔNG có tiếng: {e}"));
+                notify_warning(app, &format!("Không ghi được mic — vẫn tiếp tục quay: {e}"));
                 None
             }
-        },
-        AudioSource::System => match audio_wasapi::start() {
+        }
+    } else {
+        None
+    };
+
+    let sys_result = if want_system_audio {
+        match audio_wasapi::start() {
             Ok((sys, rx, sample_rate, channels)) => {
-                Some(AudioProducer { rx, sample_rate, channels, capture: AudioCapture::System(sys) })
+                Some((sys, rx, sample_rate, channels))
             }
             Err(e) => {
-                notify_warning(app, &format!("Không ghi được audio hệ thống — vẫn tiếp tục quay KHÔNG có tiếng: {e}"));
+                notify_warning(app, &format!("Không ghi được audio hệ thống — vẫn tiếp tục quay: {e}"));
                 None
             }
-        },
-        AudioSource::Off => None,
+        }
+    } else {
+        None
     };
 
     // Cờ pause dùng chung giữa writer thread video, writer thread audio, và ticker.
@@ -749,37 +741,60 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
     let paused_accumulated_ms = Arc::new(AtomicU64::new(0));
     let pause_started_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
-    let (video_path, output_path, audio) = match audio_producer {
-        Some(producer) => {
-            let tmp_dir = std::env::temp_dir().join(format!("snapdoc-rec-audio-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&tmp_dir)
-                .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
-            let raw_path = tmp_dir.join("audio.pcm");
-            let video_tmp_path = tmp_dir.join("video.mp4");
-            let writer = spawn_pcm_file_writer(raw_path.clone(), producer.rx, paused.clone());
-            let final_path = new_output_path(app)?;
-            let (mic, system_audio) = match producer.capture {
-                AudioCapture::Mic(m) => (Some(m), None),
-                AudioCapture::System(s) => (None, Some(s)),
-            };
+    let has_any_audio = sys_result.is_some() || mic_result.is_some();
+    let (video_path, output_path, audio) = if has_any_audio {
+        let tmp_dir = std::env::temp_dir().join(format!("snapdoc-rec-audio-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir)
+            .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
+        let video_tmp_path = tmp_dir.join("video.mp4");
+        let final_path = new_output_path(app)?;
+
+        let (system_audio, system_track) = if let Some((sys, sys_rx, sample_rate, channels)) = sys_result {
+            let sys_raw_path = tmp_dir.join("system.pcm");
+            let writer = spawn_pcm_file_writer(sys_raw_path.clone(), sys_rx, paused.clone());
             (
-                video_tmp_path,
-                final_path,
-                Some(ActiveAudio {
-                    mic,
-                    system_audio,
+                Some(sys),
+                Some(AudioTrack {
                     writer,
-                    raw_path,
-                    sample_rate: producer.sample_rate,
-                    channels: producer.channels,
-                    tmp_dir,
+                    raw_path: sys_raw_path,
+                    sample_rate,
+                    channels,
                 }),
             )
-        }
-        None => {
-            let final_path = new_output_path(app)?;
-            (final_path.clone(), final_path, None)
-        }
+        } else {
+            (None, None)
+        };
+
+        let (mic_capture, mic_track) = if let Some((mic, mic_rx, sample_rate, channels)) = mic_result {
+            let mic_raw_path = tmp_dir.join("mic.pcm");
+            let writer = spawn_pcm_file_writer(mic_raw_path.clone(), mic_rx, paused.clone());
+            (
+                Some(mic),
+                Some(AudioTrack {
+                    writer,
+                    raw_path: mic_raw_path,
+                    sample_rate,
+                    channels,
+                }),
+            )
+        } else {
+            (None, None)
+        };
+
+        (
+            video_tmp_path,
+            final_path,
+            Some(ActiveAudio {
+                mic: mic_capture,
+                system_audio,
+                mic_track,
+                system_track,
+                tmp_dir,
+            }),
+        )
+    } else {
+        let final_path = new_output_path(app)?;
+        (final_path.clone(), final_path, None)
     };
 
     let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
@@ -983,9 +998,16 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
 
     // Ghi file audio KHÔNG qua ffmpeg lúc quay (chỉ `File::write_all`) nên
     // join ở đây luôn nhanh — không có rủi ro treo như hướng fifo cũ.
-    let audio_meta = audio.map(|a| {
-        let _ = a.writer.join();
-        (a.raw_path, a.sample_rate, a.channels, a.tmp_dir)
+    let audio_meta = audio.map(|mut a| {
+        let mic_meta = a.mic_track.take().map(|t| {
+            let _ = t.writer.join();
+            (t.raw_path, t.sample_rate, t.channels)
+        });
+        let sys_meta = a.system_track.take().map(|t| {
+            let _ = t.writer.join();
+            (t.raw_path, t.sample_rate, t.channels)
+        });
+        (mic_meta, sys_meta, a.tmp_dir)
     });
 
     let write_join_res = active.writer.join();
@@ -1009,23 +1031,69 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
     // bản quay: dùng thẳng video tạm (không tiếng) làm kết quả cuối, không
     // xoá `tmp_dir` trong trường hợp này vì video tạm đang nằm trong đó.
     let output_path = match audio_meta {
-        Some((raw_path, sample_rate, channels, tmp_dir)) => {
-            match encoder::mux_audio(&active.video_path, &raw_path, sample_rate, channels, &active.output_path) {
+        // CẢ 2 NGUỒN (Mic + Hệ thống): Trộn qua mux_dual_audio với gain boost cho mic + cân bằng âm lượng hệ thống
+        Some((Some((mic_path, mic_sr, mic_ch)), Some((sys_path, sys_sr, sys_ch)), tmp_dir)) => {
+            match encoder::mux_dual_audio(
+                &active.video_path,
+                &mic_path,
+                mic_sr,
+                mic_ch,
+                &sys_path,
+                sys_sr,
+                sys_ch,
+                &active.output_path,
+            ) {
                 Ok(()) => {
                     let _ = std::fs::remove_dir_all(&tmp_dir);
                     active.output_path
                 }
                 Err(e) => {
-                    notify_warning(app, &format!("Ghép audio thất bại — video được giữ lại KHÔNG có tiếng: {e}"));
-                    // Video tạm nằm trong thư mục temp — mở asset scope cho
-                    // nó để cửa sổ xem lại còn phát được (scope chỉ mở sẵn
-                    // cho saveDir, không có thư mục temp này).
+                    notify_warning(app, &format!("Ghép dual audio thất bại — video được giữ lại KHÔNG có tiếng: {e}"));
                     if let Some(parent) = active.video_path.parent() {
                         allow_asset_scope(app, parent);
                     }
                     active.video_path
                 }
             }
+        }
+        // CHỈ MIC: Ghép qua mux_audio với is_mic = true (gain boost 2.2x to rõ)
+        Some((Some((mic_path, mic_sr, mic_ch)), None, tmp_dir)) => {
+            match encoder::mux_audio(&active.video_path, &mic_path, mic_sr, mic_ch, true, &active.output_path) {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    active.output_path
+                }
+                Err(e) => {
+                    notify_warning(app, &format!("Ghép audio mic thất bại — video được giữ lại KHÔNG có tiếng: {e}"));
+                    if let Some(parent) = active.video_path.parent() {
+                        allow_asset_scope(app, parent);
+                    }
+                    active.video_path
+                }
+            }
+        }
+        // CHỈ HỆ THỐNG: Ghép qua mux_audio với is_mic = false (âm lượng chuẩn 1.0x)
+        Some((None, Some((sys_path, sys_sr, sys_ch)), tmp_dir)) => {
+            match encoder::mux_audio(&active.video_path, &sys_path, sys_sr, sys_ch, false, &active.output_path) {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    active.output_path
+                }
+                Err(e) => {
+                    notify_warning(app, &format!("Ghép audio hệ thống thất bại — video được giữ lại KHÔNG có tiếng: {e}"));
+                    if let Some(parent) = active.video_path.parent() {
+                        allow_asset_scope(app, parent);
+                    }
+                    active.video_path
+                }
+            }
+        }
+        Some((None, None, tmp_dir)) => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            if active.video_path != active.output_path {
+                let _ = std::fs::rename(&active.video_path, &active.output_path);
+            }
+            active.output_path
         }
         None => active.output_path,
     };

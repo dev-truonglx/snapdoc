@@ -202,14 +202,23 @@ impl Encoder {
 /// pipe/fifo sống), nên không có rủi ro ffmpeg đồng bộ-rồi-treo giữa 2 input
 /// như hướng live-mux cũ. `-c:v copy`: giữ nguyên video đã encode, không mã
 /// hoá lại (nhanh, không mất chất lượng) — chỉ ghép thêm audio track AAC.
+/// Khi `is_mic = true`, áp dụng `dynaudnorm` để tự động khuếch đại giọng nói
+/// lên mức to rõ chuẩn phòng thu (peak 0.95) và chống vỡ tiếng.
 pub fn mux_audio(
     video_path: &Path,
     audio_path: &Path,
     sample_rate: u32,
     channels: u16,
+    is_mic: bool,
     output_path: &Path,
 ) -> Result<(), String> {
     let ffmpeg = sidecar_path("ffmpeg")?;
+
+    let filter_arg = if is_mic {
+        "aresample=async=1000:first_pts=0,dynaudnorm=f=150:g=15:p=0.95:m=10.0"
+    } else {
+        "aresample=async=1000:first_pts=0"
+    };
 
     let mut cmd = Command::new(&ffmpeg);
     cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
@@ -226,7 +235,7 @@ pub fn mux_audio(
         .args([
             "-map", "0:v:0", "-map", "1:a:0",
             "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
-            "-af", "aresample=async=1000:first_pts=0",
+            "-af", filter_arg,
             "-shortest",
             "-movflags", "+faststart",
         ])
@@ -248,6 +257,68 @@ pub fn mux_audio(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ffmpeg ghép audio thất bại: {} — {stderr}", output.status));
+    }
+    Ok(())
+}
+
+/// Ghép và trộn 2 nguồn audio thô (PCM s16le, Microphone + Âm thanh hệ thống)
+/// vào video ĐÃ QUAY XONG bằng 1 lần chạy ffmpeg TĨNH.
+///
+/// Xử lý cân bằng âm thanh chuyên nghiệp:
+/// 1. `mic`: Áp dụng `dynaudnorm` (Dynamic Audio Normalizer) tự động khuếch đại
+///    thông minh tiếng micro lên mức to rõ (peak 0.95) mà không bị vỡ tiếng.
+/// 2. `sys`: Âm thanh hệ thống (vốn đã ở mức cực đại 0 dBFS) được cân chỉnh về 0.45×
+///    để làm nền hài hòa, không lấn át tiếng nói thuyết minh của người dùng.
+/// 3. `aresample=async=1000:first_pts=0` độc lập trên từng nguồn để căn chuẩn
+///    tuyệt đối mốc thời gian sau các lần Tạm dừng (Pause) & Tiếp tục (Resume).
+pub fn mux_dual_audio(
+    video_path: &Path,
+    mic_path: &Path,
+    mic_sample_rate: u32,
+    mic_channels: u16,
+    sys_path: &Path,
+    sys_sample_rate: u32,
+    sys_channels: u16,
+    output_path: &Path,
+) -> Result<(), String> {
+    let ffmpeg = sidecar_path("ffmpeg")?;
+
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
+        .arg("-i")
+        .arg(video_path)
+        .args(["-f", "s16le", "-ar", &mic_sample_rate.to_string(), "-ac", &mic_channels.to_string()])
+        .arg("-i")
+        .arg(mic_path)
+        .args(["-f", "s16le", "-ar", &sys_sample_rate.to_string(), "-ac", &sys_channels.to_string()])
+        .arg("-i")
+        .arg(sys_path)
+        .args([
+            "-filter_complex",
+            "[1:a]aresample=async=1000:first_pts=0,dynaudnorm=f=150:g=15:p=0.95:m=10.0[mic];[2:a]aresample=async=1000:first_pts=0,volume=0.45[sys];[mic][sys]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,aresample=async=1000:first_pts=0,alimiter=limit=0.95[aout]",
+            "-map", "0:v:0", "-map", "[aout]",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            "-movflags", "+faststart",
+        ])
+        .arg(output_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg ghép dual audio thất bại: {} — {stderr}", output.status));
     }
     Ok(())
 }
