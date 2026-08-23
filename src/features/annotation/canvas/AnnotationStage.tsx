@@ -255,7 +255,10 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   // và ghi đè `img` bằng ảnh sai; huỷ trong cleanup để chỉ lần load mới nhất
   // được set (cùng pattern StitchDialog).
   useEffect(() => {
-    if (!doc) return;
+    if (!doc) {
+      setImg(null);
+      return;
+    }
     let cancelled = false;
     const el = new window.Image();
     el.onload = () => {
@@ -1177,6 +1180,16 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const isNumberedRectSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "numbered-rect");
   // Line / arrow / numbered-arrow → Transformer ẩn (kéo di chuyển trực tiếp, không resize bounding box)
   const isLineSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "line" || a.type === "arrow" || a.type === "numbered-arrow");
+
+  if (!doc) {
+    return (
+      <div ref={outerRef} style={{ ...fill, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim, #6c7086)" }}>
+        <div style={{ textAlign: "center" }}>
+          <p style={{ margin: 0, fontSize: 14 }}>{t("historyStrip.noDocument", "Không có ảnh nào đang mở")}</p>
+        </div>
+      </div>
+    );
+  }
 
   // DPI info từ metadata ảnh chụp (1 = normal, 2 = Retina 2×, ...)
   const scaleFactor = doc.scaleFactor ?? 1;

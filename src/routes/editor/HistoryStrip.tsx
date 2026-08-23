@@ -7,7 +7,10 @@ import {
   openLibraryImage,
   suspendActive,
   tryResume,
+  dropSession,
+  noteActiveKey,
 } from "../../features/annotation/sessions";
+import { useEditor } from "../../features/annotation/store";
 import { fmtDuration } from "../history/formatUtils";
 
 const LIMIT = 20;
@@ -161,19 +164,57 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
     doCopy(id);
   };
 
-  // Xoá nhanh ngay từ dải "Gần đây" — VĨNH VIỄN (xoá cả row DB lẫn file
-  // asset/thumbnail trên đĩa, xem `permanently_delete_history_item_sync` ở
-  // backend), không qua Thùng rác. Không hỏi xác nhận theo yêu cầu — khác
-  // `doPermanentDelete` ở `HistoryPreviewPanel.tsx` (có `confirm()`) vì đây
-  // là thao tác được yêu cầu rõ ràng: bấm là xoá luôn, không hỏi lại.
-  const doDelete = async (id: string) => {
+  // Xoá tạm (chuyển vào Thùng rác) — row DB được gắn deleted_at, file vẫn còn
+  // trên đĩa và có thể xem/khôi phục trong Thùng rác (Trash).
+  const doTrash = async (id: string) => {
+    setDeletingId(id);
+    try {
+      await ipc.deleteHistoryItem(id);
+      dropSession(id);
+      onFlash(t("historyStrip.movedToTrash"));
+
+      // Nếu tài liệu đang bị xoá chính là tài liệu đang mở trong Editor:
+      if (id === currentId) {
+        noteActiveKey(null);
+        const remaining = items.filter((it) => it.id !== id);
+        if (remaining.length > 0) {
+          const idx = items.findIndex((it) => it.id === id);
+          const nextItem = idx < remaining.length ? remaining[idx] : remaining[remaining.length - 1];
+          openItem(nextItem);
+        } else {
+          onOpenImage(); // Thoát video nếu đang xem video
+          useEditor.getState().loadDoc(null);
+        }
+      }
+      load();
+    } catch (err) {
+      onFlash(String(err));
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  // Xoá vĩnh viễn khỏi máy tính — xoá cả row DB lẫn file asset/thumbnail trên đĩa.
+  const doPermanentDelete = async (id: string) => {
     setDeletingId(id);
     try {
       await ipc.permanentlyDeleteHistoryItem(id);
-      // `load()` (gọi lại đúng `LIMIT` cũ) thay vì tự lọc `id` khỏi `items` —
-      // lọc tại chỗ chỉ làm dải NGẮN LẠI 1 item, còn `load()` kéo thêm đúng 1
-      // item kế tiếp (trước đó bị `LIMIT` cắt bớt) lên để dải luôn đủ số
-      // lượng như trước khi xoá.
+      dropSession(id);
+      onFlash(t("historyStrip.deletedPermanent"));
+
+      // Nếu tài liệu đang bị xoá chính là tài liệu đang mở trong Editor:
+      if (id === currentId) {
+        noteActiveKey(null);
+        const remaining = items.filter((it) => it.id !== id);
+        if (remaining.length > 0) {
+          const idx = items.findIndex((it) => it.id === id);
+          const nextItem = idx < remaining.length ? remaining[idx] : remaining[remaining.length - 1];
+          openItem(nextItem);
+        } else {
+          onOpenImage(); // Thoát video nếu đang xem video
+          useEditor.getState().loadDoc(null);
+        }
+      }
       load();
     } catch (err) {
       onFlash(String(err));
@@ -184,7 +225,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
 
   const quickDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    doDelete(id);
+    doTrash(id);
   };
 
   // "Xem trong Thư mục" — mở Finder/Explorer, tự bôi đen đúng file asset
@@ -297,7 +338,10 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
               </button>
             )}
             <div style={contextMenuDivider} />
-            <button style={{ ...contextMenuItem, color: "#fca5a5" }} onClick={() => { setMenu(null); doDelete(item.id); }}>
+            <button style={contextMenuItem} onClick={() => { setMenu(null); doTrash(item.id); }}>
+              {t("historyStrip.moveToTrash")}
+            </button>
+            <button style={{ ...contextMenuItem, color: "#fca5a5" }} onClick={() => { setMenu(null); doPermanentDelete(item.id); }}>
               {t("historyStrip.deletePermanent")}
             </button>
           </div>

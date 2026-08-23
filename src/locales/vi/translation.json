@@ -320,13 +320,17 @@
     "copiedToClipboard": "Đã copy vào clipboard",
     "openVideoEditor": "Mở video trong Editor",
     "reopenEditor": "Mở lại trong Editor",
-    "deleteVideo": "Xoá vĩnh viễn video này (cả file trên máy)",
-    "deleteImage": "Xoá vĩnh viễn ảnh này (cả file trên máy)",
+    "deleteVideo": "Xoá (chuyển vào Thùng rác)",
+    "deleteImage": "Xoá (chuyển vào Thùng rác)",
+    "moveToTrash": "Xoá (chuyển vào Thùng rác)",
+    "movedToTrash": "Đã chuyển vào Thùng rác",
     "viewAll": "Xem tất cả →",
     "quickCopy": "Copy nhanh vào clipboard",
     "viewInFolder": "Xem file trong Thư mục",
-    "deletePermanent": "Xoá vĩnh viễn (cả file trên máy)",
-    "hasUnsavedEdit": "Đang có bản chỉnh sửa chưa lưu — bấm để tiếp tục"
+    "deletePermanent": "Xoá vĩnh viễn (khỏi máy tính)",
+    "deletedPermanent": "Đã xoá vĩnh viễn khỏi máy tính",
+    "hasUnsavedEdit": "Đang có bản chỉnh sửa chưa lưu — bấm để tiếp tục",
+    "noDocument": "Không có ảnh nào đang mở"
   },
   "quickToolbar": {
     "selectColor": "Chọn màu",

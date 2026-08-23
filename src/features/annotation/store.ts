@@ -70,7 +70,7 @@ interface EditorState {
    * (ảnh vừa chụp / vừa mở từ Library → đúng bằng bản trên đĩa). Đường
    * FLATTEN phải truyền `false`: nó `loadDoc` lại với ảnh đã burn nhưng CHƯA
    * hề được lưu — chính app cũng nói vậy (xem `editorMain.flattenItem3`). */
-  loadDoc: (doc: Doc, markClean?: boolean) => void;
+  loadDoc: (doc: Doc | null, markClean?: boolean) => void;
   /** Khôi phục một phiên sửa đã bị treo (xem `sessions.ts`) — khác `loadDoc` ở
    * chỗ nó KHÔI PHỤC undo stack thay vì xoá.
    *
