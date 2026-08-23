@@ -59,8 +59,8 @@ use objc2_core_video::{
 };
 use objc2_foundation::{NSArray, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
-    SCStreamDelegate, SCStreamOutput, SCStreamOutputType, SCWindow,
+    SCContentFilter, SCDisplay, SCRunningApplication, SCShareableContent, SCStream,
+    SCStreamConfiguration, SCStreamDelegate, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
 /// Âm thanh HỆ THỐNG (loa) do SCStream trả về khi bật `capturesAudio` —
@@ -115,7 +115,9 @@ pub struct StreamOutputIvars {
     /// Nội dung frame VIDEO mới nhất SCStream đã gửi — callback chỉ cập nhật
     /// chỗ này, KHÔNG tự đẩy vào channel; `spawn_ticker` mới là nơi đẩy vào
     /// `frame_tx` theo đúng nhịp fps thật (xem doc-comment `spawn_ticker`).
-    latest: Arc<Mutex<Option<Frame>>>,
+    /// Bọc `Arc<Frame>` để `spawn_ticker` lặp lại frame cũ chỉ tốn chi phí clone
+    /// con trỏ Arc (8 bytes) thay vì deep-copy mảng byte 33MB mỗi nhịp.
+    latest: Arc<Mutex<Option<Arc<Frame>>>>,
     /// `Some` khi bật quay âm thanh hệ thống (`capturesAudio=true` lúc
     /// `start()`) — callback nhận `SCStreamOutputType::Audio` sẽ gửi thẳng
     /// vào đây (audio không cần "nhịp lại" như video — gói tới đều theo thời
@@ -159,12 +161,8 @@ define_class!(
                     if let Some(frame) = unsafe { sample_buffer_to_frame(sample_buffer) } {
                         // Chỉ ghi đè frame mới nhất — KHÔNG đẩy thẳng vào
                         // channel nữa (xem doc-comment `latest`/`spawn_ticker`).
-                        // Lock rất ngắn (chỉ gán con trỏ) nên không lo chặn
-                        // callback queue của SCK. `unwrap_or_else(into_inner)`:
-                        // không panic dây chuyền trong callback Objective-C
-                        // nếu mutex bị poison — dữ liệu chỉ là "frame mới
-                        // nhất", ghi đè an toàn.
-                        *self.ivars().latest.lock().unwrap_or_else(|p| p.into_inner()) = Some(frame);
+                        // Bọc `Arc::new(frame)` để ticker chia sẻ dữ liệu zero-copy.
+                        *self.ivars().latest.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(frame));
                     }
                 }
                 SCStreamOutputType::Audio => {
@@ -198,7 +196,7 @@ define_class!(
 
 impl StreamOutputHandler {
     fn new(
-        latest: Arc<Mutex<Option<Frame>>>,
+        latest: Arc<Mutex<Option<Arc<Frame>>>>,
         audio_tx: Option<mpsc::SyncSender<Vec<u8>>>,
         dropped: Arc<AtomicBool>,
         stopped_externally: Arc<AtomicBool>,
@@ -215,20 +213,10 @@ impl StreamOutputHandler {
 
 /// Thread đếm nhịp đúng `interval` (= 1/fps giây) — MỖI NHỊP lấy frame mới
 /// nhất SCStream đã gửi (`latest`, lặp lại frame cũ nếu chưa có gì mới kể từ
-/// nhịp trước) rồi đẩy vào `frame_tx`. Bắt buộc vì SCStream chỉ THỰC SỰ gọi
-/// callback khi nội dung màn hình thay đổi — `setMinimumFrameInterval` chỉ
-/// giới hạn tốc độ TỐI ĐA, không đảm bảo tốc độ TỐI THIỂU. Nếu ghi thẳng
-/// từng frame nhận được vào encoder (giả định 1 frame = 1/fps giây), video
-/// quay ra sẽ "tua nhanh" so với thời gian quay thực tế mỗi khi màn hình
-/// đứng yên — khiến video phát xong SỚM HƠN mốc thời lượng hiển thị (đo bằng
-/// đồng hồ treo tường ở `record/mod.rs`), và tệ hơn, sẽ LỆCH với audio hệ
-/// thống (vẫn ghi đều theo thời gian thực, không bị "hụt" như video). Cùng
-/// kiến trúc hệt `windows_stream.rs::spawn_ticker` (xem doc-comment đầu file
-/// đó để hiểu đầy đủ bối cảnh — đã áp dụng đúng ở đó, module này trước đây
-/// còn thiếu).
+/// nhịp trước) rồi đẩy vào `frame_tx`.
 fn spawn_ticker(
-    frame_tx: mpsc::SyncSender<Frame>,
-    latest: Arc<Mutex<Option<Frame>>>,
+    frame_tx: mpsc::SyncSender<Arc<Frame>>,
+    latest: Arc<Mutex<Option<Arc<Frame>>>>,
     dropped: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     interval: Duration,
@@ -243,8 +231,6 @@ fn spawn_ticker(
             let target_time = start + interval * frame_index;
             let now = Instant::now();
             if target_time > now {
-                // Ngủ từng đoạn ngắn thay vì ngủ hết `interval` 1 lần — để
-                // phản hồi nhanh với cờ `stop` khi người dùng bấm dừng quay.
                 std::thread::sleep((target_time - now).min(Duration::from_millis(20)));
                 continue;
             }
@@ -252,14 +238,10 @@ fn spawn_ticker(
 
             let frame = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(frame) = frame {
-                // try_send: nếu channel đầy (encoder chậm hơn tốc độ quay),
-                // DROP frame này thay vì chặn ticker.
                 if frame_tx.try_send(frame).is_err() {
                     dropped.store(true, Ordering::Relaxed);
                 }
             }
-            // `latest` vẫn `None` (chưa có frame đầu tiên từ SCK) — bỏ qua
-            // nhịp này, không gửi gì, đợi nhịp sau.
         }
     })
 }
@@ -445,10 +427,11 @@ fn f32_to_i16_le(sample: f32) -> [u8; 2] {
     v.to_le_bytes()
 }
 
-/// Tìm `SCDisplay` khớp `CGDirectDisplayID` bằng cách liệt kê
-/// `SCShareableContent` (đồng bộ hoá qua channel, có timeout).
-fn find_display(display_id: u32) -> Result<Retained<SCDisplay>, String> {
-    let (tx, rx) = mpsc::channel::<Result<Retained<SCDisplay>, String>>();
+/// Tìm `SCDisplay` khớp `CGDirectDisplayID` và danh sách `SCRunningApplication`
+/// của chính SnapDoc (`processID == my_pid`) để loại trừ khỏi stream quay video.
+fn find_display_and_own_apps(display_id: u32) -> Result<(Retained<SCDisplay>, Vec<Retained<SCRunningApplication>>), String> {
+    let my_pid = std::process::id();
+    let (tx, rx) = mpsc::channel::<Result<(Retained<SCDisplay>, Vec<Retained<SCRunningApplication>>), String>>();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, err: *mut objc2_foundation::NSError| {
         if content.is_null() {
             let msg = if err.is_null() {
@@ -461,10 +444,21 @@ fn find_display(display_id: u32) -> Result<Retained<SCDisplay>, String> {
         }
         let content: &SCShareableContent = unsafe { &*content };
         let displays = unsafe { content.displays() };
-        let found = displays
+        let found_display = displays
             .iter()
             .find(|d| unsafe { d.displayID() } == display_id);
-        let _ = tx.send(found.ok_or_else(|| "Không tìm thấy màn hình để quay".to_string()));
+        let Some(display) = found_display else {
+            let _ = tx.send(Err("Không tìm thấy màn hình để quay".to_string()));
+            return;
+        };
+
+        let apps = unsafe { content.applications() };
+        let own_apps: Vec<Retained<SCRunningApplication>> = apps
+            .iter()
+            .filter(|a| unsafe { a.processID() } as u32 == my_pid)
+            .collect();
+
+        let _ = tx.send(Ok((display, own_apps)));
     });
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
     rx.recv_timeout(TIMEOUT)
@@ -629,23 +623,37 @@ pub fn start(
     target: RecordTarget,
     fps: u32,
     capture_system_audio: bool,
-) -> Result<(RecordingHandle, mpsc::Receiver<Frame>, Option<mpsc::Receiver<Vec<u8>>>), String> {
+) -> Result<(RecordingHandle, mpsc::Receiver<Arc<Frame>>, Option<mpsc::Receiver<Vec<u8>>>), String> {
     // `source_rect`: Some khi quay 1 VÙNG (crop qua `SCStreamConfiguration`),
     // None khi quay trọn nội dung của filter (toàn màn hình hoặc cả cửa sổ).
     let (filter, source_rect): (Retained<SCContentFilter>, Option<CGRect>) = match &target {
         RecordTarget::Display(display_id) => {
-            let display = find_display(*display_id)?;
-            let excluded = NSArray::from_slice(&[]);
+            let (display, own_apps) = find_display_and_own_apps(*display_id)?;
+            let own_apps_arr = NSArray::from_retained_slice(&own_apps);
+            let no_exceptions = NSArray::from_slice(&[]);
+            // Loại trừ toàn bộ các cửa sổ, popup và Tray Menu của SnapDoc ra khỏi video.
             let filter = unsafe {
-                SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &excluded)
+                SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
+                    SCContentFilter::alloc(),
+                    &display,
+                    &own_apps_arr,
+                    &no_exceptions,
+                )
             };
             (filter, None)
         }
         RecordTarget::Region { display_id, x, y, w, h } => {
-            let display = find_display(*display_id)?;
-            let excluded = NSArray::from_slice(&[]);
+            let (display, own_apps) = find_display_and_own_apps(*display_id)?;
+            let own_apps_arr = NSArray::from_retained_slice(&own_apps);
+            let no_exceptions = NSArray::from_slice(&[]);
+            // Loại trừ toàn bộ các cửa sổ, popup và Tray Menu của SnapDoc ra khỏi video.
             let filter = unsafe {
-                SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &excluded)
+                SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
+                    SCContentFilter::alloc(),
+                    &display,
+                    &own_apps_arr,
+                    &no_exceptions,
+                )
             };
             let rect = CGRect {
                 origin: CGPoint { x: *x, y: *y },
@@ -717,9 +725,9 @@ pub fn start(
 
     // Channel có giới hạn dung lượng — nếu encoder xử lý chậm hơn tốc độ quay,
     // các lệnh gọi try_send() trong callback sẽ thất bại (drop) thay vì chặn
-    // luồng SCK. Bound = 2 giây buffer ở fps yêu cầu.
+    // luồng SCK. Bound = 2 giây buffer ở fps yêu cầu. Dùng Arc<Frame> để zero-copy.
     let bound = (fps.max(1) as usize) * 2;
-    let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(bound);
+    let (frame_tx, frame_rx) = mpsc::sync_channel::<Arc<Frame>>(bound);
     // Audio đến theo packet nhỏ (~10-20ms/lần) chứ không theo fps — bound rời
     // rạc hơn (packet/giây, không phải sample/giây) vẫn đủ ~2s đệm.
     let (audio_tx, audio_rx) = if capture_system_audio {
@@ -730,7 +738,7 @@ pub fn start(
     };
     let dropped = Arc::new(AtomicBool::new(false));
     let stopped_externally = Arc::new(AtomicBool::new(false));
-    let latest: Arc<Mutex<Option<Frame>>> = Arc::new(Mutex::new(None));
+    let latest: Arc<Mutex<Option<Arc<Frame>>>> = Arc::new(Mutex::new(None));
     let handler_obj =
         StreamOutputHandler::new(latest.clone(), audio_tx, dropped.clone(), stopped_externally.clone());
 

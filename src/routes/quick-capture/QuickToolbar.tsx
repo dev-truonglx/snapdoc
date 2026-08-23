@@ -148,6 +148,10 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><rect x="2.5" y="4" width="13" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" /></svg>,
     },
     {
+      id: "numbered-rect", label: t("tools.numberedRect") || (t("tools.rect") + " #"), shortcut: "E",
+      icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><rect x="2.5" y="4" width="13" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" /><circle cx="5" cy="6.5" r="3.2" fill="currentColor" /><text x="5" y="8.8" textAnchor="middle" fontSize="4.5" fontWeight="700" fill="#fff">1</text></svg>,
+    },
+    {
       id: "step", label: t("tools.step"), shortcut: "N",
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" strokeWidth="1.8" /><text x="9" y="12.4" textAnchor="middle" fontSize="9" fontWeight="700" fill="currentColor">1</text></svg>,
     },

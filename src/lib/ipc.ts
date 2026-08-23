@@ -209,8 +209,15 @@ export const ipc = {
     invoke<string>("save_and_copy", { path, data }),
   openCaptureBar: () => invoke<void>("open_capture_bar"),
   openCaptureBarForNew: () => invoke<void>("open_capture_bar_for_new"),
-  /** Resize capture-bar giữ nguyên cạnh đáy (xem `windows::resize_capture_bar`
-   * — macOS dùng NSWindow.setFrame atomic để không nháy). */
+  toggleCaptureBarPopover: (anchor: { x: number; y: number; width: number; height: number }) =>
+    invoke<void>("toggle_capture_bar_popover", {
+      anchorX: anchor.x,
+      anchorY: anchor.y,
+      anchorW: anchor.width,
+      anchorH: anchor.height,
+    }),
+  hideCaptureBarPopover: () => invoke<void>("hide_capture_bar_popover"),
+  /** @deprecated Không còn dùng do popover đã tách thành cửa sổ riêng */
   resizeCaptureBar: (height: number) => invoke<void>("resize_capture_bar", { height }),
   openEditor: () => invoke<void>("open_editor"),
   openSettings: () => invoke<void>("open_settings"),

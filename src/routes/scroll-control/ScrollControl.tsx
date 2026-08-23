@@ -220,6 +220,71 @@ function shiftNCC(
   return denom > 1e-6 ? cov / denom : 0;
 }
 
+// Xác thực 2D tinh chỉnh (Fine 2D Validation): Khi có nhiều ứng viên dy với điểm NCC
+// xấp xỉ nhau (đặc biệt trong trang bảng biểu lặp chu kỳ dòng hoặc lưới), kiểm tra
+// độ khớp pixel thực tế trên các dòng có mật độ nội dung cao nhất để chọn ra dy
+// chính xác tuyệt đối.
+function validateCandidateDy(
+  p: Uint8ClampedArray,
+  c: Uint8ClampedArray,
+  bgP: Float32Array,
+  bgC: Float32Array,
+  w: number,
+  _h: number,
+  scrollTop: number,
+  scrollBottom: number,
+  candidates: number[],
+  stride: number,
+  vEst: number,
+  span: number,
+): number {
+  if (candidates.length === 1) return candidates[0];
+
+  // Chọn ra tối đa 8 dòng có độ lệch sáng nội dung mạnh nhất trong vùng chồng lấn
+  const minDy = candidates[0];
+  const sampleY0 = scrollTop + minDy;
+  const sampleY1 = scrollBottom;
+  const testRows: number[] = [];
+  const step = Math.max(1, Math.floor((sampleY1 - sampleY0) / 16));
+
+  for (let y = sampleY0; y < sampleY1; y += step) {
+    testRows.push(y);
+    if (testRows.length >= 8) break;
+  }
+
+  if (testRows.length === 0) return candidates[0];
+
+  let bestCand = candidates[0];
+  let bestScore = -1;
+
+  for (const cand of candidates) {
+    let totalContent = 0;
+    let matchedContent = 0;
+
+    for (const yp of testRows) {
+      const yc = yp - cand;
+      if (yc < scrollTop || yc >= scrollBottom) continue;
+      const offP = yp * stride;
+      const offC = yc * stride;
+      const cmp = rowCompare(p, offP, bgP[yp], c, offC, bgC[yc], w);
+      totalContent += cmp.content;
+      matchedContent += cmp.contentRatio * cmp.content;
+    }
+
+    const matchRatio = totalContent > 0 ? matchedContent / totalContent : 0;
+    // Kết hợp độ khớp 2D với trọng số đà cuộn (velocity prior) nếu có vận tốc ước tính
+    const velBonus = vEst > 0 ? (1 - Math.min(1, Math.abs(cand - vEst) / Math.max(span, 1))) * 0.05 : 0;
+    const finalScore = matchRatio + velBonus;
+
+    if (finalScore > bestScore) {
+      bestScore = finalScore;
+      bestCand = cand;
+    }
+  }
+
+  return bestCand;
+}
+
 interface ScrollAnalysis {
   dy: number; // số pixel nội dung mới (0 = không cuộn, -1 = không khớp được)
   topFixed: number; // chiều cao dải cố định trên (header dính)
@@ -232,10 +297,8 @@ interface ScrollAnalysis {
 }
 
 // Phân tích 2 khung liên tiếp: phát hiện dải cố định (header/footer dính) rồi
-// tính khoảng cuộn dy CHỈ trong vùng thực sự cuộn. Nhờ đó:
-//   - Không nhận nhầm "không cuộn" khi một phần khung (đáy/đỉnh) đứng yên.
-//   - Không nhân đôi header/footer dính khi ghép.
-function analyzeScroll(prev: ImageData, cur: ImageData): ScrollAnalysis {
+// tính khoảng cuộn dy CHỈ trong vùng thực sự cuộn.
+function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): ScrollAnalysis {
   const w = prev.width;
   const h = prev.height;
   const stride = w * 4;
@@ -243,8 +306,7 @@ function analyzeScroll(prev: ImageData, cur: ImageData): ScrollAnalysis {
   const c = cur.data;
   const maxBand = Math.floor(h * 0.4);
 
-  // Ước lượng nền của từng dòng MỘT LẦN cho cả 2 khung (dùng lại trong mọi phép
-  // so sánh bên dưới) — tránh tính trung vị lặp đi lặp lại trong vòng quét dy.
+  // Ước lượng nền của từng dòng MỘT LẦN cho cả 2 khung
   const bgP = new Float32Array(h);
   const bgC = new Float32Array(h);
   for (let yy = 0; yy < h; yy++) {
@@ -252,18 +314,14 @@ function analyzeScroll(prev: ImageData, cur: ImageData): ScrollAnalysis {
     bgC[yy] = rowBgLum(c, yy * stride, w);
   }
 
-  // "Giống nhau ở CÙNG vị trí?" — dùng contentRatio nếu dòng có ÍT NHẤT 2 điểm
-  // nội dung (đủ để biết nội dung có đổi không); chỉ dòng gần như trắng mới xét
-  // ratio tổng. Nhờ vậy 1 dòng nội dung THƯA bị đổi vẫn bị tính là "khác" — dải
-  // cố định không còn phình nuốt sạch vùng cuộn (lỗi span≈1).
+  // "Giống nhau ở CÙNG vị trí?" — dùng contentRatio nếu dòng có ÍT NHẤT 2 điểm nội dung
   const sameInPlace = (y: number): boolean => {
     const off = y * stride;
     const cmp = rowCompare(p, off, bgP[y], c, off, bgC[y], w);
     return cmp.content >= 2 ? cmp.contentRatio >= SAME_RATIO : cmp.ratio >= SAME_RATIO;
   };
 
-  // Tỉ lệ dòng THAY ĐỔI giữa 2 khung (đo độc lập, ở cùng vị trí) — cho biết khung
-  // có thật sự đổi không (loại trừ khả năng capture trả về khung trùng).
+  // Tỉ lệ dòng THAY ĐỔI giữa 2 khung
   let sampled = 0;
   let changed = 0;
   for (let y = 0; y < h; y += 4) {
@@ -278,8 +336,7 @@ function analyzeScroll(prev: ImageData, cur: ImageData): ScrollAnalysis {
   let botFixed = 0;
   while (botFixed < maxBand && sameInPlace(h - 1 - botFixed)) botFixed++;
 
-  // An toàn: nếu dải nuốt gần hết (vùng cuộn còn < 25% chiều cao) thì KHÔNG tin
-  // vào dải — để NCC quét trên (gần) toàn khung thay vì trả "không cuộn" giả.
+  // An toàn: nếu dải nuốt gần hết (vùng cuộn còn < 25% chiều cao) thì KHÔNG tin vào dải
   if (h - topFixed - botFixed < h * 0.25) {
     topFixed = 0;
     botFixed = 0;
@@ -289,34 +346,27 @@ function analyzeScroll(prev: ImageData, cur: ImageData): ScrollAnalysis {
   const scrollBottom = h - botFixed;
   const span = scrollBottom - scrollTop;
 
-  // Hai khung gần như giống hệt → không cuộn (đây là trạng thái đúng, không lỗi).
+  // Hai khung gần như giống hệt → không cuộn (trang đứng yên).
   if (changedFrac < 0.02 || span < 24) {
     return { dy: 0, topFixed, botFixed, span, changedFrac };
   }
 
-  // 3) Ước lượng dy bằng TƯƠNG QUAN BIÊN DẠNG CẠNH (thay cho dò vài dòng mốc).
-  //    Mỗi khung được rút gọn thành tín hiệu 1 chiều (đỉnh ở chữ/viền, ≈0 ở nền)
-  //    rồi tìm dịch chuyển dy cho NCC cao nhất. Cách này quét được TOÀN BỘ dy với
-  //    chi phí thấp và bền với trang thưa (table, dashboard) — nơi cách so pixel
-  //    2-D cũ bị nền trắng lấn át.
+  // 3) Ước lượng dy bằng TƯƠNG QUAN BIÊN DẠNG CẠNH (Edge Profile Correlation)
   const profP = edgeProfileBinned(p, w, h, stride);
   const profC = edgeProfileBinned(c, w, h, stride);
 
-  // Loại các CỘT CỐ ĐỊNH (sidebar/panel dính) khỏi NCC: chúng không cuộn nên chỉ
-  // thêm nhiễu lệch pha, kéo NCC ở dy thật xuống.
+  // Loại các CỘT CỐ ĐỊNH (sidebar/panel dính) khỏi NCC
   const mask = activeBinMask(p, c, bgP, bgC, w, h, stride);
   let activeBins = 0;
   for (let b = 0; b < NBINS; b++) activeBins += mask[b];
 
-  // Giới hạn dy để overlap không quá nhỏ: dy lớn ⇒ overlap bé ⇒ NCC nhiễu, cho
-  // đỉnh GIẢ rất cao (đây chính là lỗi bestDy≈700). Một tick cuộn tay không vượt
-  // quá nửa khung nên chặn ở span/2 và đảm bảo overlap ≥ MIN_OVERLAP dòng.
   const maxDy = Math.min(span - MIN_OVERLAP, Math.floor(span * MAX_SCROLL_FRAC));
   if (maxDy < MIN_DY) return { dy: 0, topFixed, botFixed, span, changedFrac };
 
   const scores = new Float32Array(maxDy + 1);
   let bestNcc = -1;
   let bestDy = 0;
+
   for (let dy = MIN_DY; dy <= maxDy; dy++) {
     const ncc = shiftNCC(profP, profC, scrollTop, scrollBottom, dy, mask, activeBins);
     scores[dy] = ncc;
@@ -325,55 +375,76 @@ function analyzeScroll(prev: ImageData, cur: ImageData): ScrollAnalysis {
       bestDy = dy;
     }
   }
-  // 4) Chọn dy. Biên dạng binned đã đủ phân biệt nên TIN vào đỉnh NCC thay vì so
-  //    pixel chặt (vốn từ chối nhầm khi cuộn mượt/răng cưa). Trong số các dy có
-  //    NCC sát đỉnh (≤ NEAR), ưu tiên dy NHỎ NHẤT: vừa chống đỉnh nhiễu ở dy lớn,
-  //    vừa chọn chu kỳ cơ bản khi bảng có nhiều dòng cao đều nhau.
+
+  // Nếu điểm tương quan không đủ tin cậy
   if (bestNcc < NCC_ACCEPT) {
     return { dy: -1, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
   }
-  const NEAR = 0.03;
-  let dy = bestDy;
-  for (let d2 = MIN_DY; d2 < bestDy; d2++) {
+
+  // Thu thập các ứng viên dy nằm trong dải đỉnh tương quan (NEAR)
+  const NEAR = 0.04;
+  const candidates: number[] = [];
+  for (let d2 = MIN_DY; d2 <= maxDy; d2++) {
     if (scores[d2] >= bestNcc - NEAR) {
-      dy = d2;
-      break;
+      candidates.push(d2);
     }
   }
-  return { dy, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
+
+  // Xác thực tinh 2D trên các ứng viên để loại bỏ sai số do chu kỳ bảng biểu
+  const finalDy = validateCandidateDy(
+    p,
+    c,
+    bgP,
+    bgC,
+    w,
+    h,
+    scrollTop,
+    scrollBottom,
+    candidates.length > 0 ? candidates : [bestDy],
+    stride,
+    vEst,
+    span,
+  );
+
+  return { dy: finalDy, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
+}
+
+interface FrameHistoryItem {
+  imgData: ImageData;
+  img: HTMLImageElement;
+  sliceIdx: number;
+  botFixed: number;
+  usedHeightAtFrame: number;
 }
 
 export default function ScrollControl() {
   const { t } = useTranslation();
-  // Bắt đầu thẳng ở trạng thái "capturing": vẽ xong khung là tự động chụp, nút
-  // "Hoàn thành" hiện ngay (không cần nhấn "Bắt đầu").
+  // Bắt đầu thẳng ở trạng thái "capturing": vẽ xong khung là tự động chụp
   const [status, setStatus] = useState<"ready" | "capturing" | "processing">("capturing");
   const [frameCount, setFrameCount] = useState(0);
   const [stitchedHeight, setStitchedHeight] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  // Cảnh báo cuộn quá nhanh: khi không khớp được (dy=-1) mà nội dung lại đổi
-  // nhiều (đang cuộn thật) → đã vượt tầm chồng lấn → có thể bỏ sót nội dung.
+  // Cảnh báo cuộn quá nhanh
   const [fastWarn, setFastWarn] = useState(false);
   const fastWarnRef = useRef(false);
-  // Chẩn đoán hiển thị ngay trên panel (không cần devtools): cho biết vì sao
-  // 1 frame bị bỏ. Tắt bằng cách đặt DEBUG = false.
+  // Chẩn đoán hiển thị ngay trên panel
   const [dbg, setDbg] = useState<string>("");
-  // Log tích luỹ mọi tick để người dùng copy gửi lại (giữ tối đa MAX_LOG dòng).
   const [logText, setLogText] = useState<string>("");
   const logRef = useRef<string[]>([]);
   const seqRef = useRef(0);
   const [copied, setCopied] = useState(false);
 
-  // Master canvas dùng "capacity doubling": vùng nhớ (capacity) cao hơn nội
-  // dung thực (usedHeight) để KHÔNG phải tạo canvas mới + copy lại toàn bộ ảnh
-  // mỗi khung hình (tránh O(n²) copy). Canvas được gắn thẳng vào DOM để xem
-  // trước, nên KHÔNG cần encode PNG (toDataURL) mỗi tick nữa — đây là điểm tốn
-  // kém nhất của bản cũ.
+  // Master canvas dùng "capacity doubling"
   const masterRef = useRef<HTMLCanvasElement | null>(null);
   const masterCtxRef = useRef<CanvasRenderingContext2D | null>(null);
   const usedHeightRef = useRef(0);
   const frameWidthRef = useRef(0);
-  const prevImageDataRef = useRef<ImageData | null>(null);
+
+  // Bộ đệm lịch sử tham chiếu đa khung hình (Multi-Frame Reference History)
+  const recentFramesRef = useRef<FrameHistoryItem[]>([]);
+  // Vận tốc cuộn ước tính (px/tick) để hỗ trợ phân biệt chu kỳ bảng biểu
+  const velocityRef = useRef(0);
+
   const instructionsRef = useRef<{ sliceIndex: number; srcY: number; srcH: number }[]>([]);
   const totalSlicesRef = useRef(0);
 
@@ -403,9 +474,7 @@ export default function ScrollControl() {
     return () => window.removeEventListener("keydown", onKey);
   }, [status]);
 
-  // Bảo đảm master canvas đủ chỗ cho `neededHeight` dòng. Chỉ tạo canvas mới +
-  // copy lại khi thật sự hết chỗ (nhân đôi dung lượng) → amortized O(n) thay vì
-  // tạo + copy toàn bộ mỗi frame như bản cũ (O(n²)).
+  // Bảo đảm master canvas đủ chỗ cho `neededHeight` dòng
   const ensureCapacity = (neededHeight: number, width: number) => {
     const current = masterRef.current;
     if (current && current.width === width && current.height >= neededHeight) {
@@ -425,7 +494,7 @@ export default function ScrollControl() {
     masterRef.current = next;
     masterCtxRef.current = ctx;
 
-    // Gắn (hoặc thay) canvas vào DOM để hiển thị trực tiếp, không encode PNG.
+    // Gắn canvas vào DOM để hiển thị trực tiếp
     const host = cropWrapperRef.current;
     if (host) {
       next.style.position = "absolute";
@@ -437,15 +506,12 @@ export default function ScrollControl() {
     }
   };
 
-  // Cắt vùng hiển thị theo nội dung thực (ẩn phần capacity dư) và tự cuộn theo
-  // ảnh ghép để tiện theo dõi. Chỉ bám đáy khi người dùng ĐANG ở gần đáy — nếu
-  // họ chủ động cuộn lên xem lại thì không bị kéo xuống.
+  // Cắt vùng hiển thị theo nội dung thực
   const updatePreview = () => {
     const host = cropWrapperRef.current;
     const cont = scrollContainerRef.current;
     const fw = frameWidthRef.current;
 
-    // Đo trạng thái cuộn TRƯỚC khi đổi chiều cao (dựa trên nội dung cũ).
     const stickToBottom = cont
       ? cont.scrollHeight - cont.scrollTop - cont.clientHeight < 48
       : true;
@@ -459,8 +525,7 @@ export default function ScrollControl() {
   };
 
   const captureTick = async () => {
-    // tickBusyRef chống chồng lấn: nếu 1 tick xử lý lâu hơn 220ms thì tick kế
-    // tiếp bị bỏ qua thay vì xếp chồng (gây giật + trùng frame).
+    // tickBusyRef chống xếp chồng: nếu 1 tick xử lý lâu thì tick kế tiếp bị bỏ qua
     if (!isCapturingRef.current || tickBusyRef.current) return;
     tickBusyRef.current = true;
     try {
@@ -474,7 +539,7 @@ export default function ScrollControl() {
       const fw = img.naturalWidth;
       const fh = img.naturalHeight;
 
-      // Lấy ImageData của frame mới để so khớp.
+      // Lấy ImageData của frame mới để so khớp
       const tempCanvas = document.createElement("canvas");
       tempCanvas.width = fw;
       tempCanvas.height = fh;
@@ -483,29 +548,67 @@ export default function ScrollControl() {
       tempCtx.drawImage(img, 0, 0);
       const newImgData = tempCtx.getImageData(0, 0, fw, fh);
 
-      if (!masterRef.current || !prevImageDataRef.current) {
-        // Frame đầu tiên.
+      const history = recentFramesRef.current;
+
+      if (!masterRef.current || history.length === 0) {
+        // Frame đầu tiên của phiên chụp
         frameWidthRef.current = fw;
         ensureCapacity(fh, fw);
         masterCtxRef.current?.drawImage(img, 0, 0);
         usedHeightRef.current = fh;
-        prevImageDataRef.current = newImgData;
+
         instructionsRef.current = [
           { sliceIndex: sliceIdx, srcY: 0, srcH: fh }
         ];
+
+        recentFramesRef.current = [
+          {
+            imgData: newImgData,
+            img,
+            sliceIdx,
+            botFixed: 0,
+            usedHeightAtFrame: fh,
+          }
+        ];
+
         setStitchedHeight(fh);
         setFrameCount(1);
         updatePreview();
         return;
       }
 
-      // Các frame tiếp theo: phân tích cuộn + dải cố định.
-      const an = analyzeScroll(prevImageDataRef.current, newImgData);
+      // So khớp đa khung hình: Thử với frame gần nhất (k-1), nếu không khớp thì thử với k-2, k-3
+      let matchedIdx = -1;
+      let matchedAn: ScrollAnalysis | null = null;
+
+      // 1. Thử so khớp với frame mới nhất (k-1)
+      const lastItem = history[history.length - 1];
+      const anLast = analyzeScroll(lastItem.imgData, newImgData, velocityRef.current);
+
+      if (anLast.dy > 0 || anLast.dy === 0) {
+        matchedIdx = history.length - 1;
+        matchedAn = anLast;
+      } else if (anLast.dy === -1 && history.length > 1) {
+        // 2. Không khớp được với k-1 (do cuộn nhanh), tìm ngược lại các frame trước đó
+        for (let i = history.length - 2; i >= 0; i--) {
+          const stepCount = history.length - i;
+          const anMulti = analyzeScroll(
+            history[i].imgData,
+            newImgData,
+            velocityRef.current * stepCount,
+          );
+          if (anMulti.dy > 0) {
+            matchedIdx = i;
+            matchedAn = anMulti;
+            break;
+          }
+        }
+      }
+
+      const an = matchedAn ?? anLast;
       const { dy, botFixed } = an;
 
-      // Cảnh báo cuộn quá nhanh: dy=-1 (không khớp được) + nội dung đổi nhiều
-      // (đang cuộn thật, không phải tới đáy trang) ⇒ đã vượt tầm chồng lấn, có thể
-      // bỏ sót. Tắt cảnh báo ngay khi nối được hoặc dừng cuộn.
+      // Cảnh báo cuộn quá nhanh khi hoàn toàn không khớp được với frame nào trong history
       const fast = dy === -1 && (an.changedFrac ?? 0) >= FAST_DIFF;
       if (fast !== fastWarnRef.current) {
         fastWarnRef.current = fast;
@@ -515,7 +618,7 @@ export default function ScrollControl() {
       if (DEBUG) {
         const ncc = an.ncc === undefined ? "—" : an.ncc.toFixed(2);
         const diff = an.changedFrac === undefined ? "—" : `${Math.round(an.changedFrac * 100)}%`;
-        const act = dy > 0 ? "APPEND" : dy === 0 ? "skip0" : "skip-1";
+        const act = dy > 0 ? `APPEND(m=${matchedIdx})` : dy === 0 ? "skip0" : "skip-1";
         seqRef.current++;
         const line = `#${seqRef.current} ${act} dy=${dy} diff=${diff} ncc=${ncc} bestDy=${an.bestDy ?? "—"} bins=${an.activeBins ?? "—"} top=${an.topFixed} bot=${an.botFixed} span=${an.span ?? "—"} fh=${fh}`;
         setDbg(line);
@@ -525,34 +628,60 @@ export default function ScrollControl() {
         setLogText(buf.join("\n"));
       }
 
-      if (dy > 0) {
-        // Có cuộn THẬT. Chỉ NỐI đúng dy dòng nội dung mới vừa lộ ra ở đáy vùng
-        // cuộn (ngay trên footer dính nếu có) — KHÔNG vẽ lại header/footer dính
-        // nên không bị lặp/chồng chéo.
-        const srcY = fh - botFixed - dy; // đáy vùng cuộn, lùi lên dy dòng
+      if (dy > 0 && matchedIdx >= 0) {
+        const matchedItem = history[matchedIdx];
+
+        // Nếu khớp với frame cũ hơn trong buffer (matchedIdx < history.length - 1),
+        // rollback usedHeight và instructions về mốc của frame đó để nối chính xác
+        if (matchedIdx < history.length - 1) {
+          usedHeightRef.current = matchedItem.usedHeightAtFrame;
+          // Cắt bớt instructions tương ứng
+          while (
+            instructionsRef.current.length > 0 &&
+            instructionsRef.current[instructionsRef.current.length - 1].sliceIndex > matchedItem.sliceIdx
+          ) {
+            instructionsRef.current.pop();
+          }
+        }
+
+        const srcY = fh - botFixed - dy;
         const at = usedHeightRef.current;
         ensureCapacity(at + dy, fw);
         masterCtxRef.current?.drawImage(img, 0, srcY, fw, dy, 0, at, fw, dy);
         usedHeightRef.current = at + dy;
-        prevImageDataRef.current = newImgData;
+
         instructionsRef.current.push({
           sliceIndex: sliceIdx,
           srcY,
-          srcH: dy
+          srcH: dy,
         });
+
+        // Cập nhật vận tốc cuộn ước tính mượt theo EMA
+        velocityRef.current = velocityRef.current === 0 ? dy : velocityRef.current * 0.6 + dy * 0.4;
+
+        // Cập nhật buffer lịch sử: giữ tối đa 4 frame gần nhất
+        const updatedHistory = history.slice(0, matchedIdx + 1);
+        updatedHistory.push({
+          imgData: newImgData,
+          img,
+          sliceIdx,
+          botFixed,
+          usedHeightAtFrame: usedHeightRef.current,
+        });
+        if (updatedHistory.length > 4) {
+          updatedHistory.shift();
+        }
+        recentFramesRef.current = updatedHistory;
+
         setStitchedHeight(usedHeightRef.current);
         setFrameCount((prev) => prev + 1);
         updatePreview();
-      } else {
-        // dy === 0 (không cuộn / trang đứng yên) hoặc dy === -1 (không khớp được,
-        // ví dụ cuộn > 1 màn hình mỗi tick): KHÔNG nối để tránh lặp/đứt đoạn,
-        // chỉ cập nhật khung tham chiếu cho lần sau.
-        prevImageDataRef.current = newImgData;
+      } else if (dy === 0) {
+        // Trang đứng yên: giảm dần vận tốc cuộn
+        velocityRef.current = 0;
       }
     } catch (err) {
       console.error(t("scroll.captureSliceError"), err);
-      // Lỗi thật (vd chạm giới hạn số lát) phải dừng vòng lặp + hiện cho user
-      // thấy — trước đây chỉ log console, user thấy "đang ghi..." mãi không rõ vì sao.
       isCapturingRef.current = false;
       setError(String(err));
     } finally {
@@ -574,26 +703,24 @@ export default function ScrollControl() {
     setError(null);
     instructionsRef.current = [];
     totalSlicesRef.current = 0;
+    recentFramesRef.current = [];
+    velocityRef.current = 0;
     await ipc.startScrollSession().catch(console.error);
 
     // Chụp lát cắt đầu tiên ngay lập tức.
     await captureTick();
 
-    // Vòng lặp chụp mỗi 220ms.
+    // Vòng lặp chụp tối ưu tần số 120ms (thay vì 220ms cũ)
     intervalRef.current = window.setInterval(() => {
       if (!isCapturingRef.current) {
         stopLoop();
         return;
       }
       void captureTick();
-    }, 220);
+    }, 120);
   };
 
-  // Tự động bắt đầu chụp ngay khi cửa sổ mở (vẽ xong khung). startedRef chống
-  // gọi 2 lần do StrictMode double-invoke effect ở chế độ dev. Cleanup gọi
-  // stopLoop: unmount giữa chừng (cửa sổ bị đóng ngoài các đường
-  // finish/cancel) không được để interval sống tiếp — timer rò + setState
-  // sau unmount.
+  // Tự động bắt đầu chụp ngay khi cửa sổ mở
   useEffect(() => {
     if (!startedRef.current) {
       startedRef.current = true;
@@ -605,8 +732,6 @@ export default function ScrollControl() {
   const finishCapture = async () => {
     stopLoop();
 
-    // Dùng ref (luôn cập nhật) thay vì state frameCount — tránh stale closure
-    // khi gọi từ handler bàn phím (effect bắt phím chỉ re-subscribe theo status).
     if (usedHeightRef.current === 0) {
       ipc.closeSelf();
       return;

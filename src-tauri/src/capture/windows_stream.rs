@@ -84,7 +84,9 @@ fn even_floor(v: u32) -> u32 {
 struct CapturerFlags {
     /// Nội dung frame MỚI NHẤT WGC đã gửi — `on_frame_arrived` chỉ cập nhật
     /// chỗ này, KHÔNG tự đẩy vào channel (xem doc-comment đầu file).
-    latest: Arc<Mutex<Option<Frame>>>,
+    /// Bọc `Arc<Frame>` để `spawn_ticker` lặp lại frame cũ chỉ tốn chi phí clone
+    /// con trỏ Arc (8 bytes) thay vì deep-copy mảng byte lớn.
+    latest: Arc<Mutex<Option<Arc<Frame>>>>,
     stopped_externally: Arc<AtomicBool>,
     /// Kích thước ĐÃ làm tròn chẵn, khớp đúng `-s WxH` đã khai với `Encoder`
     /// lúc `start()` — MỌI frame gửi đi phải đúng kích thước này (không phải
@@ -101,7 +103,7 @@ struct CapturerFlags {
 }
 
 struct Capturer {
-    latest: Arc<Mutex<Option<Frame>>>,
+    latest: Arc<Mutex<Option<Arc<Frame>>>>,
     stopped_externally: Arc<AtomicBool>,
     target_width: u32,
     target_height: u32,
@@ -172,9 +174,9 @@ impl GraphicsCaptureApiHandler for Capturer {
         // `unwrap_or_else(into_inner)`: 1 lần panic ở holder khác làm poison
         // mutex — `unwrap()` ở đây sẽ panic DÂY CHUYỀN trong callback FFI
         // (abort). Dữ liệu chỉ là "frame mới nhất", ghi đè an toàn kể cả sau
-        // poison.
+        // poison. Bọc `Arc::new` để ticker chia sẻ dữ liệu zero-copy.
         *self.latest.lock().unwrap_or_else(|p| p.into_inner()) =
-            Some(Frame { bgra, width: self.target_width, height: self.target_height });
+            Some(Arc::new(Frame { bgra, width: self.target_width, height: self.target_height }));
         Ok(())
     }
 
@@ -190,12 +192,10 @@ impl GraphicsCaptureApiHandler for Capturer {
 
 /// Thread đếm nhịp đúng `interval` (= 1/fps giây) — MỖI NHỊP lấy frame mới
 /// nhất `Capturer` đã ghi vào `latest` (lặp lại frame cũ nếu WGC chưa gửi gì
-/// mới kể từ nhịp trước) rồi đẩy vào `frame_tx`. Xem doc-comment đầu file:
-/// đây là cách duy nhất để ffmpeg (rawvideo, không có timestamp thật) tính ra
-/// ĐÚNG thời lượng thay vì bị "tua nhanh" theo tần suất WGC báo đổi nội dung.
+/// mới kể từ nhịp trước) rồi đẩy vào `frame_tx`.
 fn spawn_ticker(
-    frame_tx: mpsc::SyncSender<Frame>,
-    latest: Arc<Mutex<Option<Frame>>>,
+    frame_tx: mpsc::SyncSender<Arc<Frame>>,
+    latest: Arc<Mutex<Option<Arc<Frame>>>>,
     dropped: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     interval: Duration,
@@ -210,8 +210,6 @@ fn spawn_ticker(
             let target_time = start + interval * frame_index;
             let now = Instant::now();
             if target_time > now {
-                // Ngủ từng đoạn ngắn thay vì ngủ hết `interval` 1 lần — để
-                // phản hồi nhanh với cờ `stop` khi người dùng bấm dừng quay.
                 std::thread::sleep((target_time - now).min(Duration::from_millis(20)));
                 continue;
             }
@@ -219,15 +217,10 @@ fn spawn_ticker(
 
             let frame = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(frame) = frame {
-                // try_send: nếu channel đầy (encoder chậm hơn tốc độ quay),
-                // DROP frame này thay vì chặn ticker — giống hệt lý do ở
-                // mac_stream.rs.
                 if frame_tx.try_send(frame).is_err() {
                     dropped.store(true, Ordering::Relaxed);
                 }
             }
-            // `latest` vẫn `None` (chưa có frame đầu tiên từ WGC) — bỏ qua
-            // nhịp này, không gửi gì, đợi nhịp sau.
         }
     })
 }
@@ -425,15 +418,15 @@ pub fn start(
     target: RecordTarget,
     fps: u32,
     _capture_system_audio: bool,
-) -> Result<(RecordingHandle, mpsc::Receiver<Frame>, Option<mpsc::Receiver<Vec<u8>>>), String> {
+) -> Result<(RecordingHandle, mpsc::Receiver<Arc<Frame>>, Option<mpsc::Receiver<Vec<u8>>>), String> {
     // Channel có giới hạn dung lượng — nếu encoder xử lý chậm hơn tốc độ quay,
     // try_send() trong `spawn_ticker` sẽ thất bại (drop) thay vì chặn nó lại.
-    // Bound = 2 giây buffer ở fps yêu cầu (giống mac_stream.rs).
+    // Bound = 2 giây buffer ở fps yêu cầu (giống mac_stream.rs). Dùng Arc<Frame> để zero-copy.
     let bound = (fps.max(1) as usize) * 2;
-    let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(bound);
+    let (frame_tx, frame_rx) = mpsc::sync_channel::<Arc<Frame>>(bound);
     let dropped = Arc::new(AtomicBool::new(false));
     let stopped_externally = Arc::new(AtomicBool::new(false));
-    let latest: Arc<Mutex<Option<Frame>>> = Arc::new(Mutex::new(None));
+    let latest: Arc<Mutex<Option<Arc<Frame>>>> = Arc::new(Mutex::new(None));
     let interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
     // Default cho setting của CRATE — việc ép nhịp fps thật giờ nằm ở
     // `spawn_ticker`, không còn phụ thuộc `MinimumUpdateIntervalSettings`.

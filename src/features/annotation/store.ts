@@ -56,10 +56,13 @@ interface EditorState {
   /** Màu dùng cho solid redact. */
   blurSolidColor: string;
   selectedId: string | null;
+  selectedIds: string[];
   /** Bộ đếm số thứ tự cho tool "step" (số bước) — độc lập với mũi tên số. */
   stepCounter: number;
   /** Bộ đếm số thứ tự cho tool "numbered-arrow" (mũi tên số) — độc lập với số bước. */
   arrowCounter: number;
+  /** Bộ đếm số thứ tự cho tool "numbered-rect" (khung số). */
+  rectCounter: number;
   editingTextId: string | null;
 
   // setup
@@ -67,7 +70,7 @@ interface EditorState {
    * (ảnh vừa chụp / vừa mở từ Library → đúng bằng bản trên đĩa). Đường
    * FLATTEN phải truyền `false`: nó `loadDoc` lại với ảnh đã burn nhưng CHƯA
    * hề được lưu — chính app cũng nói vậy (xem `editorMain.flattenItem3`). */
-  loadDoc: (doc: Doc, markClean?: boolean) => void;
+  loadDoc: (doc: Doc | null, markClean?: boolean) => void;
   /** Khôi phục một phiên sửa đã bị treo (xem `sessions.ts`) — khác `loadDoc` ở
    * chỗ nó KHÔI PHỤC undo stack thay vì xoá.
    *
@@ -81,6 +84,7 @@ interface EditorState {
     future: Doc[];
     stepCounter: number;
     arrowCounter: number;
+    rectCounter?: number;
     baseDirty: boolean;
     savedRef: Doc | null;
   }) => void;
@@ -104,7 +108,9 @@ interface EditorState {
   commitBlurRadius: () => void;
   setBlurMode: (m: "blur" | "pixelate" | "solid") => void;
   setBlurSolidColor: (c: string) => void;
-  select: (id: string | null) => void;
+  select: (id: string | null, multi?: boolean) => void;
+  selectMany: (ids: string[], append?: boolean) => void;
+  selectAll: () => void;
 
   // mutations (đều đi qua history)
   addAnnotation: (a: Annotation) => void;
@@ -122,21 +128,26 @@ interface EditorState {
   canUndo: () => boolean;
   canRedo: () => boolean;
 
-  nextStep: () => number;
-  nextArrowStep: () => number;
-
   /** Metadata gộp history (xem `COALESCE_KEYS`) — nội bộ, không render. */
   _lastCommitKey: string | null;
   _lastCommitAt: number;
+
+  nextStep: () => number;
+  nextArrowStep: () => number;
+  nextRectStep: () => number;
 
   /** Đặt số sẽ gán cho badge "step" kế tiếp (>= 1). */
   setStepCounter: (n: number) => void;
   /** Đặt số sẽ gán cho "numbered-arrow" kế tiếp (>= 1). */
   setArrowCounter: (n: number) => void;
+  /** Đặt số sẽ gán cho "numbered-rect" kế tiếp (>= 1). */
+  setRectCounter: (n: number) => void;
   /** Đánh số lại toàn bộ badge "step" theo thứ tự tạo (1..N), dọn gap sau khi xóa. */
   renumberSteps: () => void;
   /** Đánh số lại toàn bộ "numbered-arrow" theo thứ tự tạo (1..N). */
   renumberArrows: () => void;
+  /** Đánh số lại toàn bộ "numbered-rect" theo thứ tự tạo (1..N). */
+  renumberRects: () => void;
 }
 
 function commit(state: EditorState, nextDoc: Doc): Partial<EditorState> {
@@ -164,8 +175,10 @@ export const useEditor = create<EditorState>((set, get) => ({
   blurMode: "blur" as const,
   blurSolidColor: "#1a1a1a",
   selectedId: null,
+  selectedIds: [],
   stepCounter: 1,
   arrowCounter: 1,
+  rectCounter: 1,
   editingTextId: null,
   _lastCommitKey: null,
   _lastCommitAt: 0,
@@ -182,8 +195,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       past: [],
       future: [],
       selectedId: null,
+      selectedIds: [],
       stepCounter: 1,
       arrowCounter: 1,
+      rectCounter: 1,
       tool: "select",
       editingTextId: null,
     }),
@@ -195,12 +210,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       future: s.future,
       stepCounter: s.stepCounter,
       arrowCounter: s.arrowCounter,
+      rectCounter: s.rectCounter ?? 1,
       baseDirty: s.baseDirty,
       savedRef: s.savedRef,
       // Reset phần state phù du: chọn/đang gõ text/metadata gộp undo không
       // thuộc về nội dung tài liệu, khôi phục lại chỉ gây trạng thái lơ lửng
       // (vd transformer bám vào annotation đã bị undo mất).
       selectedId: null,
+      selectedIds: [],
       editingTextId: null,
       tool: "select",
       _lastCommitKey: null,
@@ -221,54 +238,98 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
 
   setEditingText: (editingTextId) => set({ editingTextId }),
-  setTool: (tool) => set({ tool, selectedId: tool === "select" ? get().selectedId : null }),
+  setTool: (tool) =>
+    set({
+      tool,
+      selectedId: tool === "select" ? get().selectedId : null,
+      selectedIds: tool === "select" ? (get().selectedIds ?? []) : [],
+    }),
 
   setColor: (color) => {
-    const { selectedId, doc } = get();
-    if (selectedId && doc) {
-      get().updateAnnotation(selectedId, { color } as Partial<Annotation>);
+    const { selectedIds, selectedId, doc } = get();
+    const targets = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+    if (targets.length > 0 && doc) {
+      const targetSet = new Set(targets);
+      const next = {
+        ...doc,
+        annotations: doc.annotations.map((a) =>
+          targetSet.has(a.id) && "color" in a && a.type !== "highlight"
+            ? ({ ...a, color } as Annotation)
+            : a,
+        ),
+      };
+      set({ ...commit(get(), next), color });
+      return;
     }
     set({ color });
   },
 
   setHighlightColor: (highlightColor) => {
-    const { selectedId, doc } = get();
-    if (selectedId && doc) {
-      const ann = doc.annotations.find((a) => a.id === selectedId);
-      if (ann?.type === "highlight") {
-        get().updateAnnotation(selectedId, { color: highlightColor } as Partial<Annotation>);
-      }
+    const { selectedIds, selectedId, doc } = get();
+    const targets = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+    if (targets.length > 0 && doc) {
+      const targetSet = new Set(targets);
+      const next = {
+        ...doc,
+        annotations: doc.annotations.map((a) =>
+          targetSet.has(a.id) && a.type === "highlight"
+            ? ({ ...a, color: highlightColor } as Annotation)
+            : a,
+        ),
+      };
+      set({ ...commit(get(), next), highlightColor });
+      return;
     }
     set({ highlightColor });
   },
 
   setStrokeWidth: (strokeWidth) => {
-    const { selectedId, doc } = get();
-    if (selectedId && doc) {
-      get().updateAnnotation(selectedId, { strokeWidth } as Partial<Annotation>);
+    const { selectedIds, selectedId, doc } = get();
+    const targets = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+    if (targets.length > 0 && doc) {
+      const targetSet = new Set(targets);
+      const next = {
+        ...doc,
+        annotations: doc.annotations.map((a) =>
+          targetSet.has(a.id) && "strokeWidth" in a
+            ? ({ ...a, strokeWidth } as Annotation)
+            : a,
+        ),
+      };
+      set({ ...commit(get(), next), strokeWidth });
+      return;
     }
     set({ strokeWidth });
   },
 
   setFontSize: (fontSize) => {
-    const { editingTextId, selectedId, doc } = get();
-    const target = editingTextId ?? selectedId;
-    if (target && doc) {
-      const ann = doc.annotations.find((a) => a.id === target);
-      if (ann?.type === "text") {
-        get().updateAnnotation(target, { fontSize } as Partial<Annotation>);
-      }
+    const { editingTextId, selectedIds, selectedId, doc } = get();
+    const targets = editingTextId ? [editingTextId] : (selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []));
+    if (targets.length > 0 && doc) {
+      const targetSet = new Set(targets);
+      const next = {
+        ...doc,
+        annotations: doc.annotations.map((a) =>
+          targetSet.has(a.id) && a.type === "text"
+            ? ({ ...a, fontSize } as Annotation)
+            : a,
+        ),
+      };
+      set({ ...commit(get(), next), fontSize });
+      return;
     }
     set({ fontSize });
   },
 
   setBlurRadius: (blurRadius) => {
-    const { selectedId, doc } = get();
-    if (selectedId && doc) {
-      const ann = doc.annotations.find((a) => a.id === selectedId);
-      if (ann?.type === "blur") {
-        // Live update — không tạo history undo entry mỗi px kéo slider
-        get().updateAnnotationLive(selectedId, { blurRadius } as Partial<Annotation>);
+    const { selectedIds, selectedId, doc } = get();
+    const targets = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+    if (targets.length > 0 && doc) {
+      for (const id of targets) {
+        const ann = doc.annotations.find((a) => a.id === id);
+        if (ann?.type === "blur") {
+          get().updateAnnotationLive(id, { blurRadius } as Partial<Annotation>);
+        }
       }
     }
     set({ blurRadius });
@@ -276,41 +337,83 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   commitBlurRadius: () => {
     // Gọi khi nhả slider (onMouseUp / onPointerUp) để push history entry
-    const { selectedId, doc, blurRadius } = get();
-    if (!selectedId || !doc) return;
-    const ann = doc.annotations.find((a) => a.id === selectedId);
-    if (ann?.type === "blur") {
-      get().updateAnnotation(selectedId, { blurRadius } as Partial<Annotation>);
-    }
+    const { selectedIds, selectedId, doc, blurRadius } = get();
+    const targets = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+    if (targets.length === 0 || !doc) return;
+    const targetSet = new Set(targets);
+    const next = {
+      ...doc,
+      annotations: doc.annotations.map((a) =>
+        targetSet.has(a.id) && a.type === "blur"
+          ? ({ ...a, blurRadius } as Annotation)
+          : a,
+      ),
+    };
+    set({ ...commit(get(), next) });
   },
 
   setBlurMode: (blurMode) => {
-    const { selectedId, doc } = get();
-    if (selectedId && doc) {
-      const ann = doc.annotations.find((a) => a.id === selectedId);
-      if (ann?.type === "blur") {
-        get().updateAnnotation(selectedId, { blurMode } as Partial<Annotation>);
-      }
+    const { selectedIds, selectedId, doc } = get();
+    const targets = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+    if (targets.length > 0 && doc) {
+      const targetSet = new Set(targets);
+      const next = {
+        ...doc,
+        annotations: doc.annotations.map((a) =>
+          targetSet.has(a.id) && a.type === "blur"
+            ? ({ ...a, blurMode } as Annotation)
+            : a,
+        ),
+      };
+      set({ ...commit(get(), next), blurMode });
+      return;
     }
     set({ blurMode });
   },
 
   setBlurSolidColor: (blurSolidColor) => {
-    const { selectedId, doc } = get();
-    if (selectedId && doc) {
-      const ann = doc.annotations.find((a) => a.id === selectedId);
-      if (ann?.type === "blur") {
-        get().updateAnnotation(selectedId, { solidColor: blurSolidColor } as Partial<Annotation>);
-      }
+    const { selectedIds, selectedId, doc } = get();
+    const targets = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+    if (targets.length > 0 && doc) {
+      const targetSet = new Set(targets);
+      const next = {
+        ...doc,
+        annotations: doc.annotations.map((a) =>
+          targetSet.has(a.id) && a.type === "blur"
+            ? ({ ...a, solidColor: blurSolidColor } as Annotation)
+            : a,
+        ),
+      };
+      set({ ...commit(get(), next), blurSolidColor });
+      return;
     }
     set({ blurSolidColor });
   },
 
-  select: (selectedId) => {
+  select: (id, multi = false) => {
     const { doc } = get();
-    const ann = selectedId && doc ? doc.annotations.find((a) => a.id === selectedId) : null;
+    const selectedIds = get().selectedIds ?? [];
+    if (!id) {
+      set({ selectedId: null, selectedIds: [] });
+      return;
+    }
+    let nextIds: string[];
+    if (multi) {
+      if (selectedIds.includes(id)) {
+        nextIds = selectedIds.filter((x) => x !== id);
+      } else {
+        nextIds = [...selectedIds, id];
+      }
+    } else {
+      nextIds = [id];
+    }
+    const nextId = nextIds[nextIds.length - 1] ?? null;
+    const ann = nextId && doc ? doc.annotations.find((a) => a.id === nextId) : null;
     set({
-      selectedId,
+      selectedId: nextId,
+      selectedIds: nextIds,
+      ...(ann && "color" in ann && ann.type !== "highlight" ? { color: (ann as any).color } : null),
+      ...(ann && "strokeWidth" in ann ? { strokeWidth: (ann as any).strokeWidth } : null),
       ...(ann?.type === "text"      ? { fontSize: ann.fontSize }                                    : null),
       ...(ann?.type === "highlight" ? { highlightColor: ann.color }                                 : null),
       ...(ann?.type === "blur"      ? { blurRadius: ann.blurRadius, blurMode: ann.blurMode,
@@ -318,11 +421,41 @@ export const useEditor = create<EditorState>((set, get) => ({
     });
   },
 
+  selectMany: (ids, append = false) => {
+    const { doc } = get();
+    const selectedIds = get().selectedIds ?? [];
+    let nextIds: string[];
+    if (append) {
+      nextIds = Array.from(new Set([...selectedIds, ...ids]));
+    } else {
+      nextIds = ids;
+    }
+    const nextId = nextIds[nextIds.length - 1] ?? null;
+    const ann = nextId && doc ? doc.annotations.find((a) => a.id === nextId) : null;
+    set({
+      selectedId: nextId,
+      selectedIds: nextIds,
+      ...(ann && "color" in ann && ann.type !== "highlight" ? { color: (ann as any).color } : null),
+      ...(ann && "strokeWidth" in ann ? { strokeWidth: (ann as any).strokeWidth } : null),
+      ...(ann?.type === "text"      ? { fontSize: ann.fontSize }                                    : null),
+      ...(ann?.type === "highlight" ? { highlightColor: ann.color }                                 : null),
+      ...(ann?.type === "blur"      ? { blurRadius: ann.blurRadius, blurMode: ann.blurMode,
+                                        blurSolidColor: ann.solidColor }                            : null),
+    });
+  },
+
+  selectAll: () => {
+    const { doc } = get();
+    if (!doc || doc.annotations.length === 0) return;
+    const ids = doc.annotations.map((a) => a.id);
+    get().selectMany(ids, false);
+  },
+
   addAnnotation: (a) =>
     set((s) => {
       if (!s.doc) return {};
       const next = { ...s.doc, annotations: [...s.doc.annotations, a] };
-      return { ...commit(s, next), selectedId: a.id };
+      return { ...commit(s, next), selectedId: a.id, selectedIds: [a.id] };
     }),
 
   updateAnnotation: (id, patch) =>
@@ -367,14 +500,18 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   removeSelected: () =>
     set((s) => {
-      if (!s.doc || !s.selectedId) return {};
-      const annotations = s.doc.annotations.filter((a) => a.id !== s.selectedId);
+      if (!s.doc) return {};
+      const targets = s.selectedIds.length > 0 ? s.selectedIds : (s.selectedId ? [s.selectedId] : []);
+      if (targets.length === 0) return {};
+      const targetSet = new Set(targets);
+      const annotations = s.doc.annotations.filter((a) => !targetSet.has(a.id));
       const next = { ...s.doc, annotations };
       // B1: khi không còn badge nào, tự đặt bộ đếm về 1 → lượt sau bắt đầu từ 1.
       const reset: Partial<EditorState> = {};
       if (!annotations.some((a) => a.type === "step")) reset.stepCounter = 1;
       if (!annotations.some((a) => a.type === "numbered-arrow")) reset.arrowCounter = 1;
-      return { ...commit(s, next), selectedId: null, ...reset };
+      if (!annotations.some((a) => a.type === "numbered-rect")) reset.rectCounter = 1;
+      return { ...commit(s, next), selectedId: null, selectedIds: [], ...reset };
     }),
 
   applyCrop: (image, imgW, imgH, annotations) =>
@@ -433,8 +570,15 @@ export const useEditor = create<EditorState>((set, get) => ({
     return v;
   },
 
+  nextRectStep: () => {
+    const v = get().rectCounter;
+    set({ rectCounter: v + 1 });
+    return v;
+  },
+
   setStepCounter: (n) => set({ stepCounter: Math.max(1, Math.floor(n) || 1) }),
   setArrowCounter: (n) => set({ arrowCounter: Math.max(1, Math.floor(n) || 1) }),
+  setRectCounter: (n) => set({ rectCounter: Math.max(1, Math.floor(n) || 1) }),
 
   renumberSteps: () =>
     set((s) => {
@@ -454,6 +598,16 @@ export const useEditor = create<EditorState>((set, get) => ({
         a.type === "numbered-arrow" ? ({ ...a, value: ++n } as Annotation) : a,
       );
       return { ...commit(s, { ...s.doc, annotations }), arrowCounter: n + 1 };
+    }),
+
+  renumberRects: () =>
+    set((s) => {
+      if (!s.doc || !s.doc.annotations.some((a) => a.type === "numbered-rect")) return {};
+      let n = 0;
+      const annotations = s.doc.annotations.map((a) =>
+        a.type === "numbered-rect" ? ({ ...a, value: ++n } as Annotation) : a,
+      );
+      return { ...commit(s, { ...s.doc, annotations }), rectCounter: n + 1 };
     }),
 }));
 

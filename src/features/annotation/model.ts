@@ -7,6 +7,7 @@ export type Tool =
   | "arrow"
   | "line"
   | "numbered-arrow"
+  | "numbered-rect"
   | "highlight"
   | "blur"
   | "crop";
@@ -59,6 +60,15 @@ export interface NumberedArrowAnn extends Base {
   value: number;
   radius: number;
 }
+/** Hình vuông / chữ nhật kèm số thứ tự ở góc. */
+export interface NumberedRectAnn extends Base {
+  type: "numbered-rect";
+  width: number;
+  height: number;
+  value: number;
+  radius: number;
+  corner?: "tl" | "tr" | "bl" | "br";
+}
 /** Highlight (tô màu bán trong suốt) trên vùng chữ nhật. */
 export interface HighlightAnn extends Base {
   type: "highlight";
@@ -93,6 +103,7 @@ export type Annotation =
   | ArrowAnn
   | LineAnn
   | NumberedArrowAnn
+  | NumberedRectAnn
   | HighlightAnn
   | BlurAnn;
 

@@ -16,8 +16,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-SnapDoc Dev}"
-APP="src-tauri/target/debug/bundle/macos/SnapDoc.app"
 KEYFILE="$HOME/.tauri/snapdoc-updater.key"
+
+# Give the dev build its OWN bundle identifier + name, distinct from the
+# release build's `com.snapdoc.app` / "SnapDoc" (see tauri.conf.json). That
+# makes macOS treat it as a separate app: its own Dock icon/name, its own
+# Screen Recording TCC grant, and its own app-data dir — so a dev build never
+# collides with (or silently reuses permissions/data from) an installed
+# release build. Passed via `--config` below so tauri.conf.json itself stays
+# untouched — this only ever applies to this script's build.
+DEV_IDENTIFIER="com.snapdoc.app.dev"
+DEV_PRODUCT_NAME="SnapDoc Dev"
+APP="src-tauri/target/debug/bundle/macos/$DEV_PRODUCT_NAME.app"
 
 # 1) Make the stable identity available so Tauri signs the .app during bundling.
 echo "==> [1/4] Ensuring stable signing identity"
@@ -37,12 +47,14 @@ fi
 #    copied into a PREVIOUS bundle output — confirmed by hand: after fixing a
 #    broken ffmpeg in src-tauri/binaries/, `target/debug/bundle/.../ffmpeg`
 #    kept the old broken bytes across rebuilds until every existing
-#    `SnapDoc.app` anywhere under target/ (debug, release, and the separate
-#    universal-apple-darwin tree used for updater/universal builds) was wiped
-#    first. Deleting only the current profile's `$APP` was NOT enough — some
-#    other target/* bundle output still fed the stale copy in. Sweep all of
-#    them so this can't come back regardless of which one is the real cause.
-find src-tauri/target -type d -name "SnapDoc.app" -prune -exec rm -rf {} +
+#    `SnapDoc Dev.app` anywhere under target/ (debug, release, and the
+#    separate universal-apple-darwin tree used for updater/universal builds)
+#    was wiped first. Deleting only the current profile's `$APP` was NOT
+#    enough — some other target/* bundle output still fed the stale copy in.
+#    Sweep all of them so this can't come back regardless of which one is the
+#    real cause. Only matches the dev product name — a release "SnapDoc.app"
+#    built via build-mac.sh is untouched.
+find src-tauri/target -type d -name "$DEV_PRODUCT_NAME.app" -prune -exec rm -rf {} +
 
 # This script never passes --target, so cargo only ever writes into
 # target/debug — the per-triple dirs below (aarch64-apple-darwin,
@@ -72,12 +84,14 @@ if ! command -v cargo-sweep >/dev/null 2>&1; then
 fi
 cargo sweep --time 3 src-tauri
 
-echo "==> [2/4] Building debug .app bundle"
+echo "==> [2/4] Building debug .app bundle ($DEV_PRODUCT_NAME / $DEV_IDENTIFIER)"
 if [ -f "$KEYFILE" ]; then
-  npm run tauri build -- --debug --bundles app "$@"
+  npm run tauri build -- --debug --bundles app \
+    --config "{\"identifier\":\"$DEV_IDENTIFIER\",\"productName\":\"$DEV_PRODUCT_NAME\"}" "$@"
 else
   echo "    (no updater key — building without updater artifacts)"
-  npm run tauri build -- --debug --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}' "$@"
+  npm run tauri build -- --debug --bundles app \
+    --config "{\"identifier\":\"$DEV_IDENTIFIER\",\"productName\":\"$DEV_PRODUCT_NAME\",\"bundle\":{\"createUpdaterArtifacts\":false}}" "$@"
 fi
 
 # 3) Guarantee a valid deep signature regardless of how Tauri signed it, and
@@ -90,9 +104,18 @@ if codesign -dvvv "$APP" 2>&1 | grep -q "Signature=adhoc"; then
 fi
 
 # 4) Relaunch a clean instance.
-echo "==> [4/4] Launching SnapDoc"
-pkill -f "SnapDoc.app/Contents/MacOS" >/dev/null 2>&1 || true
+echo "==> [4/4] Launching $DEV_PRODUCT_NAME"
+pkill -f "$DEV_PRODUCT_NAME.app/Contents/MacOS" >/dev/null 2>&1 || true
 sleep 0.3
+
+# `open` (below) detaches stdout/stderr from this terminal, so the app's own
+# `eprintln!`/`println!` debug output would otherwise vanish. The debug binary
+# redirects fd 1/2 to this file on startup (see redirect_stdio_to_dev_log in
+# src-tauri/src/lib.rs, debug-only) — truncate it first so this run's tail
+# doesn't echo back a previous session's stale output.
+LOG_FILE="$HOME/Library/Logs/com.snapdoc.app/SnapDoc.log"
+mkdir -p "$(dirname "$LOG_FILE")"
+: > "$LOG_FILE"
 
 # A freshly (re)built debug bundle isn't in the LaunchServices database yet, so
 # `open` fails with error -600 (procNotFound). Force-register it first.
@@ -107,8 +130,24 @@ fi
 
 echo
 echo "============================================================"
-echo " SnapDoc launched (signed: $APPLE_SIGNING_IDENTITY)."
-echo " First run only: System Settings > Privacy & Security >"
-echo " Screen Recording > enable SnapDoc, then quit & rerun this."
-echo " Every later 'npm run dev:mac' keeps the grant."
+echo " $DEV_PRODUCT_NAME launched (signed: $APPLE_SIGNING_IDENTITY)."
+echo " Separate identifier from the release build ($DEV_IDENTIFIER vs."
+echo " the release's identifier in tauri.conf.json) — first run needs its"
+echo " OWN grant: System Settings > Privacy & Security > Screen Recording"
+echo " > enable $DEV_PRODUCT_NAME, then quit & rerun this."
+echo " Every later 'npm run dev:mac' keeps that grant."
 echo "============================================================"
+
+# `open` detaches stdout from this terminal (its output goes nowhere useful),
+# so tail the app's OWN log file instead — same eprintln!/println! debug
+# output, just read from disk. Ctrl+C here only stops the tail, the app keeps
+# running (quit it from the tray icon).
+echo " Streaming logs from: $LOG_FILE"
+echo " (Ctrl+C stops watching — the app keeps running)"
+echo "============================================================"
+echo
+for _ in $(seq 1 20); do
+  [ -s "$LOG_FILE" ] && break
+  sleep 0.25
+done
+exec tail -n 50 -f "$LOG_FILE"

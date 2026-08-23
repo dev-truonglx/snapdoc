@@ -92,6 +92,7 @@
     "select": "Select / edit",
     "selectHint": "Select or edit objects",
     "rect": "Draw rectangle",
+    "numberedRect": "Numbered box",
     "circle": "Circle",
     "arrow": "Arrow",
     "line": "Line",
@@ -151,6 +152,7 @@
     "timerSection": "Timer",
     "aboutToCapture": "About to capture… (Esc to cancel)",
     "quickCaptureHint": "Quick capture — select area and annotate immediately",
+    "options": "Options",
     "close": "Close"
   },
   "overlay": {
@@ -266,6 +268,7 @@
     "resetCounter": "Reset counter to 1",
     "renumber": "Renumber",
     "renumberAll": "Renumber all in creation order (clean up gaps)",
+    "badgeCorner": "Badge corner",
     "blurSoft": "Soft blur",
     "pixelate": "Pixelate",
     "solidMode": "Solid",
@@ -317,13 +320,17 @@
     "copiedToClipboard": "Copied to clipboard",
     "openVideoEditor": "Open video in Editor",
     "reopenEditor": "Reopen in Editor",
-    "deleteVideo": "Permanently delete this video (file too)",
-    "deleteImage": "Permanently delete this image (file too)",
+    "deleteVideo": "Delete (move to Trash)",
+    "deleteImage": "Delete (move to Trash)",
+    "moveToTrash": "Delete (move to Trash)",
+    "movedToTrash": "Moved to Trash",
     "viewAll": "View all →",
     "quickCopy": "Quick copy to clipboard",
     "viewInFolder": "Show file in folder",
-    "deletePermanent": "Permanently delete (file too)",
-    "hasUnsavedEdit": "Has unsaved edits — click to continue"
+    "deletePermanent": "Permanently delete (from computer)",
+    "deletedPermanent": "Permanently deleted from computer",
+    "hasUnsavedEdit": "Has unsaved edits — click to continue",
+    "noDocument": "No document is currently open"
   },
   "quickToolbar": {
     "selectColor": "Select color",

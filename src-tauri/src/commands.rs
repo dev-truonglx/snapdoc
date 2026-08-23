@@ -312,7 +312,14 @@ pub fn close_self(window: tauri::WebviewWindow) {
     // Bấm "X"/Escape chỉ minimize; `windows::open_capture_bar` tự unminimize
     // khi mở lại.
     if label == "capture-bar" {
+        if let Some(popover) = window.app_handle().get_webview_window("capture-bar-popover") {
+            let _ = popover.hide();
+        }
         let _ = window.minimize();
+        return;
+    }
+    if label == "capture-bar-popover" {
+        let _ = window.hide();
         return;
     }
     let _ = window.close();
@@ -934,9 +941,6 @@ fn lum_u8(px: &image::Rgba<u8>) -> i32 {
     (px[0] as i32 * 299 + px[1] as i32 * 587 + px[2] as i32 * 114) / 1000
 }
 
-/// Cột x có phải CỘT CỐ ĐỊNH (sidebar dính) không: giống nhau qua các lát cắt ở
-/// MỌI vị trí cuộn (không dịch theo cuộn) VÀ có nội dung (khác nền trang). Cột
-/// nội dung cuộn thì đổi qua các lát; lề trắng thì không có nội dung → đều loại.
 fn col_fixed_with_content(
     refs: &[&image::RgbaImage],
     x: u32,
@@ -944,21 +948,30 @@ fn col_fixed_with_content(
     y_step: u32,
     bg: i32,
 ) -> bool {
-    let mut content = false;
+    let mut content_count = 0usize;
+    let mut match_count = 0usize;
+    let mut total_samples = 0usize;
     let mut y = 0u32;
     while y < h {
+        total_samples += 1;
         let base = lum_u8(refs[0].get_pixel(x, y));
+        let mut row_match = true;
         for r in &refs[1..] {
             if (lum_u8(r.get_pixel(x, y)) - base).abs() > 18 {
-                return false; // đổi qua các lát → đang cuộn, không cố định
+                row_match = false;
+                break;
             }
         }
+        if row_match {
+            match_count += 1;
+        }
         if (base - bg).abs() > 24 {
-            content = true; // khác nền → có nội dung (sidebar), không phải lề trắng
+            content_count += 1;
         }
         y += y_step;
     }
-    content
+    // Cột cố định nếu ít nhất 92% số điểm mẫu dọc theo cột là cố định và có chứa nội dung
+    total_samples > 0 && (match_count as f32 / total_samples as f32) >= 0.92 && content_count > 0
 }
 
 /// Phát hiện dải cột cố định ở mép trái/phải (sidebar/panel dính) bằng cách so

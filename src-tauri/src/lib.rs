@@ -93,6 +93,8 @@ pub fn run() {
             commands::save_and_copy,
             commands::open_capture_bar,
             commands::open_capture_bar_for_new,
+            windows::toggle_capture_bar_popover,
+            windows::hide_capture_bar_popover,
             windows::resize_capture_bar,
             commands::open_editor,
             commands::open_settings,
@@ -295,6 +297,7 @@ pub fn run() {
             // (macOS)/Taskbar (Windows) hiện diện xuyên suốt vòng đời app kể
             // từ lúc mở app, không còn im lặng ở tray như trước.
             let _ = windows::prewarm_capture_bar(&handle);
+            let _ = windows::prewarm_capture_bar_popover(&handle);
 
             // Lần đầu chạy sau khi cài: tự động bật "khởi động cùng hệ thống".
             // Phát hiện "lần đầu" bằng việc FILE settings.json đã tồn tại
@@ -370,9 +373,9 @@ pub fn run() {
         })
         .on_window_event(|_window, _event| {
             if let tauri::WindowEvent::Focused(focused) = _event {
-                if !*focused && _window.label() == "capture-bar" {
-                    use tauri::Emitter;
-                    let _ = _window.emit("hide-popover", ());
+                if !*focused && _window.label() == "capture-bar-popover" {
+                    let _ = _window.hide();
+                    windows::record_popover_closed();
                 }
             }
             // macOS: khi cửa sổ "thật" bị đóng (editor, settings, capture-bar,

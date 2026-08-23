@@ -28,7 +28,7 @@ const ZOOM_MAX = 8;
 const clampZoom = (z: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
 
 interface Draft {
-  type: "rect" | "ellipse" | "crop" | "highlight" | "blur";
+  type: "rect" | "ellipse" | "crop" | "highlight" | "blur" | "numbered-rect";
   x: number;
   y: number;
   width: number;
@@ -49,6 +49,85 @@ interface AnnotationStageProps {
   hideZoomBar?: boolean;
 }
 
+/** Khung viền chọn từng đối tượng khi chọn nhiều */
+function SelectionFrame({ x, y, width, height }: { x: number; y: number; width: number; height: number }) {
+  const pad = 3;
+  const rx = x - pad;
+  const ry = y - pad;
+  const rw = width + pad * 2;
+  const rh = height + pad * 2;
+  const handles = [
+    { x: rx, y: ry },
+    { x: rx + rw, y: ry },
+    { x: rx, y: ry + rh },
+    { x: rx + rw, y: ry + rh },
+  ];
+  return (
+    <>
+      <Rect
+        x={rx}
+        y={ry}
+        width={rw}
+        height={rh}
+        stroke="#3b82f6"
+        strokeWidth={1.5}
+        dash={[4, 3]}
+        listening={false}
+      />
+      {handles.map((h, i) => (
+        <Rect
+          key={i}
+          x={h.x - 3.5}
+          y={h.y - 3.5}
+          width={7}
+          height={7}
+          fill="#ffffff"
+          stroke="#3b82f6"
+          strokeWidth={1.5}
+          listening={false}
+        />
+      ))}
+    </>
+  );
+}
+
+function LineEndpoints({ x1, y1, x2, y2 }: { x1: number; y1: number; x2: number; y2: number }) {
+  return (
+    <>
+      <Circle x={x1} y={y1} radius={4} fill="#ffffff" stroke="#3b82f6" strokeWidth={1.5} listening={false} />
+      <Circle x={x2} y={y2} radius={4} fill="#ffffff" stroke="#3b82f6" strokeWidth={1.5} listening={false} />
+    </>
+  );
+}
+
+function StepSelectionFrame({ x, y, radius }: { x: number; y: number; radius: number }) {
+  const r = radius + 3;
+  const handles = [
+    { x: x - r, y },
+    { x: x + r, y },
+    { x, y: y - r },
+    { x, y: y + r },
+  ];
+  return (
+    <>
+      <Circle x={x} y={y} radius={r} stroke="#3b82f6" strokeWidth={1.5} dash={[4, 3]} listening={false} />
+      {handles.map((h, i) => (
+        <Rect
+          key={i}
+          x={h.x - 3}
+          y={h.y - 3}
+          width={6}
+          height={6}
+          fill="#ffffff"
+          stroke="#3b82f6"
+          strokeWidth={1.5}
+          listening={false}
+        />
+      ))}
+    </>
+  );
+}
+
 const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoomBar }, ref) => {
   const { t } = useTranslation();
   const doc = useEditor((s) => s.doc);
@@ -60,6 +139,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const blurRadius = useEditor((s) => s.blurRadius);
   const blurMode   = useEditor((s) => s.blurMode);
   const selectedId = useEditor((s) => s.selectedId);
+  const selectedIds = useEditor((s) => s.selectedIds ?? []);
 
   const containerRef = useRef<HTMLDivElement>(null);
   /** Wrapper NGOÀI `containerRef` — không có `overflow:auto` nên kích thước
@@ -115,6 +195,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [arrowDraft, setArrowDraft] = useState<ArrowDraft | null>(null);
+  const [marqueeBox, setMarqueeBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [cropRect, setCropRect] = useState<Draft | null>(null);
   const [cropHistory, setCropHistory] = useState<Draft[]>([]); // Lưu lại crop history
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
@@ -174,7 +255,10 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   // và ghi đè `img` bằng ảnh sai; huỷ trong cleanup để chỉ lần load mới nhất
   // được set (cùng pattern StitchDialog).
   useEffect(() => {
-    if (!doc) return;
+    if (!doc) {
+      setImg(null);
+      return;
+    }
     let cancelled = false;
     const el = new window.Image();
     el.onload = () => {
@@ -233,19 +317,20 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     setBox({ w: doc.imgW * scale, h: doc.imgH * scale });
   }, [scale, doc?.imgW, doc?.imgH]);
 
-  // Gắn Transformer vào node đang chọn
+  // Gắn Transformer vào node đang chọn (chỉ khi chọn đơn 1 phần tử)
   useEffect(() => {
     const tr = trRef.current;
     const layer = layerRef.current;
     if (!tr || !layer) return;
-    if (selectedId && tool === "select" && editing?.id !== selectedId) {
-      const node = layer.findOne("#" + selectedId);
+    const activeIds = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+    if (activeIds.length === 1 && tool === "select" && editing?.id !== activeIds[0]) {
+      const node = layer.findOne("#" + activeIds[0]);
       tr.nodes(node ? [node] : []);
     } else {
       tr.nodes([]);
     }
     layer.batchDraw();
-  }, [selectedId, tool, doc, editing?.id]);
+  }, [selectedId, selectedIds, tool, doc, editing?.id]);
 
   // Zoom giữ nguyên điểm (vx,vy) — toạ độ trong viewport container (px từ mép
   // trái/trên). Dùng chung cho wheel/pinch, nút bấm và phím tắt nên mọi đường
@@ -652,7 +737,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   // bao giờ nhận được mouseup, khiến khung vẽ bị "dính" và tiếp tục bám theo
   // con trỏ ở lần kéo sau. Toạ độ luôn được clamp vào [0, imgW]/[0, imgH].
   const beginShapeDraft = (
-    type: "rect" | "ellipse" | "highlight" | "blur",
+    type: "rect" | "ellipse" | "highlight" | "blur" | "numbered-rect",
     startX: number,
     startY: number,
   ) => {
@@ -697,6 +782,31 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
           blurRadius,
           blurMode: useEditor.getState().blurMode,
           solidColor: useEditor.getState().blurSolidColor,
+        });
+        return;
+      }
+      if (type === "numbered-rect") {
+        const value = useEditor.getState().nextRectStep();
+        const radius = Math.max(strokeWidth * 4, 14);
+        const isLeft = x >= sx;
+        const isTop = y >= sy;
+        const corner: "tl" | "tr" | "bl" | "br" =
+          isLeft && isTop ? "tl" :
+          !isLeft && isTop ? "tr" :
+          isLeft && !isTop ? "bl" : "br";
+
+        useEditor.getState().addAnnotation({
+          id: uid(),
+          type: "numbered-rect",
+          x: nx,
+          y: ny,
+          width,
+          height,
+          value,
+          radius,
+          color,
+          strokeWidth,
+          corner,
         });
         return;
       }
@@ -765,6 +875,75 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     window.addEventListener("mouseup", onUp);
   };
 
+  // Quét vùng chọn (Marquee selection) khi ở tool select
+  const beginMarqueeSelection = (startX: number, startY: number, append: boolean) => {
+    const onMove = (me: MouseEvent) => {
+      const p = clientToImg(me.clientX, me.clientY);
+      const x1 = Math.min(startX, p.x);
+      const y1 = Math.min(startY, p.y);
+      const w = Math.abs(p.x - startX);
+      const h = Math.abs(p.y - startY);
+      setMarqueeBox({ x: x1, y: y1, width: w, height: h });
+    };
+
+    const onUp = (ue: MouseEvent) => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      const p = clientToImg(ue.clientX, ue.clientY);
+      const x1 = Math.min(startX, p.x);
+      const y1 = Math.min(startY, p.y);
+      const x2 = Math.max(startX, p.x);
+      const y2 = Math.max(startY, p.y);
+      const w = x2 - x1;
+      const h = y2 - y1;
+      setMarqueeBox(null);
+
+      if (w < 4 && h < 4) return;
+
+      const d = docRef.current;
+      if (!d) return;
+
+      const hitIds = d.annotations
+        .filter((a) => {
+          let ax1 = a.x;
+          let ay1 = a.y;
+          let ax2 = a.x;
+          let ay2 = a.y;
+
+          if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect") {
+            ax2 = a.x + a.width;
+            ay2 = a.y + a.height;
+          } else if (a.type === "ellipse") {
+            ax2 = a.x + a.width;
+            ay2 = a.y + a.height;
+          } else if (a.type === "arrow" || a.type === "line" || a.type === "numbered-arrow") {
+            ax1 = Math.min(a.x, a.x2);
+            ay1 = Math.min(a.y, a.y2);
+            ax2 = Math.max(a.x, a.x2);
+            ay2 = Math.max(a.y, a.y2);
+          } else if (a.type === "step") {
+            ax1 = a.x - a.radius;
+            ay1 = a.y - a.radius;
+            ax2 = a.x + a.radius;
+            ay2 = a.y + a.radius;
+          } else if (a.type === "text") {
+            ax2 = a.x + 80;
+            ay2 = a.y + (a.fontSize || 22) * 1.5;
+          }
+
+          return !(ax2 < x1 || ax1 > x2 || ay2 < y1 || ay1 > y2);
+        })
+        .map((a) => a.id);
+
+      if (hitIds.length > 0) {
+        useEditor.getState().selectMany(hitIds, append);
+      }
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   const onStageMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     // Pan mode (Space giữ) hoặc middle-button → nhường cho pointer handler
     if (isPanModeRef.current || e.evt.button === 1) return;
@@ -779,11 +958,17 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const { x, y } = toImg(pos);
 
     if (tool === "select") {
-      if (e.target === stage || e.target.id() === "bg") useEditor.getState().select(null);
+      if (e.target === stage || e.target.id() === "bg") {
+        const isMulti = e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey;
+        if (!isMulti) {
+          useEditor.getState().select(null);
+        }
+        beginMarqueeSelection(x, y, isMulti);
+      }
       return;
     }
 
-    if (tool === "rect" || tool === "ellipse" || tool === "highlight" || tool === "blur") {
+    if (tool === "rect" || tool === "ellipse" || tool === "highlight" || tool === "blur" || tool === "numbered-rect") {
       beginShapeDraft(tool, x, y);
       return;
     }
@@ -832,13 +1017,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     }
   };
 
-  // Vẽ rect/ellipse/highlight/blur/arrow/line/numbered-arrow giờ được kéo
+  // Vẽ rect/ellipse/highlight/blur/arrow/line/numbered-arrow/numbered-rect giờ được kéo
   // hoàn toàn qua `beginShapeDraft`/`beginArrowDraft` (window mousemove/
   // mouseup) — xem 2 hàm đó ở trên, nên Stage không cần onMouseMove/onMouseUp
   // riêng cho việc này nữa.
 
   const onDragEnd = (id: string, e: Konva.KonvaEventObject<DragEvent>) => {
-    useEditor.getState().updateAnnotation(id, { x: e.target.x(), y: e.target.y() });
+    useEditor.getState().updateAnnotation(id, { x: e.currentTarget.x(), y: e.currentTarget.y() });
   };
 
   const onTransformEnd = (a: Annotation, node: Konva.Node) => {
@@ -858,7 +1043,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         width: newW,
         height: newH,
       } as Partial<Annotation>);
-    } else if (a.type === "rect" || a.type === "highlight" || a.type === "blur") {
+    } else if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect") {
       useEditor.getState().updateAnnotation(a.id, {
         x: node.x(),
         y: node.y(),
@@ -988,11 +1173,23 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const atZoomMin = zoom <= ZOOM_MIN + 1e-6;
   const atZoomMax = zoom >= ZOOM_MAX - 1e-6;
 
-  // Step / numbered-arrow luôn tròn → keepRatio. Line/arrow không có bounding box resize.
-  const selectedAnn = selectedId ? doc.annotations.find((a) => a.id === selectedId) : null;
-  const isCircleSelected = selectedAnn?.type === "step" || selectedAnn?.type === "numbered-arrow";
-  // Line / arrow → Transformer ẩn (kéo bằng draggable, không resize bounding box)
-  const isLineSelected = selectedAnn?.type === "line" || selectedAnn?.type === "arrow";
+  // Step luôn tròn → keepRatio. Line/arrow/numbered-arrow không dùng transformer bounding box
+  const activeIds = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+  const selectedAnns = doc ? doc.annotations.filter((a) => activeIds.includes(a.id)) : [];
+  const isCircleSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "step");
+  const isNumberedRectSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "numbered-rect");
+  // Line / arrow / numbered-arrow → Transformer ẩn (kéo di chuyển trực tiếp, không resize bounding box)
+  const isLineSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "line" || a.type === "arrow" || a.type === "numbered-arrow");
+
+  if (!doc) {
+    return (
+      <div ref={outerRef} style={{ ...fill, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim, #6c7086)" }}>
+        <div style={{ textAlign: "center" }}>
+          <p style={{ margin: 0, fontSize: 14 }}>{t("historyStrip.noDocument", "Không có ảnh nào đang mở")}</p>
+        </div>
+      </div>
+    );
+  }
 
   // DPI info từ metadata ảnh chụp (1 = normal, 2 = Retina 2×, ...)
   const scaleFactor = doc.scaleFactor ?? 1;
@@ -1037,148 +1234,261 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
             {img && <KImage image={img} id="bg" width={doc.imgW} height={doc.imgH} listening={false} />}
 
             {doc.annotations.map((a) => {
+              const isSelected = activeIds.includes(a.id);
               if (a.type === "rect")
                 return (
-                  <Rect
-                    key={a.id}
-                    id={a.id}
-                    x={a.x}
-                    y={a.y}
-                    width={a.width}
-                    height={a.height}
-                    stroke={a.color}
-                    strokeWidth={a.strokeWidth}
-                    draggable={draggable}
-                    onClick={() => useEditor.getState().select(a.id)}
-                    onTap={() => useEditor.getState().select(a.id)}
-                    onDragEnd={(e) => onDragEnd(a.id, e)}
-                    onTransformEnd={(e) => onTransformEnd(a, e.target)}
-                  />
+                  <Group key={a.id}>
+                    <Rect
+                      id={a.id}
+                      x={a.x}
+                      y={a.y}
+                      width={a.width}
+                      height={a.height}
+                      stroke={a.color}
+                      strokeWidth={a.strokeWidth}
+                      shadowColor={isSelected ? "#3b82f6" : undefined}
+                      shadowBlur={isSelected ? 6 : 0}
+                      shadowOpacity={isSelected ? 0.9 : 0}
+                      draggable={draggable}
+                      onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                      onTap={() => useEditor.getState().select(a.id)}
+                      onDragEnd={(e) => onDragEnd(a.id, e)}
+                      onTransformEnd={(e) => onTransformEnd(a, e.target)}
+                    />
+                    {isSelected && activeIds.length > 1 && (
+                      <SelectionFrame x={a.x} y={a.y} width={a.width} height={a.height} />
+                    )}
+                  </Group>
                 );
+              if (a.type === "numbered-rect") {
+                const corner = a.corner || "tl";
+                const cx = corner === "tl" || corner === "bl" ? 0 : a.width;
+                const cy = corner === "tl" || corner === "tr" ? 0 : a.height;
+                return (
+                  <Group key={a.id}>
+                    <Group
+                      id={a.id}
+                      x={a.x}
+                      y={a.y}
+                      draggable={draggable}
+                      onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                      onTap={() => useEditor.getState().select(a.id)}
+                      onDragEnd={(e) => onDragEnd(a.id, e)}
+                      onTransformEnd={(e) => onTransformEnd(a, e.target)}
+                    >
+                      <Rect
+                        x={0}
+                        y={0}
+                        width={a.width}
+                        height={a.height}
+                        stroke={a.color}
+                        strokeWidth={a.strokeWidth}
+                        shadowColor={isSelected ? "#3b82f6" : undefined}
+                        shadowBlur={isSelected ? 6 : 0}
+                        shadowOpacity={isSelected ? 0.9 : 0}
+                      />
+                      <Circle
+                        x={cx}
+                        y={cy}
+                        radius={a.radius}
+                        fill={a.color}
+                        stroke={isSelected ? "#3b82f6" : "#ffffff"}
+                        strokeWidth={isSelected ? 2.5 : 1.5}
+                        shadowColor={isSelected ? "#3b82f6" : undefined}
+                        shadowBlur={isSelected ? 6 : 0}
+                      />
+                      <Text
+                        x={cx}
+                        y={cy}
+                        text={String(a.value)}
+                        fontSize={a.radius}
+                        fontStyle="bold"
+                        fill="#ffffff"
+                        width={a.radius * 2}
+                        height={a.radius * 2}
+                        offsetX={a.radius}
+                        offsetY={a.radius}
+                        align="center"
+                        verticalAlign="middle"
+                      />
+                    </Group>
+                    {isSelected && activeIds.length > 1 && (
+                      <SelectionFrame x={a.x} y={a.y} width={a.width} height={a.height} />
+                    )}
+                  </Group>
+                );
+              }
               if (a.type === "ellipse")
                 return (
-                  <Ellipse
-                    key={a.id}
-                    id={a.id}
-                    x={a.x + a.width / 2}
-                    y={a.y + a.height / 2}
-                    radiusX={Math.abs(a.width / 2)}
-                    radiusY={Math.abs(a.height / 2)}
-                    stroke={a.color}
-                    strokeWidth={a.strokeWidth}
-                    draggable={draggable}
-                    onClick={() => useEditor.getState().select(a.id)}
-                    onTap={() => useEditor.getState().select(a.id)}
-                    onDragEnd={(e) =>
-                      useEditor.getState().updateAnnotation(a.id, {
-                        x: e.target.x() - a.width / 2,
-                        y: e.target.y() - a.height / 2,
-                      })
-                    }
-                    onTransformEnd={(e) => onTransformEnd(a, e.target)}
-                  />
+                  <Group key={a.id}>
+                    <Ellipse
+                      id={a.id}
+                      x={a.x + a.width / 2}
+                      y={a.y + a.height / 2}
+                      radiusX={Math.abs(a.width / 2)}
+                      radiusY={Math.abs(a.height / 2)}
+                      stroke={a.color}
+                      strokeWidth={a.strokeWidth}
+                      shadowColor={isSelected ? "#3b82f6" : undefined}
+                      shadowBlur={isSelected ? 6 : 0}
+                      shadowOpacity={isSelected ? 0.9 : 0}
+                      draggable={draggable}
+                      onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                      onTap={() => useEditor.getState().select(a.id)}
+                      onDragEnd={(e) =>
+                        useEditor.getState().updateAnnotation(a.id, {
+                          x: e.target.x() - a.width / 2,
+                          y: e.target.y() - a.height / 2,
+                        })
+                      }
+                      onTransformEnd={(e) => onTransformEnd(a, e.target)}
+                    />
+                    {isSelected && activeIds.length > 1 && (
+                      <SelectionFrame x={a.x} y={a.y} width={a.width} height={a.height} />
+                    )}
+                  </Group>
                 );
               if (a.type === "text")
                 return (
-                  <Text
-                    key={a.id}
-                    id={a.id}
-                    x={a.x}
-                    y={a.y}
-                    text={a.text || " "}
-                    fontSize={a.fontSize}
-                    fill={a.color}
-                    fontStyle="bold"
-                    draggable={draggable}
-                    onClick={() => useEditor.getState().select(a.id)}
-                    onDblClick={(e) => beginEdit(a.id, a.text, e.target)}
-                    onDragEnd={(e) => onDragEnd(a.id, e)}
-                    visible={editing?.id !== a.id}
-                  />
+                  <Group key={a.id}>
+                    <Text
+                      id={a.id}
+                      x={a.x}
+                      y={a.y}
+                      text={a.text || " "}
+                      fontSize={a.fontSize}
+                      fill={a.color}
+                      fontStyle="bold"
+                      shadowColor={isSelected ? "#3b82f6" : undefined}
+                      shadowBlur={isSelected ? 6 : 0}
+                      shadowOpacity={isSelected ? 0.9 : 0}
+                      draggable={draggable}
+                      onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                      onDblClick={(e) => beginEdit(a.id, a.text, e.target)}
+                      onDragEnd={(e) => onDragEnd(a.id, e)}
+                      visible={editing?.id !== a.id}
+                    />
+                    {isSelected && activeIds.length > 1 && (
+                      <SelectionFrame
+                        x={a.x}
+                        y={a.y}
+                        width={Math.max(40, (a.text?.length || 1) * (a.fontSize || 22) * 0.6)}
+                        height={(a.fontSize || 22) * 1.35}
+                      />
+                    )}
+                  </Group>
                 );
               // step
               if (a.type === "step")
               return (
-                <Group
-                  key={a.id}
-                  id={a.id}
-                  x={a.x}
-                  y={a.y}
-                  draggable={draggable}
-                  onClick={() => useEditor.getState().select(a.id)}
-                  onTap={() => useEditor.getState().select(a.id)}
-                  onDragEnd={(e) => onDragEnd(a.id, e)}
-                  onTransformEnd={(e) => onTransformEnd(a, e.target)}
-                >
-                  <Circle radius={a.radius} fill={a.color} />
-                  <Text
-                    text={String(a.value)}
-                    fontSize={a.radius}
-                    fontStyle="bold"
-                    fill="#ffffff"
-                    width={a.radius * 2}
-                    height={a.radius * 2}
-                    offsetX={a.radius}
-                    offsetY={a.radius}
-                    align="center"
-                    verticalAlign="middle"
-                  />
+                <Group key={a.id}>
+                  <Group
+                    id={a.id}
+                    x={a.x}
+                    y={a.y}
+                    draggable={draggable}
+                    onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                    onTap={() => useEditor.getState().select(a.id)}
+                    onDragEnd={(e) => onDragEnd(a.id, e)}
+                    onTransformEnd={(e) => onTransformEnd(a, e.target)}
+                  >
+                    <Circle
+                      radius={a.radius}
+                      fill={a.color}
+                      stroke={isSelected ? "#3b82f6" : "#ffffff"}
+                      strokeWidth={isSelected ? 2.5 : 1}
+                      shadowColor={isSelected ? "#3b82f6" : undefined}
+                      shadowBlur={isSelected ? 6 : 0}
+                      shadowOpacity={isSelected ? 0.9 : 0}
+                    />
+                    <Text
+                      text={String(a.value)}
+                      fontSize={a.radius}
+                      fontStyle="bold"
+                      fill="#ffffff"
+                      width={a.radius * 2}
+                      height={a.radius * 2}
+                      offsetX={a.radius}
+                      offsetY={a.radius}
+                      align="center"
+                      verticalAlign="middle"
+                    />
+                  </Group>
+                  {isSelected && activeIds.length > 1 && (
+                    <StepSelectionFrame x={a.x} y={a.y} radius={a.radius} />
+                  )}
                 </Group>
               );
               // arrow
               if (a.type === "arrow")
               return (
-                <Arrow
-                  key={a.id}
-                  id={a.id}
-                  points={[a.x, a.y, a.x2, a.y2]}
-                  stroke={a.color}
-                  strokeWidth={a.strokeWidth}
-                  fill={a.color}
-                  pointerLength={Math.max(10, a.strokeWidth * 3)}
-                  pointerWidth={Math.max(8, a.strokeWidth * 2.5)}
-                  lineCap="round"
-                  lineJoin="round"
-                  draggable={draggable}
-                  onClick={() => useEditor.getState().select(a.id)}
-                  onTap={() => useEditor.getState().select(a.id)}
-                  onDragEnd={(e) => {
-                    const dx = e.target.x();
-                    const dy = e.target.y();
-                    e.target.x(0);
-                    e.target.y(0);
-                    useEditor.getState().updateAnnotation(a.id, {
-                      x: a.x + dx, y: a.y + dy,
-                      x2: a.x2 + dx, y2: a.y2 + dy,
-                    } as Partial<Annotation>);
-                  }}
-                />
+                <Group key={a.id}>
+                  <Arrow
+                    id={a.id}
+                    points={[a.x, a.y, a.x2, a.y2]}
+                    stroke={a.color}
+                    strokeWidth={a.strokeWidth}
+                    fill={a.color}
+                    pointerLength={Math.max(10, a.strokeWidth * 3)}
+                    pointerWidth={Math.max(8, a.strokeWidth * 2.5)}
+                    lineCap="round"
+                    lineJoin="round"
+                    hitStrokeWidth={Math.max(20, a.strokeWidth * 3)}
+                    shadowColor={isSelected ? "#3b82f6" : undefined}
+                    shadowBlur={isSelected ? 6 : 0}
+                    shadowOpacity={isSelected ? 0.9 : 0}
+                    draggable={draggable}
+                    onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                    onTap={() => useEditor.getState().select(a.id)}
+                    onDragEnd={(e) => {
+                      const dx = e.currentTarget.x();
+                      const dy = e.currentTarget.y();
+                      e.currentTarget.x(0);
+                      e.currentTarget.y(0);
+                      useEditor.getState().updateAnnotation(a.id, {
+                        x: a.x + dx, y: a.y + dy,
+                        x2: a.x2 + dx, y2: a.y2 + dy,
+                      } as Partial<Annotation>);
+                    }}
+                  />
+                  {isSelected && activeIds.length > 1 && (
+                    <LineEndpoints x1={a.x} y1={a.y} x2={a.x2} y2={a.y2} />
+                  )}
+                </Group>
               );
               // line
               if (a.type === "line")
               return (
-                <Line
-                  key={a.id}
-                  id={a.id}
-                  points={[a.x, a.y, a.x2, a.y2]}
-                  stroke={a.color}
-                  strokeWidth={a.strokeWidth}
-                  lineCap="round"
-                  lineJoin="round"
-                  draggable={draggable}
-                  onClick={() => useEditor.getState().select(a.id)}
-                  onTap={() => useEditor.getState().select(a.id)}
-                  onDragEnd={(e) => {
-                    const dx = e.target.x();
-                    const dy = e.target.y();
-                    e.target.x(0);
-                    e.target.y(0);
-                    useEditor.getState().updateAnnotation(a.id, {
-                      x: a.x + dx, y: a.y + dy,
-                      x2: a.x2 + dx, y2: a.y2 + dy,
-                    } as Partial<Annotation>);
-                  }}
-                />
+                <Group key={a.id}>
+                  <Line
+                    id={a.id}
+                    points={[a.x, a.y, a.x2, a.y2]}
+                    stroke={a.color}
+                    strokeWidth={a.strokeWidth}
+                    lineCap="round"
+                    lineJoin="round"
+                    hitStrokeWidth={Math.max(20, a.strokeWidth * 3)}
+                    shadowColor={isSelected ? "#3b82f6" : undefined}
+                    shadowBlur={isSelected ? 6 : 0}
+                    shadowOpacity={isSelected ? 0.9 : 0}
+                    draggable={draggable}
+                    onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                    onTap={() => useEditor.getState().select(a.id)}
+                    onDragEnd={(e) => {
+                      const dx = e.currentTarget.x();
+                      const dy = e.currentTarget.y();
+                      e.currentTarget.x(0);
+                      e.currentTarget.y(0);
+                      useEditor.getState().updateAnnotation(a.id, {
+                        x: a.x + dx, y: a.y + dy,
+                        x2: a.x2 + dx, y2: a.y2 + dy,
+                      } as Partial<Annotation>);
+                    }}
+                  />
+                  {isSelected && activeIds.length > 1 && (
+                    <LineEndpoints x1={a.x} y1={a.y} x2={a.x2} y2={a.y2} />
+                  )}
+                </Group>
               );
               // numbered-arrow
               if (a.type === "numbered-arrow") {
@@ -1192,89 +1502,115 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 const startX = a.x + nx * a.radius;
                 const startY = a.y + ny * a.radius;
                 return (
-                  <Group
-                    key={a.id}
-                    id={a.id}
-                    draggable={draggable}
-                    onClick={() => useEditor.getState().select(a.id)}
-                    onTap={() => useEditor.getState().select(a.id)}
-                    onDragEnd={(e) => {
-                      const ddx = e.target.x();
-                      const ddy = e.target.y();
-                      e.target.x(0);
-                      e.target.y(0);
-                      useEditor.getState().updateAnnotation(a.id, {
-                        x: a.x + ddx, y: a.y + ddy,
-                        x2: a.x2 + ddx, y2: a.y2 + ddy,
-                      } as Partial<Annotation>);
-                    }}
-                    onTransformEnd={(e) => onTransformEnd(a, e.target)}
-                  >
-                    {/* Vòng tròn số thứ tự tại đuôi */}
-                    <Circle x={a.x} y={a.y} radius={a.radius} fill={a.color} />
-                    <Text
-                      x={a.x}
-                      y={a.y}
-                      text={String(a.value)}
-                      fontSize={a.radius}
-                      fontStyle="bold"
-                      fill="#ffffff"
-                      width={a.radius * 2}
-                      height={a.radius * 2}
-                      offsetX={a.radius}
-                      offsetY={a.radius}
-                      align="center"
-                      verticalAlign="middle"
-                    />
-                    {/* Mũi tên từ mép vòng tròn đến đầu mũi tên */}
-                    <Arrow
-                      points={[startX, startY, a.x2, a.y2]}
-                      stroke={a.color}
-                      strokeWidth={a.strokeWidth}
-                      fill={a.color}
-                      pointerLength={Math.max(10, a.strokeWidth * 3)}
-                      pointerWidth={Math.max(8, a.strokeWidth * 2.5)}
-                      lineCap="round"
-                      lineJoin="round"
-                    />
+                  <Group key={a.id}>
+                    <Group
+                      id={a.id}
+                      draggable={draggable}
+                      onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                      onTap={() => useEditor.getState().select(a.id)}
+                      onDragEnd={(e) => {
+                        const ddx = e.currentTarget.x();
+                        const ddy = e.currentTarget.y();
+                        e.currentTarget.x(0);
+                        e.currentTarget.y(0);
+                        useEditor.getState().updateAnnotation(a.id, {
+                          x: a.x + ddx, y: a.y + ddy,
+                          x2: a.x2 + ddx, y2: a.y2 + ddy,
+                        } as Partial<Annotation>);
+                      }}
+                    >
+                      {/* Vòng tròn số thứ tự tại đuôi */}
+                      <Circle
+                        x={a.x}
+                        y={a.y}
+                        radius={a.radius}
+                        fill={a.color}
+                        stroke={isSelected ? "#3b82f6" : "#ffffff"}
+                        strokeWidth={isSelected ? 2.5 : 1.5}
+                        shadowColor={isSelected ? "#3b82f6" : undefined}
+                        shadowBlur={isSelected ? 6 : 0}
+                      />
+                      <Text
+                        x={a.x}
+                        y={a.y}
+                        text={String(a.value)}
+                        fontSize={a.radius}
+                        fontStyle="bold"
+                        fill="#ffffff"
+                        width={a.radius * 2}
+                        height={a.radius * 2}
+                        offsetX={a.radius}
+                        offsetY={a.radius}
+                        align="center"
+                        verticalAlign="middle"
+                      />
+                      {/* Mũi tên từ mép vòng tròn đến đầu mũi tên */}
+                      <Arrow
+                        points={[startX, startY, a.x2, a.y2]}
+                        stroke={a.color}
+                        strokeWidth={a.strokeWidth}
+                        fill={a.color}
+                        pointerLength={Math.max(10, a.strokeWidth * 3)}
+                        pointerWidth={Math.max(8, a.strokeWidth * 2.5)}
+                        lineCap="round"
+                        lineJoin="round"
+                        hitStrokeWidth={Math.max(20, a.strokeWidth * 3)}
+                        shadowColor={isSelected ? "#3b82f6" : undefined}
+                        shadowBlur={isSelected ? 6 : 0}
+                        shadowOpacity={isSelected ? 0.9 : 0}
+                      />
+                    </Group>
+                    {isSelected && activeIds.length > 1 && (
+                      <LineEndpoints x1={a.x} y1={a.y} x2={a.x2} y2={a.y2} />
+                    )}
                   </Group>
                 );
               }
               // highlight
               if (a.type === "highlight")
               return (
-                <Rect
-                  key={a.id}
-                  id={a.id}
-                  x={a.x}
-                  y={a.y}
-                  width={a.width}
-                  height={a.height}
-                  fill={a.color}
-                  opacity={0.38}
-                  draggable={draggable}
-                  onClick={() => useEditor.getState().select(a.id)}
-                  onTap={() => useEditor.getState().select(a.id)}
-                  onDragEnd={(e) => onDragEnd(a.id, e)}
-                  onTransformEnd={(e) => onTransformEnd(a, e.target)}
-                />
+                <Group key={a.id}>
+                  <Rect
+                    id={a.id}
+                    x={a.x}
+                    y={a.y}
+                    width={a.width}
+                    height={a.height}
+                    fill={a.color}
+                    opacity={0.38}
+                    stroke={isSelected ? "#3b82f6" : undefined}
+                    strokeWidth={isSelected ? 1.5 : 0}
+                    draggable={draggable}
+                    onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                    onTap={() => useEditor.getState().select(a.id)}
+                    onDragEnd={(e) => onDragEnd(a.id, e)}
+                    onTransformEnd={(e) => onTransformEnd(a, e.target)}
+                  />
+                  {isSelected && activeIds.length > 1 && (
+                    <SelectionFrame x={a.x} y={a.y} width={a.width} height={a.height} />
+                  )}
+                </Group>
               );
               // blur — dùng canvas 2D để process pixel
               if (a.type === "blur")
               return (
-                <BlurRect
-                  key={a.id}
-                  ann={a}
-                  img={img}
-                  draggable={draggable}
-                  onSelect={() => useEditor.getState().select(a.id)}
-                  onDragEnd={(newX, newY) =>
-                    useEditor.getState().updateAnnotation(a.id, {
-                      x: newX, y: newY,
-                    } as Partial<Annotation>)
-                  }
-                  onTransformEnd={(node) => onTransformEnd(a, node)}
-                />
+                <Group key={a.id}>
+                  <BlurRect
+                    ann={a}
+                    img={img}
+                    draggable={draggable}
+                    onSelect={(multi) => useEditor.getState().select(a.id, multi)}
+                    onDragEnd={(newX, newY) =>
+                      useEditor.getState().updateAnnotation(a.id, {
+                        x: newX, y: newY,
+                      } as Partial<Annotation>)
+                    }
+                    onTransformEnd={(node) => onTransformEnd(a, node)}
+                  />
+                  {isSelected && activeIds.length > 1 && (
+                    <SelectionFrame x={a.x} y={a.y} width={a.width} height={a.height} />
+                  )}
+                </Group>
               );
               return null;
             })}
@@ -1334,7 +1670,53 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                   listening={false}
                 />
               </>
-            ) : draft ? (
+            ) : draft && draft.type === "numbered-rect" ? (() => {
+              const nx = Math.min(draft.x, draft.x + draft.width);
+              const ny = Math.min(draft.y, draft.y + draft.height);
+              const w = Math.abs(draft.width);
+              const h = Math.abs(draft.height);
+              const isLeft = draft.width >= 0;
+              const isTop = draft.height >= 0;
+              const cx = isLeft ? nx : nx + w;
+              const cy = isTop ? ny : ny + h;
+              const radius = Math.max(strokeWidth * 4, 14);
+              const nextVal = useEditor.getState().rectCounter;
+              return (
+                <Group opacity={0.8}>
+                  <Rect
+                    x={nx}
+                    y={ny}
+                    width={w}
+                    height={h}
+                    stroke={color}
+                    strokeWidth={strokeWidth}
+                    dash={[6, 4]}
+                  />
+                  <Circle
+                    x={cx}
+                    y={cy}
+                    radius={radius}
+                    fill={color}
+                    stroke="#ffffff"
+                    strokeWidth={1.5}
+                  />
+                  <Text
+                    x={cx}
+                    y={cy}
+                    text={String(nextVal)}
+                    fontSize={radius}
+                    fontStyle="bold"
+                    fill="#ffffff"
+                    width={radius * 2}
+                    height={radius * 2}
+                    offsetX={radius}
+                    offsetY={radius}
+                    align="center"
+                    verticalAlign="middle"
+                  />
+                </Group>
+              );
+            })() : draft ? (
               <Rect
                 x={draft.x} y={draft.y} width={draft.width} height={draft.height}
                 stroke={color}
@@ -1481,6 +1863,21 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               </>
             )}
 
+            {/* Marquee drag selection box */}
+            {marqueeBox && (
+              <Rect
+                x={marqueeBox.x}
+                y={marqueeBox.y}
+                width={marqueeBox.width}
+                height={marqueeBox.height}
+                fill="rgba(59, 130, 246, 0.15)"
+                stroke="#3b82f6"
+                strokeWidth={1 / scale}
+                dash={[4 / scale, 4 / scale]}
+                listening={false}
+              />
+            )}
+
             <Transformer
               ref={trRef}
               rotateEnabled={false}
@@ -1488,7 +1885,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               keepRatio={isCircleSelected}
               visible={!isLineSelected}
               enabledAnchors={
-                isCircleSelected
+                isCircleSelected || isNumberedRectSelected
                   ? ["top-left", "top-right", "bottom-left", "bottom-right"]
                   : ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
               }
@@ -1839,7 +2236,7 @@ interface BlurRectProps {
   ann: import("../model").BlurAnn;
   img: HTMLImageElement | null;
   draggable: boolean;
-  onSelect: () => void;
+  onSelect: (multi: boolean) => void;
   /** Truyền về tọa độ tuyệt đối mới (x, y) sau khi drag xong. */
   onDragEnd: (newX: number, newY: number) => void;
   onTransformEnd: (node: Konva.Node) => void;
@@ -2016,7 +2413,8 @@ function BlurRect({ ann, img, draggable, onSelect, onDragEnd, onTransformEnd }: 
     id: ann.id,
     x: ann.x, y: ann.y, width: ann.width, height: ann.height,
     draggable,
-    onClick: onSelect, onTap: onSelect,
+    onClick: (e: any) => onSelect(Boolean(e?.evt?.shiftKey || e?.evt?.metaKey || e?.evt?.ctrlKey)),
+    onTap: () => onSelect(false),
     onDragEnd: (e: Konva.KonvaEventObject<DragEvent>) => {
       // e.target.x()/y() = tọa độ image-space mới (layer có scaleX=scale
       // nhưng node position luôn ở image-space — giống onDragEnd chung).

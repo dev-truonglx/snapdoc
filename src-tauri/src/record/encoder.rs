@@ -220,10 +220,15 @@ pub fn mux_audio(
         .arg(audio_path)
         // -map tường minh: input 0 (mp4) chỉ có video, input 1 (raw PCM) chỉ
         // có audio — không dựa vào auto-mapping mặc định của ffmpeg để loại
-        // hẳn khả năng nó chọn nhầm/bỏ sót stream.
+        // hẳn khả năng nó chọn nhầm/bỏ sót stream. Thêm aresample async=1000
+        // và -shortest để đồng bộ thời lượng tuyệt đối giữa audio và video,
+        // chống lệch tiếng sau khi pause/resume nhiều lần.
         .args([
             "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+            "-af", "aresample=async=1000:first_pts=0",
+            "-shortest",
+            "-movflags", "+faststart",
         ])
         .arg(output_path)
         .stdin(Stdio::null())
@@ -384,11 +389,13 @@ pub fn trim(
         cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0"])
             .arg("-i")
             .arg(&list_path)
+            .args(["-map", "0:v:0"])
             .args(["-c:v", "copy"]);
-        // Các đoạn không có track audio (đã `-an` ở bước encode trên) —
-        // `-c:a copy` sẽ lỗi nếu ép copy 1 track không tồn tại.
+        // Dùng `-map 0:a?` (optional stream mapping): nếu segment có track audio
+        // thì copy; nếu không có audio (vd video gốc không có tiếng, hoặc đã
+        // `-an`), ffmpeg tự động bỏ qua mà không bị lỗi stream mapping.
         if !remove_audio {
-            cmd.args(["-c:a", "copy"]);
+            cmd.args(["-map", "0:a?", "-c:a", "copy"]);
         }
         cmd.args(["-movflags", "+faststart"])
             .arg(output_path)

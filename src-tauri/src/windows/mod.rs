@@ -492,6 +492,9 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
 /// WGC/GDI chụp vào frozen background.
 #[cfg(target_os = "windows")]
 pub fn minimize_capture_bar_for_freeze(app: &AppHandle) -> bool {
+    if let Some(popover) = app.get_webview_window("capture-bar-popover") {
+        let _ = popover.hide();
+    }
     let Some(win) = app.get_webview_window("capture-bar") else {
         return false;
     };
@@ -613,146 +616,136 @@ pub fn prewarm_capture_bar(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Resize capture-bar giữ NGUYÊN cạnh đáy (bar luôn "mọc" lên trên khi mở
-/// popover, xem `CaptureBar.tsx`) mà KHÔNG nháy.
-///
-/// macOS: gọi thẳng `NSWindow.setFrame:display:` — MỘT lệnh AppKit atomic
-/// set cả kích thước lẫn vị trí cùng lúc. Khác với `set_size` + `set_position`
-/// riêng lẻ của Tauri (2 lệnh OS tách rời), atomic frame không thể lộ ra 1
-/// khung hình trung gian sai kích thước/vị trí giữa 2 bước — đây chính là
-/// nguồn gây nháy khi resize nhanh (mở/đóng popover liên tục) dù JS đã tính
-/// đúng chiều cao và đúng thứ tự gọi.
-///
-/// Windows: gọi thẳng Win32 `SetWindowPos` — MỘT lệnh atomic set cả size lẫn
-/// position cùng lúc (tương đương `setFrame:display:` bên macOS). Windows
-/// dùng gốc toạ độ TRÊN-TRÁI (khác AppKit) nên vẫn cần tự tính `y` mới để
-/// giữ cạnh đáy đứng yên, nhưng việc đó + set đều gói trong 1 lệnh Win32 duy
-/// nhất — không tách thành 2 lệnh (set_size rồi set_position) như Tauri.
-///
-/// Linux (fallback chung): không có API atomic tương đương, dùng set_size +
-/// set_position của Tauri — nhưng vẫn gộp việc đo + tính + set vào 1 lệnh
-/// Rust duy nhất (trước đây JS phải gọi 4 round-trip IPC riêng: innerSize/
-/// outerPosition/setSize/setPosition), giảm hẳn độ trễ giữa các bước.
+/// Mở hoặc ẩn popover của capture-bar.
+use std::sync::atomic::AtomicU64;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static LAST_POPOVER_CLOSE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub fn record_popover_closed() {
+    LAST_POPOVER_CLOSE_MS.store(now_millis(), Ordering::Relaxed);
+}
+
+pub fn prewarm_capture_bar_popover(app: &AppHandle) -> Result<(), String> {
+    if app.get_webview_window("capture-bar-popover").is_some() {
+        return Ok(());
+    }
+    let _win = WebviewWindowBuilder::new(app, "capture-bar-popover", url("capture-bar-popover"))
+        .title("SnapDoc Options")
+        .inner_size(220.0, 390.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .visible(false)
+        .build()
+        .map_err(|e| format!("Không tạo được capture bar popover: {e}"))?;
+
+    #[cfg(target_os = "windows")]
+    disable_overlay_transitions(&_win);
+
+    Ok(())
+}
+
+/// Mở hoặc ẩn popover của capture-bar.
+/// `anchor_x`, `anchor_y`, `anchor_w`, `anchor_h` là toạ độ logic của nút Options (tương đối so với capture-bar).
 #[tauri::command]
-pub fn resize_capture_bar(app: AppHandle, height: f64) -> Result<(), String> {
-    let win = app
+pub async fn toggle_capture_bar_popover(
+    app: AppHandle,
+    anchor_x: f64,
+    anchor_y: f64,
+    anchor_w: f64,
+    anchor_h: f64,
+) -> Result<(), String> {
+    if let Some(popover) = app.get_webview_window("capture-bar-popover") {
+        if popover.is_visible().unwrap_or(false) {
+            let _ = popover.hide();
+            record_popover_closed();
+            return Ok(());
+        }
+    }
+    // Nếu popover vừa mới bị đóng do mất focus trong vòng 200ms
+    // (ví dụ: user click chuột vào đúng nút Options trên bar trong lúc popover đang mở),
+    // hành động click này được coi là để đóng popover chứ không phải mở lại ngay.
+    let last_close = LAST_POPOVER_CLOSE_MS.load(Ordering::Relaxed);
+    if now_millis().saturating_sub(last_close) < 200 {
+        return Ok(());
+    }
+    open_capture_bar_popover(&app, anchor_x, anchor_y, anchor_w, anchor_h)
+}
+
+/// Ẩn popover của capture-bar.
+#[tauri::command]
+pub async fn hide_capture_bar_popover(app: AppHandle) -> Result<(), String> {
+    if let Some(popover) = app.get_webview_window("capture-bar-popover") {
+        let _ = popover.hide();
+        record_popover_closed();
+    }
+    Ok(())
+}
+
+/// Mở và định vị popover ngay phía trên nút Options của capture-bar.
+pub fn open_capture_bar_popover(
+    app: &AppHandle,
+    anchor_x: f64,
+    _anchor_y: f64,
+    anchor_w: f64,
+    _anchor_h: f64,
+) -> Result<(), String> {
+    let bar_win = app
         .get_webview_window("capture-bar")
         .ok_or("capture-bar không tồn tại")?;
 
-    #[cfg(target_os = "macos")]
-    {
-        // #[tauri::command] đồng bộ (không async) chạy NGAY TRÊN thread nhận
-        // IPC — trên macOS đó CHÍNH LÀ main thread (WKScriptMessageHandler
-        // của WebKit luôn callback trên main thread, không có thread pool nào
-        // ở giữa). Vì vậy gọi thẳng AppKit ở đây là AN TOÀN, không cần
-        // `run_on_main_thread`.
-        //
-        // TRƯỚC ĐÂY code này dùng `run_on_main_thread` + channel để "chắc ăn"
-        // — nhưng đó chính là BUG gây "nháy": `run_on_main_thread` chỉ ĐƯA
-        // closure vào hàng đợi của main thread rồi trả về ngay (không tự
-        // chạy), trong khi ta đang ĐỨNG NGAY TRÊN main thread và tự chặn nó
-        // bằng `rx.recv_timeout` — closure không bao giờ được xử lý cho tới
-        // khi hàm này return (giải phóng main thread), nên lúc nào cũng phải
-        // đợi hết timeout (500ms) mới "release" được: bar bị kẹt ở kích thước
-        // cũ suốt 500ms rồi mới "nháy" snap về đúng kích thước — deadlock tự
-        // gây ra, không phải do AppKit hay do JS.
-        resize_capture_bar_ns_window_main_thread(&win, height);
-        Ok(())
+    let scale = bar_win.scale_factor().map_err(|e| e.to_string())?;
+    let bar_pos = bar_win.outer_position().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
+
+    let popover_w = 220.0;
+    let popover_h = 390.0;
+
+    // Căn mép phải của popover khớp với mép phải của nút Options trên thanh bar
+    let pop_x = (bar_pos.x + anchor_x + anchor_w - popover_w).max(bar_pos.x);
+    let pop_y = bar_pos.y - popover_h - 6.0;
+
+    if let Some(w) = app.get_webview_window("capture-bar-popover") {
+        let _ = w.set_position(tauri::LogicalPosition::new(pop_x, pop_y));
+        let _ = w.show();
+        let _ = w.set_focus();
+    } else {
+        let win = WebviewWindowBuilder::new(app, "capture-bar-popover", url("capture-bar-popover"))
+            .title("SnapDoc Options")
+            .inner_size(popover_w, popover_h)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .position(pop_x, pop_y)
+            .build()
+            .map_err(|e| format!("Không tạo được capture bar popover: {e}"))?;
+
+        #[cfg(target_os = "windows")]
+        disable_overlay_transitions(&win);
+
+        let _ = win.show();
+        let _ = win.set_focus();
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        resize_capture_bar_win32(&win, height)
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let scale = win.scale_factor().map_err(|e| e.to_string())?;
-        let current_size = win.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
-        let current_position = win.outer_position().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
-        let height_delta = height - current_size.height;
-        win
-            .set_size(tauri::LogicalSize::new(current_size.width, height))
-            .map_err(|e| e.to_string())?;
-        if height_delta.abs() > 0.5 {
-            win
-                .set_position(tauri::LogicalPosition::new(
-                    current_position.x,
-                    current_position.y - height_delta,
-                ))
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
-/// SAFETY: BẮT BUỘC chạy trên main thread — được đảm bảo bởi caller duy nhất
-/// (`resize_capture_bar`, một `#[tauri::command]` đồng bộ, luôn chạy ngay
-/// trên thread nhận IPC — main thread trên macOS).
-#[cfg(target_os = "macos")]
-fn resize_capture_bar_ns_window_main_thread(win: &tauri::WebviewWindow, height: f64) {
-    let ptr = match win.ns_window() {
-        Ok(p) => p as *mut objc2_app_kit::NSWindow,
-        Err(_) => return,
-    };
-    if ptr.is_null() {
-        return;
-    }
-    // SAFETY: con trỏ NSWindow do Tauri giữ, còn sống trong scope.
-    unsafe {
-        let ns_win: &objc2_app_kit::NSWindow = &*ptr;
-        let mut frame = ns_win.frame();
-        // AppKit: origin là góc DƯỚI-TRÁI của màn hình → giữ nguyên origin,
-        // chỉ đổi height là cửa sổ tự "mọc" lên TRÊN (đáy đứng yên), không
-        // cần tính bù vị trí thủ công như set_size/set_position riêng lẻ.
-        frame.size.height = height;
-        ns_win.setFrame_display(frame, true);
-    }
-}
-
-/// `height` (logic/CSS px, từ `getBoundingClientRect` bên JS) được quy đổi
-/// sang PHYSICAL px qua `scale_factor()` vì `GetWindowRect`/`SetWindowPos`
-/// của Win32 luôn làm việc ở physical px (app Tauri per-monitor-DPI-aware).
-#[cfg(target_os = "windows")]
-fn resize_capture_bar_win32(win: &tauri::WebviewWindow, height: f64) -> Result<(), String> {
-    use windows_sys::Win32::Foundation::RECT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
-
-    let hwnd = win.hwnd().map_err(|e| e.to_string())?.0;
-    let scale = win.scale_factor().map_err(|e| e.to_string())?;
-    let height_physical = (height * scale).round() as i32;
-
-    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    // SAFETY: hwnd còn sống trong scope (giữ bởi `win`); rect là output hợp lệ.
-    let ok = unsafe { GetWindowRect(hwnd, &mut rect) };
-    if ok == 0 {
-        return Err("GetWindowRect thất bại".to_string());
-    }
-
-    let width = rect.right - rect.left;
-    let current_height = rect.bottom - rect.top;
-    let height_delta = height_physical - current_height;
-    // Win32: gốc toạ độ TRÊN-TRÁI, y tăng xuống dưới → phải bù `top` lên
-    // đúng bằng phần chiều cao tăng thêm để giữ cạnh đáy đứng yên (khác
-    // AppKit, nơi giữ nguyên origin là đủ).
-    let new_top = rect.top - height_delta;
-
-    // SAFETY: hwnd hợp lệ (Tauri giữ); SWP_NOZORDER nên hwndinsertafter (null)
-    // bị bỏ qua.
-    let ok = unsafe {
-        SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            rect.left,
-            new_top,
-            width,
-            height_physical,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        )
-    };
-    if ok == 0 {
-        return Err("SetWindowPos thất bại".to_string());
-    }
+/// Giữ lại hàm tương thích ngược (no-op)
+#[tauri::command]
+pub fn resize_capture_bar(_app: AppHandle, _height: f64) -> Result<(), String> {
     Ok(())
 }
 
@@ -910,6 +903,7 @@ pub fn prewarm_stop_control(app: &AppHandle) -> Result<(), String> {
 /// không bị nhảy chỗ. Tái dùng cửa sổ pre-warm — chỉ reposition rồi show +
 /// focus (bấm 1 lần là ăn ngay, không cửa sổ nào khác giành mất vì mọi cửa sổ
 /// tạo sau nó đều đã `.focused(false)`).
+#[allow(dead_code)]
 pub fn open_stop_control(app: &AppHandle, s: &MonitorSnap, rx: f64, ry: f64, _rw: f64, rh: f64) -> Result<(), String> {
     if app.get_webview_window("record-stop-control").is_none() {
         prewarm_stop_control(app)?;
@@ -1901,8 +1895,10 @@ pub fn close_overlays_except(app: &AppHandle, keep_label: &str) {
 ///    nhân sâu xa là gì).
 pub fn end_scroll_session(app: &AppHandle) {
     close_overlays(app);
-    app.state::<AppState>().overlay_gen.fetch_add(1, Ordering::SeqCst);
-    app.state::<AppState>().last_capture.clear_mode();
+    let state = app.state::<AppState>();
+    state.overlay_gen.fetch_add(1, Ordering::SeqCst);
+    state.last_capture.clear_mode();
+    let _ = state.scroll_slices.lock().map(|mut s| s.clear());
 }
 
 /// Ẩn editor và trả về Accessory policy (ẩn Dock) / ẩn icon khỏi taskbar (Windows).
