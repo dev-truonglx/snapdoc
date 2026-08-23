@@ -787,7 +787,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       }
       if (type === "numbered-rect") {
         const value = useEditor.getState().nextRectStep();
-        const radius = Math.max(strokeWidth * 4, 14);
+        const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
         const isLeft = x >= sx;
         const isTop = y >= sy;
         const corner: "tl" | "tr" | "bl" | "br" =
@@ -863,7 +863,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         });
       } else {
         const value = useEditor.getState().nextArrowStep();
-        const radius = Math.max(strokeWidth * 4, 14);
+        const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
         useEditor.getState().addAnnotation({
           id: uid(), type: "numbered-arrow",
           x: sx, y: sy, x2, y2,
@@ -984,7 +984,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         x,
         y,
         value,
-        radius: Math.max(strokeWidth * 4, 14),
+        radius: Math.max(Math.round(strokeWidth * 2 + 5), 10),
         color,
         strokeWidth,
       });
@@ -1264,6 +1264,9 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 const corner = a.corner || "tl";
                 const cx = corner === "tl" || corner === "bl" ? 0 : a.width;
                 const cy = corner === "tl" || corner === "tr" ? 0 : a.height;
+                const badgeRadius = a.radius || Math.max(Math.round(a.strokeWidth * 2 + 5), 10);
+                const valStr = String(a.value);
+                const fontSize = Math.max(9, Math.round(badgeRadius * (valStr.length > 1 ? 0.78 : 0.88)));
                 return (
                   <Group key={a.id}>
                     <Group
@@ -1290,24 +1293,24 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       <Circle
                         x={cx}
                         y={cy}
-                        radius={a.radius}
+                        radius={badgeRadius}
                         fill={a.color}
                         stroke={isSelected ? "#3b82f6" : "#ffffff"}
-                        strokeWidth={isSelected ? 2.5 : 1.5}
+                        strokeWidth={isSelected ? 2 : 1}
                         shadowColor={isSelected ? "#3b82f6" : undefined}
                         shadowBlur={isSelected ? 6 : 0}
                       />
                       <Text
                         x={cx}
                         y={cy}
-                        text={String(a.value)}
-                        fontSize={a.radius}
+                        text={valStr}
+                        fontSize={fontSize}
                         fontStyle="bold"
                         fill="#ffffff"
-                        width={a.radius * 2}
-                        height={a.radius * 2}
-                        offsetX={a.radius}
-                        offsetY={a.radius}
+                        width={badgeRadius * 2}
+                        height={badgeRadius * 2}
+                        offsetX={badgeRadius}
+                        offsetY={badgeRadius}
                         align="center"
                         verticalAlign="middle"
                       />
@@ -1379,46 +1382,50 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                   </Group>
                 );
               // step
-              if (a.type === "step")
-              return (
-                <Group key={a.id}>
-                  <Group
-                    id={a.id}
-                    x={a.x}
-                    y={a.y}
-                    draggable={draggable}
-                    onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
-                    onTap={() => useEditor.getState().select(a.id)}
-                    onDragEnd={(e) => onDragEnd(a.id, e)}
-                    onTransformEnd={(e) => onTransformEnd(a, e.target)}
-                  >
-                    <Circle
-                      radius={a.radius}
-                      fill={a.color}
-                      stroke={isSelected ? "#3b82f6" : "#ffffff"}
-                      strokeWidth={isSelected ? 2.5 : 1}
-                      shadowColor={isSelected ? "#3b82f6" : undefined}
-                      shadowBlur={isSelected ? 6 : 0}
-                      shadowOpacity={isSelected ? 0.9 : 0}
-                    />
-                    <Text
-                      text={String(a.value)}
-                      fontSize={a.radius}
-                      fontStyle="bold"
-                      fill="#ffffff"
-                      width={a.radius * 2}
-                      height={a.radius * 2}
-                      offsetX={a.radius}
-                      offsetY={a.radius}
-                      align="center"
-                      verticalAlign="middle"
-                    />
+              if (a.type === "step") {
+                const badgeRadius = a.radius || Math.max(Math.round(a.strokeWidth * 2 + 5), 10);
+                const valStr = String(a.value);
+                const fontSize = Math.max(9, Math.round(badgeRadius * (valStr.length > 1 ? 0.78 : 0.88)));
+                return (
+                  <Group key={a.id}>
+                    <Group
+                      id={a.id}
+                      x={a.x}
+                      y={a.y}
+                      draggable={draggable}
+                      onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                      onTap={() => useEditor.getState().select(a.id)}
+                      onDragEnd={(e) => onDragEnd(a.id, e)}
+                      onTransformEnd={(e) => onTransformEnd(a, e.target)}
+                    >
+                      <Circle
+                        radius={badgeRadius}
+                        fill={a.color}
+                        stroke={isSelected ? "#3b82f6" : "#ffffff"}
+                        strokeWidth={isSelected ? 2.5 : 1}
+                        shadowColor={isSelected ? "#3b82f6" : undefined}
+                        shadowBlur={isSelected ? 6 : 0}
+                        shadowOpacity={isSelected ? 0.9 : 0}
+                      />
+                      <Text
+                        text={valStr}
+                        fontSize={fontSize}
+                        fontStyle="bold"
+                        fill="#ffffff"
+                        width={badgeRadius * 2}
+                        height={badgeRadius * 2}
+                        offsetX={badgeRadius}
+                        offsetY={badgeRadius}
+                        align="center"
+                        verticalAlign="middle"
+                      />
+                    </Group>
+                    {isSelected && activeIds.length > 1 && (
+                      <StepSelectionFrame x={a.x} y={a.y} radius={badgeRadius} />
+                    )}
                   </Group>
-                  {isSelected && activeIds.length > 1 && (
-                    <StepSelectionFrame x={a.x} y={a.y} radius={a.radius} />
-                  )}
-                </Group>
-              );
+                );
+              }
               // arrow
               if (a.type === "arrow")
               return (
@@ -1492,6 +1499,9 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               );
               // numbered-arrow
               if (a.type === "numbered-arrow") {
+                const badgeRadius = a.radius || Math.max(Math.round(a.strokeWidth * 2 + 5), 10);
+                const valStr = String(a.value);
+                const fontSize = Math.max(9, Math.round(badgeRadius * (valStr.length > 1 ? 0.78 : 0.88)));
                 const dx = a.x2 - a.x;
                 const dy = a.y2 - a.y;
                 const len = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -1499,8 +1509,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 const nx = dx / len;
                 const ny = dy / len;
                 // Điểm bắt đầu thật sự của đường thẳng = mép vòng tròn
-                const startX = a.x + nx * a.radius;
-                const startY = a.y + ny * a.radius;
+                const startX = a.x + nx * badgeRadius;
+                const startY = a.y + ny * badgeRadius;
                 return (
                   <Group key={a.id}>
                     <Group
@@ -1523,7 +1533,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       <Circle
                         x={a.x}
                         y={a.y}
-                        radius={a.radius}
+                        radius={badgeRadius}
                         fill={a.color}
                         stroke={isSelected ? "#3b82f6" : "#ffffff"}
                         strokeWidth={isSelected ? 2.5 : 1.5}
@@ -1533,14 +1543,14 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       <Text
                         x={a.x}
                         y={a.y}
-                        text={String(a.value)}
-                        fontSize={a.radius}
+                        text={valStr}
+                        fontSize={fontSize}
                         fontStyle="bold"
                         fill="#ffffff"
-                        width={a.radius * 2}
-                        height={a.radius * 2}
-                        offsetX={a.radius}
-                        offsetY={a.radius}
+                        width={badgeRadius * 2}
+                        height={badgeRadius * 2}
+                        offsetX={badgeRadius}
+                        offsetY={badgeRadius}
                         align="center"
                         verticalAlign="middle"
                       />
@@ -1679,8 +1689,10 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               const isTop = draft.height >= 0;
               const cx = isLeft ? nx : nx + w;
               const cy = isTop ? ny : ny + h;
-              const radius = Math.max(strokeWidth * 4, 14);
+              const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
               const nextVal = useEditor.getState().rectCounter;
+              const valStr = String(nextVal);
+              const fontSize = Math.max(9, Math.round(radius * (valStr.length > 1 ? 0.78 : 0.88)));
               return (
                 <Group opacity={0.8}>
                   <Rect
@@ -1698,13 +1710,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                     radius={radius}
                     fill={color}
                     stroke="#ffffff"
-                    strokeWidth={1.5}
+                    strokeWidth={1}
                   />
                   <Text
                     x={cx}
                     y={cy}
-                    text={String(nextVal)}
-                    fontSize={radius}
+                    text={valStr}
+                    fontSize={fontSize}
                     fontStyle="bold"
                     fill="#ffffff"
                     width={radius * 2}
@@ -1758,7 +1770,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 );
               }
               // numbered-arrow preview
-              const radius = Math.max(strokeWidth * 4, 14);
+              const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
               const startX = arrowDraft.x + nx * radius;
               const startY = arrowDraft.y + ny * radius;
               return (

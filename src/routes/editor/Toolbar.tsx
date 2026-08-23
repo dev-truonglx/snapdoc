@@ -386,7 +386,7 @@ export default function Toolbar({
   const isNumberedRect  = !isMultiple && (tool === "numbered-rect" || selectedAnn?.type === "numbered-rect");
   const isCrop      = tool === "crop";
   // Tools dùng color + strokeWidth: hiển thị đầy đủ khi ở chế độ vẽ hoặc khi ở chế độ chọn/sửa
-  const hasStroke   = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop && !isStep);
+  const hasStroke   = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop);
 
   return (
     <div style={bar}>

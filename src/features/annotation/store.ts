@@ -290,11 +290,17 @@ export const useEditor = create<EditorState>((set, get) => ({
       const targetSet = new Set(targets);
       const next = {
         ...doc,
-        annotations: doc.annotations.map((a) =>
-          targetSet.has(a.id) && "strokeWidth" in a
-            ? ({ ...a, strokeWidth } as Annotation)
-            : a,
-        ),
+        annotations: doc.annotations.map((a) => {
+          if (!targetSet.has(a.id) || !("strokeWidth" in a)) return a;
+          if (a.type === "numbered-rect" || a.type === "numbered-arrow" || a.type === "step") {
+            return {
+              ...a,
+              strokeWidth,
+              radius: Math.max(Math.round(strokeWidth * 2 + 5), 10),
+            } as Annotation;
+          }
+          return { ...a, strokeWidth } as Annotation;
+        }),
       };
       set({ ...commit(get(), next), strokeWidth });
       return;
