@@ -124,6 +124,7 @@ pub fn run() {
             commands::install_update,
             commands::restart_app,
             commands::capture_scroll_slice,
+            commands::commit_scroll_slice,
             commands::finalize_scroll_capture,
             commands::start_scroll_session,
             commands::finalize_scroll_stitch,

@@ -844,14 +844,7 @@ pub fn finalize_region(
 
     let (mode, _) = app.state::<AppState>().last_capture.get();
     if mode == "scroll" {
-        // Cùng kỹ thuật chống nháy hình với nhánh `pending_record` ở trên: GIỮ
-        // NGUYÊN chính overlay đang hiển thị (đã đứng yên từ lúc user kéo/thả
-        // chuột) làm khung viền trong lúc chụp cuộn, thay vì đóng nó rồi build
-        // 1 cửa sổ "scroll-border" MỚI từ đầu — trước đây khoảng hở giữa lúc
-        // overlay cũ biến mất và cửa sổ mới paint xong chính là nguồn gây
-        // "nháy khung" khi bắt đầu chụp cuộn. Không có build() mới nào cho
-        // phần khung nên khung xanh hiển thị Y NGUYÊN PIXEL, chỉ đổi sang
-        // click-through để chuột xuyên xuống trang thật phía dưới.
+        clear_frozen_screens(app);
         windows::close_overlays_except(app, win.label());
         windows::restore_regular_activation(app);
         windows::open_scroll_control(app, &win, center_x, center_y, rx as u32, ry as u32, rw as u32, rh as u32)?;

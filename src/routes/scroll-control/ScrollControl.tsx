@@ -10,31 +10,63 @@ const ry = Number(params.get("ry") ?? "0");
 const rw = Number(params.get("rw") ?? "0");
 const rh = Number(params.get("rh") ?? "0");
 
+function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
+  if (!src) return { url: "" };
+  if (src.startsWith("data:") && src.length > 200_000) {
+    try {
+      const commaIdx = src.indexOf(",");
+      if (commaIdx !== -1) {
+        const meta = src.slice(0, commaIdx);
+        const rawBase64 = src.slice(commaIdx + 1);
+        const mimeMatch = meta.match(/:(.*?);/);
+        const mime = mimeMatch ? mimeMatch[1] : "image/png";
+        const byteChars = atob(rawBase64);
+        const byteNumbers = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) {
+          byteNumbers[i] = byteChars.charCodeAt(i);
+        }
+        const blob = new Blob([byteNumbers], { type: mime });
+        const blobUrl = URL.createObjectURL(blob);
+        return { url: blobUrl, revoke: () => URL.revokeObjectURL(blobUrl) };
+      }
+    } catch (e) {
+      console.error("Lỗi chuyển đổi Blob URL:", e);
+    }
+  }
+  return { url: src };
+}
+
 function loadImage(src: string, t: any): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
+    const safe = toSafeImageUrl(src);
     const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error(t("scroll.imageLoadError")));
-    img.src = src;
+    img.onload = () => {
+      safe.revoke?.();
+      resolve(img);
+    };
+    img.onerror = () => {
+      safe.revoke?.();
+      reject(new Error(t("scroll.imageLoadError")));
+    };
+    img.src = safe.url;
   });
 }
 
-const COLOR_TOL = 12; // sai khác màu cho phép mỗi kênh
+const COLOR_TOL = 16; // sai khác màu cho phép mỗi kênh (hỗ trợ tốt hơn cho ClearType trên Windows)
 const SCROLLBAR_MARGIN = 25; // bỏ lề phải tránh thanh cuộn
-const SAMPLE_STEP = 4; // bước lấy mẫu pixel theo chiều ngang (dày hơn để bắt nội dung thưa)
+const SAMPLE_STEP = 2; // bước lấy mẫu pixel theo chiều ngang (dày để bắt chính xác từng điểm ảnh)
 const BG_SAMPLE_STEP = 8; // bước lấy mẫu khi ước lượng màu nền của dòng
 const BG_DEV = 16; // độ lệch sáng so với nền để coi 1 điểm là "có nội dung"
 const SAME_RATIO = 0.9; // tỉ lệ khớp (trên điểm nội dung) để coi 2 dòng "y hệt" (vùng cố định)
 const PROFILE_STEP = 3; // bước lấy mẫu x khi tính biên dạng cạnh ngang
-const MIN_DY = 3; // bỏ qua dịch chuyển quá nhỏ (nhiễu / con trỏ nhấp nháy)
-const MIN_OVERLAP = 64; // số dòng chồng lấn tối thiểu để NCC đáng tin (chặn đỉnh giả ở dy lớn)
-const MAX_SCROLL_FRAC = 0.5; // dy tối đa = nửa vùng cuộn (1 tick không cuộn quá nửa khung)
+const MIN_DY = 2; // bỏ qua dịch chuyển quá nhỏ (nhận diện được cả cuộn mượt 2px)
+const MIN_OVERLAP = 36; // số dòng chồng lấn tối thiểu để NCC đáng tin (mở rộng khả năng bắt cuộn dài)
+const MAX_SCROLL_FRAC = 0.88; // dy tối đa = 88% vùng cuộn (tương thích chuột lăn Windows & HiDPI)
 const NBINS = 8; // số ô ngang của biên dạng cạnh (mã hoá vị trí ngang để phân biệt mạnh)
-const NCC_ACCEPT = 0.6; // NCC tại đỉnh ≥ ngưỡng này thì TIN dy (không cần so pixel chặt)
+const NCC_ACCEPT = 0.52; // NCC tại đỉnh ≥ ngưỡng này thì đưa vào so khớp 2D tinh chỉnh
 const CHANGE_TOL = 16; // độ lệch sáng để coi 1 điểm là "đã đổi" giữa 2 khung
 const FIXED_FG_FRAC = 0.05; // mật độ nội dung tối thiểu để 1 ô được xét là cột cố định
 const FIXED_CHANGE_MAX = 0.2; // tỉ lệ nội dung thay đổi tối đa để coi ô là CỐ ĐỊNH (sidebar dính)
-const FAST_DIFF = 0.35; // dy=-1 mà tỉ lệ dòng đổi ≥ ngưỡng này ⇒ cuộn quá nhanh (không phải tới đáy)
 const DEBUG = false; // bật true để hiện log chẩn đoán trên panel khi cần dò lỗi cuộn
 
 // Độ sáng (luminance) gần đúng của 1 pixel — dùng phân biệt nền/nội dung.
@@ -61,10 +93,7 @@ interface RowCmp {
   content: number; // số điểm có nội dung (độ mạnh của bằng chứng)
 }
 
-// So 2 dòng theo mẫu, nhưng TÁCH RIÊNG điểm nội dung khỏi nền. Đây là chỗ then
-// chốt: bản cũ đếm mọi pixel ngang nhau nên với khung thưa (nội dung ~10%, còn
-// lại là nền) thì nền trùng làm tỉ lệ khớp luôn cao → nhận nhầm 2 dòng khác
-// nhau là "giống". Nay nền không còn lấn át: quyết định dựa trên contentRatio.
+// So 2 dòng theo mẫu, nhưng TÁCH RIÊNG điểm nội dung khỏi nền.
 function rowCompare(
   d1: Uint8ClampedArray,
   off1: number,
@@ -101,12 +130,35 @@ function rowCompare(
   };
 }
 
+// Đánh giá tỉ lệ sai khác pixel nhanh giữa 2 frame liên tiếp (để phát hiện trạng thái đứng yên)
+function computeDiffFrac(d1: ImageData, d2: ImageData): number {
+  if (d1.width !== d2.width || d1.height !== d2.height) return 1.0;
+  const p = d1.data;
+  const c = d2.data;
+  const w = d1.width;
+  const h = d1.height;
+  const stride = w * 4;
+  let sampled = 0;
+  let changed = 0;
+  for (let y = 0; y < h; y += 6) {
+    const row = y * stride;
+    for (let x = 0; x < w; x += 12) {
+      const i = row + x * 4;
+      if (
+        Math.abs(p[i] - c[i]) > COLOR_TOL ||
+        Math.abs(p[i + 1] - c[i + 1]) > COLOR_TOL ||
+        Math.abs(p[i + 2] - c[i + 2]) > COLOR_TOL
+      ) {
+        changed++;
+      }
+      sampled++;
+    }
+  }
+  return sampled === 0 ? 0 : changed / sampled;
+}
+
 // Biên dạng cạnh ngang CHIA Ô (binned): với mỗi dòng y, năng lượng cạnh dọc
-// (|Δsáng| so với dòng trên) được gom vào NBINS ô theo bề ngang. Khác với phiên
-// bản 1-số/dòng (mất thông tin vị trí ngang → đỉnh nhiễu dễ trùng), vector NBINS
-// mã hoá CẠNH NẰM Ở ĐÂU theo chiều ngang nên phân biệt mạnh hơn hẳn: một dịch
-// chuyển sai sẽ không khớp được phân bố ngang. Vẫn ≈0 ở nền trơn (bền nội dung
-// thưa) và gom-tổng nên bao dung với răng cưa/subpixel khi cuộn mượt.
+// (|Δsáng| so với dòng trên) được gom vào NBINS ô theo bề ngang.
 function edgeProfileBinned(d: Uint8ClampedArray, w: number, h: number, stride: number): Float32Array {
   const xEnd = w - SCROLLBAR_MARGIN;
   const binW = Math.max(1, Math.floor(xEnd / NBINS));
@@ -125,12 +177,7 @@ function edgeProfileBinned(d: Uint8ClampedArray, w: number, h: number, stride: n
   return prof;
 }
 
-// Mặt nạ ô "đang cuộn": phát hiện CỘT CỐ ĐỊNH (sidebar/panel dính) để loại khỏi
-// NCC. Một ô bị coi là CỐ ĐỊNH khi có MẬT ĐỘ NỘI DUNG cao nhưng nội dung GẦN NHƯ
-// KHÔNG ĐỔI giữa 2 khung (foreground trùng tại chỗ). Khác hẳn cột nội-dung-thưa
-// đang cuộn: cột đó mật độ thấp HOẶC nội dung có thay đổi (đã dịch) — nên không
-// bị loại nhầm. Cột cố định nếu giữ lại sẽ thêm năng lượng cạnh lệch pha, kéo
-// NCC ở dy thật xuống. Trả Uint8Array(NBINS): 1 = dùng, 0 = bỏ.
+// Mặt nạ ô "đang cuộn": phát hiện CỘT CỐ ĐỊNH (sidebar/panel dính) để loại khỏi NCC.
 function activeBinMask(
   p: Uint8ClampedArray,
   c: Uint8ClampedArray,
@@ -170,15 +217,11 @@ function activeBinMask(
     mask[b] = isFixed ? 0 : 1;
     active += mask[b];
   }
-  // Nếu (hiếm) mọi ô đều bị coi là cố định → không loại gì, dùng hết để có tín hiệu.
   if (active === 0) mask.fill(1);
   return mask;
 }
 
-// Tương quan chuẩn hoá (NCC) giữa biên dạng binned của prev và cur khi nội dung
-// dịch LÊN dy px (prev[y] ≈ cur[y - dy]). Coi mỗi (dòng, ô ĐANG CUỘN) là một mẫu
-// nên NCC nắm cả MẪU HÌNH DỌC lẫn PHÂN BỐ NGANG của cạnh → đỉnh thật tách bạch
-// khỏi nhiễu. Bỏ qua các ô cố định (mask=0). Overlap toàn nền → trả 0.
+// Tương quan chuẩn hoá (NCC) giữa biên dạng binned của prev và cur khi nội dung dịch LÊN dy px.
 function shiftNCC(
   profP: Float32Array,
   profC: Float32Array,
@@ -190,7 +233,7 @@ function shiftNCC(
 ): number {
   const y0 = scrollTop + dy;
   const nRows = scrollBottom - y0;
-  if (nRows < MIN_OVERLAP || activeBins === 0) return -1; // overlap nhỏ / không có ô cuộn
+  if (nRows < MIN_OVERLAP || activeBins === 0) return -1;
   const n = nRows * activeBins;
   let sa = 0;
   let sb = 0;
@@ -220,10 +263,7 @@ function shiftNCC(
   return denom > 1e-6 ? cov / denom : 0;
 }
 
-// Xác thực 2D tinh chỉnh (Fine 2D Validation): Khi có nhiều ứng viên dy với điểm NCC
-// xấp xỉ nhau (đặc biệt trong trang bảng biểu lặp chu kỳ dòng hoặc lưới), kiểm tra
-// độ khớp pixel thực tế trên các dòng có mật độ nội dung cao nhất để chọn ra dy
-// chính xác tuyệt đối.
+// Xác thực 2D tinh chỉnh (Fine 2D Validation)
 function validateCandidateDy(
   p: Uint8ClampedArray,
   c: Uint8ClampedArray,
@@ -240,16 +280,15 @@ function validateCandidateDy(
 ): number {
   if (candidates.length === 1) return candidates[0];
 
-  // Chọn ra tối đa 8 dòng có độ lệch sáng nội dung mạnh nhất trong vùng chồng lấn
   const minDy = candidates[0];
   const sampleY0 = scrollTop + minDy;
   const sampleY1 = scrollBottom;
   const testRows: number[] = [];
-  const step = Math.max(1, Math.floor((sampleY1 - sampleY0) / 16));
+  const step = Math.max(1, Math.floor((sampleY1 - sampleY0) / 32));
 
   for (let y = sampleY0; y < sampleY1; y += step) {
     testRows.push(y);
-    if (testRows.length >= 8) break;
+    if (testRows.length >= 32) break;
   }
 
   if (testRows.length === 0) return candidates[0];
@@ -272,7 +311,6 @@ function validateCandidateDy(
     }
 
     const matchRatio = totalContent > 0 ? matchedContent / totalContent : 0;
-    // Kết hợp độ khớp 2D với trọng số đà cuộn (velocity prior) nếu có vận tốc ước tính
     const velBonus = vEst > 0 ? (1 - Math.min(1, Math.abs(cand - vEst) / Math.max(span, 1))) * 0.05 : 0;
     const finalScore = matchRatio + velBonus;
 
@@ -296,8 +334,7 @@ interface ScrollAnalysis {
   activeBins?: number; // số ô ngang đang cuộn (đã loại cột cố định) (chẩn đoán)
 }
 
-// Phân tích 2 khung liên tiếp: phát hiện dải cố định (header/footer dính) rồi
-// tính khoảng cuộn dy CHỈ trong vùng thực sự cuộn.
+// Phân tích 2 khung liên tiếp
 function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): ScrollAnalysis {
   const w = prev.width;
   const h = prev.height;
@@ -306,7 +343,6 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
   const c = cur.data;
   const maxBand = Math.floor(h * 0.4);
 
-  // Ước lượng nền của từng dòng MỘT LẦN cho cả 2 khung
   const bgP = new Float32Array(h);
   const bgC = new Float32Array(h);
   for (let yy = 0; yy < h; yy++) {
@@ -314,14 +350,12 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
     bgC[yy] = rowBgLum(c, yy * stride, w);
   }
 
-  // "Giống nhau ở CÙNG vị trí?" — dùng contentRatio nếu dòng có ÍT NHẤT 2 điểm nội dung
   const sameInPlace = (y: number): boolean => {
     const off = y * stride;
     const cmp = rowCompare(p, off, bgP[y], c, off, bgC[y], w);
     return cmp.content >= 2 ? cmp.contentRatio >= SAME_RATIO : cmp.ratio >= SAME_RATIO;
   };
 
-  // Tỉ lệ dòng THAY ĐỔI giữa 2 khung
   let sampled = 0;
   let changed = 0;
   for (let y = 0; y < h; y += 4) {
@@ -336,7 +370,6 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
   let botFixed = 0;
   while (botFixed < maxBand && sameInPlace(h - 1 - botFixed)) botFixed++;
 
-  // An toàn: nếu dải nuốt gần hết (vùng cuộn còn < 25% chiều cao) thì KHÔNG tin vào dải
   if (h - topFixed - botFixed < h * 0.25) {
     topFixed = 0;
     botFixed = 0;
@@ -346,7 +379,6 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
   const scrollBottom = h - botFixed;
   const span = scrollBottom - scrollTop;
 
-  // Hai khung gần như giống hệt → không cuộn (trang đứng yên).
   if (changedFrac < 0.02 || span < 24) {
     return { dy: 0, topFixed, botFixed, span, changedFrac };
   }
@@ -355,7 +387,6 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
   const profP = edgeProfileBinned(p, w, h, stride);
   const profC = edgeProfileBinned(c, w, h, stride);
 
-  // Loại các CỘT CỐ ĐỊNH (sidebar/panel dính) khỏi NCC
   const mask = activeBinMask(p, c, bgP, bgC, w, h, stride);
   let activeBins = 0;
   for (let b = 0; b < NBINS; b++) activeBins += mask[b];
@@ -376,13 +407,11 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
     }
   }
 
-  // Nếu điểm tương quan không đủ tin cậy
   if (bestNcc < NCC_ACCEPT) {
     return { dy: -1, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
   }
 
-  // Thu thập các ứng viên dy nằm trong dải đỉnh tương quan (NEAR)
-  const NEAR = 0.04;
+  const NEAR = 0.03;
   const candidates: number[] = [];
   for (let d2 = MIN_DY; d2 <= maxDy; d2++) {
     if (scores[d2] >= bestNcc - NEAR) {
@@ -390,21 +419,24 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
     }
   }
 
-  // Xác thực tinh 2D trên các ứng viên để loại bỏ sai số do chu kỳ bảng biểu
-  const finalDy = validateCandidateDy(
-    p,
-    c,
-    bgP,
-    bgC,
-    w,
-    h,
-    scrollTop,
-    scrollBottom,
-    candidates.length > 0 ? candidates : [bestDy],
-    stride,
-    vEst,
-    span,
-  );
+  // Nếu NCC rất rõ ràng (bestNcc >= 0.70) thì dùng trực tiếp đỉnh NCC để tránh sai lệch pixel
+  const finalDy =
+    bestNcc >= 0.70 || candidates.length <= 1
+      ? bestDy
+      : validateCandidateDy(
+          p,
+          c,
+          bgP,
+          bgC,
+          w,
+          h,
+          scrollTop,
+          scrollBottom,
+          candidates,
+          stride,
+          vEst,
+          span,
+        );
 
   return { dy: finalDy, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
 }
@@ -427,6 +459,12 @@ export default function ScrollControl() {
   // Cảnh báo cuộn quá nhanh
   const [fastWarn, setFastWarn] = useState(false);
   const fastWarnRef = useRef(false);
+  // Mất dấu nối (để hỗ trợ nút nối tiếp nếu muốn bỏ qua khoảng trống)
+  const [lostTracking, setLostTracking] = useState(false);
+  const lostTrackingRef = useRef(false);
+  const lastRawImgDataRef = useRef<ImageData | null>(null);
+  const latestRawFrameRef = useRef<{ img: HTMLImageElement; imgData: ImageData; sliceIdx: number } | null>(null);
+
   // Chẩn đoán hiển thị ngay trên panel
   const [dbg, setDbg] = useState<string>("");
   const [logText, setLogText] = useState<string>("");
@@ -456,10 +494,28 @@ export default function ScrollControl() {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const cropWrapperRef = useRef<HTMLDivElement | null>(null);
 
+  const cleanupMemory = () => {
+    stopLoop();
+    if (masterRef.current) {
+      masterRef.current.width = 0;
+      masterRef.current.height = 0;
+      masterRef.current = null;
+      masterCtxRef.current = null;
+    }
+    if (cropWrapperRef.current) {
+      cropWrapperRef.current.replaceChildren();
+    }
+    recentFramesRef.current = [];
+    lastRawImgDataRef.current = null;
+    latestRawFrameRef.current = null;
+    instructionsRef.current = [];
+  };
+
   // Phím tắt bắt đầu / hoàn thành / huỷ
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        cleanupMemory();
         ipc.closeSelf();
       } else if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
@@ -524,15 +580,57 @@ export default function ScrollControl() {
     if (cont && stickToBottom) cont.scrollTop = cont.scrollHeight;
   };
 
+  // Nối tiếp từ vị trí hiện tại nếu người dùng chủ động bỏ qua khoảng nhảy
+  const handleBridgeCurrentFrame = async () => {
+    const raw = latestRawFrameRef.current;
+    if (!raw || !masterRef.current) return;
+    const { img, imgData, sliceIdx } = raw;
+    const fw = img.naturalWidth;
+    const fh = img.naturalHeight;
+
+    const at = usedHeightRef.current;
+    ensureCapacity(at + fh, fw);
+    masterCtxRef.current?.drawImage(img, 0, 0, fw, fh, 0, at, fw, fh);
+    usedHeightRef.current = at + fh;
+
+    instructionsRef.current.push({
+      sliceIndex: sliceIdx,
+      srcY: 0,
+      srcH: fh,
+    });
+
+    await ipc.commitScrollSlice(sliceIdx).catch(console.error);
+
+    recentFramesRef.current = [
+      {
+        imgData,
+        img,
+        sliceIdx,
+        botFixed: 0,
+        usedHeightAtFrame: usedHeightRef.current,
+      }
+    ];
+
+    setFastWarn(false);
+    fastWarnRef.current = false;
+    setLostTracking(false);
+    lostTrackingRef.current = false;
+    velocityRef.current = 0;
+
+    setStitchedHeight(usedHeightRef.current);
+    setFrameCount((prev) => prev + 1);
+    updatePreview();
+  };
+
   const captureTick = async () => {
     // tickBusyRef chống xếp chồng: nếu 1 tick xử lý lâu thì tick kế tiếp bị bỏ qua
     if (!isCapturingRef.current || tickBusyRef.current) return;
     tickBusyRef.current = true;
     try {
-      const base64 = await ipc.captureScrollSlice(mx, my, rx, ry, rw, rh);
-      if (!base64 || !isCapturingRef.current) return;
+      const res = await ipc.captureScrollSlice(mx, my, rx, ry, rw, rh);
+      if (!res || !res.base64 || !isCapturingRef.current) return;
 
-      const sliceIdx = totalSlicesRef.current;
+      const { sliceIndex, base64 } = res;
       totalSlicesRef.current++;
 
       const img = await loadImage(`data:image/png;base64,${base64}`, t);
@@ -548,6 +646,16 @@ export default function ScrollControl() {
       tempCtx.drawImage(img, 0, 0);
       const newImgData = tempCtx.getImageData(0, 0, fw, fh);
 
+      latestRawFrameRef.current = { img, imgData: newImgData, sliceIdx: sliceIndex };
+
+      // Đánh giá chuyển động giữa 2 nhịp chụp liên tiếp (120ms)
+      const tickDiff = lastRawImgDataRef.current
+        ? computeDiffFrac(lastRawImgDataRef.current, newImgData)
+        : 1.0;
+      lastRawImgDataRef.current = newImgData;
+
+      const isStationary = tickDiff < 0.015;
+
       const history = recentFramesRef.current;
 
       if (!masterRef.current || history.length === 0) {
@@ -558,14 +666,17 @@ export default function ScrollControl() {
         usedHeightRef.current = fh;
 
         instructionsRef.current = [
-          { sliceIndex: sliceIdx, srcY: 0, srcH: fh }
+          { sliceIndex, srcY: 0, srcH: fh }
         ];
+
+        // Xác nhận lát cắt đầu tiên vào backend
+        await ipc.commitScrollSlice(sliceIndex).catch(console.error);
 
         recentFramesRef.current = [
           {
             imgData: newImgData,
             img,
-            sliceIdx,
+            sliceIdx: sliceIndex,
             botFixed: 0,
             usedHeightAtFrame: fh,
           }
@@ -577,7 +688,7 @@ export default function ScrollControl() {
         return;
       }
 
-      // So khớp đa khung hình: Thử với frame gần nhất (k-1), nếu không khớp thì thử với k-2, k-3
+      // So khớp đa khung hình: Thử với frame gần nhất (k-1), nếu không khớp thì thử với k-2, k-3...
       let matchedIdx = -1;
       let matchedAn: ScrollAnalysis | null = null;
 
@@ -585,19 +696,18 @@ export default function ScrollControl() {
       const lastItem = history[history.length - 1];
       const anLast = analyzeScroll(lastItem.imgData, newImgData, velocityRef.current);
 
-      if (anLast.dy > 0 || anLast.dy === 0) {
+      if (anLast.dy >= 0) {
         matchedIdx = history.length - 1;
         matchedAn = anLast;
-      } else if (anLast.dy === -1 && history.length > 1) {
-        // 2. Không khớp được với k-1 (do cuộn nhanh), tìm ngược lại các frame trước đó
+      } else if (history.length > 1) {
+        // 2. Thử so khớp với các frame trước đó trong history (để rollback / rehook nếu cuộn ngược hoặc lệch)
         for (let i = history.length - 2; i >= 0; i--) {
-          const stepCount = history.length - i;
           const anMulti = analyzeScroll(
             history[i].imgData,
             newImgData,
-            velocityRef.current * stepCount,
+            velocityRef.current,
           );
-          if (anMulti.dy > 0) {
+          if (anMulti.dy >= 0) {
             matchedIdx = i;
             matchedAn = anMulti;
             break;
@@ -608,19 +718,12 @@ export default function ScrollControl() {
       const an = matchedAn ?? anLast;
       const { dy, botFixed } = an;
 
-      // Cảnh báo cuộn quá nhanh khi hoàn toàn không khớp được với frame nào trong history
-      const fast = dy === -1 && (an.changedFrac ?? 0) >= FAST_DIFF;
-      if (fast !== fastWarnRef.current) {
-        fastWarnRef.current = fast;
-        setFastWarn(fast);
-      }
-
       if (DEBUG) {
         const ncc = an.ncc === undefined ? "—" : an.ncc.toFixed(2);
         const diff = an.changedFrac === undefined ? "—" : `${Math.round(an.changedFrac * 100)}%`;
         const act = dy > 0 ? `APPEND(m=${matchedIdx})` : dy === 0 ? "skip0" : "skip-1";
         seqRef.current++;
-        const line = `#${seqRef.current} ${act} dy=${dy} diff=${diff} ncc=${ncc} bestDy=${an.bestDy ?? "—"} bins=${an.activeBins ?? "—"} top=${an.topFixed} bot=${an.botFixed} span=${an.span ?? "—"} fh=${fh}`;
+        const line = `#${seqRef.current} ${act} dy=${dy} tDiff=${Math.round(tickDiff * 100)}% diff=${diff} ncc=${ncc} bestDy=${an.bestDy ?? "—"} bins=${an.activeBins ?? "—"} top=${an.topFixed} bot=${an.botFixed} span=${an.span ?? "—"} fh=${fh}`;
         setDbg(line);
         const buf = logRef.current;
         buf.push(line);
@@ -629,13 +732,21 @@ export default function ScrollControl() {
       }
 
       if (dy > 0 && matchedIdx >= 0) {
+        // Ghép thành công! Xoá mọi cảnh báo
+        if (fastWarnRef.current) {
+          fastWarnRef.current = false;
+          setFastWarn(false);
+        }
+        if (lostTrackingRef.current) {
+          lostTrackingRef.current = false;
+          setLostTracking(false);
+        }
+
         const matchedItem = history[matchedIdx];
 
-        // Nếu khớp với frame cũ hơn trong buffer (matchedIdx < history.length - 1),
-        // rollback usedHeight và instructions về mốc của frame đó để nối chính xác
+        // Nếu khớp với frame cũ hơn trong buffer, rollback usedHeight và instructions
         if (matchedIdx < history.length - 1) {
           usedHeightRef.current = matchedItem.usedHeightAtFrame;
-          // Cắt bớt instructions tương ứng
           while (
             instructionsRef.current.length > 0 &&
             instructionsRef.current[instructionsRef.current.length - 1].sliceIndex > matchedItem.sliceIdx
@@ -644,31 +755,34 @@ export default function ScrollControl() {
           }
         }
 
-        const srcY = fh - botFixed - dy;
+        const srcY = Math.max(0, fh - dy);
         const at = usedHeightRef.current;
         ensureCapacity(at + dy, fw);
         masterCtxRef.current?.drawImage(img, 0, srcY, fw, dy, 0, at, fw, dy);
         usedHeightRef.current = at + dy;
 
         instructionsRef.current.push({
-          sliceIndex: sliceIdx,
+          sliceIndex,
           srcY,
           srcH: dy,
         });
 
+        // Xác nhận lát cắt vào backend Rust
+        await ipc.commitScrollSlice(sliceIndex).catch(console.error);
+
         // Cập nhật vận tốc cuộn ước tính mượt theo EMA
         velocityRef.current = velocityRef.current === 0 ? dy : velocityRef.current * 0.6 + dy * 0.4;
 
-        // Cập nhật buffer lịch sử: giữ tối đa 4 frame gần nhất
+        // Cập nhật buffer lịch sử: giữ tối đa 8 frame gần nhất
         const updatedHistory = history.slice(0, matchedIdx + 1);
         updatedHistory.push({
           imgData: newImgData,
           img,
-          sliceIdx,
+          sliceIdx: sliceIndex,
           botFixed,
           usedHeightAtFrame: usedHeightRef.current,
         });
-        if (updatedHistory.length > 4) {
+        if (updatedHistory.length > 8) {
           updatedHistory.shift();
         }
         recentFramesRef.current = updatedHistory;
@@ -676,13 +790,33 @@ export default function ScrollControl() {
         setStitchedHeight(usedHeightRef.current);
         setFrameCount((prev) => prev + 1);
         updatePreview();
-      } else if (dy === 0) {
-        // Trang đứng yên: giảm dần vận tốc cuộn
+      } else if (dy === 0 || isStationary) {
+        // Màn hình đứng yên: giảm dần vận tốc cuộn và luôn gỡ bỏ cảnh báo cuộn nhanh
         velocityRef.current = 0;
+        if (fastWarnRef.current) {
+          fastWarnRef.current = false;
+          setFastWarn(false);
+        }
+        // Nếu không khớp (dy === -1) nhưng màn hình đã đứng yên, hiển thị trạng thái mất dấu nối
+        if (dy === -1 && !lostTrackingRef.current) {
+          lostTrackingRef.current = true;
+          setLostTracking(true);
+        }
+      } else {
+        // dy === -1 và màn hình đang di chuyển nhanh
+        if (tickDiff >= 0.08) {
+          if (!fastWarnRef.current) {
+            fastWarnRef.current = true;
+            setFastWarn(true);
+          }
+        }
+        if (!lostTrackingRef.current) {
+          lostTrackingRef.current = true;
+          setLostTracking(true);
+        }
       }
     } catch (err) {
       console.error(t("scroll.captureSliceError"), err);
-      isCapturingRef.current = false;
       setError(String(err));
     } finally {
       tickBusyRef.current = false;
@@ -701,6 +835,12 @@ export default function ScrollControl() {
     setStatus("capturing");
     isCapturingRef.current = true;
     setError(null);
+    setFastWarn(false);
+    fastWarnRef.current = false;
+    setLostTracking(false);
+    lostTrackingRef.current = false;
+    lastRawImgDataRef.current = null;
+    latestRawFrameRef.current = null;
     instructionsRef.current = [];
     totalSlicesRef.current = 0;
     recentFramesRef.current = [];
@@ -710,7 +850,7 @@ export default function ScrollControl() {
     // Chụp lát cắt đầu tiên ngay lập tức.
     await captureTick();
 
-    // Vòng lặp chụp tối ưu tần số 120ms (thay vì 220ms cũ)
+    // Vòng lặp chụp tần số 120ms
     intervalRef.current = window.setInterval(() => {
       if (!isCapturingRef.current) {
         stopLoop();
@@ -726,13 +866,14 @@ export default function ScrollControl() {
       startedRef.current = true;
       void startCapture();
     }
-    return () => stopLoop();
+    return () => cleanupMemory();
   }, []);
 
   const finishCapture = async () => {
     stopLoop();
 
     if (usedHeightRef.current === 0) {
+      cleanupMemory();
       ipc.closeSelf();
       return;
     }
@@ -740,7 +881,8 @@ export default function ScrollControl() {
     setStatus("processing");
     try {
       const w = frameWidthRef.current;
-      await ipc.finalizeScrollStitch(w, instructionsRef.current);
+      await ipc.finalizeScrollStitch(w, instructionsRef.current, mx, my);
+      cleanupMemory();
       ipc.closeSelf();
     } catch (err) {
       setError(String(err));
@@ -750,6 +892,12 @@ export default function ScrollControl() {
 
   return (
     <div style={panel} data-tauri-drag-region>
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
       {/* Header */}
       <div style={header} data-tauri-drag-region>
         <div style={status === "capturing" ? pulseDot : inactiveDot} />
@@ -760,13 +908,44 @@ export default function ScrollControl() {
       <div style={statusRow} data-tauri-drag-region>
         {status === "ready" && <span style={statusText}>{t("scroll.readyCapture")}</span>}
         {status === "capturing" && (
-          <span style={fastWarn ? statusWarn : statusText}>
-            {fastWarn
-              ? t("scroll.scrollWarning")
-              : t("scroll.recording")}
-          </span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            <span style={fastWarn || lostTracking ? statusWarn : statusText}>
+              {fastWarn
+                ? t("scroll.scrollWarning")
+                : lostTracking
+                ? t("scroll.lostTracking")
+                : t("scroll.recording")}
+            </span>
+            {lostTracking && (
+              <button
+                onClick={handleBridgeCurrentFrame}
+                style={bridgeBtn}
+                onMouseOver={(e) => Object.assign(e.currentTarget.style, bridgeBtnHover)}
+                onMouseOut={(e) => Object.assign(e.currentTarget.style, bridgeBtn)}
+              >
+                {t("scroll.bridgeButton")}
+              </button>
+            )}
+          </div>
         )}
-        {status === "processing" && <span style={statusText}>{t("scroll.rendering")}</span>}
+        {status === "processing" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span
+              style={{
+                display: "inline-block",
+                width: 14,
+                height: 14,
+                border: "2px solid rgba(255,255,255,0.3)",
+                borderTopColor: "var(--accent, #6366f1)",
+                borderRadius: "50%",
+                animation: "spin 0.8s linear infinite",
+              }}
+            />
+            <span style={{ ...statusText, color: "var(--accent, #6366f1)", fontWeight: 600 }}>
+              {t("scroll.rendering", "Đang kết xuất ảnh...")}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Info Stats */}
@@ -821,13 +1000,44 @@ export default function ScrollControl() {
       {/* Preview: canvas gắn thẳng vào DOM, cắt theo usedHeight — không encode PNG mỗi frame.
           LUÔN mount scrollContainer/cropWrapper để ref sẵn sàng trước khi chụp
           (startCapture gọi captureTick ngay, trước khi React kịp mount). */}
-      <div style={previewBox}>
+      <div style={{ ...previewBox, position: "relative" }}>
         <div ref={scrollContainerRef} style={scrollList}>
           <div ref={cropWrapperRef} style={cropWrapper} />
         </div>
         {status === "ready" && (
           <div style={emptyOverlay} data-tauri-drag-region>
             {t("scroll.startMessage")}
+          </div>
+        )}
+        {status === "processing" && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 12,
+              background: "rgba(15, 23, 42, 0.75)",
+              backdropFilter: "blur(4px)",
+              color: "#fff",
+              zIndex: 10,
+              fontSize: 13,
+              fontWeight: 500,
+            }}
+          >
+            <div
+              style={{
+                width: 28,
+                height: 28,
+                border: "3px solid rgba(255, 255, 255, 0.2)",
+                borderTopColor: "var(--accent, #6366f1)",
+                borderRadius: "50%",
+                animation: "spin 0.8s linear infinite",
+              }}
+            />
+            <span>{t("scroll.rendering", "Đang kết xuất ảnh...")}</span>
           </div>
         )}
       </div>
@@ -866,7 +1076,7 @@ export default function ScrollControl() {
 
         <button
           onClick={() => {
-            stopLoop();
+            cleanupMemory();
             ipc.closeSelf();
           }}
           disabled={status === "processing"}
@@ -1131,3 +1341,24 @@ const cancelBtnHover: React.CSSProperties = {
   background: "rgba(255, 255, 255, 0.1)",
   color: "#cbd5e1",
 };
+
+const bridgeBtn: React.CSSProperties = {
+  fontSize: 11,
+  padding: "4px 8px",
+  borderRadius: 6,
+  border: "1px solid rgba(251, 191, 36, 0.4)",
+  background: "rgba(251, 191, 36, 0.15)",
+  color: "#fef08a",
+  fontWeight: 600,
+  cursor: "pointer",
+  transition: "all 0.15s ease",
+  alignSelf: "flex-start",
+  marginTop: 2,
+};
+
+const bridgeBtnHover: React.CSSProperties = {
+  background: "rgba(251, 191, 36, 0.25)",
+  color: "#ffffff",
+  borderColor: "rgba(251, 191, 36, 0.6)",
+};
+

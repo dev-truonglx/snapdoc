@@ -191,6 +191,8 @@
     "readyCapture": "Ready to capture",
     "recording": "Recording… scroll slowly and smoothly",
     "scrollWarning": "⚠ Scrolling too fast — slow down to avoid missing content",
+    "lostTracking": "⚠ Seam lost — scroll slowly or scroll up slightly to recover",
+    "bridgeButton": "Continue from here",
     "rendering": "Rendering…",
     "frameCount": "Frames:",
     "height": "Height:",
@@ -377,7 +379,8 @@
     "zoomIn": "Zoom in (Ctrl/Cmd +)",
     "zoomInLabel": "Zoom in",
     "toggleZoom": "Click to toggle Fit ↔ 100%",
-    "hidpiInfo": "HiDPI {{label}} — {{physicalW}}×{{physicalH}}px physical ({{logicalW}}×{{logicalH}} pts)"
+    "hidpiInfo": "HiDPI {{label}} — {{physicalW}}×{{physicalH}}px physical ({{logicalW}}×{{logicalH}} pts)",
+    "loadingImage": "Loading image…"
   },
   "videoTrimmer": {
     "volume": "Volume",

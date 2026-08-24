@@ -23,9 +23,14 @@ export interface StageHandle {
 }
 
 const ZOOM_STEP = 1.25;
-const ZOOM_MIN = 0.1;
-const ZOOM_MAX = 8;
-const clampZoom = (z: number) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+const SCALE_MIN = 0.01;
+const SCALE_MAX = 6.0;
+const clampZoom = (z: number, fs: number) => {
+  const currentFit = fs > 0 ? fs : 1;
+  const minZ = SCALE_MIN / currentFit;
+  const maxZ = SCALE_MAX / currentFit;
+  return Math.max(minZ, Math.min(maxZ, z));
+};
 
 interface Draft {
   type: "rect" | "ellipse" | "crop" | "highlight" | "blur" | "numbered-rect";
@@ -154,6 +159,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const [img, setImg] = useState<HTMLImageElement | null>(null);
+  const [imgLoading, setImgLoading] = useState(false);
   const [fitScale, setFitScale] = useState(1);
   const [zoom, setZoom] = useState(1);
   const scale = fitScale * zoom;
@@ -250,6 +256,32 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     };
   }, [!!editing]);
 
+function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
+  if (!src) return { url: "" };
+  if (src.startsWith("data:") && src.length > 200_000) {
+    try {
+      const commaIdx = src.indexOf(",");
+      if (commaIdx !== -1) {
+        const meta = src.slice(0, commaIdx);
+        const rawBase64 = src.slice(commaIdx + 1);
+        const mimeMatch = meta.match(/:(.*?);/);
+        const mime = mimeMatch ? mimeMatch[1] : "image/png";
+        const byteChars = atob(rawBase64);
+        const byteNumbers = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) {
+          byteNumbers[i] = byteChars.charCodeAt(i);
+        }
+        const blob = new Blob([byteNumbers], { type: mime });
+        const blobUrl = URL.createObjectURL(blob);
+        return { url: blobUrl, revoke: () => URL.revokeObjectURL(blobUrl) };
+      }
+    } catch (e) {
+      console.error("Lỗi chuyển đổi Blob URL:", e);
+    }
+  }
+  return { url: src };
+}
+
   // Tải ảnh nền. Cờ `cancelled`: undo/redo/crop/stitch đổi `doc.image` liên
   // tiếp — decode của ảnh CŨ (to hơn → chậm hơn) có thể resolve SAU ảnh mới
   // và ghi đè `img` bằng ảnh sai; huỷ trong cleanup để chỉ lần load mới nhất
@@ -257,17 +289,35 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   useEffect(() => {
     if (!doc) {
       setImg(null);
+      setImgLoading(false);
       return;
     }
     let cancelled = false;
+    setImgLoading(true);
+    const safe = toSafeImageUrl(doc.image);
     const el = new window.Image();
-    el.onload = () => {
-      if (!cancelled) setImg(el);
+
+    const onDone = () => {
+      if (!cancelled) {
+        setImg(el);
+        setImgLoading(false);
+      }
     };
-    el.src = doc.image;
+
+    if (typeof el.decode === "function") {
+      el.src = safe.url;
+      el.decode().then(onDone).catch(onDone);
+    } else {
+      el.onload = onDone;
+      el.onerror = onDone;
+      el.src = safe.url;
+    }
+
     return () => {
       cancelled = true;
       el.onload = null;
+      el.onerror = null;
+      safe.revoke?.();
     };
   }, [doc?.image]);
 
@@ -290,19 +340,22 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       // Padding nhỏ (8px mỗi bên) để ảnh không dính mép cứng
       const cw = c.clientWidth - 16;
       const ch = c.clientHeight - 16;
-      // Không giới hạn max — ảnh nhỏ hơn window sẽ hiển thị 1:1 hoặc lớn hơn
-      const s = Math.max(0.05, Math.min(cw / doc.imgW, ch / doc.imgH));
+      const isScroll = doc.captureMode === "scroll" || doc.imgH > doc.imgW * 1.8;
+
+      // Với ảnh dài / chụp cuộn: fit theo chiều ngang (fit-width) để chữ to rõ, dễ đọc và cuộn dọc tự nhiên
+      // Với ảnh thông thường: fit cả 2 chiều (fit-contain)
+      const s = Math.max(0.01, Math.min(cw / doc.imgW, isScroll ? 1.0 : ch / doc.imgH));
       setFitScale(s);
-      // Zoom mặc định tuỳ mode đã chụp ra ảnh (`doc.captureMode`, xem model.ts):
-      // "region" (vùng chọn) → ảnh NHỎ hơn khung Editor (fitScale s ≥ 1, tức
-      // không cần thu nhỏ mới vừa) thì hiện đúng 100% THẬT (1px ảnh = 1px màn
-      // hình, zoom = 1/s ⇒ scale = 1); ảnh LỚN hơn khung (s < 1) thì tự fit vừa
-      // khung (zoom = 1 ⇒ scale = fitScale) thay vì luôn ép 100% khiến ảnh to
-      // tràn ra ngoài tầm nhìn. Mọi mode khác → luôn fit như trước. Chỉ áp
-      // dụng khi còn ở chế độ auto (`autoZoomRef`) — nếu không, resize sẽ ghi
-      // đè zoom user vừa tự chỉnh tay.
+
+      // Zoom mặc định tuỳ mode đã chụp ra ảnh:
+      // "scroll" → hiện theo chiều ngang (zoom=1 ⇒ scale=fitScale)
+      // "region" → nếu ảnh nhỏ hơn khung thì 100% thật (zoom=1/s ⇒ scale=1), lớn hơn thì vừa khung
       if (autoZoomRef.current) {
-        setZoom(s ? (s < 1 ? 1 : clampZoom(1 / s)) : 1);
+        if (isScroll) {
+          setZoom(1);
+        } else {
+          setZoom(s ? (s < 1 ? 1 : clampZoom(1 / s, s)) : 1);
+        }
       }
     };
     measure();
@@ -346,7 +399,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       const d = docRef.current;
       if (!d) return oldZoom;
 
-      const newZoom = clampZoom(opts.target ?? oldZoom * (opts.factor ?? 1));
+      const newZoom = clampZoom(opts.target ?? oldZoom * (opts.factor ?? 1), fs);
       if (newZoom === oldZoom) return oldZoom; // đã chạm giới hạn → không đổi
 
       const oldScale = fs * oldZoom;
@@ -611,16 +664,18 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     exportPng: () => {
       const stage = stageRef.current;
       if (!stage || !doc) return null;
+      if (doc.annotations.length === 0) {
+        return doc.image;
+      }
       trRef.current?.nodes([]);
-      const url = stage.toDataURL({ pixelRatio: 1 / scale, mimeType: "image/png" });
-      return url;
+      return stage.toDataURL({ pixelRatio: 1 / scale, mimeType: "image/png" });
     },
     flattenPng: () => {
-      // Export toàn bộ stage thành PNG rồi trả về data URL.
-      // Caller (Editor) sẽ dùng loadDoc để replace ảnh nền + xoá annotations
-      // → không còn layer riêng, an toàn tuyệt đối.
       const stage = stageRef.current;
       if (!stage || !doc) return null;
+      if (doc.annotations.length === 0) {
+        return doc.image;
+      }
       trRef.current?.nodes([]);
       return stage.toDataURL({ pixelRatio: 1 / scale, mimeType: "image/png" });
     },
@@ -1170,8 +1225,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
 
   // % so với pixel gốc của ảnh (scale), KHÔNG phải so với fit — 100% = 1:1 pixel.
   const zoomPct = Math.round(scale * 100);
-  const atZoomMin = zoom <= ZOOM_MIN + 1e-6;
-  const atZoomMax = zoom >= ZOOM_MAX - 1e-6;
+  const atZoomMin = scale <= SCALE_MIN + 1e-4;
+  const atZoomMax = scale >= SCALE_MAX - 1e-4;
 
   // Step luôn tròn → keepRatio. Line/arrow/numbered-arrow không dùng transformer bounding box
   const activeIds = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
@@ -1195,10 +1250,57 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const scaleFactor = doc.scaleFactor ?? 1;
   const dpiLabel = scaleFactor >= 2 ? `${scaleFactor}×` : null;
 
+  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  const maxDim = Math.max(1, box.w, box.h);
+  const stagePixelRatio = Math.max(0.1, Math.min(dpr, 14000 / maxDim));
+
   return (
     // outer: bao quanh cả scroll area và zoom bar cố định — cũng là điểm đo
     // fitScale (`outerRef`, xem effect phía trên) vì không có overflow:auto.
     <div ref={outerRef} style={{ ...fill, position: "relative" }}>
+      {imgLoading && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 12,
+            background: "rgba(18, 18, 24, 0.65)",
+            backdropFilter: "blur(4px)",
+            zIndex: 100,
+            color: "var(--text, #cdd6f4)",
+            fontSize: 14,
+            fontWeight: 500,
+            pointerEvents: "none",
+            animation: "stageFadeIn 0.2s ease",
+          }}
+        >
+          <style>{`
+            @keyframes stageSpin {
+              from { transform: rotate(0deg); }
+              to { transform: rotate(360deg); }
+            }
+            @keyframes stageFadeIn {
+              from { opacity: 0; }
+              to { opacity: 1; }
+            }
+          `}</style>
+          <div
+            style={{
+              width: 32,
+              height: 32,
+              border: "3px solid rgba(255, 255, 255, 0.15)",
+              borderTopColor: "var(--accent, #6366f1)",
+              borderRadius: "50%",
+              animation: "stageSpin 0.75s linear infinite",
+            }}
+          />
+          <span>{t("annotationCanvas.loadingImage", "Đang tải ảnh…")}</span>
+        </div>
+      )}
     {/* scroll container — containerRef để gắn wheel listener và tính scroll */}
     <div ref={containerRef} style={{ ...fill, overflow: "auto" }}>
       {/* Căn giữa bằng margin:auto thay vì justify/align center. Lý do: khi canvas
@@ -1211,6 +1313,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
           ref={stageRef}
           width={box.w}
           height={box.h}
+          pixelRatio={stagePixelRatio}
           onMouseDown={onStageMouseDown}
           style={{ 
             cursor: isPanMode 

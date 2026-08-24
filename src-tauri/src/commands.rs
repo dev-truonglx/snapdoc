@@ -772,14 +772,21 @@ pub fn start_scroll_session(state: State<'_, AppState>) {
     }
 }
 
-/// Giới hạn số lát cắt tối đa cho 1 phiên chụp cuộn — mỗi lát là 1
-/// `RgbaImage` full-res giữ nguyên trong RAM tới lúc ghép (không nén), ảnh
-/// ~1920×1440 đã ~11MB/lát. Không giới hạn thì trang cuộn quá dài có thể đẩy
-/// RAM lên hàng GB. 300 lát tương ứng ~3.3GB ở độ phân giải trên — đủ rộng
-/// cho hầu hết trang dài, vẫn có trần để tránh OOM.
+/// Giới hạn số lát cắt ĐÃ XÁC NHẬN (thực sự ghép) tối đa cho 1 phiên chụp cuộn —
+/// chỉ tính các lát được frontend commit, không tính các tick đứng yên / bỏ qua.
+/// 300 lát tương ứng chiều cao hàng chục nghìn pixel, đủ cho mọi trang web siêu dài.
 const MAX_SCROLL_SLICES: usize = 300;
 
+#[derive(serde::Serialize)]
+pub struct ScrollSliceResult {
+    #[serde(rename = "sliceIndex")]
+    pub slice_index: usize,
+    pub base64: String,
+}
+
 /// Chụp một lát cắt trong tính năng chụp cuộn.
+/// Trả về `ScrollSliceResult` chứa `slice_index` và ảnh base64.
+/// Lát cắt được đưa vào bộ đệm `uncommitted` (tối đa 16 lát gần nhất).
 #[tauri::command]
 pub async fn capture_scroll_slice(
     state: State<'_, AppState>,
@@ -789,16 +796,7 @@ pub async fn capture_scroll_slice(
     ry: u32,
     rw: u32,
     rh: u32,
-) -> Result<String, String> {
-    {
-        let slices = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
-        if slices.len() >= MAX_SCROLL_SLICES {
-            return Err(format!(
-                "Đã đạt giới hạn {MAX_SCROLL_SLICES} lát cắt cho 1 lần chụp cuộn — hãy dừng lại và ghép ảnh."
-            ));
-        }
-    }
-
+) -> Result<ScrollSliceResult, String> {
     let raw_img = tauri::async_runtime::spawn_blocking(move || -> Result<image::RgbaImage, String> {
         let m = crate::capture::monitor::at_point(mx, my)?;
         let img = crate::capture::region::capture_region_raw(&m, rx, ry, rw, rh)?;
@@ -807,14 +805,39 @@ pub async fn capture_scroll_slice(
     .await
     .map_err(|e| format!("Task join error: {e}"))??;
 
-    // Encode preview TRƯỚC (persist chỉ borrow) rồi MOVE ảnh vào bộ đệm —
-    // tránh clone cả 1 RgbaImage full-res (~11MB ở 1920×1440) trên hot path
-    // của mỗi lát cuộn.
     let cap = crate::capture::persist(&raw_img)?;
-    if let Ok(mut slices) = state.scroll_slices.lock() {
-        slices.push(raw_img);
+    let slice_index = {
+        let mut slices = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
+        let idx = slices.next_id;
+        slices.next_id += 1;
+        // Ring buffer: chỉ giữ tối đa 16 uncommitted gần nhất để tránh tràn RAM khi user nghỉ tay hoặc cuộn nhanh
+        if slices.uncommitted.len() >= 16 {
+            let oldest = slices.next_id.saturating_sub(17);
+            slices.uncommitted.retain(|&k, _| k > oldest);
+        }
+        slices.uncommitted.insert(idx, raw_img);
+        idx
+    };
+
+    Ok(ScrollSliceResult {
+        slice_index,
+        base64: cap.base64,
+    })
+}
+
+/// Xác nhận một lát cắt được đưa vào danh sách ghép (chuyển từ `uncommitted` sang `committed`).
+#[tauri::command]
+pub fn commit_scroll_slice(state: State<'_, AppState>, slice_index: usize) -> Result<(), String> {
+    let mut slices = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
+    if slices.committed.len() >= MAX_SCROLL_SLICES {
+        return Err(format!(
+            "Đã đạt giới hạn {MAX_SCROLL_SLICES} lát cắt cho 1 lần chụp cuộn — hãy dừng lại và ghép ảnh."
+        ));
     }
-    Ok(cap.base64)
+    if let Some(img) = slices.uncommitted.remove(&slice_index) {
+        slices.committed.insert(slice_index, img);
+    }
+    Ok(())
 }
 
 /// Hoàn tất chụp cuộn: nhận base64 của canvas đã ghép, chuyển về flow để kết xuất.
@@ -824,6 +847,8 @@ pub fn finalize_scroll_capture(
     base64: String,
     width: u32,
     height: u32,
+    mx: Option<i32>,
+    my: Option<i32>,
 ) -> Result<(), String> {
     // Khung viền chụp cuộn giờ là overlay tái sử dụng (xem
     // `windows::open_scroll_control`) — phiên đã HOÀN TẤT, dùng
@@ -836,11 +861,20 @@ pub fn finalize_scroll_capture(
         height,
     };
     let output = crate::flow::get_output(&app);
+    let scale_factor = match (mx, my) {
+        (Some(x), Some(y)) => crate::capture::monitor::at_point(x, y)
+            .map(|m| m.scale_factor().unwrap_or(1.0).max(1.0) as f64)
+            .unwrap_or(1.0),
+        _ => crate::capture::monitor::primary()
+            .ok()
+            .map(|m| m.scale_factor().unwrap_or(1.0).max(1.0) as f64)
+            .unwrap_or(1.0),
+    };
     // flow::finish() có thể gọi windows::open_editor() (build() cửa sổ mới) —
     // tách sang thread riêng để không deadlock IPC thread trên Windows, xem
     // comment ở commands::open_editor.
     std::thread::spawn(move || {
-        let _ = crate::flow::finish(&app, cap, &output, 1.0);
+        let _ = crate::flow::finish(&app, cap, &output, scale_factor);
     });
     Ok(())
 }
@@ -937,105 +971,6 @@ pub struct StitchInstruction {
     src_h: u32,
 }
 
-fn lum_u8(px: &image::Rgba<u8>) -> i32 {
-    (px[0] as i32 * 299 + px[1] as i32 * 587 + px[2] as i32 * 114) / 1000
-}
-
-fn col_fixed_with_content(
-    refs: &[&image::RgbaImage],
-    x: u32,
-    h: u32,
-    y_step: u32,
-    bg: i32,
-) -> bool {
-    let mut content_count = 0usize;
-    let mut match_count = 0usize;
-    let mut total_samples = 0usize;
-    let mut y = 0u32;
-    while y < h {
-        total_samples += 1;
-        let base = lum_u8(refs[0].get_pixel(x, y));
-        let mut row_match = true;
-        for r in &refs[1..] {
-            if (lum_u8(r.get_pixel(x, y)) - base).abs() > 18 {
-                row_match = false;
-                break;
-            }
-        }
-        if row_match {
-            match_count += 1;
-        }
-        if (base - bg).abs() > 24 {
-            content_count += 1;
-        }
-        y += y_step;
-    }
-    // Cột cố định nếu ít nhất 92% số điểm mẫu dọc theo cột là cố định và có chứa nội dung
-    total_samples > 0 && (match_count as f32 / total_samples as f32) >= 0.92 && content_count > 0
-}
-
-/// Phát hiện dải cột cố định ở mép trái/phải (sidebar/panel dính) bằng cách so
-/// vài lát cắt rải đều. Trả (left, right) tính bằng px. Có chốt an toàn để không
-/// cắt nhầm nội dung.
-fn detect_fixed_columns(slices: &[image::RgbaImage], width: u32) -> (u32, u32) {
-    let n = slices.len();
-    if n < 3 {
-        return (0, 0);
-    }
-    let idxs = [0usize, n / 4, n / 2, (3 * n) / 4, n - 1];
-    let refs: Vec<&image::RgbaImage> = idxs.iter().map(|&i| &slices[i]).collect();
-    let h = refs[0].height();
-    let mut w = width;
-    for r in &refs {
-        w = w.min(r.width());
-    }
-    if w == 0 || h == 0 {
-        return (0, 0);
-    }
-    let y_step = (h / 120).max(1);
-
-    // Nền trang ≈ trung vị độ sáng của khung đầu (trang admin thường trắng).
-    let bg = {
-        let mut lums: Vec<i32> = Vec::new();
-        let xs = (w / 40).max(1);
-        let ys = (h / 60).max(1);
-        let mut yy = 0u32;
-        while yy < h {
-            let mut xx = 0u32;
-            while xx < w {
-                lums.push(lum_u8(refs[0].get_pixel(xx, yy)));
-                xx += xs;
-            }
-            yy += ys;
-        }
-        lums.sort_unstable();
-        if lums.is_empty() { 255 } else { lums[lums.len() / 2] }
-    };
-
-    let mut left = 0u32;
-    while left < w && col_fixed_with_content(&refs, left, h, y_step, bg) {
-        left += 1;
-    }
-    let mut right = 0u32;
-    while right < w && col_fixed_with_content(&refs, w - 1 - right, h, y_step, bg) {
-        right += 1;
-    }
-
-    // Chốt an toàn: 1 dải > 40% bề ngang, hoặc 2 dải phủ gần hết khung → coi như
-    // phát hiện sai (vd cuộn quá ít) và bỏ qua, tránh cắt nhầm nội dung.
-    let maxband = (width as f32 * 0.4) as u32;
-    if left > maxband {
-        left = 0;
-    }
-    if right > maxband {
-        right = 0;
-    }
-    if left + right >= w {
-        return (0, 0);
-    }
-    (left, right)
-}
-
 /// Ghép ảnh cuộn ở backend dựa trên danh sách các lát cắt đã lưu và hướng dẫn ghép.
 #[tauri::command]
 pub async fn finalize_scroll_stitch(
@@ -1043,14 +978,16 @@ pub async fn finalize_scroll_stitch(
     state: State<'_, AppState>,
     width: u32,
     instructions: Vec<StitchInstruction>,
+    mx: Option<i32>,
+    my: Option<i32>,
 ) -> Result<(), String> {
-    let slices = {
+    let (committed, uncommitted) = {
         let mut guard = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
-        std::mem::take(&mut *guard)
+        (std::mem::take(&mut guard.committed), std::mem::take(&mut guard.uncommitted))
     };
 
-    if slices.is_empty() || instructions.is_empty() {
-        return Err("Không có dữ liệu lát cắt hoặc hướng dẫn ghép".to_string());
+    if instructions.is_empty() {
+        return Err("Không có dữ liệu hướng dẫn ghép".to_string());
     }
 
     let cap = tauri::async_runtime::spawn_blocking(move || -> Result<crate::capture::Capture, String> {
@@ -1063,42 +1000,21 @@ pub async fn finalize_scroll_stitch(
             return Err("Chiều cao ảnh ghép bằng 0".to_string());
         }
 
-        // Phát hiện sidebar/panel cố định để KHÔNG copy lặp khi nối (chỉ khi thực
-        // sự có cuộn nhiều khung).
-        let (fixed_left, fixed_right) = if instructions.len() >= 2 {
-            detect_fixed_columns(&slices, width)
-        } else {
-            (0, 0)
-        };
-        let first_h = instructions[0].src_h;
-
         let mut final_img = image::RgbaImage::new(width, total_height);
 
         let mut current_y = 0u32;
-        for (idx, inst) in instructions.iter().enumerate() {
-            let slice = slices.get(inst.slice_index).ok_or_else(|| {
+        for inst in &instructions {
+            let slice = committed.get(&inst.slice_index).or_else(|| uncommitted.get(&inst.slice_index)).ok_or_else(|| {
                 format!("Không tìm thấy lát cắt index {}", inst.slice_index)
             })?;
 
             let slice_w = slice.width();
             let slice_h = slice.height();
 
-            // Khung ĐẦU vẽ đủ bề ngang (sidebar hiện 1 lần); các dải nối SAU chỉ
-            // copy cột đang cuộn, bỏ cột cố định để sidebar không bị lặp dọc.
-            let (x_lo, x_hi) = if idx == 0 {
-                (0u32, width)
-            } else {
-                (fixed_left, width.saturating_sub(fixed_right))
-            };
-
-            // Copy theo HÀNG bằng `copy_from_slice` trên buffer thô thay vì
-            // `get_pixel`/`put_pixel` từng điểm — ảnh ghép có thể cao hàng
-            // chục nghìn px (hàng trăm triệu pixel), per-pixel với bounds
-            // check mỗi call chậm hơn memcpy theo hàng rất nhiều. Offset tính
-            // bằng usize: ảnh ghép rất dài có thể vượt u32 khi nhân ra byte.
-            let x_hi_clamped = x_hi.min(slice_w).min(width);
-            if x_lo < x_hi_clamped {
-                let row_len = ((x_hi_clamped - x_lo) * 4) as usize;
+            // Nối toàn bộ bề rộng nội dung khớp với preview, copy theo hàng siêu tốc
+            let copy_w = width.min(slice_w);
+            if copy_w > 0 {
+                let row_len = (copy_w * 4) as usize;
                 let src_raw: &[u8] = slice.as_raw();
                 let dst_raw: &mut [u8] = &mut final_img;
                 for y in 0..inst.src_h {
@@ -1110,42 +1026,14 @@ pub async fn finalize_scroll_stitch(
                     if dest_pixel_y >= total_height {
                         continue;
                     }
-                    let src_off = (src_pixel_y as usize * slice_w as usize + x_lo as usize) * 4;
-                    let dst_off = (dest_pixel_y as usize * width as usize + x_lo as usize) * 4;
+                    let src_off = (src_pixel_y as usize * slice_w as usize) * 4;
+                    let dst_off = (dest_pixel_y as usize * width as usize) * 4;
                     dst_raw[dst_off..dst_off + row_len]
                         .copy_from_slice(&src_raw[src_off..src_off + row_len]);
                 }
             }
 
             current_y += inst.src_h;
-        }
-
-        // Đóng băng sidebar (kiểu Snagit): phần cột cố định bên dưới khung đầu được
-        // ĐỔ bằng cách kéo dài hàng đáy của sidebar xuống hết chiều cao — nền sidebar
-        // (thường màu đặc) trải liền mạch, nội dung sidebar chỉ hiện 1 lần ở trên.
-        if (fixed_left > 0 || fixed_right > 0) && first_h > 0 && first_h <= total_height {
-            // Copy sẵn 2 dải anchor ra buffer riêng rồi đổ theo HÀNG — cùng
-            // lý do row-wise ở vòng ghép phía trên.
-            let anchor_y = (first_h - 1) as usize;
-            let row_px = width as usize;
-            let left_len = fixed_left as usize * 4;
-            let right_x = width.saturating_sub(fixed_right) as usize;
-            let right_len = fixed_right as usize * 4;
-            let dst_raw: &mut [u8] = &mut final_img;
-            let left_off = anchor_y * row_px * 4;
-            let left_src = dst_raw[left_off..left_off + left_len].to_vec();
-            let right_off = (anchor_y * row_px + right_x) * 4;
-            let right_src = dst_raw[right_off..right_off + right_len].to_vec();
-            for y in (first_h as usize)..(total_height as usize) {
-                if left_len > 0 {
-                    let off = y * row_px * 4;
-                    dst_raw[off..off + left_len].copy_from_slice(&left_src);
-                }
-                if right_len > 0 {
-                    let off = (y * row_px + right_x) * 4;
-                    dst_raw[off..off + right_len].copy_from_slice(&right_src);
-                }
-            }
         }
 
         let cap = crate::capture::persist(&final_img)?;
@@ -1161,8 +1049,18 @@ pub async fn finalize_scroll_stitch(
     // lại" (xem hàm đó).
     crate::windows::end_scroll_session(&app);
 
+    let scale_factor = match (mx, my) {
+        (Some(x), Some(y)) => crate::capture::monitor::at_point(x, y)
+            .map(|m| m.scale_factor().unwrap_or(1.0).max(1.0) as f64)
+            .unwrap_or(1.0),
+        _ => crate::capture::monitor::primary()
+            .ok()
+            .map(|m| m.scale_factor().unwrap_or(1.0).max(1.0) as f64)
+            .unwrap_or(1.0),
+    };
+
     let output = crate::flow::get_output(&app);
-    crate::flow::finish(&app, cap, &output, 1.0)
+    crate::flow::finish(&app, cap, &output, scale_factor)
 }
 
 /// Lấy ảnh "đóng băng màn hình" (JPEG base64 trần) cho overlay có chỉ số `idx`.
