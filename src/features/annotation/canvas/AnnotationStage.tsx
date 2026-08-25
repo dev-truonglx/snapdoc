@@ -664,7 +664,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
     exportPng: () => {
       const stage = stageRef.current;
       if (!stage || !doc) return null;
-      if (doc.annotations.length === 0) {
+      if (doc.annotations.length === 0 && doc.image.startsWith("data:")) {
         return doc.image;
       }
       trRef.current?.nodes([]);
@@ -673,7 +673,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
     flattenPng: () => {
       const stage = stageRef.current;
       if (!stage || !doc) return null;
-      if (doc.annotations.length === 0) {
+      if (doc.annotations.length === 0 && doc.image.startsWith("data:")) {
         return doc.image;
       }
       trRef.current?.nodes([]);

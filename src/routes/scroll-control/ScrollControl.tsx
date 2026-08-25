@@ -62,7 +62,7 @@ const PROFILE_STEP = 3; // bước lấy mẫu x khi tính biên dạng cạnh n
 const MIN_DY = 2; // bỏ qua dịch chuyển quá nhỏ (nhận diện được cả cuộn mượt 2px)
 const MIN_OVERLAP = 36; // số dòng chồng lấn tối thiểu để NCC đáng tin (mở rộng khả năng bắt cuộn dài)
 const MAX_SCROLL_FRAC = 0.88; // dy tối đa = 88% vùng cuộn (tương thích chuột lăn Windows & HiDPI)
-const NBINS = 8; // số ô ngang của biên dạng cạnh (mã hoá vị trí ngang để phân biệt mạnh)
+const NBINS = 16; // số ô ngang của biên dạng cạnh (tăng độ mịn để nhận diện tốt lưới sản phẩm)
 const NCC_ACCEPT = 0.52; // NCC tại đỉnh ≥ ngưỡng này thì đưa vào so khớp 2D tinh chỉnh
 const CHANGE_TOL = 16; // độ lệch sáng để coi 1 điểm là "đã đổi" giữa 2 khung
 const FIXED_FG_FRAC = 0.05; // mật độ nội dung tối thiểu để 1 ô được xét là cột cố định
@@ -276,7 +276,7 @@ function validateCandidateDy(
   candidates: number[],
   stride: number,
   vEst: number,
-  span: number,
+  _span: number,
 ): number {
   if (candidates.length === 1) return candidates[0];
 
@@ -311,7 +311,9 @@ function validateCandidateDy(
     }
 
     const matchRatio = totalContent > 0 ? matchedContent / totalContent : 0;
-    const velBonus = vEst > 0 ? (1 - Math.min(1, Math.abs(cand - vEst) / Math.max(span, 1))) * 0.05 : 0;
+    // Điểm cộng quán tính cuộn (vEst): Ưu tiên ứng cử viên tiệm cận với tốc độ cuộn mượt hiện tại
+    const velDiff = vEst > 0 ? Math.abs(cand - vEst) : 0;
+    const velBonus = vEst > 0 ? (1 - Math.min(1, velDiff / Math.max(vEst * 1.5, 40))) * 0.15 : 0;
     const finalScore = matchRatio + velBonus;
 
     if (finalScore > bestScore) {
@@ -321,6 +323,59 @@ function validateCandidateDy(
   }
 
   return bestCand;
+}
+
+// Tinh chỉnh vi mô ±2px dựa trên tổng sai số tuyệt đối (SAD) của tất cả các dòng pixel thực tế
+function refineDyLocal(
+  p: Uint8ClampedArray,
+  c: Uint8ClampedArray,
+  w: number,
+  scrollTop: number,
+  scrollBottom: number,
+  initialDy: number,
+  maxDy: number,
+  stride: number,
+): number {
+  if (initialDy < MIN_DY) return initialDy;
+
+  const rMin = Math.max(MIN_DY, initialDy - 2);
+  const rMax = Math.min(maxDy, initialDy + 2);
+  if (rMin >= rMax) return initialDy;
+
+  let bestDy = initialDy;
+  let minSad = Infinity;
+
+  const sampleY0 = scrollTop + rMax;
+  const sampleY1 = scrollBottom;
+  const step = Math.max(1, Math.floor((sampleY1 - sampleY0) / 64));
+
+  for (let cand = rMin; cand <= rMax; cand++) {
+    let sad = 0;
+    let count = 0;
+    for (let yp = sampleY0; yp < sampleY1; yp += step) {
+      const yc = yp - cand;
+      if (yc < scrollTop || yc >= scrollBottom) continue;
+      const offP = yp * stride;
+      const offC = yc * stride;
+      for (let x = 0; x < w - SCROLLBAR_MARGIN; x += SAMPLE_STEP) {
+        const iP = offP + x * 4;
+        const iC = offC + x * 4;
+        const diff = Math.abs(p[iP] - c[iC]) + Math.abs(p[iP + 1] - c[iC + 1]) + Math.abs(p[iP + 2] - c[iC + 2]);
+        // Tăng trọng số x3 cho các pixel cạnh/chữ/số (đặc trưng cấu trúc cố định) để khoá vị trí chính xác
+        const edgeP = x + SAMPLE_STEP < w - SCROLLBAR_MARGIN ? Math.abs(lumAt(p, iP) - lumAt(p, iP + SAMPLE_STEP * 4)) : 0;
+        const weight = edgeP > 15 ? 3 : 1;
+        sad += diff * weight;
+        count += weight;
+      }
+    }
+    const avgSad = count > 0 ? sad / count : Infinity;
+    if (avgSad < minSad) {
+      minSad = avgSad;
+      bestDy = cand;
+    }
+  }
+
+  return bestDy;
 }
 
 interface ScrollAnalysis {
@@ -335,7 +390,7 @@ interface ScrollAnalysis {
 }
 
 // Phân tích 2 khung liên tiếp
-function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): ScrollAnalysis {
+function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0, forceTopFixed: number = 0): ScrollAnalysis {
   const w = prev.width;
   const h = prev.height;
   const stride = w * 4;
@@ -367,6 +422,9 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
   // 1) Dải cố định trên/dưới: DỪNG ngay ở dòng đầu tiên khác (break-on-mismatch).
   let topFixed = 0;
   while (topFixed < maxBand && sameInPlace(topFixed)) topFixed++;
+  if (forceTopFixed > 0) {
+    topFixed = Math.max(topFixed, forceTopFixed);
+  }
   let botFixed = 0;
   while (botFixed < maxBand && sameInPlace(h - 1 - botFixed)) botFixed++;
 
@@ -411,7 +469,7 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
     return { dy: -1, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
   }
 
-  const NEAR = 0.03;
+  const NEAR = 0.06;
   const candidates: number[] = [];
   for (let d2 = MIN_DY; d2 <= maxDy; d2++) {
     if (scores[d2] >= bestNcc - NEAR) {
@@ -419,9 +477,9 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
     }
   }
 
-  // Nếu NCC rất rõ ràng (bestNcc >= 0.70) thì dùng trực tiếp đỉnh NCC để tránh sai lệch pixel
+  // Luôn gọi xác thực 2D pixel (validateCandidateDy) nếu có nhiều hơn 1 ứng cử viên
   const finalDy =
-    bestNcc >= 0.70 || candidates.length <= 1
+    candidates.length <= 1
       ? bestDy
       : validateCandidateDy(
           p,
@@ -438,7 +496,19 @@ function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0): Scrol
           span,
         );
 
-  return { dy: finalDy, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
+  // Tinh chỉnh vi mô ±2px dựa trên tổng sai số tuyệt đối (SAD) để triệt tiêu vệt gạch ngang 1-2px
+  const refinedDy = refineDyLocal(
+    p,
+    c,
+    w,
+    scrollTop,
+    scrollBottom,
+    finalDy,
+    maxDy,
+    stride,
+  );
+
+  return { dy: refinedDy, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
 }
 
 interface FrameHistoryItem {
@@ -694,29 +764,63 @@ export default function ScrollControl() {
 
       // 1. Thử so khớp với frame mới nhất (k-1)
       const lastItem = history[history.length - 1];
-      const anLast = analyzeScroll(lastItem.imgData, newImgData, velocityRef.current);
+      let anLast = analyzeScroll(lastItem.imgData, newImgData, velocityRef.current);
 
+      // Nếu không khớp được ở đợt cuộn đầu tiên (do trang web tự bật Header fixed/đổi padding), thử bỏ qua dải header động (180px)
+      if (anLast.dy < 0 && (history.length <= 2 || lastItem.usedHeightAtFrame <= fh * 1.5)) {
+        const anHeaderEx = analyzeScroll(lastItem.imgData, newImgData, velocityRef.current, 180);
+        if (anHeaderEx.dy >= 0) {
+          anLast = anHeaderEx;
+        }
+      }
+
+      // Xử lý đặc biệt nhịp đầu tiên (history.length === 1): Nếu trang web tự bật Header fixed ở nhịp cuộn đầu,
+      // tự động re-anchor Frame 1 làm mốc mốc tham chiếu chuẩn mới (sau khi Header đã ổn định)
+      if (history.length === 1 && anLast.dy < 0) {
+        recentFramesRef.current = [
+          {
+            imgData: newImgData,
+            img,
+            sliceIdx: sliceIndex,
+            botFixed: 0,
+            usedHeightAtFrame: fh,
+          }
+        ];
+        masterCtxRef.current?.drawImage(img, 0, 0);
+        usedHeightRef.current = fh;
+        setStitchedHeight(fh);
+        fastWarnRef.current = false;
+        setFastWarn(false);
+        lostTrackingRef.current = false;
+        setLostTracking(false);
+        updatePreview();
+        return;
+      }
+
+      let bestNccScore = anLast.dy >= 0 ? (anLast.ncc ?? 0) : -1;
       if (anLast.dy >= 0) {
         matchedIdx = history.length - 1;
         matchedAn = anLast;
-      } else if (history.length > 1) {
-        // 2. Thử so khớp với các frame trước đó trong history (để rollback / rehook nếu cuộn ngược hoặc lệch)
+      }
+
+      // 2. Nếu frame k-1 bị nhiễu do Lazy-Loading (NCC < 0.65), kiểm tra các frame cũ hơn k-2, k-3 để Rollback thay thế
+      if (history.length > 1 && (anLast.dy < 0 || bestNccScore < 0.65)) {
         for (let i = history.length - 2; i >= 0; i--) {
           const anMulti = analyzeScroll(
             history[i].imgData,
             newImgData,
             velocityRef.current,
           );
-          if (anMulti.dy >= 0) {
+          if (anMulti.dy >= 0 && (anMulti.ncc ?? 0) > bestNccScore + 0.05) {
+            bestNccScore = anMulti.ncc ?? 0;
             matchedIdx = i;
             matchedAn = anMulti;
-            break;
           }
         }
       }
 
       const an = matchedAn ?? anLast;
-      const { dy, botFixed } = an;
+      const { dy, botFixed, topFixed = 0 } = an;
 
       if (DEBUG) {
         const ncc = an.ncc === undefined ? "—" : an.ncc.toFixed(2);
@@ -755,7 +859,7 @@ export default function ScrollControl() {
           }
         }
 
-        const srcY = Math.max(0, fh - dy);
+        const srcY = Math.max(topFixed, fh - botFixed - dy);
         const at = usedHeightRef.current;
         ensureCapacity(at + dy, fw);
         masterCtxRef.current?.drawImage(img, 0, srcY, fw, dy, 0, at, fw, dy);
