@@ -12,6 +12,7 @@ import {
   beginSwitch,
   isCurrentSwitch,
   noteActiveKey,
+  ownBlobUrl,
   initAutosave,
   parseDocPayload,
   suspendActive,
@@ -107,11 +108,24 @@ export default function Editor() {
   const loadPending = (p: Pending | null) => {
     if (!p) return false;
     const payload = parseDocPayload(p.docJson);
-    // Nạp từ bản nháp hay ảnh mới: luôn markClean=true — annotation được autosave
-    // liên tục, không cần phân biệt "đã lưu" hay "chưa lưu".
+    let imageUrl = `data:image/png;base64,${p.base64}`;
+    if (p.base64 && p.base64.length > 200_000) {
+      try {
+        const byteChars = atob(p.base64);
+        const byteNumbers = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) {
+          byteNumbers[i] = byteChars.charCodeAt(i);
+        }
+        const blob = new Blob([byteNumbers], { type: "image/png" });
+        imageUrl = URL.createObjectURL(blob);
+      } catch (e) {
+        console.error("Lỗi tạo Blob URL trong loadPending:", e);
+      }
+    }
+
     loadDoc(
       {
-        image: `data:image/png;base64,${p.base64}`,
+        image: imageUrl,
         imgW: p.width,
         imgH: p.height,
         scaleFactor: p.scale_factor ?? 1,
@@ -122,6 +136,9 @@ export default function Editor() {
       },
       true,
     );
+    if (p.history_id && imageUrl.startsWith("blob:")) {
+      ownBlobUrl(p.history_id, imageUrl);
+    }
     if (payload) {
       useEditor.getState().setStepCounter(payload.stepCounter);
       useEditor.getState().setArrowCounter(payload.arrowCounter);

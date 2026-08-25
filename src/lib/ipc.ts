@@ -250,13 +250,15 @@ export const ipc = {
   restartApp: () => invoke<void>("restart_app"),
   // Scroll
   captureScrollSlice: (mx: number, my: number, rx: number, ry: number, rw: number, rh: number) =>
-    invoke<string>("capture_scroll_slice", { mx, my, rx, ry, rw, rh }),
-  finalizeScrollCapture: (base64: string, width: number, height: number) =>
-    invoke<void>("finalize_scroll_capture", { base64, width, height }),
+    invoke<{ sliceIndex: number; base64: string }>("capture_scroll_slice", { mx, my, rx, ry, rw, rh }),
+  commitScrollSlice: (sliceIndex: number) =>
+    invoke<void>("commit_scroll_slice", { sliceIndex }),
+  finalizeScrollCapture: (base64: string, width: number, height: number, mx?: number, my?: number) =>
+    invoke<void>("finalize_scroll_capture", { base64, width, height, mx, my }),
   startScrollSession: () =>
     invoke<void>("start_scroll_session"),
-  finalizeScrollStitch: (width: number, instructions: { sliceIndex: number; srcY: number; srcH: number }[]) =>
-    invoke<void>("finalize_scroll_stitch", { width, instructions }),
+  finalizeScrollStitch: (width: number, instructions: { sliceIndex: number; srcY: number; srcH: number }[], mx?: number, my?: number) =>
+    invoke<void>("finalize_scroll_stitch", { width, instructions, mx, my }),
   // History / Library
   listHistory: (filter: HistoryFilter) => invoke<HistoryPage>("list_history", { filter }),
   getHistoryItem: (id: string) => invoke<HistoryItem>("get_history_item", { id }),

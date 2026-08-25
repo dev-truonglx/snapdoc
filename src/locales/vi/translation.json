@@ -191,6 +191,8 @@
     "readyCapture": "Sẵn sàng chụp",
     "recording": "Đang ghi... cuộn chậm & đều tay",
     "scrollWarning": "⚠ Cuộn quá nhanh — chậm lại kẻo bỏ sót nội dung",
+    "lostTracking": "⚠ Mất dấu nối — cuộn chậm lại hoặc cuộn ngược lên để bắt lại",
+    "bridgeButton": "Nối tiếp từ đây",
     "rendering": "Đang kết xuất...",
     "frameCount": "Khung hình:",
     "height": "Chiều cao:",
@@ -377,7 +379,8 @@
     "zoomIn": "Phóng to (Ctrl/Cmd +)",
     "zoomInLabel": "Phóng to",
     "toggleZoom": "Bấm để đổi Fit ↔ 100%",
-    "hidpiInfo": "HiDPI {{label}} — {{physicalW}}×{{physicalH}}px vật lý ({{logicalW}}×{{logicalH}} pts)"
+    "hidpiInfo": "HiDPI {{label}} — {{physicalW}}×{{physicalH}}px vật lý ({{logicalW}}×{{logicalH}} pts)",
+    "loadingImage": "Đang tải ảnh…"
   },
   "videoTrimmer": {
     "volume": "Âm lượng",

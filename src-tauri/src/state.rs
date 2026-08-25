@@ -109,6 +109,25 @@ impl LastCaptureMode {
     }
 }
 
+/// Trạng thái lưu trữ các lát cắt trong phiên chụp cuộn.
+/// Tách biệt giữa các lát cắt vừa chụp (chưa chắc dùng) và các lát cắt đã xác nhận đưa vào ảnh ghép.
+#[derive(Default)]
+pub struct ScrollSlicesState {
+    pub next_id: usize,
+    /// Ring buffer chứa các lát cắt vừa chụp gần nhất (tối đa 16 lát) để tránh rò rỉ RAM khi trang đứng yên / cuộn nhanh.
+    pub uncommitted: HashMap<usize, image::RgbaImage>,
+    /// Các lát cắt đã được frontend xác nhận đưa vào danh sách ghép.
+    pub committed: HashMap<usize, image::RgbaImage>,
+}
+
+impl ScrollSlicesState {
+    pub fn clear(&mut self) {
+        self.next_id = 0;
+        self.uncommitted.clear();
+        self.committed.clear();
+    }
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub pending: Mutex<Option<PendingCapture>>,
@@ -140,7 +159,7 @@ pub struct AppState {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub editor_seq: AtomicU64,
     /// Bộ đệm lưu các lát cắt (slices) của tính năng chụp cuộn.
-    pub scroll_slices: Mutex<Vec<image::RgbaImage>>,
+    pub scroll_slices: Mutex<ScrollSlicesState>,
     /// Lỗi đăng ký global shortcut lúc khởi động (nếu có) — Settings query lúc
     /// mount để hiện banner cảnh báo, thay vì chỉ `eprintln!` không ai thấy.
     pub hotkey_warning: Mutex<Option<String>>,

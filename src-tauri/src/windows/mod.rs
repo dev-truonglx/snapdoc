@@ -1899,6 +1899,7 @@ pub fn end_scroll_session(app: &AppHandle) {
     state.overlay_gen.fetch_add(1, Ordering::SeqCst);
     state.last_capture.clear_mode();
     let _ = state.scroll_slices.lock().map(|mut s| s.clear());
+    let _ = state.frozen_screens.lock().map(|mut s| s.clear());
 }
 
 /// Ẩn editor và trả về Accessory policy (ẩn Dock) / ẩn icon khỏi taskbar (Windows).
