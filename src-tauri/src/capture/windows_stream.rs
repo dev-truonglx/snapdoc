@@ -213,7 +213,9 @@ fn spawn_ticker(
                 std::thread::sleep((target_time - now).min(Duration::from_millis(20)));
                 continue;
             }
-            frame_index += 1;
+            frame_index = frame_index.wrapping_add(1).max(
+                ((now - start).as_nanos() / interval.as_nanos().max(1)) as u32,
+            );
 
             let frame = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(frame) = frame {
@@ -261,7 +263,8 @@ fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
             .map(|m| want_w > 0 && size_of(m) == (want_w, want_h))
             .unwrap_or(false);
         if by_index_ok {
-            return Ok(wgc_monitors.into_iter().nth(index).unwrap());
+            return wgc_monitors.into_iter().nth(index)
+                .ok_or_else(|| format!("Không lấy được monitor theo index {index}"));
         }
         if want_w > 0 {
             let matches: Vec<usize> = wgc_monitors
@@ -271,7 +274,8 @@ fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
                 .map(|(i, _)| i)
                 .collect();
             if matches.len() == 1 {
-                return Ok(wgc_monitors.into_iter().nth(matches[0]).unwrap());
+                return wgc_monitors.into_iter().nth(matches[0])
+                    .ok_or_else(|| format!("Không lấy được monitor theo index {}", matches[0]));
             }
         }
         if let Some(m) = wgc_monitors.into_iter().nth(index) {
@@ -303,7 +307,7 @@ fn resolve_window(window_id: u32) -> Result<WgcWindow, String> {
     }
     // Fallback hành vi cũ: dựng HWND trực tiếp từ id (đúng khi
     // `xcap::Window::id()` chính là giá trị HWND).
-    let hwnd = window_id as usize as *mut std::ffi::c_void;
+    let hwnd = window_id as i32 as isize as *mut std::ffi::c_void;
     let window = WgcWindow::from_raw_hwnd(hwnd);
     if !window.is_valid() {
         return Err("Cửa sổ không còn hợp lệ để quay (có thể đã đóng hoặc bị thu nhỏ)".to_string());

@@ -578,7 +578,7 @@ mod tests {
         std::fs::write(&audio_path, vec![0u8; 44_100 * 2 * 2]).unwrap();
 
         let out = tmp_dir.join("final.mp4");
-        mux_audio(&video_path, &audio_path, 44_100, 1, &out)
+        mux_audio(&video_path, &audio_path, 44_100, 1, false, &out)
             .expect("mux_audio thất bại — kiểm tra lại cú pháp lệnh ffmpeg");
 
         let meta = std::fs::metadata(&out).expect("không đọc được file output");

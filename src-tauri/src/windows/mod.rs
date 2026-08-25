@@ -1,9 +1,9 @@
 use crate::state::{AppState, MonitorSnap};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(not(target_os = "macos"))]
-use tauri::PhysicalSize;
+use tauri::{PhysicalPosition, PhysicalSize};
 
 /// Vị trí con trỏ trong hệ POINTS global của CoreGraphics (top-left origin),
 /// NHẤT QUÁN với CGDisplayBounds dùng cho `MonitorSnap`. KHÔNG dùng
@@ -2155,9 +2155,13 @@ pub fn open_editor_with_file(app: &AppHandle, data_url: String) -> Result<(), St
     // Cascade: lệch mỗi cửa sổ một chút để không chồng khít lên nhau → người
     // dùng thấy rõ nhiều ảnh đang mở thay vì tưởng ảnh trước bị thay.
     if n > 1 {
-        if let Ok(pos) = win.outer_position() {
-            let off = (((n - 1) % 8) as i32) * 32;
-            let _ = win.set_position(PhysicalPosition::new(pos.x + off, pos.y + off));
+        if let (Ok(pos), Ok(scale)) = (win.outer_position(), win.scale_factor()) {
+            let scale = scale.max(0.0001);
+            let off = (((n - 1) % 8) as f64) * 32.0;
+            let _ = win.set_position(tauri::LogicalPosition::new(
+                pos.x as f64 / scale + off,
+                pos.y as f64 / scale + off,
+            ));
         }
     }
     bring_to_front(app, &win);

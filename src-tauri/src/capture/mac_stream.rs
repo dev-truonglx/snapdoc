@@ -234,7 +234,9 @@ fn spawn_ticker(
                 std::thread::sleep((target_time - now).min(Duration::from_millis(20)));
                 continue;
             }
-            frame_index += 1;
+            frame_index = frame_index.wrapping_add(1).max(
+                ((now - start).as_nanos() / interval.as_nanos().max(1)) as u32,
+            );
 
             let frame = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(frame) = frame {
