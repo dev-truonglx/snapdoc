@@ -135,7 +135,7 @@ const wrap: React.CSSProperties = {
   height: "100vh",
   display: "flex",
   alignItems: "center",
-  justifyContent: "center",
+  justifyContent: "space-around",
   gap: 0,
   boxSizing: "border-box",
   background: "rgba(28,28,32,0.96)",
