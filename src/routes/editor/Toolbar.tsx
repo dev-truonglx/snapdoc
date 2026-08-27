@@ -303,6 +303,7 @@ export default function Toolbar({
     blurMode, setBlurMode,
     blurSolidColor, setBlurSolidColor,
     undo, redo, canUndo, canRedo,
+    bringToFront, sendToBack,
     removeSelected, selectedId, selectedIds,
     stepCounter, arrowCounter, rectCounter,
     setStepCounter, setArrowCounter, setRectCounter,
@@ -319,6 +320,7 @@ export default function Toolbar({
       blurMode: s.blurMode, setBlurMode: s.setBlurMode,
       blurSolidColor: s.blurSolidColor, setBlurSolidColor: s.setBlurSolidColor,
       undo: s.undo, redo: s.redo, canUndo: s.canUndo, canRedo: s.canRedo,
+      bringToFront: s.bringToFront, sendToBack: s.sendToBack,
       removeSelected: s.removeSelected, selectedId: s.selectedId, selectedIds: s.selectedIds ?? [],
       stepCounter: s.stepCounter, arrowCounter: s.arrowCounter, rectCounter: s.rectCounter,
       setStepCounter: s.setStepCounter, setArrowCounter: s.setArrowCounter, setRectCounter: s.setRectCounter,
@@ -385,8 +387,9 @@ export default function Toolbar({
   const isNumberedArrow = !isMultiple && (tool === "numbered-arrow" || selectedAnn?.type === "numbered-arrow");
   const isNumberedRect  = !isMultiple && (tool === "numbered-rect" || selectedAnn?.type === "numbered-rect");
   const isCrop      = tool === "crop";
+  const isImage     = (!isMultiple && selectedAnn?.type === "image") || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "image"));
   // Tools dùng color + strokeWidth: hiển thị đầy đủ khi ở chế độ vẽ hoặc khi ở chế độ chọn/sửa
-  const hasStroke   = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop);
+  const hasStroke   = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop && !isImage);
 
   return (
     <div style={bar}>
@@ -453,18 +456,49 @@ export default function Toolbar({
 
               <div style={sep} />
 
-              {/* Undo / redo / xoá */}
+              {/* Undo / redo / xoá / layer order */}
               <div style={group}>
                 <button onClick={undo} disabled={!canUndo()} style={toolBtn(false)} title={t("editorToolbar.undo")}>↩︎</button>
                 <button onClick={redo} disabled={!canRedo()} style={toolBtn(false)} title={t("editorToolbar.redo")}>↪︎</button>
                 <button onClick={removeSelected} disabled={!selectedId && selectedIds.length === 0} style={toolBtn(false)} title={t("editorToolbar.delete")}>🗑</button>
               </div>
+
+              {/* Thứ tự lớp (Lên trên / Xuống dưới) — hiện khi có đối tượng được chọn */}
+              {(selectedId || selectedIds.length > 0) && (
+                <>
+                  <div style={sep} />
+                  <div style={group}>
+                    <button
+                      onClick={bringToFront}
+                      style={toolBtn(false)}
+                      title={t("editorToolbar.bringToFront")}
+                      aria-label="Bring to Front"
+                    >
+                      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+                        <path d="M8 12V3.5M4.5 7L8 3.5 11.5 7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M2.5 14h11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                      </svg>
+                    </button>
+                    <button
+                      onClick={sendToBack}
+                      style={toolBtn(false)}
+                      title={t("editorToolbar.sendToBack")}
+                      aria-label="Send to Back"
+                    >
+                      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+                        <path d="M8 4v8.5M4.5 9L8 12.5 11.5 9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M2.5 2h11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                      </svg>
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
 
             {/* DÒNG 2: THUỘC TÍNH CHI TIẾT THEO CÔNG CỤ ĐANG CHỌN (Màu, Nét, Size chữ, Đếm số, Blur...) */}
             <div style={toolbarRow}>
-              {/* Màu stroke — ẩn khi đang dùng highlight/blur */}
-              {!isHighlight && !isBlur && (
+              {/* Màu stroke — ẩn khi đang dùng highlight/blur/image */}
+              {!isHighlight && !isBlur && !isImage && (
                 <div style={group}>
                   <span style={dimLabel}>{t("editorToolbar.color")}</span>
                   {PRESET_COLORS.map((c) => (

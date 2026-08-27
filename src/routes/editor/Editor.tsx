@@ -17,7 +17,7 @@ import {
   parseDocPayload,
   suspendActive,
 } from "../../features/annotation/sessions";
-import { uid } from "../../features/annotation/model";
+import { uid, type ImageAnn } from "../../features/annotation/model";
 import {
   copyToClipboard,
   saveToFile,
@@ -71,6 +71,139 @@ export default function Editor() {
   // Signature của trạng thái cắt tại lần lưu gần nhất (`null` = chưa lưu lần
   // nào cho video đang mở). Xem `trimSig`.
   const [videoSavedSig, setVideoSavedSig] = useState<string | null>(null);
+
+  const insertImageAnnotation = (
+    dataUrl: string,
+    dropPos?: { clientX: number; clientY: number } | null,
+  ) => {
+    console.log("[SnapDoc Drag] insertImageAnnotation called, dataUrl length:", dataUrl?.length, "dropPos:", dropPos);
+    const currentDoc = useEditor.getState().doc;
+    if (!currentDoc) {
+      console.warn("[SnapDoc Drag] insertImageAnnotation aborted: no current doc");
+      return;
+    }
+
+    const img = new window.Image();
+    img.onload = () => {
+      console.log("[SnapDoc Drag] img.onload success - natural size:", img.naturalWidth, "x", img.naturalHeight);
+      const naturalW = img.naturalWidth || 200;
+      const naturalH = img.naturalHeight || 200;
+
+      // Giới hạn kích thước ban đầu tối đa 50% khung ảnh để không che hết canvas
+      const maxW = Math.max(100, Math.round(currentDoc.imgW * 0.5));
+      const maxH = Math.max(100, Math.round(currentDoc.imgH * 0.5));
+      let w = naturalW;
+      let h = naturalH;
+      if (w > maxW || h > maxH) {
+        const ratio = Math.min(maxW / w, maxH / h);
+        w = Math.max(20, Math.round(w * ratio));
+        h = Math.max(20, Math.round(h * ratio));
+      }
+
+      let x = Math.max(0, Math.round((currentDoc.imgW - w) / 2));
+      let y = Math.max(0, Math.round((currentDoc.imgH - h) / 2));
+
+      if (dropPos) {
+        const stageCanvas = document.querySelector(".konvajs-content canvas") as HTMLCanvasElement | null;
+        if (stageCanvas) {
+          const rect = stageCanvas.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            const scaleX = currentDoc.imgW / rect.width;
+            const scaleY = currentDoc.imgH / rect.height;
+            const dropImgX = (dropPos.clientX - rect.left) * scaleX;
+            const dropImgY = (dropPos.clientY - rect.top) * scaleY;
+            x = Math.max(0, Math.min(currentDoc.imgW - w, Math.round(dropImgX - w / 2)));
+            y = Math.max(0, Math.min(currentDoc.imgH - h, Math.round(dropImgY - h / 2)));
+            console.log("[SnapDoc Drag] calculated canvas pos:", { x, y, dropImgX, dropImgY, scaleX, scaleY });
+          }
+        }
+      }
+
+      const newAnn: ImageAnn = {
+        id: uid(),
+        type: "image",
+        src: dataUrl,
+        x,
+        y,
+        width: w,
+        height: h,
+      };
+
+      console.log("[SnapDoc Drag] adding ImageAnn to store:", newAnn);
+      useEditor.getState().addAnnotation(newAnn);
+      useEditor.getState().setTool("select");
+      useEditor.getState().select(newAnn.id);
+      flash(dropPos ? t("editorMain.imageAdded") : t("editorMain.imagePasted"));
+    };
+    img.onerror = (err) => {
+      console.error("[SnapDoc Drag] img.onerror failed to load dataUrl:", err);
+    };
+    img.src = dataUrl;
+  };
+  const lastInsertedRef = useRef<{ id: string; time: number } | null>(null);
+
+  const insertHistoryImageById = async (
+    historyId: string,
+    pos?: { clientX: number; clientY: number } | null,
+  ) => {
+    const now = Date.now();
+    if (lastInsertedRef.current && lastInsertedRef.current.id === historyId && now - lastInsertedRef.current.time < 800) {
+      console.log("[SnapDoc Drag] Ignored duplicate insertion for historyId:", historyId);
+      return;
+    }
+    lastInsertedRef.current = { id: historyId, time: now };
+
+    try {
+      console.log("[SnapDoc Drag] insertHistoryImageById fetching bytes for:", historyId);
+      const bytes = await ipc.getHistoryPreviewBytes(historyId).catch((err) => {
+        console.warn("[SnapDoc Drag] getHistoryPreviewBytes failed, trying getHistoryAssetBytes:", err);
+        return ipc.getHistoryAssetBytes(historyId);
+      });
+      if (bytes && (bytes.byteLength > 0 || (bytes as any).length > 0)) {
+        const blob = new Blob([bytes], { type: "image/png" });
+        const dataUrl = await readFileAsDataUrl(blob);
+        insertImageAnnotation(dataUrl, pos);
+      } else {
+        console.error("[SnapDoc Drag] bytes is empty for history item:", historyId);
+      }
+    } catch (err) {
+      console.error("[SnapDoc Drag] Lỗi kéo thả ảnh từ lịch sử:", err);
+    }
+  };
+
+  const readFileAsDataUrl = (file: File | Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const loadFilePathAsDataUrl = (path: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const src = convertFileSrc(path);
+      const img = new window.Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            resolve(src);
+            return;
+          }
+          ctx.drawImage(img, 0, 0);
+          resolve(canvas.toDataURL("image/png"));
+        } catch {
+          resolve(src);
+        }
+      };
+      img.onerror = () => reject(new Error("Cannot load image from path"));
+      img.src = src;
+    });
+  };
 
   // Video dirty = có thay đổi VÀ thay đổi đó khác lần lưu gần nhất.
   const videoDirty =
@@ -431,6 +564,16 @@ export default function Editor() {
       } else if ((e.key === "Delete" || e.key === "Backspace") && (s.selectedId || s.selectedIds.length > 0)) {
         e.preventDefault();
         s.removeSelected();
+      } else if (e.key === "]" || (mod && e.key === "]")) {
+        if (s.selectedId || s.selectedIds.length > 0) {
+          e.preventDefault();
+          e.shiftKey || mod ? s.bringToFront() : s.bringForward();
+        }
+      } else if (e.key === "[" || (mod && e.key === "[")) {
+        if (s.selectedId || s.selectedIds.length > 0) {
+          e.preventDefault();
+          e.shiftKey || mod ? s.sendToBack() : s.sendBackward();
+        }
       } else if (!mod) {
         const t = editorToolFromKey(e);
         if (t) {
@@ -442,6 +585,224 @@ export default function Editor() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // Dán ảnh từ Clipboard (Ctrl+V / Cmd+V)
+  useEffect(() => {
+    const handlePaste = async (e: ClipboardEvent) => {
+      if (videoDoc || !useEditor.getState().doc) return;
+
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable || useEditor.getState().editingTextId) {
+        return;
+      }
+
+      const items = e.clipboardData?.items;
+      if (items) {
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          if (item.type.startsWith("image/")) {
+            const file = item.getAsFile();
+            if (file) {
+              e.preventDefault();
+              try {
+                const dataUrl = await readFileAsDataUrl(file);
+                insertImageAnnotation(dataUrl);
+                return;
+              } catch (err) {
+                console.error("Lỗi đọc ảnh từ clipboard:", err);
+              }
+            }
+          }
+        }
+      }
+
+      // Fallback cho Tauri clipboard plugin
+      if ("__TAURI_INTERNALS__" in window) {
+        try {
+          const { readImage } = await import("@tauri-apps/plugin-clipboard-manager");
+          const clipImg = await readImage().catch(() => null);
+          if (clipImg) {
+            const rgba = await clipImg.rgba();
+            const size = await clipImg.size();
+            if (size.width > 0 && size.height > 0) {
+              e.preventDefault();
+              const canvas = document.createElement("canvas");
+              canvas.width = size.width;
+              canvas.height = size.height;
+              const ctx = canvas.getContext("2d");
+              if (ctx) {
+                const imgData = ctx.createImageData(size.width, size.height);
+                imgData.data.set(rgba);
+                ctx.putImageData(imgData, 0, 0);
+                const dataUrl = canvas.toDataURL("image/png");
+                insertImageAnnotation(dataUrl);
+                return;
+              }
+            }
+          }
+        } catch {
+          // không có ảnh trong clipboard
+        }
+      }
+    };
+
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  }, [videoDoc]);
+
+  // Lắng nghe kéo thả file từ hệ điều hành (Tauri drag drop event)
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let unlisten: (() => void) | null = null;
+
+    getCurrentWebviewWindow()
+      .onDragDropEvent(async (event) => {
+        if (videoDoc || !useEditor.getState().doc) return;
+        const payload = event.payload;
+        if (payload.type === "drop") {
+          const historyId = (window as any).__snapdocDraggingHistoryId;
+          if (historyId) {
+            (window as any).__snapdocDraggingHistoryId = null;
+            const dpr = window.devicePixelRatio || 1;
+            insertHistoryImageById(historyId, {
+              clientX: payload.position.x / dpr,
+              clientY: payload.position.y / dpr,
+            });
+            return;
+          }
+
+          const imagePaths = payload.paths.filter((p) =>
+            /\.(png|jpe?g|webp|bmp|gif|svg|ico|tiff?|avif)$/i.test(p),
+          );
+          if (imagePaths.length === 0) return;
+
+          const dpr = window.devicePixelRatio || 1;
+          const clientX = payload.position.x / dpr;
+          const clientY = payload.position.y / dpr;
+
+          for (let i = 0; i < imagePaths.length; i++) {
+            try {
+              const dataUrl = await loadFilePathAsDataUrl(imagePaths[i]);
+              insertImageAnnotation(dataUrl, { clientX: clientX + i * 20, clientY: clientY + i * 20 });
+            } catch (err) {
+              console.error("Lỗi load ảnh từ đường dẫn:", err);
+            }
+          }
+        }
+      })
+      .then((un) => {
+        unlisten = un;
+      });
+
+    return () => {
+      unlisten?.();
+    };
+  }, [videoDoc]);
+
+  const isImageFile = (file: File) => {
+    return file.type.startsWith("image/") || /\.(png|jpe?g|webp|bmp|gif|svg|ico|tiff?|avif)$/i.test(file.name);
+  };
+
+  // Lắng nghe kéo thả trong toàn bộ cửa sổ editor (Web drag & drop: từ HistoryStrip hoặc từ ngoài vào)
+  useEffect(() => {
+    const onCustomDrop = (e: Event) => {
+      const customEvt = e as CustomEvent<{ id: string; clientX: number; clientY: number }>;
+      if (!customEvt.detail?.id) return;
+      console.log("[SnapDoc Drag] custom event snapdoc:insert-history-item received:", customEvt.detail);
+      insertHistoryImageById(customEvt.detail.id, {
+        clientX: customEvt.detail.clientX,
+        clientY: customEvt.detail.clientY,
+      });
+    };
+
+    const onDragOver = (e: DragEvent) => {
+      if (videoDoc || !useEditor.getState().doc) return;
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = "copy";
+      }
+    };
+
+    const onDragEnter = (e: DragEvent) => {
+      console.log("[SnapDoc Drag] window onDragEnter, types:", e.dataTransfer?.types);
+      if (videoDoc || !useEditor.getState().doc) return;
+      e.preventDefault();
+    };
+
+    const onDrop = async (e: DragEvent) => {
+      console.log("[SnapDoc Drag] window onDrop fired! pos:", { x: e.clientX, y: e.clientY });
+      console.log("[SnapDoc Drag] window onDrop dataTransfer types:", e.dataTransfer?.types);
+      console.log("[SnapDoc Drag] window onDrop global dragging ID:", (window as any).__snapdocDraggingHistoryId);
+
+      if (videoDoc || !useEditor.getState().doc) {
+        console.warn("[SnapDoc Drag] onDrop ignored: videoDoc or no doc loaded");
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") {
+        console.log("[SnapDoc Drag] onDrop ignored: dropped on input/textarea");
+        return;
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      let historyId =
+        (window as any).__snapdocDraggingHistoryId ||
+        e.dataTransfer?.getData("application/snapdoc-history-id");
+      (window as any).__snapdocDraggingHistoryId = null;
+
+      if (!historyId) {
+        const text = e.dataTransfer?.getData("text/plain");
+        console.log("[SnapDoc Drag] text/plain received:", text);
+        if (text?.startsWith("snapdoc-history:")) {
+          historyId = text.replace("snapdoc-history:", "");
+        }
+      }
+
+      console.log("[SnapDoc Drag] resolved historyId:", historyId);
+
+      if (historyId) {
+        insertHistoryImageById(historyId, { clientX: e.clientX, clientY: e.clientY });
+        return;
+      }
+
+      if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+        console.log("[SnapDoc Drag] dropped files count:", e.dataTransfer.files.length);
+        const files = Array.from(e.dataTransfer.files).filter(isImageFile);
+        if (files.length > 0) {
+          const clientX = e.clientX;
+          const clientY = e.clientY;
+          for (let i = 0; i < files.length; i++) {
+            try {
+              const dataUrl = await readFileAsDataUrl(files[i]);
+              insertImageAnnotation(dataUrl, { clientX: clientX + i * 20, clientY: clientY + i * 20 });
+            } catch (err) {
+              console.error("[SnapDoc Drag] Lỗi đọc file thả vào:", err);
+            }
+          }
+        }
+      }
+    };
+
+    window.addEventListener("snapdoc:insert-history-item", onCustomDrop);
+    document.addEventListener("dragenter", onDragEnter, true);
+    document.addEventListener("dragover", onDragOver, true);
+    document.addEventListener("drop", onDrop, true);
+    window.addEventListener("dragenter", onDragEnter, true);
+    window.addEventListener("dragover", onDragOver, true);
+    window.addEventListener("drop", onDrop, true);
+    return () => {
+      window.removeEventListener("snapdoc:insert-history-item", onCustomDrop);
+      document.removeEventListener("dragenter", onDragEnter, true);
+      document.removeEventListener("dragover", onDragOver, true);
+      document.removeEventListener("drop", onDrop, true);
+      window.removeEventListener("dragenter", onDragEnter, true);
+      window.removeEventListener("dragover", onDragOver, true);
+      window.removeEventListener("drop", onDrop, true);
+    };
+  }, [videoDoc]);
 
   const doFlatten = () => {
     setShowFlattenConfirm(true);
@@ -558,7 +919,16 @@ export default function Editor() {
         onStitch={doStitch}
         busy={busy}
       />
-      <div style={{ flex: 1, minHeight: 0, background: "#161619", display: "flex", ...(videoDoc ? { padding: 10, boxSizing: "border-box" } : null) }}>
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          background: "#161619",
+          position: "relative",
+          display: "flex",
+          ...(videoDoc ? { padding: 10, boxSizing: "border-box" } : null),
+        }}
+      >
         {videoDoc ? (
           <VideoTrimmer
             key={`${videoDoc.historyId}:${videoVersion}`}

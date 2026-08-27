@@ -284,6 +284,8 @@
     "undo": "Undo (Ctrl/Cmd+Z)",
     "redo": "Redo",
     "delete": "Delete (Delete)",
+    "bringToFront": "Bring to front (])",
+    "sendToBack": "Send to back ([)",
     "save": "Save (Ctrl/Cmd+S)",
     "saveOptions": "Save options",
     "saveAs": "Save As… (Ctrl/Cmd+Shift+S)",
@@ -317,7 +319,10 @@
     "draftFoundPrompt": "Found unsaved edits from earlier.",
     "draftKeep": "Continue",
     "draftDiscard": "Discard",
-    "draftDiscarded": "Unsaved edits discarded"
+    "draftDiscarded": "Unsaved edits discarded",
+    "imagePasted": "Image pasted into editor",
+    "imageAdded": "Image added to editor",
+    "dropImageHere": "Drop image here to insert"
   },
   "historyStrip": {
     "recent": "Recent",

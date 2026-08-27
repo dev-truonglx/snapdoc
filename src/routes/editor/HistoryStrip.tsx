@@ -46,6 +46,8 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
   // lúc menu mở, tra lại theo id khi cần).
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
+  const isDraggingRef = useRef(false);
   // Id của lần bấm gần nhất — chỉ để quản spinner theo id. Việc chống race
   // "2 promise resolve sai thứ tự bấm" (từng gây hiện sai ảnh + gắn nhầm
   // `historyId`, khiến Save ghi đè nhầm record) nay do bộ đếm thế hệ DÙNG
@@ -235,7 +237,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
   };
 
   return (
-    <div style={strip}>
+    <div ref={stripRef} style={strip}>
       <span style={label}>{t("historyStrip.recent")}</span>
       <div style={scrollRow}>
         {items.map((item) => {
@@ -244,6 +246,46 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
             <div
               key={item.id}
               className="history-thumb"
+              draggable={!isVideo}
+              onDragStart={(e) => {
+                isDraggingRef.current = true;
+                console.log("[SnapDoc Drag] onDragStart triggered for item:", item.id, "isVideo:", isVideo);
+                if (isVideo) {
+                  e.preventDefault();
+                  return;
+                }
+                (window as any).__snapdocDraggingHistoryId = item.id;
+                e.dataTransfer.setData("application/snapdoc-history-id", item.id);
+                e.dataTransfer.setData("text/plain", `snapdoc-history:${item.id}`);
+                e.dataTransfer.effectAllowed = "copy";
+                if (e.currentTarget) {
+                  const imgEl = e.currentTarget.querySelector("img");
+                  if (imgEl) {
+                    try {
+                      e.dataTransfer.setDragImage(imgEl, 46, 32);
+                    } catch {}
+                  }
+                }
+                console.log("[SnapDoc Drag] onDragStart setData finished, global ID set to:", item.id);
+              }}
+              onDragEnd={(e) => {
+                console.log("[SnapDoc Drag] onDragEnd dropEffect:", e.dataTransfer?.dropEffect, "pos:", { x: e.clientX, y: e.clientY });
+                (window as any).__snapdocDraggingHistoryId = null;
+                setTimeout(() => {
+                  isDraggingRef.current = false;
+                }, 250);
+
+                const stripEl = stripRef.current;
+                const stripTop = stripEl ? stripEl.getBoundingClientRect().top : window.innerHeight - 90;
+                if (e.clientY < stripTop && e.clientY > 0 && e.clientX > 0 && e.clientX < window.innerWidth) {
+                  console.log("[SnapDoc Drag] Dispatched snapdoc:insert-history-item from onDragEnd:", item.id, { clientX: e.clientX, clientY: e.clientY });
+                  window.dispatchEvent(
+                    new CustomEvent("snapdoc:insert-history-item", {
+                      detail: { id: item.id, clientX: e.clientX, clientY: e.clientY },
+                    }),
+                  );
+                }
+              }}
               style={{
                 ...thumbBtn,
                 outline:
@@ -253,7 +295,14 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                 opacity: openingId === item.id ? 0.55 : 1,
                 cursor: openingId ? "wait" : "pointer",
               }}
-              onClick={() => openItem(item)}
+              onClick={() => {
+                if (isDraggingRef.current) {
+                  console.log("[SnapDoc Drag] click ignored because dragging occurred");
+                  return;
+                }
+                console.log("[SnapDoc Drag] history thumb clicked:", item.id);
+                openItem(item);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setMenu({ id: item.id, x: e.clientX, y: e.clientY });
@@ -398,7 +447,11 @@ const thumbBtn: React.CSSProperties = {
   borderRadius: 6,
   overflow: "hidden",
   cursor: "pointer",
+  cursor: "grab",
   background: "#000",
+  userSelect: "none",
+  WebkitUserSelect: "none",
+  ...({ WebkitUserDrag: "element" } as any),
 };
 
 const spinner: React.CSSProperties = {
@@ -416,6 +469,8 @@ const thumbImg: React.CSSProperties = {
   height: "100%",
   objectFit: "cover",
   display: "block",
+  pointerEvents: "none",
+  userSelect: "none",
 };
 
 const copyBtn: React.CSSProperties = {

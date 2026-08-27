@@ -133,6 +133,32 @@ function StepSelectionFrame({ x, y, radius }: { x: number; y: number; radius: nu
   );
 }
 
+function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
+  if (!src) return { url: "" };
+  if (src.startsWith("data:") && src.length > 200_000) {
+    try {
+      const commaIdx = src.indexOf(",");
+      if (commaIdx !== -1) {
+        const meta = src.slice(0, commaIdx);
+        const rawBase64 = src.slice(commaIdx + 1);
+        const mimeMatch = meta.match(/:(.*?);/);
+        const mime = mimeMatch ? mimeMatch[1] : "image/png";
+        const byteChars = atob(rawBase64);
+        const byteNumbers = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) {
+          byteNumbers[i] = byteChars.charCodeAt(i);
+        }
+        const blob = new Blob([byteNumbers], { type: mime });
+        const blobUrl = URL.createObjectURL(blob);
+        return { url: blobUrl, revoke: () => URL.revokeObjectURL(blobUrl) };
+      }
+    } catch (e) {
+      console.error("Lỗi chuyển đổi Blob URL:", e);
+    }
+  }
+  return { url: src };
+}
+
 const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoomBar }, ref) => {
   const { t } = useTranslation();
   const doc = useEditor((s) => s.doc);
@@ -255,32 +281,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       document.removeEventListener("pointerdown", handleOutsideClick, true);
     };
   }, [!!editing]);
-
-function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
-  if (!src) return { url: "" };
-  if (src.startsWith("data:") && src.length > 200_000) {
-    try {
-      const commaIdx = src.indexOf(",");
-      if (commaIdx !== -1) {
-        const meta = src.slice(0, commaIdx);
-        const rawBase64 = src.slice(commaIdx + 1);
-        const mimeMatch = meta.match(/:(.*?);/);
-        const mime = mimeMatch ? mimeMatch[1] : "image/png";
-        const byteChars = atob(rawBase64);
-        const byteNumbers = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) {
-          byteNumbers[i] = byteChars.charCodeAt(i);
-        }
-        const blob = new Blob([byteNumbers], { type: mime });
-        const blobUrl = URL.createObjectURL(blob);
-        return { url: blobUrl, revoke: () => URL.revokeObjectURL(blobUrl) };
-      }
-    } catch (e) {
-      console.error("Lỗi chuyển đổi Blob URL:", e);
-    }
-  }
-  return { url: src };
-}
 
   // Tải ảnh nền. Cờ `cancelled`: undo/redo/crop/stitch đổi `doc.image` liên
   // tiếp — decode của ảnh CŨ (to hơn → chậm hơn) có thể resolve SAU ảnh mới
@@ -965,7 +965,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
           let ax2 = a.x;
           let ay2 = a.y;
 
-          if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect") {
+          if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect" || a.type === "image") {
             ax2 = a.x + a.width;
             ay2 = a.y + a.height;
           } else if (a.type === "ellipse") {
@@ -1098,7 +1098,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
         width: newW,
         height: newH,
       } as Partial<Annotation>);
-    } else if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect") {
+    } else if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect" || a.type === "image") {
       useEditor.getState().updateAnnotation(a.id, {
         x: node.x(),
         y: node.y(),
@@ -1725,6 +1725,20 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
                   )}
                 </Group>
               );
+              // image — ảnh chèn thêm
+              if (a.type === "image")
+              return (
+                <ImageItem
+                  key={a.id}
+                  ann={a}
+                  draggable={draggable}
+                  isSelected={isSelected}
+                  activeIds={activeIds}
+                  onSelect={(multi) => useEditor.getState().select(a.id, multi)}
+                  onDragEnd={(e) => onDragEnd(a.id, e)}
+                  onTransformEnd={(node) => onTransformEnd(a, node)}
+                />
+              );
               return null;
             })}
 
@@ -2012,7 +2026,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
         {editing && (() => {
           const activeAnn = doc?.annotations.find((x) => x.id === editing.id);
           const activeFontSize = ((activeAnn?.type === "text" ? (activeAnn as any).fontSize : fontSize) ?? fontSize) * scale;
-          const activeColor = activeAnn?.color ?? color;
+          const activeColor = (activeAnn && "color" in activeAnn ? (activeAnn as any).color : null) ?? color;
           return (
             <div 
               style={{
@@ -2549,6 +2563,73 @@ function BlurRect({ ann, img, draggable, onSelect, onDragEnd, onTransformEnd }: 
   }
 
   return <KImage {...sharedProps} image={processed} />;
+}
+
+interface ImageItemProps {
+  ann: import("../model").ImageAnn;
+  draggable: boolean;
+  isSelected: boolean;
+  activeIds: string[];
+  onSelect: (multi: boolean) => void;
+  onDragEnd: (e: Konva.KonvaEventObject<DragEvent>) => void;
+  onTransformEnd: (node: Konva.Node) => void;
+}
+
+function ImageItem({ ann, draggable, isSelected, activeIds, onSelect, onDragEnd, onTransformEnd }: ImageItemProps) {
+  const [loadedImg, setLoadedImg] = useState<HTMLImageElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const el = new window.Image();
+    el.crossOrigin = "anonymous";
+    const onDone = () => {
+      if (!cancelled) setLoadedImg(el);
+    };
+    if (typeof el.decode === "function") {
+      el.src = ann.src;
+      el.decode().then(onDone).catch(() => {
+        el.onload = onDone;
+        el.onerror = () => console.error("Không thể load ảnh ann:", ann.id);
+        el.src = ann.src;
+      });
+    } else {
+      el.onload = onDone;
+      el.onerror = () => console.error("Không thể load ảnh ann:", ann.id);
+      el.src = ann.src;
+    }
+    return () => {
+      cancelled = true;
+      el.onload = null;
+      el.onerror = null;
+    };
+  }, [ann.src, ann.id]);
+
+  if (!loadedImg) return null;
+
+  return (
+    <Group key={ann.id}>
+      <KImage
+        id={ann.id}
+        image={loadedImg}
+        x={ann.x}
+        y={ann.y}
+        width={ann.width}
+        height={ann.height}
+        shadowColor={isSelected ? "#3b82f6" : undefined}
+        shadowBlur={isSelected ? 6 : 0}
+        shadowOpacity={isSelected ? 0.9 : 0}
+        draggable={draggable}
+        listening={draggable}
+        onClick={(e) => onSelect(Boolean(e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey))}
+        onTap={() => onSelect(false)}
+        onDragEnd={onDragEnd}
+        onTransformEnd={(e) => onTransformEnd(e.target)}
+      />
+      {isSelected && activeIds.length > 1 && (
+        <SelectionFrame x={ann.x} y={ann.y} width={ann.width} height={ann.height} />
+      )}
+    </Group>
+  );
 }
 
 AnnotationStage.displayName = "AnnotationStage";
