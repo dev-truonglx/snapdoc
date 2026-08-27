@@ -434,7 +434,7 @@ fn window_snap_and_rect(
 #[cfg(target_os = "macos")]
 fn snapshot_product_windows(app: &AppHandle) {
     let keep = windows::snapshot_visible_product_windows(app);
-    *app.state::<AppState>().visible_product_windows.lock().unwrap() = keep;
+    *app.state::<AppState>().visible_product_windows.lock().unwrap_or_else(|e| e.into_inner()) = keep;
 }
 #[cfg(not(target_os = "macos"))]
 fn snapshot_product_windows(_app: &AppHandle) {}
@@ -449,7 +449,7 @@ fn with_product_windows_protected<T>(
 ) -> Result<T, String> {
     #[cfg(target_os = "macos")]
     {
-        let keep = app.state::<AppState>().visible_product_windows.lock().unwrap().clone();
+        let keep = app.state::<AppState>().visible_product_windows.lock().unwrap_or_else(|e| e.into_inner()).clone();
         windows::protect_product_windows(app, &keep);
         let result = f();
         windows::unprotect_product_windows(app);
@@ -709,12 +709,12 @@ pub fn run_record_picker(app: &AppHandle, mode: &str) {
     // thay vì chụp ảnh. Không cần freeze vì đây là dialog thường, không phải
     // overlay phủ kín màn hình.
     if mode == "window" {
-        *app.state::<AppState>().pending_record.lock().unwrap() = true;
+        *app.state::<AppState>().pending_record.lock().unwrap_or_else(|e| e.into_inner()) = true;
         if bar_is_visible(app) {
             hide_bar(app);
         }
         if let Err(e) = windows::open_window_picker(app, true) {
-            *app.state::<AppState>().pending_record.lock().unwrap() = false;
+            *app.state::<AppState>().pending_record.lock().unwrap_or_else(|e| e.into_inner()) = false;
             let _ = app.emit("snapdoc-error", e);
         }
         return;
@@ -726,7 +726,7 @@ pub fn run_record_picker(app: &AppHandle, mode: &str) {
     }
     take_frozen_screens(app);
     let result: Result<(), String> = (|| {
-        *app.state::<AppState>().pending_record.lock().unwrap() = true;
+        *app.state::<AppState>().pending_record.lock().unwrap_or_else(|e| e.into_inner()) = true;
         let overlay_mode = if mode == "full" { "monitor" } else { mode };
         // "region": đề xuất lại vùng đã quay lần gần nhất (nếu có) — overlay
         // tự khớp đúng màn hình + validate còn nằm trong biên (xem
@@ -745,7 +745,7 @@ pub fn run_record_picker(app: &AppHandle, mode: &str) {
         Ok(())
     })();
     if let Err(e) = result {
-        *app.state::<AppState>().pending_record.lock().unwrap() = false;
+        *app.state::<AppState>().pending_record.lock().unwrap_or_else(|e| e.into_inner()) = false;
         clear_frozen_screens(app);
         let _ = app.emit("snapdoc-error", e);
     }
@@ -764,7 +764,7 @@ pub fn confirm_region_record_start(app: &AppHandle) {
 /// lần chọn tiếp theo mặc định quay về chụp ảnh như thường lệ.
 fn take_pending_record(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
-    let mut guard = state.pending_record.lock().unwrap();
+    let mut guard = state.pending_record.lock().unwrap_or_else(|e| e.into_inner());
     std::mem::take(&mut *guard)
 }
 
@@ -1021,7 +1021,7 @@ pub fn cancel_overlay(app: &AppHandle) {
     // Reset cờ chọn phạm vi quay — tránh rò rỉ sang lần chọn vùng/cửa sổ kế
     // tiếp (vốn dành cho chụp ảnh) nếu người dùng bấm Esc giữa lúc đang chọn
     // phạm vi quay.
-    *app.state::<AppState>().pending_record.lock().unwrap() = false;
+    *app.state::<AppState>().pending_record.lock().unwrap_or_else(|e| e.into_inner()) = false;
     // Giải phóng frozen screen data — không còn cần sau khi overlay đóng.
     clear_frozen_screens(app);
     windows::close_overlays(app);

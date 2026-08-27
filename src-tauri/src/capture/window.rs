@@ -226,14 +226,18 @@ pub fn capture_thumbs_streaming(ids: &[u32], on_ready: impl Fn(u32, Option<Strin
 
     #[cfg(not(target_os = "macos"))]
     {
-        std::thread::scope(|scope| {
-            for &id in ids {
-                let on_ready = &on_ready;
-                scope.spawn(move || {
-                    let thumb = capture_raw_by_id(id).ok().and_then(|img| shrink_to_thumb(&img).ok());
-                    on_ready(id, thumb);
-                });
-            }
-        });
+        // Chia batch tối đa 8 thread mỗi lần — tránh spawn vô hạn thread khi
+        // user mở 50+ cửa sổ (gây tràn GDI handle trên Windows, lag hệ thống).
+        for chunk in ids.chunks(8) {
+            std::thread::scope(|scope| {
+                for &id in chunk {
+                    let on_ready = &on_ready;
+                    scope.spawn(move || {
+                        let thumb = capture_raw_by_id(id).ok().and_then(|img| shrink_to_thumb(&img).ok());
+                        on_ready(id, thumb);
+                    });
+                }
+            });
+        }
     }
 }

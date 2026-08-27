@@ -42,6 +42,16 @@
   background-clip: content-box;
 }
 
+.preview-scroll-container {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.preview-scroll-container::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
 html,
 body,
 #root {

@@ -95,6 +95,18 @@ export interface BlurAnn extends Base {
   solidColor: string;
 }
 
+/** Ảnh chèn thêm vào tài liệu (từ kéo thả hoặc dán clipboard). */
+export interface ImageAnn {
+  id: string;
+  type: "image";
+  /** Data URL hoặc URL ảnh. */
+  src: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export type Annotation =
   | RectAnn
   | EllipseAnn
@@ -105,7 +117,8 @@ export type Annotation =
   | NumberedArrowAnn
   | NumberedRectAnn
   | HighlightAnn
-  | BlurAnn;
+  | BlurAnn
+  | ImageAnn;
 
 /** Một "tài liệu" editor: ảnh nền + danh sách annotation (object-based). */
 export interface Doc {

@@ -87,15 +87,15 @@ pub struct LastCaptureMode {
 
 impl LastCaptureMode {
     pub fn get(&self) -> (String, String) {
-        let mode = self.mode.lock().unwrap().clone();
-        let output = self.output.lock().unwrap().clone();
+        let mode = self.mode.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let output = self.output.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mode = if mode.is_empty() { "region".to_string() } else { mode };
         let output = if output.is_empty() { "editor".to_string() } else { output };
         (mode, output)
     }
     pub fn set(&self, mode: &str, output: &str) {
-        *self.mode.lock().unwrap() = mode.to_string();
-        *self.output.lock().unwrap() = output.to_string();
+        *self.mode.lock().unwrap_or_else(|e| e.into_inner()) = mode.to_string();
+        *self.output.lock().unwrap_or_else(|e| e.into_inner()) = output.to_string();
     }
 
     /// Xoá `mode` (giữ nguyên `output`) — gọi khi 1 phiên "có trạng thái đặc
@@ -105,7 +105,7 @@ impl LastCaptureMode {
     /// kiện chuột toàn cục nào đó, xem `windows::input_loop`) sẽ bị hiểu nhầm
     /// là "vẫn đang chụp cuộn" và tự khởi động lại phiên, thay vì bị bỏ qua.
     pub fn clear_mode(&self) {
-        *self.mode.lock().unwrap() = String::new();
+        *self.mode.lock().unwrap_or_else(|e| e.into_inner()) = String::new();
     }
 }
 

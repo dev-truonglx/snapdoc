@@ -13,9 +13,12 @@ import { useTranslation } from "react-i18next";
 import { useEditor } from "../store";
 import type { Annotation } from "../model";
 import { uid } from "../model";
+import { copyToClipboard } from "../../output/useOutput";
 
 export interface StageHandle {
   exportPng: () => string | null;
+  exportCropPng: () => string | null;
+  hasActiveCrop: () => boolean;
   flattenPng: () => string | null;
   zoomIn: () => void;
   zoomOut: () => void;
@@ -52,6 +55,7 @@ interface ArrowDraft {
 interface AnnotationStageProps {
   /** Ẩn thanh zoom (Fit/100%/±) — dùng cho "Chụp nhanh". Mặc định hiện. */
   hideZoomBar?: boolean;
+  onFlash?: (msg: string) => void;
 }
 
 /** Khung viền chọn từng đối tượng khi chọn nhiều */
@@ -133,7 +137,35 @@ function StepSelectionFrame({ x, y, radius }: { x: number; y: number; radius: nu
   );
 }
 
-const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoomBar }, ref) => {
+/**
+ * Component Canvas chỉnh sửa ảnh SnapDoc (React-Konva).
+ * Hỗ trợ vẽ vector annotations (text, arrow, rect, ellipse, step counter, highlight, blur)
+ * và tương tác chuột mượt mà 60 FPS (zoom quanh con trỏ, pan Space/Middle drag, crop, crop history).
+ */
+function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
+  if (src.startsWith("data:")) {
+    try {
+      const parts = src.split(",");
+      const mimeMatch = parts[0].match(/:(.*?);/);
+      const mime = mimeMatch ? mimeMatch[1] : "image/png";
+      const b64 = atob(parts[1]);
+      if (b64.length > 500_000) {
+        const byteNumbers = new Uint8Array(b64.length);
+        for (let i = 0; i < b64.length; i++) {
+          byteNumbers[i] = b64.charCodeAt(i);
+        }
+        const blob = new Blob([byteNumbers], { type: mime });
+        const blobUrl = URL.createObjectURL(blob);
+        return { url: blobUrl, revoke: () => URL.revokeObjectURL(blobUrl) };
+      }
+    } catch (e) {
+      console.error("Lỗi chuyển đổi Blob URL:", e);
+    }
+  }
+  return { url: src };
+}
+
+const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoomBar, onFlash }, ref) => {
   const { t } = useTranslation();
   const doc = useEditor((s) => s.doc);
   const tool = useEditor((s) => s.tool);
@@ -156,6 +188,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const stageRef = useRef<Konva.Stage>(null);
   const layerRef = useRef<Konva.Layer>(null);
   const trRef = useRef<Konva.Transformer>(null);
+  const cropOverlayGroupRef = useRef<Konva.Group>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const [img, setImg] = useState<HTMLImageElement | null>(null);
@@ -214,6 +247,19 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const [resizingCropHandle, setResizingCropHandle] = useState<string | null>(null);
   const [cropHoverHandle, setCropHoverHandle] = useState<string | null>(null);
 
+  // Reset crop khi chuyển đổi ảnh hoặc chuyển sang công cụ khác
+  useEffect(() => {
+    setCropRect(null);
+    setCropHistory([]);
+  }, [doc?.image, doc?.historyId, doc?.filePath]);
+
+  useEffect(() => {
+    if (tool !== "crop") {
+      setCropRect(null);
+      setCropHistory([]);
+    }
+  }, [tool]);
+
   // Focus tường minh ô nhập chữ khi bắt đầu sửa. `autoFocus` không đáng tin
   // trong webview (Tauri) khi phần tử được tạo ngay trong handler mousedown —
   // nếu mất focus, phím gõ rơi xuống window và bị hiểu thành phím tắt công cụ.
@@ -255,32 +301,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       document.removeEventListener("pointerdown", handleOutsideClick, true);
     };
   }, [!!editing]);
-
-function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
-  if (!src) return { url: "" };
-  if (src.startsWith("data:") && src.length > 200_000) {
-    try {
-      const commaIdx = src.indexOf(",");
-      if (commaIdx !== -1) {
-        const meta = src.slice(0, commaIdx);
-        const rawBase64 = src.slice(commaIdx + 1);
-        const mimeMatch = meta.match(/:(.*?);/);
-        const mime = mimeMatch ? mimeMatch[1] : "image/png";
-        const byteChars = atob(rawBase64);
-        const byteNumbers = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) {
-          byteNumbers[i] = byteChars.charCodeAt(i);
-        }
-        const blob = new Blob([byteNumbers], { type: mime });
-        const blobUrl = URL.createObjectURL(blob);
-        return { url: blobUrl, revoke: () => URL.revokeObjectURL(blobUrl) };
-      }
-    } catch (e) {
-      console.error("Lỗi chuyển đổi Blob URL:", e);
-    }
-  }
-  return { url: src };
-}
 
   // Tải ảnh nền. Cờ `cancelled`: undo/redo/crop/stitch đổi `doc.image` liên
   // tiếp — decode của ảnh CŨ (to hơn → chậm hơn) có thể resolve SAU ảnh mới
@@ -498,13 +518,21 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
     };
   }, []);
 
-  // Keyboard shortcuts: Delete để xóa crop, Escape để hủy, Ctrl/Cmd+Z để undo crop
+  // Keyboard shortcuts: Delete để xóa crop, Escape để hủy, Ctrl/Cmd+Z để undo crop, Ctrl/Cmd+C để copy crop
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       // Bỏ qua nếu đang nhập text
       const tag = (document.activeElement as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if (useEditor.getState().editingTextId) return;
+
+      // Ctrl/Cmd+C: copy phần ảnh trong khung crop
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c" && cropRect) {
+        e.preventDefault();
+        e.stopPropagation();
+        handleCopyCrop();
+        return;
+      }
 
       // Ctrl/Cmd+Z: undo crop (nếu có crop history)
       if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey && cropRect && cropHistory.length > 0) {
@@ -533,7 +561,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [cropRect, cropHistory]);
+  }, [cropRect, cropHistory, scale, doc]);
 
   // Pointer events trên scroll container cho pan.
   // Dùng setPointerCapture để tiếp tục nhận move/up kể cả khi chuột ra ngoài.
@@ -660,24 +688,138 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
   const toggleFitActual = () =>
     Math.abs(scale - 1) < 0.001 ? doZoomFit() : doZoomActual();
 
+  /**
+   * Xuất ảnh PNG chất lượng gốc 1:1 (Master Resolution).
+   * - Nếu không có annotation: vẽ trực tiếp từ `HTMLImageElement` gốc lên canvas 1:1 (chuẩn tuyệt đối 100%, không qua resample).
+   * - Nếu có annotation: tạm thời đặt Stage và Layer về đúng kích thước pixel gốc (1:1), vẽ vector sắc nét, lấy snapshot rồi hoàn trả kích thước xem.
+   */
+  const renderMasterPng = (cropArea?: { x: number; y: number; width: number; height: number } | null): string | null => {
+    if (!doc || !img) return null;
+
+    const imgW = doc.imgW;
+    const imgH = doc.imgH;
+
+    // 1. Trường hợp không có annotation nào: xuất trực tiếp từ ảnh gốc img
+    if (doc.annotations.length === 0) {
+      if (cropArea) {
+        const rx = cropArea.width < 0 ? cropArea.x + cropArea.width : cropArea.x;
+        const ry = cropArea.height < 0 ? cropArea.y + cropArea.height : cropArea.y;
+        const rw = Math.abs(cropArea.width);
+        const rh = Math.abs(cropArea.height);
+        if (rw <= 0 || rh <= 0) return null;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(rw);
+        canvas.height = Math.round(rh);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, rx, ry, rw, rh, 0, 0, rw, rh);
+        return canvas.toDataURL("image/png");
+      } else {
+        if (doc.image.startsWith("data:")) {
+          return doc.image;
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = imgW;
+        canvas.height = imgH;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, 0, 0, imgW, imgH);
+        return canvas.toDataURL("image/png");
+      }
+    }
+
+    // 2. Trường hợp có annotations: render qua Konva ở độ phân giải 1:1 chuẩn xác
+    const stage = stageRef.current;
+    const layer = layerRef.current;
+    if (!stage || !layer) return null;
+
+    // Lưu lại kích thước & scale hiển thị hiện tại của Stage/Layer
+    const prevStageW = stage.width();
+    const prevStageH = stage.height();
+    const prevScaleX = layer.scaleX();
+    const prevScaleY = layer.scaleY();
+
+    // Ẩn Transformer và khung chọn crop
+    trRef.current?.nodes([]);
+    cropOverlayGroupRef.current?.hide();
+
+    // Đặt Stage và Layer về kích thước gốc 1:1
+    stage.width(imgW);
+    stage.height(imgH);
+    layer.scale({ x: 1, y: 1 });
+    layer.draw();
+
+    let dataUrl: string | null = null;
+    if (cropArea) {
+      const rx = cropArea.width < 0 ? cropArea.x + cropArea.width : cropArea.x;
+      const ry = cropArea.height < 0 ? cropArea.y + cropArea.height : cropArea.y;
+      const rw = Math.abs(cropArea.width);
+      const rh = Math.abs(cropArea.height);
+      dataUrl = stage.toDataURL({
+        x: rx,
+        y: ry,
+        width: rw,
+        height: rh,
+        pixelRatio: 1,
+        mimeType: "image/png",
+      });
+    } else {
+      dataUrl = stage.toDataURL({
+        pixelRatio: 1,
+        mimeType: "image/png",
+      });
+    }
+
+    // Hoàn trả lại kích thước và scale viewport của Stage/Layer
+    stage.width(prevStageW);
+    stage.height(prevStageH);
+    layer.scale({ x: prevScaleX, y: prevScaleY });
+    cropOverlayGroupRef.current?.show();
+    layer.batchDraw();
+
+    return dataUrl;
+  };
+
+  const exportCropDataUrl = (): string | null => {
+    return renderMasterPng(cropRect);
+  };
+
+  const handleCopyCrop = async () => {
+    const dataUrl = exportCropDataUrl();
+    if (!dataUrl) return;
+    setCropRect(null);
+    setCropHistory([]);
+    useEditor.getState().setTool("select");
+    try {
+      await copyToClipboard(dataUrl);
+      onFlash?.(t("editorMain.copiedClipboard"));
+    } catch (err) {
+      console.error("Failed to copy crop to clipboard:", err);
+    }
+  };
+
   useImperativeHandle(ref, () => ({
     exportPng: () => {
-      const stage = stageRef.current;
-      if (!stage || !doc) return null;
-      if (doc.annotations.length === 0 && doc.image.startsWith("data:")) {
-        return doc.image;
+      if (!doc) return null;
+      if (cropRect) {
+        const cropData = renderMasterPng(cropRect);
+        setCropRect(null);
+        setCropHistory([]);
+        useEditor.getState().setTool("select");
+        if (cropData) return cropData;
       }
-      trRef.current?.nodes([]);
-      return stage.toDataURL({ pixelRatio: 1 / scale, mimeType: "image/png" });
+      return renderMasterPng(null);
     },
+    exportCropPng: exportCropDataUrl,
+    hasActiveCrop: () => Boolean(cropRect),
     flattenPng: () => {
-      const stage = stageRef.current;
-      if (!stage || !doc) return null;
-      if (doc.annotations.length === 0 && doc.image.startsWith("data:")) {
-        return doc.image;
-      }
-      trRef.current?.nodes([]);
-      return stage.toDataURL({ pixelRatio: 1 / scale, mimeType: "image/png" });
+      if (!doc) return null;
+      return renderMasterPng(null);
     },
     zoomIn:  doZoomIn,
     zoomOut: doZoomOut,
@@ -965,7 +1107,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
           let ax2 = a.x;
           let ay2 = a.y;
 
-          if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect") {
+          if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect" || a.type === "image") {
             ax2 = a.x + a.width;
             ay2 = a.y + a.height;
           } else if (a.type === "ellipse") {
@@ -1098,7 +1240,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
         width: newW,
         height: newH,
       } as Partial<Annotation>);
-    } else if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect") {
+    } else if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect" || a.type === "image") {
       useEditor.getState().updateAnnotation(a.id, {
         x: node.x(),
         y: node.y(),
@@ -1725,6 +1867,20 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
                   )}
                 </Group>
               );
+              // image — ảnh chèn thêm
+              if (a.type === "image")
+              return (
+                <ImageItem
+                  key={a.id}
+                  ann={a}
+                  draggable={draggable}
+                  isSelected={isSelected}
+                  activeIds={activeIds}
+                  onSelect={(multi) => useEditor.getState().select(a.id, multi)}
+                  onDragEnd={(e) => onDragEnd(a.id, e)}
+                  onTransformEnd={(node) => onTransformEnd(a, node)}
+                />
+              );
               return null;
             })}
 
@@ -1895,7 +2051,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
             })()}
 
             {cropRect && (
-              <>
+              <Group ref={cropOverlayGroupRef}>
                 {/* Overlay xám cho các vùng ngoài crop */}
                 <Rect x={0} y={0} width={doc.imgW} height={cropRect.y} fill="#000000" opacity={0.5} listening={false} />
                 <Rect x={0} y={cropRect.y} width={cropRect.x} height={cropRect.height} fill="#000000" opacity={0.5} listening={false} />
@@ -1975,7 +2131,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
                     }}
                   />
                 ))}
-              </>
+              </Group>
             )}
 
             {/* Marquee drag selection box */}
@@ -2012,7 +2168,7 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
         {editing && (() => {
           const activeAnn = doc?.annotations.find((x) => x.id === editing.id);
           const activeFontSize = ((activeAnn?.type === "text" ? (activeAnn as any).fontSize : fontSize) ?? fontSize) * scale;
-          const activeColor = activeAnn?.color ?? color;
+          const activeColor = (activeAnn && "color" in activeAnn ? (activeAnn as any).color : null) ?? color;
           return (
             <div 
               style={{
@@ -2102,8 +2258,8 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
         })()}
 
         {cropRect && (() => {
-          // Đặt 2 nút ở cạnh ĐÁY, canh theo GÓC PHẢI khung crop (toạ độ hiển thị
-          // = toạ độ ảnh × scale). Nếu sát đáy stage thì lật vào trong khung.
+          // Đặt 3 nút (Áp dụng / Sao chép / Huỷ) ở cạnh ĐÁY, canh theo GÓC PHẢI khung crop
+          // (toạ độ hiển thị = toạ độ ảnh × scale). Nếu sát đáy stage thì lật vào trong khung.
           const BTN_H = 34;
           const cropBottom = (cropRect.y + cropRect.height) * scale;
           const cropRight = (cropRect.x + cropRect.width) * scale;
@@ -2112,8 +2268,8 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
           // Canh mép phải hàng nút vào mép phải khung bằng thuộc tính `right`
           // (neo theo mép phải container) để width khả dụng = box.w - right luôn
           // đủ rộng → nút không bị bóp/xuống dòng khi khung sát mép phải. Giữ
-          // tối thiểu 200px chỗ trống để hàng nút hiển thị đủ.
-          const rightInset = Math.max(0, Math.min(box.w - cropRight, box.w - 200));
+          // tối thiểu 280px chỗ trống để hàng nút hiển thị đủ 3 nút.
+          const rightInset = Math.max(0, Math.min(box.w - cropRight, box.w - 280));
           return (
             <div
               style={{
@@ -2128,6 +2284,9 @@ function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
             >
               <button onClick={applyCrop} style={cropBtn(true)}>
                 Áp dụng crop
+              </button>
+              <button onClick={handleCopyCrop} style={cropBtn(false)} title="Ctrl/Cmd+C">
+                Sao chép
               </button>
               <button onClick={() => setCropRect(null)} style={cropBtn(false)}>
                 Huỷ
@@ -2549,6 +2708,86 @@ function BlurRect({ ann, img, draggable, onSelect, onDragEnd, onTransformEnd }: 
   }
 
   return <KImage {...sharedProps} image={processed} />;
+}
+
+interface ImageItemProps {
+  ann: import("../model").ImageAnn;
+  draggable: boolean;
+  isSelected: boolean;
+  activeIds: string[];
+  onSelect: (multi: boolean) => void;
+  onDragEnd: (e: Konva.KonvaEventObject<DragEvent>) => void;
+  onTransformEnd: (node: Konva.Node) => void;
+}
+
+export const imageAnnCache = new Map<string, HTMLImageElement>();
+
+function ImageItem({ ann, draggable, isSelected, activeIds, onSelect, onDragEnd, onTransformEnd }: ImageItemProps) {
+  const [loadedImg, setLoadedImg] = useState<HTMLImageElement | null>(() => imageAnnCache.get(ann.src) ?? null);
+
+  useEffect(() => {
+    if (imageAnnCache.has(ann.src)) {
+      setLoadedImg(imageAnnCache.get(ann.src)!);
+      return;
+    }
+    let cancelled = false;
+    const el = new window.Image();
+    el.crossOrigin = "anonymous";
+    const onDone = () => {
+      imageAnnCache.set(ann.src, el);
+      if (!cancelled) setLoadedImg(el);
+    };
+    if (typeof el.decode === "function") {
+      el.src = ann.src;
+      el.decode().then(onDone).catch(() => {
+        el.onload = onDone;
+        el.onerror = () => console.error("Không thể load ảnh ann:", ann.id);
+        el.src = ann.src;
+      });
+    } else {
+      el.onload = onDone;
+      el.onerror = () => console.error("Không thể load ảnh ann:", ann.id);
+      el.src = ann.src;
+    }
+    return () => {
+      cancelled = true;
+      el.onload = null;
+      el.onerror = null;
+    };
+  }, [ann.src, ann.id]);
+
+  useEffect(() => {
+    if (loadedImg && isSelected) {
+      useEditor.getState().select(ann.id);
+    }
+  }, [loadedImg, isSelected, ann.id]);
+
+  if (!loadedImg) return null;
+
+  return (
+    <Group key={ann.id}>
+      <KImage
+        id={ann.id}
+        image={loadedImg}
+        x={ann.x}
+        y={ann.y}
+        width={ann.width}
+        height={ann.height}
+        shadowColor={isSelected ? "#3b82f6" : undefined}
+        shadowBlur={isSelected ? 6 : 0}
+        shadowOpacity={isSelected ? 0.9 : 0}
+        draggable={draggable}
+        listening={draggable}
+        onClick={(e) => onSelect(Boolean(e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey))}
+        onTap={() => onSelect(false)}
+        onDragEnd={onDragEnd}
+        onTransformEnd={(e) => onTransformEnd(e.target)}
+      />
+      {isSelected && activeIds.length > 1 && (
+        <SelectionFrame x={ann.x} y={ann.y} width={ann.width} height={ann.height} />
+      )}
+    </Group>
+  );
 }
 
 AnnotationStage.displayName = "AnnotationStage";

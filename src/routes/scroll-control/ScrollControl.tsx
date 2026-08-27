@@ -647,7 +647,13 @@ export default function ScrollControl() {
       const scale = contentWidth / fw;
       host.style.height = `${Math.round(usedHeightRef.current * scale)}px`;
     }
-    if (cont && stickToBottom) cont.scrollTop = cont.scrollHeight;
+    if (cont && stickToBottom) {
+      requestAnimationFrame(() => {
+        if (scrollContainerRef.current) {
+          scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+        }
+      });
+    }
   };
 
   // Nối tiếp từ vị trí hiện tại nếu người dùng chủ động bỏ qua khoảng nhảy
@@ -1104,8 +1110,19 @@ export default function ScrollControl() {
       {/* Preview: canvas gắn thẳng vào DOM, cắt theo usedHeight — không encode PNG mỗi frame.
           LUÔN mount scrollContainer/cropWrapper để ref sẵn sàng trước khi chụp
           (startCapture gọi captureTick ngay, trước khi React kịp mount). */}
+      <style>{`
+        .preview-scroll-container {
+          scrollbar-width: none !important;
+          -ms-overflow-style: none !important;
+        }
+        .preview-scroll-container::-webkit-scrollbar {
+          display: none !important;
+          width: 0 !important;
+          height: 0 !important;
+        }
+      `}</style>
       <div style={{ ...previewBox, position: "relative" }}>
-        <div ref={scrollContainerRef} style={scrollList}>
+        <div ref={scrollContainerRef} className="preview-scroll-container" style={scrollList}>
           <div ref={cropWrapperRef} style={cropWrapper} />
         </div>
         {status === "ready" && (
@@ -1345,6 +1362,7 @@ const emptyOverlay: React.CSSProperties = {
 const scrollList: React.CSSProperties = {
   flex: 1,
   overflowY: "auto",
+  scrollbarWidth: "none",
   padding: 6,
   display: "flex",
   flexDirection: "column",
@@ -1359,6 +1377,8 @@ const cropWrapper: React.CSSProperties = {
   flexShrink: 0,
   overflow: "hidden",
   borderRadius: 4,
+  transform: "translateZ(0)",
+  backfaceVisibility: "hidden",
 };
 
 const errorBox: React.CSSProperties = {

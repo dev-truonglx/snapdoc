@@ -113,11 +113,15 @@ interface EditorState {
   selectAll: () => void;
 
   // mutations (đều đi qua history)
-  addAnnotation: (a: Annotation) => void;
+  addAnnotation: (a: Annotation, atBottom?: boolean) => void;
   updateAnnotation: (id: string, patch: Partial<Annotation>) => void;
   /** Cập nhật annotation KHÔNG tạo history entry — dùng cho live preview (slider kéo). */
   updateAnnotationLive: (id: string, patch: Partial<Annotation>) => void;
   removeSelected: () => void;
+  bringToFront: () => void;
+  sendToBack: () => void;
+  bringForward: () => void;
+  sendBackward: () => void;
   applyCrop: (image: string, imgW: number, imgH: number, annotations: Annotation[]) => void;
   /** Nối ảnh: thay ảnh nền bằng ảnh đã ghép, ĐI QUA history → Ctrl/Cmd+Z hoàn tác được. */
   applyStitch: (image: string, imgW: number, imgH: number) => void;
@@ -187,15 +191,13 @@ export const useEditor = create<EditorState>((set, get) => ({
     set({
       doc,
       savedRef: markClean ? doc : null,
-      // Reset theo `markClean`: nạp ảnh mới thì nền trong RAM ĐÚNG bằng nền trên
-      // đĩa (`false`); còn đường FLATTEN (`markClean = false`) vừa thay nền bằng
-      // ảnh đã burn nên phải là `true`, nếu không lần Save sau sẽ không gửi nền
-      // mới lên và annotation cũ sẽ được đắp lại lên nền đã burn — VẼ ĐÔI.
       baseDirty: !markClean,
       past: [],
       future: [],
       selectedId: null,
       selectedIds: [],
+      strokeWidth: get().strokeWidth > 0 ? get().strokeWidth : 2,
+      color: get().color || "#ef4444",
       stepCounter: 1,
       arrowCounter: 1,
       rectCounter: 1,
@@ -284,6 +286,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
 
   setStrokeWidth: (strokeWidth) => {
+    const sw = Math.max(1, strokeWidth);
     const { selectedIds, selectedId, doc } = get();
     const targets = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
     if (targets.length > 0 && doc) {
@@ -295,17 +298,17 @@ export const useEditor = create<EditorState>((set, get) => ({
           if (a.type === "numbered-rect" || a.type === "numbered-arrow" || a.type === "step") {
             return {
               ...a,
-              strokeWidth,
-              radius: Math.max(Math.round(strokeWidth * 2 + 5), 10),
+              strokeWidth: sw,
+              radius: Math.max(Math.round(sw * 2 + 5), 10),
             } as Annotation;
           }
-          return { ...a, strokeWidth } as Annotation;
+          return { ...a, strokeWidth: sw } as Annotation;
         }),
       };
-      set({ ...commit(get(), next), strokeWidth });
+      set({ ...commit(get(), next), strokeWidth: sw });
       return;
     }
-    set({ strokeWidth });
+    set({ strokeWidth: sw });
   },
 
   setFontSize: (fontSize) => {
@@ -419,7 +422,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       selectedId: nextId,
       selectedIds: nextIds,
       ...(ann && "color" in ann && ann.type !== "highlight" ? { color: (ann as any).color } : null),
-      ...(ann && "strokeWidth" in ann ? { strokeWidth: (ann as any).strokeWidth } : null),
+      ...(ann && "strokeWidth" in ann && (ann as any).strokeWidth > 0 ? { strokeWidth: (ann as any).strokeWidth } : null),
       ...(ann?.type === "text"      ? { fontSize: ann.fontSize }                                    : null),
       ...(ann?.type === "highlight" ? { highlightColor: ann.color }                                 : null),
       ...(ann?.type === "blur"      ? { blurRadius: ann.blurRadius, blurMode: ann.blurMode,
@@ -442,7 +445,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       selectedId: nextId,
       selectedIds: nextIds,
       ...(ann && "color" in ann && ann.type !== "highlight" ? { color: (ann as any).color } : null),
-      ...(ann && "strokeWidth" in ann ? { strokeWidth: (ann as any).strokeWidth } : null),
+      ...(ann && "strokeWidth" in ann && (ann as any).strokeWidth > 0 ? { strokeWidth: (ann as any).strokeWidth } : null),
       ...(ann?.type === "text"      ? { fontSize: ann.fontSize }                                    : null),
       ...(ann?.type === "highlight" ? { highlightColor: ann.color }                                 : null),
       ...(ann?.type === "blur"      ? { blurRadius: ann.blurRadius, blurMode: ann.blurMode,
@@ -457,11 +460,38 @@ export const useEditor = create<EditorState>((set, get) => ({
     get().selectMany(ids, false);
   },
 
-  addAnnotation: (a) =>
+  addAnnotation: (a, atBottom) =>
     set((s) => {
       if (!s.doc) return {};
-      const next = { ...s.doc, annotations: [...s.doc.annotations, a] };
-      return { ...commit(s, next), selectedId: a.id, selectedIds: [a.id] };
+      let nextAnnotations: Annotation[];
+      if (atBottom || a.type === "image") {
+        let lastImageIdx = -1;
+        for (let i = s.doc.annotations.length - 1; i >= 0; i--) {
+          if (s.doc.annotations[i].type === "image") {
+            lastImageIdx = i;
+            break;
+          }
+        }
+        if (lastImageIdx === -1) {
+          nextAnnotations = [a, ...s.doc.annotations];
+        } else {
+          nextAnnotations = [
+            ...s.doc.annotations.slice(0, lastImageIdx + 1),
+            a,
+            ...s.doc.annotations.slice(lastImageIdx + 1),
+          ];
+        }
+      } else {
+        nextAnnotations = [...s.doc.annotations, a];
+      }
+      const next = { ...s.doc, annotations: nextAnnotations };
+      // Nếu đang vẽ các tool thông thường (rect, arrow, step...) thì không gán selectedId để người dùng vẽ liên tục mượt mà
+      const shouldSelect = s.tool === "select" || a.type === "image";
+      return {
+        ...commit(s, next),
+        selectedId: shouldSelect ? a.id : null,
+        selectedIds: shouldSelect ? [a.id] : [],
+      };
     }),
 
   updateAnnotation: (id, patch) =>
@@ -518,6 +548,64 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (!annotations.some((a) => a.type === "numbered-arrow")) reset.arrowCounter = 1;
       if (!annotations.some((a) => a.type === "numbered-rect")) reset.rectCounter = 1;
       return { ...commit(s, next), selectedId: null, selectedIds: [], ...reset };
+    }),
+
+  bringToFront: () =>
+    set((s) => {
+      if (!s.doc) return {};
+      const targets = s.selectedIds.length > 0 ? s.selectedIds : (s.selectedId ? [s.selectedId] : []);
+      if (targets.length === 0) return {};
+      const targetSet = new Set(targets);
+      const nonSelected = s.doc.annotations.filter((a) => !targetSet.has(a.id));
+      const selected = s.doc.annotations.filter((a) => targetSet.has(a.id));
+      if (selected.length === 0) return {};
+      const annotations = [...nonSelected, ...selected];
+      return { ...commit(s, { ...s.doc, annotations }) };
+    }),
+
+  sendToBack: () =>
+    set((s) => {
+      if (!s.doc) return {};
+      const targets = s.selectedIds.length > 0 ? s.selectedIds : (s.selectedId ? [s.selectedId] : []);
+      if (targets.length === 0) return {};
+      const targetSet = new Set(targets);
+      const nonSelected = s.doc.annotations.filter((a) => !targetSet.has(a.id));
+      const selected = s.doc.annotations.filter((a) => targetSet.has(a.id));
+      if (selected.length === 0) return {};
+      const annotations = [...selected, ...nonSelected];
+      return { ...commit(s, { ...s.doc, annotations }) };
+    }),
+
+  bringForward: () =>
+    set((s) => {
+      if (!s.doc) return {};
+      const targets = s.selectedIds.length > 0 ? s.selectedIds : (s.selectedId ? [s.selectedId] : []);
+      if (targets.length === 0) return {};
+      const anns = [...s.doc.annotations];
+      for (let i = anns.length - 2; i >= 0; i--) {
+        if (targets.includes(anns[i].id) && !targets.includes(anns[i + 1].id)) {
+          const tmp = anns[i];
+          anns[i] = anns[i + 1];
+          anns[i + 1] = tmp;
+        }
+      }
+      return { ...commit(s, { ...s.doc, annotations: anns }) };
+    }),
+
+  sendBackward: () =>
+    set((s) => {
+      if (!s.doc) return {};
+      const targets = s.selectedIds.length > 0 ? s.selectedIds : (s.selectedId ? [s.selectedId] : []);
+      if (targets.length === 0) return {};
+      const anns = [...s.doc.annotations];
+      for (let i = 1; i < anns.length; i++) {
+        if (targets.includes(anns[i].id) && !targets.includes(anns[i - 1].id)) {
+          const tmp = anns[i];
+          anns[i] = anns[i - 1];
+          anns[i - 1] = tmp;
+        }
+      }
+      return { ...commit(s, { ...s.doc, annotations: anns }) };
     }),
 
   applyCrop: (image, imgW, imgH, annotations) =>

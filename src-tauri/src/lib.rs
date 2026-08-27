@@ -412,7 +412,7 @@ pub fn run() {
                 // dialog đóng qua nút "Huỷ"/Capture thành công (đã tự tắt cờ
                 // từ trước, set lại `false` ở đây là no-op).
                 if label == "window-picker" {
-                    *_window.app_handle().state::<crate::state::AppState>().pending_record.lock().unwrap() = false;
+                    *_window.app_handle().state::<crate::state::AppState>().pending_record.lock().unwrap_or_else(|e| e.into_inner()) = false;
                 }
             }
         })

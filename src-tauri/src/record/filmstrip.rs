@@ -100,7 +100,7 @@ fn extract_range_frames(
         .arg("-t")
         .arg(format!("{:.3}", duration_ms / 1000.0))
         .args(["-vf", &format!("fps={fps:.6},scale=160:-1"), "-q:v", "5"])
-        .arg(&pattern)
+        .arg(pattern.to_string_lossy().replace('\\', "/"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

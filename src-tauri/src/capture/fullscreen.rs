@@ -65,7 +65,7 @@ pub fn capture_all_monitors() -> Result<Capture, String> {
 
         let img = if raw.width() != logical_w || raw.height() != logical_h {
             // Scale xuống logical points bằng Lanczos3 (chất lượng cao, dùng cho downscale).
-            imageops::resize(&raw, logical_w, logical_h, imageops::FilterType::Lanczos3)
+            imageops::resize(&raw, logical_w, logical_h, imageops::FilterType::Triangle)
         } else {
             raw
         };

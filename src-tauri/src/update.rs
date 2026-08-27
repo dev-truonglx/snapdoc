@@ -50,7 +50,7 @@ pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, St
                 version: update.version.clone(),
                 current_version: update.current_version.clone(),
             };
-            *app.state::<PendingUpdate>().0.lock().unwrap() = Some(update);
+            *app.state::<PendingUpdate>().0.lock().unwrap_or_else(|e| e.into_inner()) = Some(update);
             Ok(info)
         }
         Ok(None) => Ok(UpdateInfo {
@@ -88,7 +88,7 @@ pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, St
 #[cfg_attr(debug_assertions, allow(dead_code))]
 pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
     // Take the update out of state so the lock isn't held across .await.
-    let update = app.state::<PendingUpdate>().0.lock().unwrap().take();
+    let update = app.state::<PendingUpdate>().0.lock().unwrap_or_else(|e| e.into_inner()).take();
     let Some(update) = update else {
         return Err("No update is pending.".to_string());
     };
@@ -127,7 +127,7 @@ pub fn pending_info(app: &AppHandle) -> Option<UpdateInfo> {
     app.state::<PendingUpdate>()
         .0
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .map(|u| UpdateInfo {
             available: true,
@@ -140,7 +140,7 @@ pub fn pending_info(app: &AppHandle) -> Option<UpdateInfo> {
 /// Used by the manual install flow in Settings. Errors bubble up to the webview.
 pub async fn install_pending(app: AppHandle) -> Result<(), String> {
     // Take the update out of state first so the lock isn't held across `.await`.
-    let update = app.state::<PendingUpdate>().0.lock().unwrap().take();
+    let update = app.state::<PendingUpdate>().0.lock().unwrap_or_else(|e| e.into_inner()).take();
     let Some(update) = update else {
         return Err("No update is pending.".to_string());
     };

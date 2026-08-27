@@ -102,7 +102,8 @@ fn read_entry<R: Read + Seek>(
 ) -> Result<Option<Vec<u8>>, String> {
     match zip.by_name(name) {
         Ok(mut e) => {
-            let mut buf = Vec::with_capacity(e.size() as usize);
+            // Cap tại 256MB để tránh OOM từ file lạ/corrupt khai size giả.
+            let mut buf = Vec::with_capacity(e.size().min(256 * 1024 * 1024) as usize);
             e.read_to_end(&mut buf)
                 .map_err(|err| format!("Không đọc được entry {name}: {err}"))?;
             Ok(Some(buf))
