@@ -5,7 +5,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation, Trans } from "react-i18next";
 import Toolbar from "./Toolbar";
 import HistoryStrip from "./HistoryStrip";
-import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
+import AnnotationStage, { type StageHandle, imageAnnCache } from "../../features/annotation/canvas/AnnotationStage";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 import { useEditor } from "../../features/annotation/store";
 import {
@@ -86,6 +86,7 @@ export default function Editor() {
     const img = new window.Image();
     img.onload = () => {
       console.log("[SnapDoc Drag] img.onload success - natural size:", img.naturalWidth, "x", img.naturalHeight);
+      imageAnnCache.set(dataUrl, img);
       const naturalW = img.naturalWidth || 200;
       const naturalH = img.naturalHeight || 200;
 
@@ -924,7 +925,7 @@ export default function Editor() {
             frameCaptureMode="in-place"
           />
         ) : (
-          <AnnotationStage ref={stageRef} />
+          <AnnotationStage ref={stageRef} onFlash={flash} />
         )}
       </div>
       <HistoryStrip
