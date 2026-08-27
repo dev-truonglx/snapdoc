@@ -258,14 +258,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                 e.dataTransfer.setData("application/snapdoc-history-id", item.id);
                 e.dataTransfer.setData("text/plain", `snapdoc-history:${item.id}`);
                 e.dataTransfer.effectAllowed = "copy";
-                if (e.currentTarget) {
-                  const imgEl = e.currentTarget.querySelector("img");
-                  if (imgEl) {
-                    try {
-                      e.dataTransfer.setDragImage(imgEl, 46, 32);
-                    } catch {}
-                  }
-                }
+
                 console.log("[SnapDoc Drag] onDragStart setData finished, global ID set to:", item.id);
               }}
               onDragEnd={(e) => {
@@ -446,7 +439,6 @@ const thumbBtn: React.CSSProperties = {
   height: 64,
   borderRadius: 6,
   overflow: "hidden",
-  cursor: "pointer",
   cursor: "grab",
   background: "#000",
   userSelect: "none",

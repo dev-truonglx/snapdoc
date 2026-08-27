@@ -474,9 +474,11 @@ export default function Toolbar({
                       title={t("editorToolbar.bringToFront")}
                       aria-label="Bring to Front"
                     >
-                      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
-                        <path d="M8 12V3.5M4.5 7L8 3.5 11.5 7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-                        <path d="M2.5 14h11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                      <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden>
+                        {/* Hình vuông dưới (mờ, nằm sau) */}
+                        <path d="M4.5 2.5h6.5a2 2 0 0 1 2 2V7M2.5 4.5v6.5a2 2 0 0 0 2 2H7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" opacity="0.4"/>
+                        {/* Hình vuông trên (đậm, đè lên trước) */}
+                        <rect x="7" y="7" width="10.5" height="10.5" rx="2" fill="currentColor" stroke="currentColor" strokeWidth="1.2"/>
                       </svg>
                     </button>
                     <button
@@ -485,9 +487,11 @@ export default function Toolbar({
                       title={t("editorToolbar.sendToBack")}
                       aria-label="Send to Back"
                     >
-                      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
-                        <path d="M8 4v8.5M4.5 9L8 12.5 11.5 9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-                        <path d="M2.5 2h11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                      <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden>
+                        {/* Hình vuông dưới (đậm, nằm sau) */}
+                        <path d="M4.5 2.5h6.5a2 2 0 0 1 2 2V7H7v6H4.5a2 2 0 0 1-2-2v-6.5a2 2 0 0 1 2-2z" fill="currentColor"/>
+                        {/* Hình vuông trên (mờ, đè lên trước) */}
+                        <rect x="7" y="7" width="10.5" height="10.5" rx="2" stroke="currentColor" strokeWidth="1.6" opacity="0.4"/>
                       </svg>
                     </button>
                   </div>

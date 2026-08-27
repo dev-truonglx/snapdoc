@@ -716,93 +716,69 @@ export default function Editor() {
       });
     };
 
-    const onDragOver = (e: DragEvent) => {
-      if (videoDoc || !useEditor.getState().doc) return;
-      e.preventDefault();
-      if (e.dataTransfer) {
-        e.dataTransfer.dropEffect = "copy";
-      }
+    window.addEventListener("snapdoc:insert-history-item", onCustomDrop);
+    return () => {
+      window.removeEventListener("snapdoc:insert-history-item", onCustomDrop);
     };
+  }, [videoDoc]);
 
-    const onDragEnter = (e: DragEvent) => {
-      console.log("[SnapDoc Drag] window onDragEnter, types:", e.dataTransfer?.types);
-      if (videoDoc || !useEditor.getState().doc) return;
-      e.preventDefault();
-    };
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (videoDoc || !useEditor.getState().doc) return;
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = "copy";
+    }
+  };
 
-    const onDrop = async (e: DragEvent) => {
-      console.log("[SnapDoc Drag] window onDrop fired! pos:", { x: e.clientX, y: e.clientY });
-      console.log("[SnapDoc Drag] window onDrop dataTransfer types:", e.dataTransfer?.types);
-      console.log("[SnapDoc Drag] window onDrop global dragging ID:", (window as any).__snapdocDraggingHistoryId);
+  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    if (videoDoc || !useEditor.getState().doc) return;
+    e.preventDefault();
+  };
 
-      if (videoDoc || !useEditor.getState().doc) {
-        console.warn("[SnapDoc Drag] onDrop ignored: videoDoc or no doc loaded");
-        return;
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    if (videoDoc || !useEditor.getState().doc) {
+      return;
+    }
+    const target = e.target as HTMLElement | null;
+    if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+
+    let historyId =
+      (window as any).__snapdocDraggingHistoryId ||
+      e.dataTransfer?.getData("application/snapdoc-history-id");
+    (window as any).__snapdocDraggingHistoryId = null;
+
+    if (!historyId) {
+      const text = e.dataTransfer?.getData("text/plain");
+      if (text?.startsWith("snapdoc-history:")) {
+        historyId = text.replace("snapdoc-history:", "");
       }
-      const target = e.target as HTMLElement | null;
-      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") {
-        console.log("[SnapDoc Drag] onDrop ignored: dropped on input/textarea");
-        return;
-      }
+    }
 
-      e.preventDefault();
-      e.stopPropagation();
+    if (historyId) {
+      insertHistoryImageById(historyId, { clientX: e.clientX, clientY: e.clientY });
+      return;
+    }
 
-      let historyId =
-        (window as any).__snapdocDraggingHistoryId ||
-        e.dataTransfer?.getData("application/snapdoc-history-id");
-      (window as any).__snapdocDraggingHistoryId = null;
-
-      if (!historyId) {
-        const text = e.dataTransfer?.getData("text/plain");
-        console.log("[SnapDoc Drag] text/plain received:", text);
-        if (text?.startsWith("snapdoc-history:")) {
-          historyId = text.replace("snapdoc-history:", "");
-        }
-      }
-
-      console.log("[SnapDoc Drag] resolved historyId:", historyId);
-
-      if (historyId) {
-        insertHistoryImageById(historyId, { clientX: e.clientX, clientY: e.clientY });
-        return;
-      }
-
-      if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
-        console.log("[SnapDoc Drag] dropped files count:", e.dataTransfer.files.length);
-        const files = Array.from(e.dataTransfer.files).filter(isImageFile);
-        if (files.length > 0) {
-          const clientX = e.clientX;
-          const clientY = e.clientY;
-          for (let i = 0; i < files.length; i++) {
-            try {
-              const dataUrl = await readFileAsDataUrl(files[i]);
-              insertImageAnnotation(dataUrl, { clientX: clientX + i * 20, clientY: clientY + i * 20 });
-            } catch (err) {
-              console.error("[SnapDoc Drag] Lỗi đọc file thả vào:", err);
-            }
+    if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+      const files = Array.from(e.dataTransfer.files).filter(isImageFile);
+      if (files.length > 0) {
+        const clientX = e.clientX;
+        const clientY = e.clientY;
+        for (let i = 0; i < files.length; i++) {
+          try {
+            const dataUrl = await readFileAsDataUrl(files[i]);
+            insertImageAnnotation(dataUrl, { clientX: clientX + i * 20, clientY: clientY + i * 20 });
+          } catch (err) {
+            console.error("[SnapDoc Drag] Lỗi đọc file thả vào:", err);
           }
         }
       }
-    };
-
-    window.addEventListener("snapdoc:insert-history-item", onCustomDrop);
-    document.addEventListener("dragenter", onDragEnter, true);
-    document.addEventListener("dragover", onDragOver, true);
-    document.addEventListener("drop", onDrop, true);
-    window.addEventListener("dragenter", onDragEnter, true);
-    window.addEventListener("dragover", onDragOver, true);
-    window.addEventListener("drop", onDrop, true);
-    return () => {
-      window.removeEventListener("snapdoc:insert-history-item", onCustomDrop);
-      document.removeEventListener("dragenter", onDragEnter, true);
-      document.removeEventListener("dragover", onDragOver, true);
-      document.removeEventListener("drop", onDrop, true);
-      window.removeEventListener("dragenter", onDragEnter, true);
-      window.removeEventListener("dragover", onDragOver, true);
-      window.removeEventListener("drop", onDrop, true);
-    };
-  }, [videoDoc]);
+    }
+  };
 
   const doFlatten = () => {
     setShowFlattenConfirm(true);
@@ -906,7 +882,13 @@ export default function Editor() {
   };
 
   return (
-    <div className="solid-bg" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+    <div
+      className="solid-bg"
+      style={{ display: "flex", flexDirection: "column", height: "100%" }}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
       <Toolbar
         mode={videoDoc ? "video" : "image"}
         onSave={() => doSave(false)}
