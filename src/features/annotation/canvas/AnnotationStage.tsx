@@ -137,6 +137,34 @@ function StepSelectionFrame({ x, y, radius }: { x: number; y: number; radius: nu
   );
 }
 
+function drawRoundedRect(
+  ctx: any,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+) {
+  const radius = Math.max(0, Math.min(r, w / 2, h / 2));
+  if (radius <= 0) {
+    ctx.rect(x, y, w, h);
+    return;
+  }
+  if (typeof ctx.roundRect === "function") {
+    ctx.roundRect(x, y, w, h, radius);
+  } else {
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + w - radius, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+    ctx.lineTo(x + w, y + h - radius);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+    ctx.lineTo(x + radius, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+  }
+}
+
 /**
  * Component Canvas chỉnh sửa ảnh SnapDoc (React-Konva).
  * Hỗ trợ vẽ vector annotations (text, arrow, rect, ellipse, step counter, highlight, blur)
@@ -178,6 +206,11 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const selectedId = useEditor((s) => s.selectedId);
   const selectedIds = useEditor((s) => s.selectedIds ?? []);
 
+  const bgConfig = doc?.background?.enabled ? doc.background : null;
+  const bgPad = bgConfig ? Math.max(0, bgConfig.padding) : 0;
+  const totalW = (doc?.imgW ?? 0) + 2 * bgPad;
+  const totalH = (doc?.imgH ?? 0) + 2 * bgPad;
+
   const containerRef = useRef<HTMLDivElement>(null);
   /** Wrapper NGOÀI `containerRef` — không có `overflow:auto` nên kích thước
    * của nó không bị đổi bởi thanh cuộn xuất hiện/biến mất bên trong. Dùng để
@@ -199,14 +232,14 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const [box, setBox] = useState({ w: 0, h: 0 });
 
   // Quy đổi toạ độ con trỏ THẬT (clientX/clientY, toàn cửa sổ) sang toạ độ
-  // ảnh — dùng thay cho `stage.getPointerPosition()` khi cần tiếp tục nhận
-  // toạ độ cả lúc con trỏ đã rời khỏi vùng <canvas> (kéo/resize crop sát mép
-  // ảnh): getPointerPosition() trả về null ngay khi con trỏ ra khỏi canvas,
-  // khiến thao tác kéo bị "dính" tại mép thay vì bám theo chuột.
+  // ảnh (image-space: 0..imgW, 0..imgH) — bù trừ bgPad khi có khung nền
   const clientToImg = (clientX: number, clientY: number) => {
     const rect = stageRef.current?.container().getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
-    return { x: (clientX - rect.left) / scale, y: (clientY - rect.top) / scale };
+    return {
+      x: (clientX - rect.left) / scale - bgPad,
+      y: (clientY - rect.top) / scale - bgPad,
+    };
   };
 
   // Ref luôn trỏ đến giá trị mới nhất — dùng trong wheel handler (closure cũ)
@@ -364,7 +397,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
 
       // Với ảnh dài / chụp cuộn: fit theo chiều ngang (fit-width) để chữ to rõ, dễ đọc và cuộn dọc tự nhiên
       // Với ảnh thông thường: fit cả 2 chiều (fit-contain)
-      const s = Math.max(0.01, Math.min(cw / doc.imgW, isScroll ? 1.0 : ch / doc.imgH));
+      const s = Math.max(0.01, Math.min(cw / totalW, isScroll ? 1.0 : ch / totalH));
       setFitScale(s);
 
       // Zoom mặc định tuỳ mode đã chụp ra ảnh:
@@ -382,13 +415,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const ro = new ResizeObserver(measure);
     if (outerRef.current) ro.observe(outerRef.current);
     return () => ro.disconnect();
-  }, [doc?.imgW, doc?.imgH, doc?.captureMode]);
+  }, [doc?.imgW, doc?.imgH, doc?.captureMode, totalW, totalH]);
 
   // Cập nhật kích thước stage khi scale thay đổi
   useEffect(() => {
     if (!doc) return;
-    setBox({ w: doc.imgW * scale, h: doc.imgH * scale });
-  }, [scale, doc?.imgW, doc?.imgH]);
+    setBox({ w: totalW * scale, h: totalH * scale });
+  }, [scale, totalW, totalH]);
 
   // Gắn Transformer vào node đang chọn (chỉ khi chọn đơn 1 phần tử)
   useEffect(() => {
@@ -426,14 +459,17 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       const newScale = fs * newZoom;
       const containerW = el.clientWidth;
       const containerH = el.clientHeight;
+      const curBgPad = d.background?.enabled ? Math.max(0, d.background.padding) : 0;
+      const curTotalW = d.imgW + 2 * curBgPad;
+      const curTotalH = d.imgH + 2 * curBgPad;
 
-      const oldOffsetX = Math.max(0, (containerW - d.imgW * oldScale) / 2);
-      const oldOffsetY = Math.max(0, (containerH - d.imgH * oldScale) / 2);
+      const oldOffsetX = Math.max(0, (containerW - curTotalW * oldScale) / 2);
+      const oldOffsetY = Math.max(0, (containerH - curTotalH * oldScale) / 2);
       const imageX = (el.scrollLeft + vx - oldOffsetX) / oldScale;
       const imageY = (el.scrollTop  + vy - oldOffsetY) / oldScale;
 
-      const newOffsetX = Math.max(0, (containerW - d.imgW * newScale) / 2);
-      const newOffsetY = Math.max(0, (containerH - d.imgH * newScale) / 2);
+      const newOffsetX = Math.max(0, (containerW - curTotalW * newScale) / 2);
+      const newOffsetY = Math.max(0, (containerH - curTotalH * newScale) / 2);
       pendingScrollRef.current = {
         x: Math.max(0, newOffsetX + imageX * newScale - vx),
         y: Math.max(0, newOffsetY + imageY * newScale - vy),
@@ -699,8 +735,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const imgW = doc.imgW;
     const imgH = doc.imgH;
 
-    // 1. Trường hợp không có annotation nào: xuất trực tiếp từ ảnh gốc img
-    if (doc.annotations.length === 0) {
+    // 1. Trường hợp không có annotation nào và không có background: xuất trực tiếp từ ảnh gốc img
+    if (doc.annotations.length === 0 && !bgConfig) {
       if (cropArea) {
         const rx = cropArea.width < 0 ? cropArea.x + cropArea.width : cropArea.x;
         const ry = cropArea.height < 0 ? cropArea.y + cropArea.height : cropArea.y;
@@ -733,7 +769,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       }
     }
 
-    // 2. Trường hợp có annotations: render qua Konva ở độ phân giải 1:1 chuẩn xác
+    // 2. Trường hợp có annotations hoặc có background: render qua Konva ở độ phân giải 1:1 chuẩn xác
     const stage = stageRef.current;
     const layer = layerRef.current;
     if (!stage || !layer) return null;
@@ -749,15 +785,15 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     cropOverlayGroupRef.current?.hide();
 
     // Đặt Stage và Layer về kích thước gốc 1:1
-    stage.width(imgW);
-    stage.height(imgH);
+    stage.width(totalW);
+    stage.height(totalH);
     layer.scale({ x: 1, y: 1 });
     layer.draw();
 
     let dataUrl: string | null = null;
     if (cropArea) {
-      const rx = cropArea.width < 0 ? cropArea.x + cropArea.width : cropArea.x;
-      const ry = cropArea.height < 0 ? cropArea.y + cropArea.height : cropArea.y;
+      const rx = (cropArea.width < 0 ? cropArea.x + cropArea.width : cropArea.x) + bgPad;
+      const ry = (cropArea.height < 0 ? cropArea.y + cropArea.height : cropArea.y) + bgPad;
       const rw = Math.abs(cropArea.width);
       const rh = Math.abs(cropArea.height);
       dataUrl = stage.toDataURL({
@@ -828,9 +864,10 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
 
   // Không gắn ref vào fallback: containerRef chỉ trỏ scroll container khi doc sẵn sàng,
   // tránh wheel listener bị attach vào div đã unmount khi doc load sau.
-  if (!doc) return <div style={fill} />;
-
-  const toImg = (p: { x: number; y: number }) => ({ x: p.x / scale, y: p.y / scale });
+  const toImg = (p: { x: number; y: number }) => ({
+    x: p.x / scale - bgPad,
+    y: p.y / scale - bgPad,
+  });
 
   // Helper function để lấy cursor cho crop handles
   const getCropCursor = (handleId: string): string => {
@@ -1266,7 +1303,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   };
 
   const applyCrop = () => {
-    if (!cropRect || !img) return;
+    if (!cropRect || !img || !doc) return;
     const { x, y, width, height } = cropRect;
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(width);
@@ -1476,7 +1513,83 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
           }}
         >
           <Layer ref={layerRef} scaleX={scale} scaleY={scale}>
-            {img && <KImage image={img} id="bg" width={doc.imgW} height={doc.imgH} listening={false} />}
+            {/* Khung nền gradient / solid (nếu có) */}
+            {bgConfig && (() => {
+              const angle = bgConfig.angle ?? 135;
+              const rad = (angle * Math.PI) / 180;
+              const cx = totalW / 2;
+              const cy = totalH / 2;
+              const r = Math.sqrt(totalW * totalW + totalH * totalH) / 2;
+              const startX = cx - Math.cos(rad) * r;
+              const startY = cy - Math.sin(rad) * r;
+              const endX = cx + Math.cos(rad) * r;
+              const endY = cy + Math.sin(rad) * r;
+
+              const stops: (number | string)[] = [];
+              if (bgConfig.type === "solid" || bgConfig.colors.length === 1) {
+                stops.push(0, bgConfig.colors[0], 1, bgConfig.colors[0]);
+              } else {
+                const len = bgConfig.colors.length;
+                bgConfig.colors.forEach((c, idx) => {
+                  stops.push(idx / (len - 1), c);
+                });
+              }
+
+              return (
+                <Rect
+                  x={0}
+                  y={0}
+                  width={totalW}
+                  height={totalH}
+                  fillLinearGradientStartPoint={{ x: startX, y: startY }}
+                  fillLinearGradientEndPoint={{ x: endX, y: endY }}
+                  fillLinearGradientColorStops={stops}
+                  listening={false}
+                />
+              );
+            })()}
+
+            {/* Nhóm chứa ảnh chụp và toàn bộ annotations neo tại (bgPad, bgPad) */}
+            <Group x={bgPad} y={bgPad}>
+              {/* Đổ bóng cho ảnh chụp */}
+              {bgConfig && bgConfig.shadow !== "none" && (() => {
+                const shadowConfig =
+                  bgConfig.shadow === "strong"
+                    ? { blur: 40, offset: 20, opacity: 0.55 }
+                    : bgConfig.shadow === "subtle"
+                    ? { blur: 14, offset: 7, opacity: 0.25 }
+                    : { blur: 26, offset: 13, opacity: 0.40 };
+                return (
+                  <Rect
+                    x={0}
+                    y={0}
+                    width={doc.imgW}
+                    height={doc.imgH}
+                    cornerRadius={bgConfig.borderRadius}
+                    fill="#000000"
+                    shadowColor="rgba(0, 0, 0, 0.45)"
+                    shadowBlur={shadowConfig.blur}
+                    shadowOffset={{ x: 0, y: shadowConfig.offset }}
+                    shadowOpacity={shadowConfig.opacity}
+                    listening={false}
+                  />
+                );
+              })()}
+
+              {/* Ảnh chụp chính — bo góc nếu có borderRadius */}
+              {bgConfig && bgConfig.borderRadius > 0 ? (
+                <Group
+                  clipFunc={(ctx) => {
+                    ctx.beginPath();
+                    drawRoundedRect(ctx, 0, 0, doc.imgW, doc.imgH, bgConfig.borderRadius);
+                    ctx.closePath();
+                  }}
+                >
+                  {img && <KImage image={img} id="bg" width={doc.imgW} height={doc.imgH} listening={false} />}
+                </Group>
+              ) : (
+                img && <KImage image={img} id="bg" width={doc.imgW} height={doc.imgH} listening={false} />
+              )}
 
             {doc.annotations.map((a) => {
               const isSelected = activeIds.includes(a.id);
@@ -2162,6 +2275,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               }
               boundBoxFunc={(_old, next) => next}
             />
+            </Group>
           </Layer>
         </Stage>
 
@@ -2383,7 +2497,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   function textPos(id: string) {
     const a = doc?.annotations.find((x) => x.id === id);
     if (!a) return { x: 0, y: 0 };
-    return { x: a.x * scale, y: a.y * scale };
+    return { x: (a.x + bgPad) * scale, y: (a.y + bgPad) * scale };
   }
 });
 

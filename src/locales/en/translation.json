@@ -101,7 +101,8 @@
     "text": "Text",
     "step": "Number",
     "pen": "Freehand",
-    "highlight": "Highlight"
+    "highlight": "Highlight",
+    "background": "Background"
   },
   "capture": {
     "full": "Full screen",
@@ -293,6 +294,15 @@
     "copy": "Copy to clipboard (Ctrl/Cmd+C)",
     "strokeWidth": "Stroke {{n}}px",
     "color": "Color",
+    "background": "Background",
+    "bgNone": "No background",
+    "bgPadding": "Padding",
+    "bgRadius": "Radius",
+    "bgShadow": "Shadow",
+    "shadowNone": "None",
+    "shadowSubtle": "Subtle",
+    "shadowMedium": "Medium",
+    "shadowStrong": "Strong",
     "unsaved": "Unsaved",
     "unsavedHint": "You have unsaved changes — press Ctrl/Cmd+S to save"
   },

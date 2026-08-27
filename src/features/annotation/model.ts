@@ -10,7 +10,8 @@ export type Tool =
   | "numbered-rect"
   | "highlight"
   | "blur"
-  | "crop";
+  | "crop"
+  | "background";
 
 interface Base {
   id: string;
@@ -120,6 +121,56 @@ export type Annotation =
   | BlurAnn
   | ImageAnn;
 
+/** Cấu hình khung nền gradient / solid (Mockup / Beautifier) */
+export interface BackgroundConfig {
+  enabled: boolean;
+  type: "gradient" | "solid";
+  /** ID preset nếu là preset dựng sẵn, hoặc "custom" */
+  presetId?: string;
+  /** Mảng màu gradient hoặc 1 màu duy nhất nếu solid */
+  colors: string[];
+  /** Góc gradient (độ, mặc định 135) */
+  angle?: number;
+  /** Khoảng đệm viền (px trong không gian ảnh) */
+  padding: number;
+  /** Bo góc của ảnh chụp (px) */
+  borderRadius: number;
+  /** Kiểu đổ bóng dưới ảnh chụp */
+  shadow: "none" | "subtle" | "medium" | "strong";
+}
+
+export interface BackgroundPreset {
+  id: string;
+  name: string;
+  type: "gradient" | "solid";
+  colors: string[];
+  angle?: number;
+}
+
+export const BACKGROUND_PRESETS: BackgroundPreset[] = [
+  { id: "sunset", name: "Sunset", type: "gradient", colors: ["#ff5f6d", "#ffc371"], angle: 135 },
+  { id: "ocean", name: "Ocean", type: "gradient", colors: ["#2193b0", "#6dd5ed"], angle: 135 },
+  { id: "cyberpunk", name: "Cyberpunk", type: "gradient", colors: ["#8a2387", "#e94057", "#f27121"], angle: 135 },
+  { id: "emerald", name: "Emerald", type: "gradient", colors: ["#11998e", "#38ef7d"], angle: 135 },
+  { id: "lavender", name: "Lavender", type: "gradient", colors: ["#667eea", "#764ba2"], angle: 135 },
+  { id: "peach", name: "Peach", type: "gradient", colors: ["#ff9a9e", "#fecfef"], angle: 135 },
+  { id: "midnight", name: "Midnight", type: "gradient", colors: ["#232526", "#414345"], angle: 135 },
+  { id: "frost", name: "Frost", type: "gradient", colors: ["#e0eafc", "#cfdef3"], angle: 135 },
+  { id: "dark-solid", name: "Dark", type: "solid", colors: ["#18181b"] },
+  { id: "light-solid", name: "Light", type: "solid", colors: ["#f8fafc"] },
+];
+
+export const DEFAULT_BACKGROUND_CONFIG: BackgroundConfig = {
+  enabled: true,
+  type: "gradient",
+  presetId: "sunset",
+  colors: ["#ff5f6d", "#ffc371"],
+  angle: 135,
+  padding: 32,
+  borderRadius: 12,
+  shadow: "medium",
+};
+
 /** Một "tài liệu" editor: ảnh nền + danh sách annotation (object-based). */
 export interface Doc {
   image: string; // data URL
@@ -128,6 +179,8 @@ export interface Doc {
   /** DPI scale factor của màn hình nguồn (1.0 = normal, 2.0 = Retina 2×). */
   scaleFactor: number;
   annotations: Annotation[];
+  /** Cấu hình khung nền gradient / solid (nếu có) */
+  background?: BackgroundConfig;
   /** Id bản ghi History tương ứng, nếu có — Save sẽ ghi đè tại chỗ record này
    * thay vì save-as ra vị trí khác. `null`/`undefined` cho ảnh mở từ file ngoài. */
   historyId?: string | null;

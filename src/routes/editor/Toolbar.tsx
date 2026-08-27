@@ -3,7 +3,16 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { useEditor } from "../../features/annotation/store";
-import { PRESET_COLORS, HIGHLIGHT_COLORS, STROKE_WIDTHS, SOLID_COLORS, type Tool, type Annotation } from "../../features/annotation/model";
+import {
+  PRESET_COLORS,
+  HIGHLIGHT_COLORS,
+  STROKE_WIDTHS,
+  SOLID_COLORS,
+  BACKGROUND_PRESETS,
+  DEFAULT_BACKGROUND_CONFIG,
+  type Tool,
+  type Annotation,
+} from "../../features/annotation/model";
 
 /** Icon 18×18, dùng currentColor để kế thừa màu nút. */
 const ICONS: Record<Tool, ReactNode> = {
@@ -97,6 +106,12 @@ const ICONS: Record<Tool, ReactNode> = {
         strokeWidth="1.6"
         strokeLinecap="round"
       />
+    </svg>
+  ),
+  background: (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+      <rect x="2" y="2" width="14" height="14" rx="3.5" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <rect x="4.5" y="4.5" width="9" height="9" rx="1.5" fill="currentColor" opacity="0.65" />
     </svg>
   ),
 };
@@ -286,6 +301,7 @@ export default function Toolbar({
     { id: "highlight",      label: t("tools.highlight"),    hint: "H" },
     { id: "blur",           label: t("tools.blur"),         hint: "B" },
     { id: "crop",           label: "Crop",                  hint: "C" },
+    { id: "background",     label: t("tools.background") || "Nền", hint: "G" },
   ];
 
   // Selector + useShallow thay vì subscribe cả store: trước đây MỌI thay đổi
@@ -308,6 +324,7 @@ export default function Toolbar({
     stepCounter, arrowCounter, rectCounter,
     setStepCounter, setArrowCounter, setRectCounter,
     renumberSteps, renumberArrows, renumberRects,
+    setBackground, setBackgroundLive, commitBackground,
     doc,
   } = useEditor(
     useShallow((s) => ({
@@ -325,6 +342,7 @@ export default function Toolbar({
       stepCounter: s.stepCounter, arrowCounter: s.arrowCounter, rectCounter: s.rectCounter,
       setStepCounter: s.setStepCounter, setArrowCounter: s.setArrowCounter, setRectCounter: s.setRectCounter,
       renumberSteps: s.renumberSteps, renumberArrows: s.renumberArrows, renumberRects: s.renumberRects,
+      setBackground: s.setBackground, setBackgroundLive: s.setBackgroundLive, commitBackground: s.commitBackground,
       doc: s.doc,
     })),
   );
@@ -387,9 +405,10 @@ export default function Toolbar({
   const isNumberedArrow = !isMultiple && (tool === "numbered-arrow" || selectedAnn?.type === "numbered-arrow");
   const isNumberedRect  = !isMultiple && (tool === "numbered-rect" || selectedAnn?.type === "numbered-rect");
   const isCrop      = tool === "crop";
+  const isBackground = tool === "background";
   const isImage     = (!isMultiple && selectedAnn?.type === "image") || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "image"));
   // Tools dùng color + strokeWidth: hiển thị đầy đủ khi ở chế độ vẽ hoặc khi ở chế độ chọn/sửa
-  const hasStroke   = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop && !isImage);
+  const hasStroke   = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop && !isImage && !isBackground);
 
   return (
     <div style={bar}>
@@ -499,10 +518,10 @@ export default function Toolbar({
               )}
             </div>
 
-            {/* DÒNG 2: THUỘC TÍNH CHI TIẾT THEO CÔNG CỤ ĐANG CHỌN (Màu, Nét, Size chữ, Đếm số, Blur...) */}
+            {/* DÒNG 2: THUỘC TÍNH CHI TIẾT THEO CÔNG CỤ ĐANG CHỌN (Màu, Nét, Size chữ, Đếm số, Blur, Background...) */}
             <div style={toolbarRow}>
-              {/* Màu stroke — ẩn khi đang dùng highlight/blur/image */}
-              {!isHighlight && !isBlur && !isImage && (
+              {/* Màu stroke — ẩn khi đang dùng highlight/blur/image/background */}
+              {!isHighlight && !isBlur && !isImage && !isBackground && (
                 <div style={group}>
                   <span style={dimLabel}>{t("editorToolbar.color")}</span>
                   {PRESET_COLORS.map((c) => (
@@ -662,12 +681,13 @@ export default function Toolbar({
                         <span style={dimLabel}>{blurMode === "pixelate" ? t("editorToolbar.pixelTileSize") : t("editorToolbar.blurIntensity")}</span>
                         <input
                           type="range"
+                          className="editor-slider"
                           min={2} max={blurMode === "pixelate" ? 32 : 20}
                           value={blurRadius}
                           onChange={(e) => setBlurRadius(Number(e.target.value))}
                           onMouseUp={commitBlurRadius}
                           onPointerUp={commitBlurRadius}
-                          style={sliderStyle}
+                          style={{ width: 75 }}
                           title={t("editorToolbar.intensityLabel", { n: blurRadius })}
                         />
                         <span style={blurLabel}>{blurRadius}</span>
@@ -722,6 +742,196 @@ export default function Toolbar({
                   </button>
                 </>
               )}
+
+              {/* Background controls — khi tool = background */}
+              {isBackground && (() => {
+                const bg = doc?.background;
+                const isEnabled = Boolean(bg?.enabled);
+                const currentPresetId = bg?.presetId;
+                const currentPadding = bg?.padding ?? 32;
+                const currentRadius = bg?.borderRadius ?? 12;
+                const currentShadow = bg?.shadow ?? "medium";
+
+                return (
+                  <>
+                    {/* Nhóm chọn Preset màu nền */}
+                    <div style={group}>
+                      {/* Nút Tắt / None */}
+                      <button
+                        onClick={() => setBackground(null)}
+                        style={{
+                          height: 22,
+                          padding: "0 7px",
+                          borderRadius: 4,
+                          background: !isEnabled ? "rgba(59,130,246,0.22)" : "rgba(255,255,255,0.06)",
+                          color: !isEnabled ? "#7eb8ff" : "rgba(242,242,245,0.75)",
+                          border: !isEnabled ? "1px solid rgba(59,130,246,0.5)" : "1px solid rgba(255,255,255,0.1)",
+                          fontSize: 11,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          transition: "all 0.12s",
+                        }}
+                        title={t("editorToolbar.bgNone")}
+                      >
+                        <span style={{ fontSize: 13, lineHeight: 1 }}>∅</span>
+                        {t("editorToolbar.bgNone")}
+                      </button>
+
+                      {/* Gradient / Solid Presets swatches */}
+                      {BACKGROUND_PRESETS.map((p) => {
+                        const isSelected = isEnabled && currentPresetId === p.id;
+                        const bgStyle =
+                          p.type === "solid" || p.colors.length === 1
+                            ? p.colors[0]
+                            : `linear-gradient(${p.angle ?? 135}deg, ${p.colors.join(", ")})`;
+                        return (
+                          <button
+                            key={p.id}
+                            onClick={() => {
+                              setBackground({
+                                enabled: true,
+                                type: p.type,
+                                presetId: p.id,
+                                colors: p.colors,
+                                angle: p.angle ?? 135,
+                                padding: currentPadding,
+                                borderRadius: currentRadius,
+                                shadow: currentShadow,
+                              });
+                            }}
+                            title={p.name}
+                            style={{
+                              width: 20,
+                              height: 20,
+                              borderRadius: 4,
+                              background: bgStyle,
+                              border: isSelected ? "2px solid #fff" : "1px solid rgba(255,255,255,0.15)",
+                              boxShadow: isSelected
+                                ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.3)"
+                                : "0 1px 2px rgba(0,0,0,0.2)",
+                              flexShrink: 0,
+                              cursor: "pointer",
+                              transition: "all 0.12s",
+                            }}
+                          />
+                        );
+                      })}
+
+                      {/* Custom Color Picker */}
+                      <CustomColorButton
+                        value={bg?.type === "solid" ? bg.colors[0] : "#3b82f6"}
+                        selected={isEnabled && bg?.type === "solid" && currentPresetId === "custom"}
+                        onChange={(c) => {
+                          setBackground({
+                            enabled: true,
+                            type: "solid",
+                            presetId: "custom",
+                            colors: [c],
+                            padding: currentPadding,
+                            borderRadius: currentRadius,
+                            shadow: currentShadow,
+                          });
+                        }}
+                      />
+                    </div>
+
+                    {/* Padding controls */}
+                    <div style={sep} />
+                    <div style={group}>
+                      <span style={dimLabel}>{t("editorToolbar.bgPadding")}</span>
+                      <input
+                        type="range"
+                        className="editor-slider"
+                        min={0}
+                        max={160}
+                        value={currentPadding}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+                          setBackgroundLive({ ...baseBg, enabled: true, padding: val });
+                        }}
+                        onMouseUp={commitBackground}
+                        onPointerUp={commitBackground}
+                        style={{ width: 80 }}
+                        title={`${currentPadding}px`}
+                      />
+                      <NumberField
+                        value={currentPadding}
+                        min={0}
+                        max={200}
+                        width={40}
+                        onCommit={(val) => {
+                          const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+                          setBackground({ ...baseBg, enabled: true, padding: val });
+                        }}
+                        title={t("editorToolbar.bgPadding")}
+                      />
+                    </div>
+
+                    {/* Radius controls */}
+                    <div style={sep} />
+                    <div style={group}>
+                      <span style={dimLabel}>{t("editorToolbar.bgRadius")}</span>
+                      <input
+                        type="range"
+                        className="editor-slider"
+                        min={0}
+                        max={48}
+                        value={currentRadius}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+                          setBackgroundLive({ ...baseBg, enabled: true, borderRadius: val });
+                        }}
+                        onMouseUp={commitBackground}
+                        onPointerUp={commitBackground}
+                        style={{ width: 75 }}
+                        title={`${currentRadius}px`}
+                      />
+                      <NumberField
+                        value={currentRadius}
+                        min={0}
+                        max={64}
+                        width={38}
+                        onCommit={(val) => {
+                          const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+                          setBackground({ ...baseBg, enabled: true, borderRadius: val });
+                        }}
+                        title={t("editorToolbar.bgRadius")}
+                      />
+                    </div>
+
+                    {/* Shadow controls */}
+                    <div style={sep} />
+                    <div style={group}>
+                      <span style={dimLabel}>{t("editorToolbar.bgShadow")}</span>
+                      {(
+                        [
+                          { id: "none", label: t("editorToolbar.shadowNone") },
+                          { id: "subtle", label: t("editorToolbar.shadowSubtle") },
+                          { id: "medium", label: t("editorToolbar.shadowMedium") },
+                          { id: "strong", label: t("editorToolbar.shadowStrong") },
+                        ] as const
+                      ).map((sh) => (
+                        <button
+                          key={sh.id}
+                          onClick={() => {
+                            const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+                            setBackground({ ...baseBg, enabled: true, shadow: sh.id });
+                          }}
+                          style={modeBtn(isEnabled && currentShadow === sh.id)}
+                          title={sh.label}
+                        >
+                          {sh.label}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
 
@@ -964,9 +1174,6 @@ function modeBtn(active: boolean): React.CSSProperties {
   };
 }
 
-const sliderStyle: React.CSSProperties = {
-  width: 75, height: 4, accentColor: "var(--accent)", cursor: "pointer",
-};
 
 const flattenBtn: React.CSSProperties = {
   height: 24, padding: "0 9px", borderRadius: 5, fontSize: 11, fontWeight: 600,

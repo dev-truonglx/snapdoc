@@ -152,3 +152,74 @@ select,
   background: rgba(255, 255, 255, 0.12) !important;
   color: #ffffff !important;
 }
+
+/* Range slider thanh mảnh, hiện đại cho Editor Toolbar */
+input[type="range"].editor-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  border: none;
+  height: 20px;
+  cursor: pointer;
+  outline: none;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+input[type="range"].editor-slider::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  border: none;
+  transition: background 0.15s ease;
+}
+
+input[type="range"].editor-slider:hover::-webkit-slider-runnable-track {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+input[type="range"].editor-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #3b82f6;
+  border: 1.5px solid #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  margin-top: -4.5px;
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+
+input[type="range"].editor-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.18);
+  background: #60a5fa;
+}
+
+input[type="range"].editor-slider:active::-webkit-slider-thumb {
+  transform: scale(1.25);
+  background: #2563eb;
+}
+
+input[type="range"].editor-slider::-moz-range-track {
+  width: 100%;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  border: none;
+}
+
+input[type="range"].editor-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #3b82f6;
+  border: 1.5px solid #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}

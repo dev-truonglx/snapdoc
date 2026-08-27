@@ -101,7 +101,8 @@
     "text": "Viết chữ",
     "step": "Đánh số",
     "pen": "Vẽ tự do",
-    "highlight": "Tô sáng"
+    "highlight": "Tô sáng",
+    "background": "Khung nền"
   },
   "capture": {
     "full": "Toàn màn hình",
@@ -291,6 +292,15 @@
     "copy": "Copy vào clipboard (Ctrl/Cmd+C)",
     "strokeWidth": "Nét {{n}}px",
     "color": "Màu",
+    "background": "Khung nền",
+    "bgNone": "Tắt nền",
+    "bgPadding": "Đệm",
+    "bgRadius": "Bo góc",
+    "bgShadow": "Đổ bóng",
+    "shadowNone": "Không",
+    "shadowSubtle": "Nhẹ",
+    "shadowMedium": "Vừa",
+    "shadowStrong": "Đậm",
     "unsaved": "Chưa lưu",
     "unsavedHint": "Có thay đổi chưa lưu — nhấn Ctrl/Cmd+S để lưu"
   },
