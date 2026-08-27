@@ -4,10 +4,12 @@
  * hoặc từ get_pending_update khi load (để không bị race condition với event).
  */
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { ipc, type UpdateInfo } from "../../lib/ipc";
 
 export default function UpdateWindow() {
+  const { t } = useTranslation();
   const [info, setInfo] = useState<UpdateInfo | null>(null);
   const [status, setStatus] = useState<"idle" | "installing" | "err">("idle");
   const [err, setErr] = useState<string | null>(null);
@@ -44,7 +46,7 @@ export default function UpdateWindow() {
   if (!info) {
     return (
       <div style={container}>
-        <p style={{ color: "var(--text-dim)", fontSize: 13 }}>Loading…</p>
+        <p style={{ color: "var(--text-dim)", fontSize: 13 }}>{t("common.loading")}</p>
       </div>
     );
   }
@@ -55,13 +57,13 @@ export default function UpdateWindow() {
         <img src="/app-icon.png" width={64} height={64} style={{ borderRadius: 14 }} alt="SnapDoc" />
       </div>
 
-      <h2 style={title}>New update available</h2>
+      <h2 style={title}>{t("updates.newUpdateTitle")}</h2>
       <p style={versionText}>
         <strong>v{info.version}</strong>
-        <span style={{ color: "var(--text-dim)" }}> (current: v{info.currentVersion})</span>
+        <span style={{ color: "var(--text-dim)" }}> {t("updates.currentVersionText", { version: info.currentVersion })}</span>
       </p>
       <p style={desc}>
-        Install now to get new features and security fixes. The app will restart automatically.
+        {t("updates.updateDesc")}
       </p>
 
       {status === "err" && err && (
@@ -74,14 +76,14 @@ export default function UpdateWindow() {
           disabled={status === "installing"}
           onClick={handleInstall}
         >
-          {status === "installing" ? "Installing…" : "Install and restart"}
+          {status === "installing" ? t("updates.installing") : t("updates.installAndRestart")}
         </button>
         <button
           style={{ ...actionBtn, ...secondaryBtn }}
           disabled={status === "installing"}
           onClick={handleLater}
         >
-          Để sau
+          {t("updates.later")}
         </button>
       </div>
     </div>

@@ -314,8 +314,8 @@ export default function Settings() {
         </Card>
 
         {/* LANGUAGE */}
-        <Card title="LANGUAGE">
-          <Field label="Language / Ngôn ngữ">
+        <Card title={t("settings.languageSection")}>
+          <Field label={t("settings.languageLabel")}>
             <select
               value={i18n.language}
               onChange={(e) => {

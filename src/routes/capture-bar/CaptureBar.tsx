@@ -176,7 +176,7 @@ export default function CaptureBar() {
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden>
               <path d="M11 2 3 12h6l-1 6 8-10h-6l1-6Z" fill="currentColor" />
             </svg>
-            <span style={{ fontSize: 11, lineHeight: 1 }}>Quick</span>
+            <span style={{ fontSize: 11, lineHeight: 1 }}>{t("captureBar.quick")}</span>
           </button>
           {PHOTO_MODES.map((m) => (
             <button

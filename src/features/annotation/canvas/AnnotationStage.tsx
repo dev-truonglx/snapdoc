@@ -2397,13 +2397,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               }}
             >
               <button onClick={applyCrop} style={cropBtn(true)}>
-                Áp dụng crop
+                {t("crop.apply")}
               </button>
               <button onClick={handleCopyCrop} style={cropBtn(false)} title="Ctrl/Cmd+C">
-                Sao chép
+                {t("crop.copy")}
               </button>
               <button onClick={() => setCropRect(null)} style={cropBtn(false)}>
-                Huỷ
+                {t("crop.cancel")}
               </button>
             </div>
           );

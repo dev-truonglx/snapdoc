@@ -8,7 +8,7 @@ export default function HistoryToolbar() {
   const { t } = useTranslation();
 
   const MODES = [
-    { id: "", label: t("capture.all") },
+    { id: "", label: t("history.allModes") },
     { id: "region", label: t("capture.region") },
     { id: "window", label: t("capture.window") },
     { id: "full", label: t("capture.full") },
@@ -18,9 +18,9 @@ export default function HistoryToolbar() {
   ] as const;
 
   const MEDIA_TYPES = [
-    { id: "", label: "All types" },
-    { id: "image", label: "Images" },
-    { id: "video", label: "Videos" },
+    { id: "", label: t("history.allTypes") },
+    { id: "image", label: t("history.images") },
+    { id: "video", label: t("history.videos") },
   ] as const;
 
   const filter = useHistory((s) => s.filter);
@@ -39,7 +39,7 @@ export default function HistoryToolbar() {
   };
 
   const onEmptyTrash = async () => {
-    if (!confirm("Permanently delete all items in Trash? Cannot be undone.")) return;
+    if (!confirm(t("history.emptyTrashConfirm"))) return;
     setEmptying(true);
     try {
       await ipc.emptyTrash();
@@ -77,14 +77,14 @@ export default function HistoryToolbar() {
         type="date"
         value={filter.from != null ? msToDayStr(filter.from) : ""}
         onChange={(e) => onFromChange(e.target.value)}
-        title="From date"
+        title={t("history.fromDate")}
       />
       <span style={{ color: "var(--text-dim)" }}>—</span>
       <input
         type="date"
         value={filter.to != null ? msToDayStr(filter.to - ONE_DAY_MS) : ""}
         onChange={(e) => onToChange(e.target.value)}
-        title="To date"
+        title={t("history.toDate")}
       />
 
       <div style={{ flex: 1 }} />
@@ -92,7 +92,7 @@ export default function HistoryToolbar() {
       <div style={viewSwitch}>
         <button
           style={viewIconBtn(viewMode === "grid")}
-          title="Grid view"
+          title={t("history.gridView")}
           onClick={() => setViewMode("grid")}
         >
           <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor">
@@ -104,7 +104,7 @@ export default function HistoryToolbar() {
         </button>
         <button
           style={viewIconBtn(viewMode === "list")}
-          title="List view"
+          title={t("history.listView")}
           onClick={() => setViewMode("list")}
         >
           <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor">
@@ -119,17 +119,17 @@ export default function HistoryToolbar() {
         style={toggleBtn(!filter.trashOnly)}
         onClick={() => setFilter({ trashOnly: false })}
       >
-        Thư viện
+        {t("history.library")}
       </button>
       <button
         style={toggleBtn(!!filter.trashOnly)}
         onClick={() => setFilter({ trashOnly: true })}
       >
-        Trash
+        {t("history.trash")}
       </button>
       {filter.trashOnly && (
         <button style={dangerBtn} disabled={emptying} onClick={onEmptyTrash}>
-          Empty Trash
+          {t("history.emptyTrash")}
         </button>
       )}
     </div>

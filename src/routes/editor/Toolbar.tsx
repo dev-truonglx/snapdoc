@@ -288,20 +288,20 @@ export default function Toolbar({
   const TOOLS_GROUP1: { id: Tool; label: string; hint: string }[] = [
     { id: "select",         label: t("tools.select"),       hint: "V" },
     { id: "rect",           label: t("tools.rect"),         hint: "R" },
-    { id: "numbered-rect",  label: t("tools.numberedRect") || (t("tools.rect") + " #"), hint: "E" },
+    { id: "numbered-rect",  label: t("tools.numberedRect"), hint: "E" },
     { id: "ellipse",        label: t("tools.circle"),       hint: "O" },
     { id: "text",           label: t("tools.text"),         hint: "T" },
     { id: "step",           label: t("tools.step"),         hint: "N" },
   ];
 
   const TOOLS_GROUP2: { id: Tool; label: string; hint: string }[] = [
-    { id: "arrow",          label: t("tools.arrow"),        hint: "A" },
-    { id: "line",           label: t("tools.line"),         hint: "L" },
-    { id: "numbered-arrow", label: t("tools.arrow") + " #", hint: "W" },
-    { id: "highlight",      label: t("tools.highlight"),    hint: "H" },
-    { id: "blur",           label: t("tools.blur"),         hint: "B" },
-    { id: "crop",           label: "Crop",                  hint: "C" },
-    { id: "background",     label: t("tools.background") || "Nền", hint: "G" },
+    { id: "arrow",          label: t("tools.arrow"),         hint: "A" },
+    { id: "line",           label: t("tools.line"),          hint: "L" },
+    { id: "numbered-arrow", label: t("tools.numberedArrow"), hint: "W" },
+    { id: "highlight",      label: t("tools.highlight"),     hint: "H" },
+    { id: "blur",           label: t("tools.blur"),          hint: "B" },
+    { id: "crop",           label: t("tools.crop"),          hint: "C" },
+    { id: "background",     label: t("tools.background"),    hint: "G" },
   ];
 
   // Selector + useShallow thay vì subscribe cả store: trước đây MỌI thay đổi
@@ -426,7 +426,7 @@ export default function Toolbar({
                     <circle cx="7.5" cy="7.5" r="6.5" stroke="currentColor" strokeWidth="1.6"/>
                     <path d="M7.5 4v7M4 7.5h7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
                   </svg>
-                  <span style={{ fontSize: 12, fontWeight: 600 }}>New</span>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.newBtn")}</span>
                 </button>
 
                 {/* Open */}
@@ -434,7 +434,7 @@ export default function Toolbar({
                   <svg width="14" height="14" viewBox="0 0 15 15" aria-hidden fill="none">
                     <path d="M1.5 4.5A1 1 0 0 1 2.5 3.5h3.8l1.2 1.5H12.5a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.5"/>
                   </svg>
-                  <span style={{ fontSize: 12, fontWeight: 600 }}>Open</span>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.openBtn")}</span>
                 </button>
 
                 {/* Stitch */}
@@ -491,7 +491,7 @@ export default function Toolbar({
                       onClick={bringToFront}
                       style={toolBtn(false)}
                       title={t("editorToolbar.bringToFront")}
-                      aria-label="Bring to Front"
+                      aria-label={t("editorToolbar.bringToFront")}
                     >
                       <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden>
                         {/* Hình vuông dưới (mờ, nằm sau) */}
@@ -504,7 +504,7 @@ export default function Toolbar({
                       onClick={sendToBack}
                       style={toolBtn(false)}
                       title={t("editorToolbar.sendToBack")}
-                      aria-label="Send to Back"
+                      aria-label={t("editorToolbar.sendToBack")}
                     >
                       <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden>
                         {/* Hình vuông dưới (đậm, nằm sau) */}
@@ -641,7 +641,7 @@ export default function Toolbar({
                 <>
                   <div style={sep} />
                   <div style={group}>
-                    <span style={dimLabel}>{t("editorToolbar.badgeCorner") || "Góc"}</span>
+                    <span style={dimLabel}>{t("editorToolbar.badgeCorner")}</span>
                     {(["tl", "tr", "bl", "br"] as const).map((c) => (
                       <button
                         key={c}
@@ -668,7 +668,7 @@ export default function Toolbar({
                         style={modeBtn(blurMode === m)}
                         title={m === "blur" ? t("editorToolbar.blurSoft") : m === "pixelate" ? t("editorToolbar.pixelate") : t("editorToolbar.solidMode")}
                       >
-                        {m === "blur" ? "Blur" : m === "pixelate" ? "Pixel" : "Solid"}
+                        {m === "blur" ? t("editorToolbar.blurModeShort") : m === "pixelate" ? t("editorToolbar.pixelModeShort") : t("editorToolbar.solidModeShort")}
                       </button>
                     ))}
                   </div>
@@ -950,7 +950,7 @@ export default function Toolbar({
                   <path d="M5 2v3.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.5"/>
                   <path d="M4 14v-4.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V14" stroke="currentColor" strokeWidth="1.5"/>
                 </svg>
-                <span style={{ fontSize: 12, fontWeight: 600 }}>Save</span>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.saveBtn")}</span>
               </button>
               <button
                 onClick={(e) => { e.stopPropagation(); setShowSaveMenu((v) => !v); }}
@@ -981,7 +981,7 @@ export default function Toolbar({
                 <rect x="9" y="8.5" width="5.5" height="5.5" rx="1" fill="var(--bg-elevated)" stroke="currentColor" strokeWidth="1.3"/>
                 <path d="M10.5 9.5h2.5M10.5 11h2.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
               </svg>
-              <span style={{ fontSize: 12, fontWeight: 600 }}>Save+Copy</span>
+              <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.saveCopyBtn")}</span>
             </button>
 
             <button onClick={onCopy} disabled={busy} style={actionBtn} title={t("editorToolbar.copy")}>
@@ -989,7 +989,7 @@ export default function Toolbar({
                 <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
                 <path d="M3 11H2.5A1.5 1.5 0 0 1 1 9.5v-7A1.5 1.5 0 0 1 2.5 1h7A1.5 1.5 0 0 1 11 2.5V3" stroke="currentColor" strokeWidth="1.5"/>
               </svg>
-              <span style={{ fontSize: 12, fontWeight: 600 }}>Copy</span>
+              <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.copyBtn")}</span>
             </button>
           </div>
         </>
