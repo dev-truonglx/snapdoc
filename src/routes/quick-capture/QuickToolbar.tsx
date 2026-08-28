@@ -148,7 +148,7 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><rect x="2.5" y="4" width="13" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" /></svg>,
     },
     {
-      id: "numbered-rect", label: t("tools.numberedRect") || (t("tools.rect") + " #"), shortcut: "E",
+      id: "numbered-rect", label: t("tools.numberedRect"), shortcut: "E",
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><rect x="2.5" y="4" width="13" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.8" /><circle cx="5" cy="6.5" r="3.2" fill="currentColor" /><text x="5" y="8.8" textAnchor="middle" fontSize="4.5" fontWeight="700" fill="#fff">1</text></svg>,
     },
     {
@@ -164,7 +164,7 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><line x1="3" y1="15" x2="14" y2="4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /><polygon points="14,4 9,5.5 12.5,9" fill="currentColor" /></svg>,
     },
     {
-      id: "numbered-arrow", label: t("tools.arrow") + " #", shortcut: "W",
+      id: "numbered-arrow", label: t("tools.numberedArrow"), shortcut: "W",
       icon: <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden><circle cx="4.5" cy="13.5" r="3.5" fill="currentColor" /><text x="4.5" y="16.2" textAnchor="middle" fontSize="5" fontWeight="700" fill="#fff">1</text><line x1="7.5" y1="11" x2="14.5" y2="4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /><polygon points="14.5,4 10,5.5 13,8.5" fill="currentColor" /></svg>,
     },
     {

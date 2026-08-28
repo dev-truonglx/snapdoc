@@ -45,7 +45,9 @@
     "hotkeyWarning": "hãy đổi sang tổ hợp khác bên dưới rồi lưu lại.",
     "checkPermissions": "Đang kiểm tra…",
     "permGranted": "✓ Đã cấp",
-    "permDenied": "✕ Chưa cấp"
+    "permDenied": "✕ Chưa cấp",
+    "languageSection": "NGÔN NGỮ",
+    "languageLabel": "Ngôn ngữ hiển thị"
   },
   "updates": {
     "checkingUpdates": "Đang kiểm tra…",
@@ -60,7 +62,12 @@
     "available": ". Nhấn \"Cài v",
     "availableEnd": "\" để cài và khởi động lại.",
     "networkError": "Không kiểm tra được — kiểm tra kết nối mạng",
-    "updateAvailable": "có sẵn"
+    "updateAvailable": "có sẵn",
+    "newUpdateTitle": "Có bản cập nhật mới",
+    "currentVersionText": "(hiện tại: v{{version}})",
+    "updateDesc": "Cài đặt ngay để nhận các tính năng mới và bản vá bảo mật. Ứng dụng sẽ tự động khởi động lại.",
+    "installAndRestart": "Cài đặt và khởi động lại",
+    "later": "Để sau"
   },
   "outputs": {
     "editor": "Mở editor",
@@ -101,7 +108,10 @@
     "text": "Viết chữ",
     "step": "Đánh số",
     "pen": "Vẽ tự do",
-    "highlight": "Tô sáng"
+    "highlight": "Tô sáng",
+    "background": "Khung nền",
+    "numberedArrow": "Mũi tên số",
+    "crop": "Cắt"
   },
   "capture": {
     "full": "Toàn màn hình",
@@ -155,7 +165,8 @@
     "aboutToCapture": "Sắp chụp… (Esc để huỷ)",
     "quickCaptureHint": "Chụp nhanh — chọn vùng rồi chú thích ngay tại chỗ",
     "options": "Tuỳ chọn",
-    "close": "Đóng"
+    "close": "Đóng",
+    "quick": "Chụp nhanh"
   },
   "overlay": {
     "dragToSelect": "Kéo để chọn vùng • Di chuột qua cửa sổ rồi click để chụp cả cửa sổ • Esc / chuột phải để huỷ",
@@ -225,7 +236,19 @@
     "showInFinder": "Hiện trong Finder/Explorer",
     "moveToTrash": "Xoá (chuyển vào Trash)",
     "restore": "Khôi phục",
-    "permanentDelete": "Xoá vĩnh viễn"
+    "permanentDelete": "Xoá vĩnh viễn",
+    "allTypes": "Mọi loại",
+    "images": "Ảnh",
+    "videos": "Video",
+    "allModes": "Mọi chế độ",
+    "fromDate": "Từ ngày",
+    "toDate": "Đến ngày",
+    "gridView": "Xem lưới",
+    "listView": "Xem danh sách",
+    "library": "Thư viện",
+    "trash": "Thùng rác",
+    "emptyTrash": "Dọn sạch Thùng rác",
+    "emptyTrashConfirm": "Xoá vĩnh viễn tất cả mục trong Thùng rác? Không thể hoàn tác."
   },
   "thumbnail": {
     "openEditorTooltip": "Nhấn để mở editor",
@@ -291,8 +314,33 @@
     "copy": "Copy vào clipboard (Ctrl/Cmd+C)",
     "strokeWidth": "Nét {{n}}px",
     "color": "Màu",
+    "background": "Khung nền",
+    "bgNone": "Tắt nền",
+    "bgColors": "Dải màu",
+    "bgAngle": "Góc",
+    "bgAddStop": "Thêm điểm màu",
+    "bgRemoveStop": "Xóa điểm màu",
+    "bgReverse": "Đảo chiều dải màu",
+    "bgStopTooltip": "Điểm màu {{n}} (Click để đổi màu)",
+    "bgPadding": "Đệm",
+    "bgRadius": "Bo góc",
+    "bgShadow": "Đổ bóng",
+    "shadowNone": "Không",
+    "shadowSubtle": "Nhẹ",
+    "shadowMedium": "Vừa",
+    "shadowStrong": "Đậm",
     "unsaved": "Chưa lưu",
-    "unsavedHint": "Có thay đổi chưa lưu — nhấn Ctrl/Cmd+S để lưu"
+    "unsavedHint": "Có thay đổi chưa lưu — nhấn Ctrl/Cmd+S để lưu",
+    "bringToFront": "Lên trên cùng (])",
+    "sendToBack": "Xuống dưới cùng ([)",
+    "newBtn": "Mới",
+    "openBtn": "Mở",
+    "saveBtn": "Lưu",
+    "saveCopyBtn": "Lưu + Copy",
+    "copyBtn": "Copy",
+    "blurModeShort": "Blur",
+    "pixelModeShort": "Pixel",
+    "solidModeShort": "Solid"
   },
   "editorMain": {
     "copiedClipboard": "Đã copy vào clipboard",
@@ -317,7 +365,10 @@
     "draftFoundPrompt": "Tìm thấy bản chỉnh sửa chưa lưu từ trước.",
     "draftKeep": "Tiếp tục",
     "draftDiscard": "Bỏ",
-    "draftDiscarded": "Đã bỏ bản chỉnh sửa chưa lưu"
+    "draftDiscarded": "Đã bỏ bản chỉnh sửa chưa lưu",
+    "imagePasted": "Đã dán ảnh vào editor",
+    "imageAdded": "Đã thêm ảnh vào editor",
+    "dropImageHere": "Thả ảnh vào đây để chèn"
   },
   "historyStrip": {
     "recent": "Gần đây",
@@ -433,5 +484,10 @@
     "cannotLoadImage": "Không tải được ảnh",
     "noImagesToStitch": "Chưa có ảnh nào để nối",
     "cannotCreateCanvas": "Không tạo được canvas context"
+  },
+  "crop": {
+    "apply": "Áp dụng crop",
+    "copy": "Sao chép",
+    "cancel": "Huỷ"
   }
 }

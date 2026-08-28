@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Annotation, Doc, Tool } from "./model";
+import type { Annotation, BackgroundConfig, Doc, Tool } from "./model";
 import { HIGHLIGHT_COLORS } from "./model";
 
 const HISTORY_LIMIT = 30;
@@ -111,6 +111,11 @@ interface EditorState {
   select: (id: string | null, multi?: boolean) => void;
   selectMany: (ids: string[], append?: boolean) => void;
   selectAll: () => void;
+
+  // background (khung nền)
+  setBackground: (bg: BackgroundConfig | null) => void;
+  setBackgroundLive: (bg: BackgroundConfig | null) => void;
+  commitBackground: () => void;
 
   // mutations (đều đi qua history)
   addAnnotation: (a: Annotation, atBottom?: boolean) => void;
@@ -460,6 +465,33 @@ export const useEditor = create<EditorState>((set, get) => ({
     get().selectMany(ids, false);
   },
 
+  setBackground: (background) =>
+    set((s) => {
+      if (!s.doc) return {};
+      const next: Doc = {
+        ...s.doc,
+        background: background ? { ...background } : undefined,
+      };
+      return { ...commit(s, next) };
+    }),
+
+  setBackgroundLive: (background) =>
+    set((s) => {
+      if (!s.doc) return {};
+      return {
+        doc: {
+          ...s.doc,
+          background: background ? { ...background } : undefined,
+        },
+      };
+    }),
+
+  commitBackground: () =>
+    set((s) => {
+      if (!s.doc) return {};
+      return { ...commit(s, { ...s.doc }) };
+    }),
+
   addAnnotation: (a, atBottom) =>
     set((s) => {
       if (!s.doc) return {};
@@ -615,7 +647,16 @@ export const useEditor = create<EditorState>((set, get) => ({
         // `filePath` phải đi theo: mất nó thì tài liệu `.snapdoc` mở từ đĩa sau
         // khi crop sẽ không còn biết đường về file gốc, và Save rơi xuống nhánh
         // "xuất PNG mới" thay vì ghi lại chính file đó.
-        ...commit(s, { image, imgW, imgH, scaleFactor: s.doc.scaleFactor, annotations, historyId: s.doc.historyId, filePath: s.doc.filePath }),
+        ...commit(s, {
+          image,
+          imgW,
+          imgH,
+          scaleFactor: s.doc.scaleFactor,
+          annotations,
+          background: s.doc.background,
+          historyId: s.doc.historyId,
+          filePath: s.doc.filePath,
+        }),
         selectedId: null,
         baseDirty: true,
       };

@@ -1,5 +1,5 @@
 import { useEditor } from "./store";
-import type { Annotation, Doc } from "./model";
+import type { Annotation, BackgroundConfig, Doc } from "./model";
 import { ipc } from "../../lib/ipc";
 
 /**
@@ -269,6 +269,7 @@ export interface DocPayload {
   payloadV: number;
   kind: "image";
   annotations: Annotation[];
+  background?: BackgroundConfig;
   stepCounter: number;
   arrowCounter: number;
   rectCounter?: number;
@@ -288,6 +289,7 @@ export function serializeDoc(): string | null {
     payloadV: DOC_PAYLOAD_VERSION,
     kind: "image",
     annotations: s.doc.annotations,
+    background: s.doc.background,
     stepCounter: s.stepCounter,
     arrowCounter: s.arrowCounter,
     rectCounter: s.rectCounter,
@@ -357,6 +359,7 @@ export async function openLibraryImage(
       imgH: item.height,
       scaleFactor: item.scaleFactor,
       annotations: payload?.annotations ?? [],
+      background: payload?.background,
       historyId: item.id,
       captureMode: item.captureMode,
     },

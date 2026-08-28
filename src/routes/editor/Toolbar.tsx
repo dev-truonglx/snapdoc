@@ -3,7 +3,16 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { useEditor } from "../../features/annotation/store";
-import { PRESET_COLORS, HIGHLIGHT_COLORS, STROKE_WIDTHS, SOLID_COLORS, type Tool, type Annotation } from "../../features/annotation/model";
+import {
+  PRESET_COLORS,
+  HIGHLIGHT_COLORS,
+  STROKE_WIDTHS,
+  SOLID_COLORS,
+  BACKGROUND_PRESETS,
+  DEFAULT_BACKGROUND_CONFIG,
+  type Tool,
+  type Annotation,
+} from "../../features/annotation/model";
 
 /** Icon 18×18, dùng currentColor để kế thừa màu nút. */
 const ICONS: Record<Tool, ReactNode> = {
@@ -77,14 +86,14 @@ const ICONS: Record<Tool, ReactNode> = {
     <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
       {/* Biểu tượng blur: ô vuông + vài chấm mờ bên trong */}
       <rect x="2.5" y="4" width="13" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.6" />
-      <circle cx="6"  cy="9" r="1.1" fill="currentColor" opacity="0.9" />
-      <circle cx="9"  cy="9" r="1.1" fill="currentColor" opacity="0.55" />
+      <circle cx="6" cy="9" r="1.1" fill="currentColor" opacity="0.9" />
+      <circle cx="9" cy="9" r="1.1" fill="currentColor" opacity="0.55" />
       <circle cx="12" cy="9" r="1.1" fill="currentColor" opacity="0.25" />
-      <circle cx="6"  cy="6.5" r="0.7" fill="currentColor" opacity="0.5" />
-      <circle cx="9"  cy="6.5" r="0.7" fill="currentColor" opacity="0.3" />
+      <circle cx="6" cy="6.5" r="0.7" fill="currentColor" opacity="0.5" />
+      <circle cx="9" cy="6.5" r="0.7" fill="currentColor" opacity="0.3" />
       <circle cx="12" cy="6.5" r="0.7" fill="currentColor" opacity="0.15" />
-      <circle cx="6"  cy="11.5" r="0.7" fill="currentColor" opacity="0.5" />
-      <circle cx="9"  cy="11.5" r="0.7" fill="currentColor" opacity="0.3" />
+      <circle cx="6" cy="11.5" r="0.7" fill="currentColor" opacity="0.5" />
+      <circle cx="9" cy="11.5" r="0.7" fill="currentColor" opacity="0.3" />
       <circle cx="12" cy="11.5" r="0.7" fill="currentColor" opacity="0.15" />
     </svg>
   ),
@@ -97,6 +106,12 @@ const ICONS: Record<Tool, ReactNode> = {
         strokeWidth="1.6"
         strokeLinecap="round"
       />
+    </svg>
+  ),
+  background: (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+      <rect x="2" y="2" width="14" height="14" rx="3.5" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <rect x="4.5" y="4.5" width="9" height="9" rx="1.5" fill="currentColor" opacity="0.65" />
     </svg>
   ),
 };
@@ -264,6 +279,104 @@ function CustomColorButton({
   );
 }
 
+/**
+ * Nút chọn/tùy biến từng điểm màu (color stop) trong dải Gradient
+ */
+function ColorStopButton({
+  color,
+  index,
+  totalStops,
+  onChange,
+  onRemove,
+}: {
+  color: string;
+  index: number;
+  totalStops: number;
+  onChange: (c: string) => void;
+  onRemove?: () => void;
+}) {
+  const { t } = useTranslation();
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      style={{ position: "relative", display: "inline-flex", alignItems: "center" }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <label
+        title={t("editorToolbar.bgStopTooltip", { n: index + 1 })}
+        style={{
+          position: "relative",
+          width: 20,
+          height: 20,
+          borderRadius: 4,
+          flexShrink: 0,
+          cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: color,
+          border: "1.5px solid rgba(255,255,255,0.7)",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+          boxSizing: "border-box",
+          overflow: "hidden",
+          transition: "all 0.12s",
+        }}
+      >
+        <input
+          type="color"
+          value={color}
+          onChange={(e) => onChange(e.target.value)}
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            opacity: 0,
+            border: "none",
+            padding: 0,
+            margin: 0,
+            cursor: "pointer",
+          }}
+        />
+      </label>
+      {totalStops > 2 && onRemove && hovered && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onRemove();
+          }}
+          title={t("editorToolbar.bgRemoveStop")}
+          style={{
+            position: "absolute",
+            top: -4,
+            right: -4,
+            width: 12,
+            height: 12,
+            borderRadius: "50%",
+            background: "#ef4444",
+            color: "#fff",
+            border: "1px solid #fff",
+            fontSize: 9,
+            lineHeight: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+            padding: 0,
+            zIndex: 3,
+            boxShadow: "0 1px 2px rgba(0,0,0,0.3)",
+          }}
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function Toolbar({
   mode, onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy,
 }: Props) {
@@ -271,21 +384,22 @@ export default function Toolbar({
 
   // Initialize tool groups with translations
   const TOOLS_GROUP1: { id: Tool; label: string; hint: string }[] = [
-    { id: "select",         label: t("tools.select"),       hint: "V" },
-    { id: "rect",           label: t("tools.rect"),         hint: "R" },
-    { id: "numbered-rect",  label: t("tools.numberedRect") || (t("tools.rect") + " #"), hint: "E" },
-    { id: "ellipse",        label: t("tools.circle"),       hint: "O" },
-    { id: "text",           label: t("tools.text"),         hint: "T" },
-    { id: "step",           label: t("tools.step"),         hint: "N" },
+    { id: "select", label: t("tools.select"), hint: "V" },
+    { id: "rect", label: t("tools.rect"), hint: "R" },
+    { id: "numbered-rect", label: t("tools.numberedRect"), hint: "E" },
+    { id: "ellipse", label: t("tools.circle"), hint: "O" },
+    { id: "text", label: t("tools.text"), hint: "T" },
+    { id: "step", label: t("tools.step"), hint: "N" },
   ];
 
   const TOOLS_GROUP2: { id: Tool; label: string; hint: string }[] = [
-    { id: "arrow",          label: t("tools.arrow"),        hint: "A" },
-    { id: "line",           label: t("tools.line"),         hint: "L" },
-    { id: "numbered-arrow", label: t("tools.arrow") + " #", hint: "W" },
-    { id: "highlight",      label: t("tools.highlight"),    hint: "H" },
-    { id: "blur",           label: t("tools.blur"),         hint: "B" },
-    { id: "crop",           label: "Crop",                  hint: "C" },
+    { id: "arrow", label: t("tools.arrow"), hint: "A" },
+    { id: "line", label: t("tools.line"), hint: "L" },
+    { id: "numbered-arrow", label: t("tools.numberedArrow"), hint: "W" },
+    { id: "highlight", label: t("tools.highlight"), hint: "H" },
+    { id: "blur", label: t("tools.blur"), hint: "B" },
+    { id: "crop", label: t("tools.crop"), hint: "C" },
+    { id: "background", label: t("tools.background"), hint: "G" },
   ];
 
   // Selector + useShallow thay vì subscribe cả store: trước đây MỌI thay đổi
@@ -308,6 +422,7 @@ export default function Toolbar({
     stepCounter, arrowCounter, rectCounter,
     setStepCounter, setArrowCounter, setRectCounter,
     renumberSteps, renumberArrows, renumberRects,
+    setBackground, setBackgroundLive, commitBackground,
     doc,
   } = useEditor(
     useShallow((s) => ({
@@ -325,6 +440,7 @@ export default function Toolbar({
       stepCounter: s.stepCounter, arrowCounter: s.arrowCounter, rectCounter: s.rectCounter,
       setStepCounter: s.setStepCounter, setArrowCounter: s.setArrowCounter, setRectCounter: s.setRectCounter,
       renumberSteps: s.renumberSteps, renumberArrows: s.renumberArrows, renumberRects: s.renumberRects,
+      setBackground: s.setBackground, setBackgroundLive: s.setBackgroundLive, commitBackground: s.commitBackground,
       doc: s.doc,
     })),
   );
@@ -381,15 +497,16 @@ export default function Toolbar({
 
   const isMultiple = selectedIds.length > 1;
   const isHighlight = (!isMultiple && (tool === "highlight" || selectedAnn?.type === "highlight")) || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "highlight"));
-  const isBlur      = (!isMultiple && (tool === "blur" || selectedAnn?.type === "blur")) || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "blur"));
-  const isText      = (!isMultiple && (tool === "text" || selectedAnn?.type === "text")) || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "text"));
-  const isStep      = !isMultiple && (tool === "step" || selectedAnn?.type === "step");
+  const isBlur = (!isMultiple && (tool === "blur" || selectedAnn?.type === "blur")) || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "blur"));
+  const isText = (!isMultiple && (tool === "text" || selectedAnn?.type === "text")) || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "text"));
+  const isStep = !isMultiple && (tool === "step" || selectedAnn?.type === "step");
   const isNumberedArrow = !isMultiple && (tool === "numbered-arrow" || selectedAnn?.type === "numbered-arrow");
-  const isNumberedRect  = !isMultiple && (tool === "numbered-rect" || selectedAnn?.type === "numbered-rect");
-  const isCrop      = tool === "crop";
-  const isImage     = (!isMultiple && selectedAnn?.type === "image") || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "image"));
+  const isNumberedRect = !isMultiple && (tool === "numbered-rect" || selectedAnn?.type === "numbered-rect");
+  const isCrop = tool === "crop";
+  const isBackground = tool === "background";
+  const isImage = (!isMultiple && selectedAnn?.type === "image") || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "image"));
   // Tools dùng color + strokeWidth: hiển thị đầy đủ khi ở chế độ vẽ hoặc khi ở chế độ chọn/sửa
-  const hasStroke   = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop && !isImage);
+  const hasStroke = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop && !isImage && !isBackground);
 
   return (
     <div style={bar}>
@@ -404,25 +521,25 @@ export default function Toolbar({
                 {/* New */}
                 <button onClick={onNew} style={newBtn} title={t("editorToolbar.newCapture")}>
                   <svg width="14" height="14" viewBox="0 0 15 15" aria-hidden fill="none">
-                    <circle cx="7.5" cy="7.5" r="6.5" stroke="currentColor" strokeWidth="1.6"/>
-                    <path d="M7.5 4v7M4 7.5h7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+                    <circle cx="7.5" cy="7.5" r="6.5" stroke="currentColor" strokeWidth="1.6" />
+                    <path d="M7.5 4v7M4 7.5h7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                   </svg>
-                  <span style={{ fontSize: 12, fontWeight: 600 }}>New</span>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.newBtn")}</span>
                 </button>
 
                 {/* Open */}
                 <button onClick={onOpen} style={newBtn} title={t("editorToolbar.openFile")}>
                   <svg width="14" height="14" viewBox="0 0 15 15" aria-hidden fill="none">
-                    <path d="M1.5 4.5A1 1 0 0 1 2.5 3.5h3.8l1.2 1.5H12.5a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.5"/>
+                    <path d="M1.5 4.5A1 1 0 0 1 2.5 3.5h3.8l1.2 1.5H12.5a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.5" />
                   </svg>
-                  <span style={{ fontSize: 12, fontWeight: 600 }}>Open</span>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.openBtn")}</span>
                 </button>
 
                 {/* Stitch */}
                 <button onClick={onStitch} style={newBtn} title={t("editorToolbar.stitchImages")}>
                   <svg width="14" height="14" viewBox="0 0 15 15" aria-hidden fill="none">
-                    <rect x="2" y="1.5" width="11" height="5" rx="1" stroke="currentColor" strokeWidth="1.4"/>
-                    <rect x="2" y="8.5" width="11" height="5" rx="1" stroke="currentColor" strokeWidth="1.4"/>
+                    <rect x="2" y="1.5" width="11" height="5" rx="1" stroke="currentColor" strokeWidth="1.4" />
+                    <rect x="2" y="8.5" width="11" height="5" rx="1" stroke="currentColor" strokeWidth="1.4" />
                   </svg>
                   <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.stitchButton")}</span>
                 </button>
@@ -472,26 +589,26 @@ export default function Toolbar({
                       onClick={bringToFront}
                       style={toolBtn(false)}
                       title={t("editorToolbar.bringToFront")}
-                      aria-label="Bring to Front"
+                      aria-label={t("editorToolbar.bringToFront")}
                     >
                       <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden>
                         {/* Hình vuông dưới (mờ, nằm sau) */}
-                        <path d="M4.5 2.5h6.5a2 2 0 0 1 2 2V7M2.5 4.5v6.5a2 2 0 0 0 2 2H7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" opacity="0.4"/>
+                        <path d="M4.5 2.5h6.5a2 2 0 0 1 2 2V7M2.5 4.5v6.5a2 2 0 0 0 2 2H7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" opacity="0.4" />
                         {/* Hình vuông trên (đậm, đè lên trước) */}
-                        <rect x="7" y="7" width="10.5" height="10.5" rx="2" fill="currentColor" stroke="currentColor" strokeWidth="1.2"/>
+                        <rect x="7" y="7" width="10.5" height="10.5" rx="2" fill="currentColor" stroke="currentColor" strokeWidth="1.2" />
                       </svg>
                     </button>
                     <button
                       onClick={sendToBack}
                       style={toolBtn(false)}
                       title={t("editorToolbar.sendToBack")}
-                      aria-label="Send to Back"
+                      aria-label={t("editorToolbar.sendToBack")}
                     >
                       <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden>
                         {/* Hình vuông dưới (đậm, nằm sau) */}
-                        <path d="M4.5 2.5h6.5a2 2 0 0 1 2 2V7H7v6H4.5a2 2 0 0 1-2-2v-6.5a2 2 0 0 1 2-2z" fill="currentColor"/>
+                        <path d="M4.5 2.5h6.5a2 2 0 0 1 2 2V7H7v6H4.5a2 2 0 0 1-2-2v-6.5a2 2 0 0 1 2-2z" fill="currentColor" />
                         {/* Hình vuông trên (mờ, đè lên trước) */}
-                        <rect x="7" y="7" width="10.5" height="10.5" rx="2" stroke="currentColor" strokeWidth="1.6" opacity="0.4"/>
+                        <rect x="7" y="7" width="10.5" height="10.5" rx="2" stroke="currentColor" strokeWidth="1.6" opacity="0.4" />
                       </svg>
                     </button>
                   </div>
@@ -499,10 +616,10 @@ export default function Toolbar({
               )}
             </div>
 
-            {/* DÒNG 2: THUỘC TÍNH CHI TIẾT THEO CÔNG CỤ ĐANG CHỌN (Màu, Nét, Size chữ, Đếm số, Blur...) */}
+            {/* DÒNG 2: THUỘC TÍNH CHI TIẾT THEO CÔNG CỤ ĐANG CHỌN (Màu, Nét, Size chữ, Đếm số, Blur, Background...) */}
             <div style={toolbarRow}>
-              {/* Màu stroke — ẩn khi đang dùng highlight/blur/image */}
-              {!isHighlight && !isBlur && !isImage && (
+              {/* Màu stroke — ẩn khi đang dùng highlight/blur/image/background */}
+              {!isHighlight && !isBlur && !isImage && !isBackground && (
                 <div style={group}>
                   <span style={dimLabel}>{t("editorToolbar.color")}</span>
                   {PRESET_COLORS.map((c) => (
@@ -622,7 +739,7 @@ export default function Toolbar({
                 <>
                   <div style={sep} />
                   <div style={group}>
-                    <span style={dimLabel}>{t("editorToolbar.badgeCorner") || "Góc"}</span>
+                    <span style={dimLabel}>{t("editorToolbar.badgeCorner")}</span>
                     {(["tl", "tr", "bl", "br"] as const).map((c) => (
                       <button
                         key={c}
@@ -649,7 +766,7 @@ export default function Toolbar({
                         style={modeBtn(blurMode === m)}
                         title={m === "blur" ? t("editorToolbar.blurSoft") : m === "pixelate" ? t("editorToolbar.pixelate") : t("editorToolbar.solidMode")}
                       >
-                        {m === "blur" ? "Blur" : m === "pixelate" ? "Pixel" : "Solid"}
+                        {m === "blur" ? t("editorToolbar.blurModeShort") : m === "pixelate" ? t("editorToolbar.pixelModeShort") : t("editorToolbar.solidModeShort")}
                       </button>
                     ))}
                   </div>
@@ -662,12 +779,13 @@ export default function Toolbar({
                         <span style={dimLabel}>{blurMode === "pixelate" ? t("editorToolbar.pixelTileSize") : t("editorToolbar.blurIntensity")}</span>
                         <input
                           type="range"
+                          className="editor-slider"
                           min={2} max={blurMode === "pixelate" ? 32 : 20}
                           value={blurRadius}
                           onChange={(e) => setBlurRadius(Number(e.target.value))}
                           onMouseUp={commitBlurRadius}
                           onPointerUp={commitBlurRadius}
-                          style={sliderStyle}
+                          style={{ width: 75 }}
                           title={t("editorToolbar.intensityLabel", { n: blurRadius })}
                         />
                         <span style={blurLabel}>{blurRadius}</span>
@@ -722,6 +840,354 @@ export default function Toolbar({
                   </button>
                 </>
               )}
+
+              {/* Background controls — khi tool = background */}
+              {isBackground && (() => {
+                const bg = doc?.background;
+                const isEnabled = Boolean(bg?.enabled);
+                const currentPresetId = bg?.presetId;
+                const currentPadding = bg?.padding ?? 32;
+                const currentRadius = bg?.borderRadius ?? 12;
+                const currentShadow = bg?.shadow ?? "medium";
+                const currentAngle = bg?.angle ?? 135;
+                const isGradient = !bg || bg.type === "gradient";
+                const currentColors = bg?.colors && bg.colors.length > 0 ? bg.colors : ["#f97316", "#e11d48", "#8b5cf6"];
+                const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+
+                return (
+                  <>
+                    {/* Nhóm chọn Preset màu nền */}
+                    <div style={group}>
+                      {/* Nút Tắt / None */}
+                      <button
+                        onClick={() => setBackground(null)}
+                        style={{
+                          height: 22,
+                          padding: "0 7px",
+                          borderRadius: 4,
+                          background: !isEnabled ? "rgba(59,130,246,0.22)" : "rgba(255,255,255,0.06)",
+                          color: !isEnabled ? "#7eb8ff" : "rgba(242,242,245,0.75)",
+                          border: !isEnabled ? "1px solid rgba(59,130,246,0.5)" : "1px solid rgba(255,255,255,0.1)",
+                          fontSize: 11,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          transition: "all 0.12s",
+                        }}
+                        title={t("editorToolbar.bgNone")}
+                      >
+                        <span style={{ fontSize: 13, lineHeight: 1 }}>∅</span>
+                        {t("editorToolbar.bgNone")}
+                      </button>
+
+                      {/* Gradient / Solid Presets swatches */}
+                      {BACKGROUND_PRESETS.map((p) => {
+                        const isSelected = isEnabled && currentPresetId === p.id;
+                        const bgStyle =
+                          p.type === "solid" || p.colors.length === 1
+                            ? p.colors[0]
+                            : `linear-gradient(${p.angle ?? 135}deg, ${p.colors.join(", ")})`;
+                        return (
+                          <button
+                            key={p.id}
+                            onClick={() => {
+                              setBackground({
+                                enabled: true,
+                                type: p.type,
+                                presetId: p.id,
+                                colors: p.colors,
+                                angle: p.angle ?? 135,
+                                padding: currentPadding,
+                                borderRadius: currentRadius,
+                                shadow: currentShadow,
+                              });
+                            }}
+                            title={p.name}
+                            style={{
+                              width: 20,
+                              height: 20,
+                              borderRadius: 4,
+                              background: bgStyle,
+                              border: isSelected ? "2px solid #fff" : "1px solid rgba(255,255,255,0.15)",
+                              boxShadow: isSelected
+                                ? "0 0 0 1.5px #3b82f6, 0 2px 4px rgba(0,0,0,0.3)"
+                                : "0 1px 2px rgba(0,0,0,0.2)",
+                              flexShrink: 0,
+                              cursor: "pointer",
+                              transition: "all 0.12s",
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
+
+                    {/* Tùy biến Dải Màu / Solid Color */}
+                    {isEnabled && (
+                      <>
+                        <div style={sep} />
+                        <div style={group}>
+                          <span style={dimLabel}>{t("editorToolbar.bgColors")}</span>
+                          {bg?.type === "solid" ? (
+                            <CustomColorButton
+                              value={bg.colors[0] ?? "#18181b"}
+                              selected={currentPresetId === "custom"}
+                              onChange={(c) => {
+                                setBackground({
+                                  ...baseBg,
+                                  enabled: true,
+                                  type: "solid",
+                                  presetId: "custom",
+                                  colors: [c],
+                                });
+                              }}
+                            />
+                          ) : (
+                            <>
+                              {/* Danh sách các điểm màu (stops) */}
+                              {currentColors.map((c, idx) => (
+                                <ColorStopButton
+                                  key={idx}
+                                  color={c}
+                                  index={idx}
+                                  totalStops={currentColors.length}
+                                  onChange={(newColor) => {
+                                    const next = [...currentColors];
+                                    next[idx] = newColor;
+                                    setBackground({
+                                      ...baseBg,
+                                      enabled: true,
+                                      type: "gradient",
+                                      presetId: "custom",
+                                      colors: next,
+                                    });
+                                  }}
+                                  onRemove={() => {
+                                    if (currentColors.length > 2) {
+                                      const next = currentColors.filter((_, i) => i !== idx);
+                                      setBackground({
+                                        ...baseBg,
+                                        enabled: true,
+                                        type: "gradient",
+                                        presetId: "custom",
+                                        colors: next,
+                                      });
+                                    }
+                                  }}
+                                />
+                              ))}
+
+                              {/* Nút Thêm Điểm Màu (+) */}
+                              {currentColors.length < 5 && (
+                                <button
+                                  onClick={() => {
+                                    const last = currentColors[currentColors.length - 1];
+                                    setBackground({
+                                      ...baseBg,
+                                      enabled: true,
+                                      type: "gradient",
+                                      presetId: "custom",
+                                      colors: [...currentColors, last],
+                                    });
+                                  }}
+                                  style={{
+                                    width: 20,
+                                    height: 20,
+                                    borderRadius: 4,
+                                    background: "rgba(255,255,255,0.06)",
+                                    color: "rgba(242,242,245,0.85)",
+                                    border: "1px dashed rgba(255,255,255,0.3)",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    fontSize: 13,
+                                    fontWeight: 600,
+                                    cursor: "pointer",
+                                    padding: 0,
+                                    flexShrink: 0,
+                                    transition: "all 0.12s",
+                                  }}
+                                  title={t("editorToolbar.bgAddStop")}
+                                >
+                                  +
+                                </button>
+                              )}
+
+                              {/* Nút Đảo Chiều Dải Màu (⇄) */}
+                              <button
+                                onClick={() => {
+                                  setBackground({
+                                    ...baseBg,
+                                    enabled: true,
+                                    type: "gradient",
+                                    presetId: "custom",
+                                    colors: [...currentColors].reverse(),
+                                  });
+                                }}
+                                style={{
+                                  height: 20,
+                                  padding: "0 5px",
+                                  borderRadius: 4,
+                                  background: "rgba(255,255,255,0.06)",
+                                  color: "rgba(242,242,245,0.75)",
+                                  border: "1px solid rgba(255,255,255,0.12)",
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  fontSize: 11,
+                                  cursor: "pointer",
+                                  flexShrink: 0,
+                                  transition: "all 0.12s",
+                                }}
+                                title={t("editorToolbar.bgReverse")}
+                              >
+                                ⇄
+                              </button>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Góc Gradient (Angle) */}
+                        {isGradient && (
+                          <>
+                            <div style={sep} />
+                            <div style={group}>
+                              <span style={dimLabel}>{t("editorToolbar.bgAngle")}</span>
+                              <NumberField
+                                value={currentAngle}
+                                min={0}
+                                max={360}
+                                width={46}
+                                onCommit={(val) => {
+                                  setBackground({ ...baseBg, enabled: true, angle: val });
+                                }}
+                                title={t("editorToolbar.bgAngle")}
+                              />
+                              <span style={{ fontSize: 11, color: "rgba(242,242,245,0.4)", marginLeft: -3 }}>°</span>
+                              {[45, 90, 135, 180].map((deg) => (
+                                <button
+                                  key={deg}
+                                  onClick={() => {
+                                    setBackground({ ...baseBg, enabled: true, angle: deg });
+                                  }}
+                                  style={{
+                                    height: 18,
+                                    padding: "0 4px",
+                                    borderRadius: 3,
+                                    fontSize: 10,
+                                    fontWeight: currentAngle === deg ? 600 : 400,
+                                    background: currentAngle === deg ? "rgba(59,130,246,0.3)" : "rgba(255,255,255,0.04)",
+                                    color: currentAngle === deg ? "#7eb8ff" : "rgba(242,242,245,0.6)",
+                                    border: currentAngle === deg ? "1px solid rgba(59,130,246,0.5)" : "1px solid rgba(255,255,255,0.08)",
+                                    cursor: "pointer",
+                                    transition: "all 0.12s",
+                                  }}
+                                  title={`${deg}°`}
+                                >
+                                  {deg}°
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </>
+                    )}
+
+                    {/* Padding controls */}
+                    <div style={sep} />
+                    <div style={group}>
+                      <span style={dimLabel}>{t("editorToolbar.bgPadding")}</span>
+                      <input
+                        type="range"
+                        className="editor-slider"
+                        min={0}
+                        max={160}
+                        value={currentPadding}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+                          setBackgroundLive({ ...baseBg, enabled: true, padding: val });
+                        }}
+                        onMouseUp={commitBackground}
+                        onPointerUp={commitBackground}
+                        style={{ width: 80 }}
+                        title={`${currentPadding}px`}
+                      />
+                      <NumberField
+                        value={currentPadding}
+                        min={0}
+                        max={200}
+                        width={40}
+                        onCommit={(val) => {
+                          const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+                          setBackground({ ...baseBg, enabled: true, padding: val });
+                        }}
+                        title={t("editorToolbar.bgPadding")}
+                      />
+                    </div>
+
+                    {/* Radius controls */}
+                    <div style={sep} />
+                    <div style={group}>
+                      <span style={dimLabel}>{t("editorToolbar.bgRadius")}</span>
+                      <input
+                        type="range"
+                        className="editor-slider"
+                        min={0}
+                        max={48}
+                        value={currentRadius}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+                          setBackgroundLive({ ...baseBg, enabled: true, borderRadius: val });
+                        }}
+                        onMouseUp={commitBackground}
+                        onPointerUp={commitBackground}
+                        style={{ width: 75 }}
+                        title={`${currentRadius}px`}
+                      />
+                      <NumberField
+                        value={currentRadius}
+                        min={0}
+                        max={64}
+                        width={38}
+                        onCommit={(val) => {
+                          const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+                          setBackground({ ...baseBg, enabled: true, borderRadius: val });
+                        }}
+                        title={t("editorToolbar.bgRadius")}
+                      />
+                    </div>
+
+                    {/* Shadow controls */}
+                    <div style={sep} />
+                    <div style={group}>
+                      <span style={dimLabel}>{t("editorToolbar.bgShadow")}</span>
+                      {(
+                        [
+                          { id: "none", label: t("editorToolbar.shadowNone") },
+                          { id: "subtle", label: t("editorToolbar.shadowSubtle") },
+                          { id: "medium", label: t("editorToolbar.shadowMedium") },
+                          { id: "strong", label: t("editorToolbar.shadowStrong") },
+                        ] as const
+                      ).map((sh) => (
+                        <button
+                          key={sh.id}
+                          onClick={() => {
+                            const baseBg = bg ?? DEFAULT_BACKGROUND_CONFIG;
+                            setBackground({ ...baseBg, enabled: true, shadow: sh.id });
+                          }}
+                          style={modeBtn(isEnabled && currentShadow === sh.id)}
+                          title={sh.label}
+                        >
+                          {sh.label}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
 
@@ -736,11 +1202,11 @@ export default function Toolbar({
                 title={t("editorToolbar.save")}
               >
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
-                  <path d="M13 14H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L14 5.5V13a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.5"/>
-                  <path d="M5 2v3.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.5"/>
-                  <path d="M4 14v-4.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V14" stroke="currentColor" strokeWidth="1.5"/>
+                  <path d="M13 14H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L14 5.5V13a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.5" />
+                  <path d="M5 2v3.5a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.5" />
+                  <path d="M4 14v-4.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V14" stroke="currentColor" strokeWidth="1.5" />
                 </svg>
-                <span style={{ fontSize: 12, fontWeight: 600 }}>Save</span>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.saveBtn")}</span>
               </button>
               <button
                 onClick={(e) => { e.stopPropagation(); setShowSaveMenu((v) => !v); }}
@@ -765,21 +1231,21 @@ export default function Toolbar({
 
             <button onClick={onSaveCopy} disabled={busy} style={actionBtn} title={t("editorToolbar.saveCopy")}>
               <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
-                <path d="M12 13.5H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L13 5v7.5a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.4"/>
-                <path d="M4.5 2v3a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.4"/>
-                <path d="M3.5 13.5V10h9v3.5" stroke="currentColor" strokeWidth="1.4"/>
-                <rect x="9" y="8.5" width="5.5" height="5.5" rx="1" fill="var(--bg-elevated)" stroke="currentColor" strokeWidth="1.3"/>
-                <path d="M10.5 9.5h2.5M10.5 11h2.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
+                <path d="M12 13.5H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h7.5L13 5v7.5a1 1 0 0 1-1 1Z" stroke="currentColor" strokeWidth="1.4" />
+                <path d="M4.5 2v3a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5V2" stroke="currentColor" strokeWidth="1.4" />
+                <path d="M3.5 13.5V10h9v3.5" stroke="currentColor" strokeWidth="1.4" />
+                <rect x="9" y="8.5" width="5.5" height="5.5" rx="1" fill="var(--bg-elevated)" stroke="currentColor" strokeWidth="1.3" />
+                <path d="M10.5 9.5h2.5M10.5 11h2.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
               </svg>
-              <span style={{ fontSize: 12, fontWeight: 600 }}>Save+Copy</span>
+              <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.saveCopyBtn")}</span>
             </button>
 
             <button onClick={onCopy} disabled={busy} style={actionBtn} title={t("editorToolbar.copy")}>
               <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
-                <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
-                <path d="M3 11H2.5A1.5 1.5 0 0 1 1 9.5v-7A1.5 1.5 0 0 1 2.5 1h7A1.5 1.5 0 0 1 11 2.5V3" stroke="currentColor" strokeWidth="1.5"/>
+                <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M3 11H2.5A1.5 1.5 0 0 1 1 9.5v-7A1.5 1.5 0 0 1 2.5 1h7A1.5 1.5 0 0 1 11 2.5V3" stroke="currentColor" strokeWidth="1.5" />
               </svg>
-              <span style={{ fontSize: 12, fontWeight: 600 }}>Copy</span>
+              <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.copyBtn")}</span>
             </button>
           </div>
         </>
@@ -964,9 +1430,6 @@ function modeBtn(active: boolean): React.CSSProperties {
   };
 }
 
-const sliderStyle: React.CSSProperties = {
-  width: 75, height: 4, accentColor: "var(--accent)", cursor: "pointer",
-};
 
 const flattenBtn: React.CSSProperties = {
   height: 24, padding: "0 9px", borderRadius: 5, fontSize: 11, fontWeight: 600,

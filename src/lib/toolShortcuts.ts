@@ -14,6 +14,7 @@ export function editorToolFromKey(e: KeyboardEvent): Tool | null {
     case "KeyH": return "highlight";
     case "KeyB": return "blur";
     case "KeyC": return "crop";
+    case "KeyG": return "background";
     case "KeyW": return "numbered-arrow";
     case "KeyA": return e.shiftKey ? "numbered-arrow" : "arrow";
     default: return null;

@@ -45,7 +45,9 @@
     "hotkeyWarning": "please change to another combination below and save again.",
     "checkPermissions": "Checking…",
     "permGranted": "✓ Granted",
-    "permDenied": "✕ Not granted"
+    "permDenied": "✕ Not granted",
+    "languageSection": "LANGUAGE",
+    "languageLabel": "Display language"
   },
   "updates": {
     "checkingUpdates": "Checking…",
@@ -60,7 +62,12 @@
     "available": ". Click \"Install v",
     "availableEnd": "\" to install and restart.",
     "networkError": "Could not check — check your network connection",
-    "updateAvailable": "available"
+    "updateAvailable": "available",
+    "newUpdateTitle": "New update available",
+    "currentVersionText": "(current: v{{version}})",
+    "updateDesc": "Install now to get new features and security fixes. The app will restart automatically.",
+    "installAndRestart": "Install and restart",
+    "later": "Later"
   },
   "outputs": {
     "editor": "Open editor",
@@ -101,7 +108,10 @@
     "text": "Text",
     "step": "Number",
     "pen": "Freehand",
-    "highlight": "Highlight"
+    "highlight": "Highlight",
+    "background": "Background",
+    "numberedArrow": "Numbered arrow",
+    "crop": "Crop"
   },
   "capture": {
     "full": "Full screen",
@@ -155,7 +165,8 @@
     "aboutToCapture": "About to capture… (Esc to cancel)",
     "quickCaptureHint": "Quick capture — select area and annotate immediately",
     "options": "Options",
-    "close": "Close"
+    "close": "Close",
+    "quick": "Quick"
   },
   "overlay": {
     "dragToSelect": "Drag to select area • Hover a window and click to capture it • Esc / right-click to cancel",
@@ -225,7 +236,19 @@
     "showInFinder": "Show in Finder/Explorer",
     "moveToTrash": "Delete (move to Trash)",
     "restore": "Restore",
-    "permanentDelete": "Permanently delete"
+    "permanentDelete": "Permanently delete",
+    "allTypes": "All types",
+    "images": "Images",
+    "videos": "Videos",
+    "allModes": "All modes",
+    "fromDate": "From date",
+    "toDate": "To date",
+    "gridView": "Grid view",
+    "listView": "List view",
+    "library": "Library",
+    "trash": "Trash",
+    "emptyTrash": "Empty Trash",
+    "emptyTrashConfirm": "Permanently delete all items in Trash? Cannot be undone."
   },
   "thumbnail": {
     "openEditorTooltip": "Click to open editor",
@@ -293,8 +316,31 @@
     "copy": "Copy to clipboard (Ctrl/Cmd+C)",
     "strokeWidth": "Stroke {{n}}px",
     "color": "Color",
+    "background": "Background",
+    "bgNone": "No background",
+    "bgColors": "Gradient",
+    "bgAngle": "Angle",
+    "bgAddStop": "Add color stop",
+    "bgRemoveStop": "Remove color stop",
+    "bgReverse": "Reverse gradient",
+    "bgStopTooltip": "Color stop {{n}} (Click to pick color)",
+    "bgPadding": "Padding",
+    "bgRadius": "Radius",
+    "bgShadow": "Shadow",
+    "shadowNone": "None",
+    "shadowSubtle": "Subtle",
+    "shadowMedium": "Medium",
+    "shadowStrong": "Strong",
     "unsaved": "Unsaved",
-    "unsavedHint": "You have unsaved changes — press Ctrl/Cmd+S to save"
+    "unsavedHint": "You have unsaved changes — press Ctrl/Cmd+S to save",
+    "newBtn": "New",
+    "openBtn": "Open",
+    "saveBtn": "Save",
+    "saveCopyBtn": "Save + Copy",
+    "copyBtn": "Copy",
+    "blurModeShort": "Blur",
+    "pixelModeShort": "Pixel",
+    "solidModeShort": "Solid"
   },
   "editorMain": {
     "copiedClipboard": "Copied to clipboard",
@@ -438,5 +484,10 @@
     "cannotLoadImage": "Cannot load image",
     "noImagesToStitch": "No images to stitch",
     "cannotCreateCanvas": "Cannot create canvas context"
+  },
+  "crop": {
+    "apply": "Apply crop",
+    "copy": "Copy",
+    "cancel": "Cancel"
   }
 }
