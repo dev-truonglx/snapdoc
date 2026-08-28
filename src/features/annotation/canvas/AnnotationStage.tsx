@@ -1519,19 +1519,21 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               const rad = (angle * Math.PI) / 180;
               const cx = totalW / 2;
               const cy = totalH / 2;
-              const r = Math.sqrt(totalW * totalW + totalH * totalH) / 2;
-              const startX = cx - Math.cos(rad) * r;
-              const startY = cy - Math.sin(rad) * r;
-              const endX = cx + Math.cos(rad) * r;
-              const endY = cy + Math.sin(rad) * r;
+              const dx = Math.sin(rad);
+              const dy = -Math.cos(rad);
+              const len = (Math.abs(totalW * Math.sin(rad)) + Math.abs(totalH * Math.cos(rad))) / 2;
+              const startX = cx - dx * len;
+              const startY = cy - dy * len;
+              const endX = cx + dx * len;
+              const endY = cy + dy * len;
 
               const stops: (number | string)[] = [];
               if (bgConfig.type === "solid" || bgConfig.colors.length === 1) {
                 stops.push(0, bgConfig.colors[0], 1, bgConfig.colors[0]);
               } else {
-                const len = bgConfig.colors.length;
+                const lenColors = bgConfig.colors.length;
                 bgConfig.colors.forEach((c, idx) => {
-                  stops.push(idx / (len - 1), c);
+                  stops.push(idx / (lenColors - 1), c);
                 });
               }
 

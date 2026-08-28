@@ -148,14 +148,15 @@ export interface BackgroundPreset {
 }
 
 export const BACKGROUND_PRESETS: BackgroundPreset[] = [
-  { id: "sunset", name: "Sunset", type: "gradient", colors: ["#ff5f6d", "#ffc371"], angle: 135 },
-  { id: "ocean", name: "Ocean", type: "gradient", colors: ["#2193b0", "#6dd5ed"], angle: 135 },
-  { id: "cyberpunk", name: "Cyberpunk", type: "gradient", colors: ["#8a2387", "#e94057", "#f27121"], angle: 135 },
-  { id: "emerald", name: "Emerald", type: "gradient", colors: ["#11998e", "#38ef7d"], angle: 135 },
-  { id: "lavender", name: "Lavender", type: "gradient", colors: ["#667eea", "#764ba2"], angle: 135 },
-  { id: "peach", name: "Peach", type: "gradient", colors: ["#ff9a9e", "#fecfef"], angle: 135 },
-  { id: "midnight", name: "Midnight", type: "gradient", colors: ["#232526", "#414345"], angle: 135 },
-  { id: "frost", name: "Frost", type: "gradient", colors: ["#e0eafc", "#cfdef3"], angle: 135 },
+  { id: "sunset", name: "Sunset", type: "gradient", colors: ["#f97316", "#e11d48", "#8b5cf6"], angle: 135 },
+  { id: "ocean", name: "Ocean", type: "gradient", colors: ["#06b6d4", "#2563eb", "#4f46e5"], angle: 135 },
+  { id: "cyberpunk", name: "Cyberpunk", type: "gradient", colors: ["#7928ca", "#ff0080", "#ff7a00"], angle: 135 },
+  { id: "emerald", name: "Emerald", type: "gradient", colors: ["#059669", "#10b981", "#06b6d4"], angle: 135 },
+  { id: "lavender", name: "Cosmic", type: "gradient", colors: ["#4f46e5", "#9333ea", "#f43f5e"], angle: 135 },
+  { id: "peach", name: "Peach", type: "gradient", colors: ["#f43f5e", "#fb7185", "#fbbf24"], angle: 135 },
+  { id: "aurora", name: "Aurora", type: "gradient", colors: ["#10b981", "#06b6d4", "#8b5cf6"], angle: 135 },
+  { id: "midnight", name: "Midnight", type: "gradient", colors: ["#0f0c29", "#302b63", "#24243e"], angle: 135 },
+  { id: "frost", name: "Frost", type: "gradient", colors: ["#c4b5fd", "#93c5fd", "#6ee7b7"], angle: 135 },
   { id: "dark-solid", name: "Dark", type: "solid", colors: ["#18181b"] },
   { id: "light-solid", name: "Light", type: "solid", colors: ["#f8fafc"] },
 ];
@@ -164,7 +165,7 @@ export const DEFAULT_BACKGROUND_CONFIG: BackgroundConfig = {
   enabled: true,
   type: "gradient",
   presetId: "sunset",
-  colors: ["#ff5f6d", "#ffc371"],
+  colors: ["#f97316", "#e11d48", "#8b5cf6"],
   angle: 135,
   padding: 32,
   borderRadius: 12,
