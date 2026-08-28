@@ -39,10 +39,10 @@ export default function RecordingIndicator() {
     // mount không đúng lúc ticker vừa tick.
     ipc.recordingStatus().then((ms) => {
       if (!cancelled && ms != null) setElapsedMs(ms);
-    }).catch(() => {});
+    }).catch(() => { });
     ipc.recordingPausedState().then((v) => {
       if (!cancelled && v != null) setPaused(v);
-    }).catch(() => {});
+    }).catch(() => { });
 
     const unlistenTick = listen<RecordingTick>("recording-tick", (e) => {
       if (!cancelled) {
@@ -59,10 +59,10 @@ export default function RecordingIndicator() {
         setPauseBusy(false);
         ipc.recordingStatus().then((ms) => {
           if (!cancelled && ms != null) setElapsedMs(ms);
-        }).catch(() => {});
+        }).catch(() => { });
         ipc.recordingPausedState().then((v) => {
           if (!cancelled && v != null) setPaused(v);
-        }).catch(() => {});
+        }).catch(() => { });
       }
     });
 
@@ -152,13 +152,12 @@ const wrap: React.CSSProperties = {
   height: "100vh",
   display: "flex",
   alignItems: "center",
-  justifyContent: "space-around",
+  justifyContent: "space-evenly",
   gap: 0,
   boxSizing: "border-box",
   background: "rgba(28,28,32,0.96)",
   border: "1px solid rgba(255,255,255,0.12)",
   borderRadius: 22,
-  boxShadow: "0 6px 22px rgba(0,0,0,0.45)",
   userSelect: "none",
   padding: "0 6px",
 };
