@@ -1039,17 +1039,12 @@ pub fn close_capture_timer(app: &AppHandle) {
     }
 }
 
-/// Popup nổi "đang quay" trên Windows — chấm đỏ + đồng hồ đếm mm:ss, bấm vào
-/// để dừng quay ngay (`commands::stop_recording`). Thay cho vai trò của
-/// `NSStatusItem.title` bên macOS (hiện text cạnh icon tray) — tray icon Win32
-/// (`NOTIFYICONDATA`) không có API tương đương, chỉ có tooltip khi hover, nên
-/// cần 1 cửa sổ riêng để hiện đồng hồ đếm luôn hiển thị. Nổi trên mọi cửa sổ
-/// khác + loại khỏi chính video đang quay qua `set_content_protected(true)`
-/// (WGC bỏ qua cửa sổ content-protected, cùng kỹ thuật `open_region_border`).
+/// Pre-warm popup "đang quay" trên Windows — tạo sẵn ở trạng thái ẩn (visible=false)
+/// lúc app khởi động để khi bắt đầu quay, cửa sổ hiện lên tức thì (< 16ms) thay vì
+/// phải chờ tạo mới WebView2 runtime.
 #[cfg(target_os = "windows")]
-pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("recording-indicator") {
-        let _ = win.show();
+pub fn prewarm_recording_indicator(app: &AppHandle) -> Result<(), String> {
+    if app.get_webview_window("recording-indicator").is_some() {
         return Ok(());
     }
 
@@ -1062,24 +1057,48 @@ pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)
-        // Không giành focus của cửa sổ đang key hiện tại lúc vừa tạo — cùng lý
-        // do với `.focused(false)` ở `open_region_border`.
         .focused(false)
+        .visible(false)
         .build()
         .map_err(|e| format!("Không tạo được popup đang quay: {e}"))?;
 
-    place_top_center(app, &win);
     let _ = win.set_content_protected(true);
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn prewarm_recording_indicator(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+/// Popup nổi "đang quay" trên Windows — chấm đỏ + đồng hồ đếm mm:ss, bấm vào
+/// để dừng quay ngay (`commands::stop_recording`). Thay cho vai trò của
+/// `NSStatusItem.title` bên macOS (hiện text cạnh icon tray) — tray icon Win32
+/// (`NOTIFYICONDATA`) không có API tương đương, chỉ có tooltip khi hover, nên
+/// cần 1 cửa sổ riêng để hiện đồng hồ đếm luôn hiển thị. Nổi trên mọi cửa sổ
+/// khác + loại khỏi chính video đang quay qua `set_content_protected(true)`
+/// (WGC bỏ qua cửa sổ content-protected, cùng kỹ thuật `open_region_border`).
+#[cfg(target_os = "windows")]
+pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
+    if app.get_webview_window("recording-indicator").is_none() {
+        prewarm_recording_indicator(app)?;
+    }
+    let win = app
+        .get_webview_window("recording-indicator")
+        .ok_or_else(|| "Không tìm thấy popup đang quay".to_string())?;
+
+    place_top_center(app, &win);
+    let _ = win.emit("recording-indicator-reset", ());
     let _ = win.show();
     Ok(())
 }
 
-/// Đóng popup "đang quay" (nếu có) — gọi khi dừng quay. An toàn khi gọi dù
-/// chưa từng mở.
+/// Đóng popup "đang quay" (nếu có) — gọi khi dừng quay. Chỉ ẩn (hide), không đóng
+/// (close) để giữ webview sống cho các lần quay tiếp theo.
 #[cfg(target_os = "windows")]
 pub fn close_recording_indicator(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("recording-indicator") {
-        let _ = win.close();
+        let _ = win.hide();
     }
 }
 

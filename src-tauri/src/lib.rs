@@ -283,6 +283,8 @@ pub fn run() {
             // Pre-warm thanh "Dừng quay" (ẩn) → lần bắt đầu quay vùng chọn đầu
             // tiên hiện tức thì, không chờ tải webview mới.
             let _ = windows::prewarm_stop_control(&handle);
+            // Pre-warm popup "đang quay" (ẩn) trên Windows → popup điều khiển thời gian hiện tức thì.
+            let _ = windows::prewarm_recording_indicator(&handle);
 
             // Pre-warm overlay (ẩn, 1 cửa sổ/màn hình) → lần chụp đầu trên máy
             // nhiều màn hình không phải chờ build() tuần tự N cửa sổ webview

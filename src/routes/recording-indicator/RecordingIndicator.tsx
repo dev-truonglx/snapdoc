@@ -44,15 +44,32 @@ export default function RecordingIndicator() {
       if (!cancelled && v != null) setPaused(v);
     }).catch(() => {});
 
-    const unlisten = listen<RecordingTick>("recording-tick", (e) => {
+    const unlistenTick = listen<RecordingTick>("recording-tick", (e) => {
       if (!cancelled) {
         setElapsedMs(e.payload.ms);
         setPaused(e.payload.paused);
       }
     });
+
+    const unlistenReset = listen("recording-indicator-reset", () => {
+      if (!cancelled) {
+        setElapsedMs(0);
+        setStopping(false);
+        setPaused(false);
+        setPauseBusy(false);
+        ipc.recordingStatus().then((ms) => {
+          if (!cancelled && ms != null) setElapsedMs(ms);
+        }).catch(() => {});
+        ipc.recordingPausedState().then((v) => {
+          if (!cancelled && v != null) setPaused(v);
+        }).catch(() => {});
+      }
+    });
+
     return () => {
       cancelled = true;
-      unlisten.then((f) => f());
+      unlistenTick.then((f) => f());
+      unlistenReset.then((f) => f());
     };
   }, []);
 
