@@ -704,36 +704,54 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
     let want_system_audio = audio_source == AudioSource::System || audio_source == AudioSource::Both;
     let want_mic = audio_source == AudioSource::Mic || audio_source == AudioSource::Both;
 
-    let (stream, frame_rx, _system_audio_rx) =
-        crate::capture::windows_stream::start(target, FPS, false)?;
+    // Khởi tạo song song: Video capture (WGC), Mic audio (CPAL), và System audio (WASAPI)
+    // để loại bỏ độ trễ tuần tự khi bắt đầu quay.
+    let (stream_res, mic_res, sys_res) = std::thread::scope(|s| {
+        let stream_handle = s.spawn(|| crate::capture::windows_stream::start(target, FPS, false));
+        let mic_handle = s.spawn(|| if want_mic { Some(audio_mic::start()) } else { None });
+        let sys_handle = s.spawn(|| if want_system_audio { Some(audio_wasapi::start()) } else { None });
+        (
+            stream_handle.join().unwrap_or_else(|_| Err("Video capture thread bị lỗi".to_string())),
+            mic_handle.join().unwrap_or_else(|_| Some(Err("Mic thread bị lỗi".to_string()))),
+            sys_handle.join().unwrap_or_else(|_| Some(Err("Audio hệ thống thread bị lỗi".to_string()))),
+        )
+    });
+
+    let (stream, frame_rx, _system_audio_rx) = match stream_res {
+        Ok(res) => res,
+        Err(e) => {
+            // Nếu luồng video lỗi, dọn dẹp các luồng audio đã khởi chạy thành công
+            if let Some(Ok((mic, _, _, _))) = mic_res {
+                mic.stop();
+            }
+            if let Some(Ok((sys, _, _, _))) = sys_res {
+                sys.stop();
+            }
+            return Err(e);
+        }
+    };
     let (width, height) = (stream.width, stream.height);
 
-    let mic_result = if want_mic {
-        match audio_mic::start() {
-            Ok((mic, rx, sample_rate, channels)) => {
-                Some((mic, rx, sample_rate, channels as u16))
-            }
-            Err(e) => {
-                notify_warning(app, &format!("Không ghi được mic — vẫn tiếp tục quay: {e}"));
-                None
-            }
+    let mic_result = match mic_res {
+        Some(Ok((mic, rx, sample_rate, channels))) => {
+            Some((mic, rx, sample_rate, channels as u16))
         }
-    } else {
-        None
+        Some(Err(e)) => {
+            notify_warning(app, &format!("Không ghi được mic — vẫn tiếp tục quay: {e}"));
+            None
+        }
+        None => None,
     };
 
-    let sys_result = if want_system_audio {
-        match audio_wasapi::start() {
-            Ok((sys, rx, sample_rate, channels)) => {
-                Some((sys, rx, sample_rate, channels))
-            }
-            Err(e) => {
-                notify_warning(app, &format!("Không ghi được audio hệ thống — vẫn tiếp tục quay: {e}"));
-                None
-            }
+    let sys_result = match sys_res {
+        Some(Ok((sys, rx, sample_rate, channels))) => {
+            Some((sys, rx, sample_rate, channels))
         }
-    } else {
-        None
+        Some(Err(e)) => {
+            notify_warning(app, &format!("Không ghi được audio hệ thống — vẫn tiếp tục quay: {e}"));
+            None
+        }
+        None => None,
     };
 
     // Cờ pause dùng chung giữa writer thread video, writer thread audio, và ticker.
