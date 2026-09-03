@@ -235,6 +235,14 @@ fn spawn_ticker(
 /// xem mục "Xác định monitor/window" trong plan Phase 5; nếu lệch, đổi sang
 /// đối chiếu theo toạ độ/kích thước màn hình thay vì theo vị trí index).
 fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
+    let mut wgc_monitors = WgcMonitor::enumerate().map_err(|e| format!("Không liệt kê được màn hình (WGC): {e}"))?;
+    if wgc_monitors.is_empty() {
+        return WgcMonitor::primary().map_err(|e| format!("Không tìm thấy màn hình để quay: {e}"));
+    }
+    if wgc_monitors.len() == 1 {
+        return Ok(wgc_monitors.remove(0));
+    }
+
     let xcap_monitors = xcap::Monitor::all().map_err(|e| format!("Không liệt kê được màn hình: {e}"))?;
     let target = xcap_monitors
         .iter()
@@ -248,7 +256,6 @@ fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
         // có thể lệch → quay nhầm màn hình trên setup nhiều màn hình.
         let want_w = xcap_m.width().unwrap_or(0);
         let want_h = xcap_m.height().unwrap_or(0);
-        let wgc_monitors = WgcMonitor::enumerate().map_err(|e| format!("Không liệt kê được màn hình (WGC): {e}"))?;
 
         // Ưu tiên 1: đúng index VÀ khớp kích thước (trường hợp bình thường).
         // Ưu tiên 2: bất kỳ monitor WGC nào khớp kích thước duy nhất — cứu

@@ -415,15 +415,48 @@ export default function VideoTrimmer({
     };
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
+    const onEnded = () => {
+      setIsPlaying(false);
+      setPlayheadMs(totalTimelineMs(segments));
+    };
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("play", onPlay);
     v.addEventListener("pause", onPause);
+    v.addEventListener("ended", onEnded);
     return () => {
       v.removeEventListener("timeupdate", onTime);
       v.removeEventListener("play", onPlay);
       v.removeEventListener("pause", onPause);
+      v.removeEventListener("ended", onEnded);
     };
   }, [segments]);
+
+  // Tự động cuộn timeline theo playhead khi đang phát video (zoom > 1)
+  // để vạch phát luôn nằm trong khung nhìn (kiểu CapCut/Premiere).
+  useEffect(() => {
+    if (!isPlaying || zoom <= 1 || containerWidth <= 0 || draggingRef.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const total = totalTimelineMs(segments);
+    if (total <= 0) return;
+
+    const trackWidthPx = containerWidth * zoom;
+    const playheadX = (playheadMs / total) * trackWidthPx;
+    const currentScroll = el.scrollLeft;
+
+    // Vạch phát vượt quá 85% khung nhìn hiện tại -> cuộn tiếp để playhead ở ~15% lề trái
+    if (playheadX > currentScroll + containerWidth * 0.85) {
+      const targetScroll = Math.max(0, playheadX - containerWidth * 0.15);
+      el.scrollLeft = targetScroll;
+      setScrollLeft(el.scrollLeft);
+    } else if (playheadX < currentScroll) {
+      // Vạch phát ở phía trước khung nhìn (ví dụ vừa tua lại / lặp lại) -> cuộn về
+      const targetScroll = Math.max(0, playheadX - containerWidth * 0.15);
+      el.scrollLeft = targetScroll;
+      setScrollLeft(el.scrollLeft);
+    }
+  }, [playheadMs, isPlaying, zoom, containerWidth, segments]);
 
   // Phím tắt Undo/Redo/Xoá/Chia/Cắt đầu-cuối — handler ghi vào ref MỖI render
   // (luôn thấy `segments`/`past`/`future`/`selectedSegmentId` mới nhất, không
@@ -727,8 +760,26 @@ export default function VideoTrimmer({
   const togglePlay = () => {
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) v.play();
-    else v.pause();
+    if (v.paused) {
+      const total = totalTimelineMs(segments);
+      const isAtEnd =
+        v.ended ||
+        (segments.length > 0 &&
+          (v.currentTime * 1000 >= segments[segments.length - 1].srcEnd - BOUNDARY_EPS_MS ||
+            playheadMs >= total - BOUNDARY_EPS_MS));
+      if (isAtEnd && segments.length > 0) {
+        currentSegIndexRef.current = 0;
+        v.currentTime = segments[0].srcStart / 1000;
+        setPlayheadMs(0);
+        if (scrollRef.current) {
+          scrollRef.current.scrollLeft = 0;
+          setScrollLeft(0);
+        }
+      }
+      v.play().catch(() => {});
+    } else {
+      v.pause();
+    }
   };
 
   /** Chụp khung hình hiện tại của video thành ảnh PNG — dùng canvas để lấy
@@ -1201,7 +1252,7 @@ export default function VideoTrimmer({
 
       <div
         ref={scrollRef}
-        style={trackScroll}
+        style={{ ...trackScroll, overflowX: zoom > 1 ? "auto" : "hidden" }}
         onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
       >
         {/* Bọc chung ruler + track theo đúng 1 chiều rộng (zoom) — cùng cuộn
@@ -1296,8 +1347,19 @@ export default function VideoTrimmer({
             );
           })}
 
-          {/* Vạch phát hiện tại. */}
-          <div style={{ ...playhead, left: `${pct(playheadMs)}%` }} />
+          {/* Vạch phát hiện tại — transform kẹp biên để luôn hiển thị và không tràn ra ngoài track */}
+          <div
+            style={{
+              ...playhead,
+              left: `${pct(playheadMs)}%`,
+              transform:
+                pct(playheadMs) >= 99.5
+                  ? "translateX(-100%)"
+                  : pct(playheadMs) <= 0.5
+                  ? "translateX(0)"
+                  : "translateX(-50%)",
+            }}
+          />
           </div>
         </div>
       </div>

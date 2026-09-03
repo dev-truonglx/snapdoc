@@ -63,6 +63,10 @@ export function timelineMsToSource(segments: Segment[], timelineMs: number): Tim
  * 1 đoạn đã bị xoá (dùng `nearestValidSourceMs` để tự snap về chỗ gần nhất
  * còn hợp lệ trước khi gọi lại hàm này, ví dụ sau undo/redo/xoá). */
 export function sourceMsToTimeline(segments: Segment[], srcMs: number): number | null {
+  if (segments.length === 0) return null;
+  if (srcMs <= segments[0].srcStart) return 0;
+  const lastSeg = segments[segments.length - 1];
+  if (srcMs >= lastSeg.srcEnd) return totalTimelineMs(segments);
   let acc = 0;
   for (const seg of segments) {
     if (srcMs >= seg.srcStart && srcMs <= seg.srcEnd) return acc + (srcMs - seg.srcStart);
