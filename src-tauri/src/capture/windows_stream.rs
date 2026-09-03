@@ -109,6 +109,7 @@ struct Capturer {
     target_height: u32,
     crop_x: u32,
     crop_y: u32,
+    spare_buf: Vec<u8>,
 }
 
 impl GraphicsCaptureApiHandler for Capturer {
@@ -116,6 +117,7 @@ impl GraphicsCaptureApiHandler for Capturer {
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        let needed_len = (ctx.flags.target_width as usize) * 4 * (ctx.flags.target_height as usize);
         Ok(Self {
             latest: ctx.flags.latest,
             stopped_externally: ctx.flags.stopped_externally,
@@ -123,6 +125,7 @@ impl GraphicsCaptureApiHandler for Capturer {
             target_height: ctx.flags.target_height,
             crop_x: ctx.flags.crop_x,
             crop_y: ctx.flags.crop_y,
+            spare_buf: vec![0u8; needed_len],
         })
     }
 
@@ -164,19 +167,36 @@ impl GraphicsCaptureApiHandler for Capturer {
         let copy_h = self.target_height.min(avail_h) as usize;
         let dst_row_len = (self.target_width as usize) * 4;
         let copy_row_bytes = copy_w * 4;
-        let mut bgra = vec![0u8; dst_row_len * self.target_height as usize];
+        let needed_len = dst_row_len * self.target_height as usize;
+
+        if self.spare_buf.len() != needed_len {
+            self.spare_buf = vec![0u8; needed_len];
+        } else {
+            self.spare_buf.fill(0);
+        }
+
+        let mut bgra = std::mem::take(&mut self.spare_buf);
         for y in 0..copy_h {
             let src_off = (y + self.crop_y as usize) * row_pitch + (self.crop_x as usize) * 4;
             let dst_off = y * dst_row_len;
             bgra[dst_off..dst_off + copy_row_bytes].copy_from_slice(&raw[src_off..src_off + copy_row_bytes]);
         }
 
-        // `unwrap_or_else(into_inner)`: 1 lần panic ở holder khác làm poison
-        // mutex — `unwrap()` ở đây sẽ panic DÂY CHUYỀN trong callback FFI
-        // (abort). Dữ liệu chỉ là "frame mới nhất", ghi đè an toàn kể cả sau
-        // poison. Bọc `Arc::new` để ticker chia sẻ dữ liệu zero-copy.
-        *self.latest.lock().unwrap_or_else(|p| p.into_inner()) =
-            Some(Arc::new(Frame { bgra, width: self.target_width, height: self.target_height }));
+        let new_frame = Arc::new(Frame { bgra, width: self.target_width, height: self.target_height });
+        let old_frame = {
+            let mut guard = self.latest.lock().unwrap_or_else(|p| p.into_inner());
+            guard.replace(new_frame)
+        };
+
+        // Tái sử dụng buffer của frame cũ nếu không còn ai giữ tham chiếu Arc (zero allocation)
+        if let Some(old) = old_frame {
+            if let Ok(frame) = Arc::try_unwrap(old) {
+                if frame.bgra.len() == needed_len {
+                    self.spare_buf = frame.bgra;
+                }
+            }
+        }
+
         Ok(())
     }
 

@@ -14,6 +14,7 @@ import { useEditor } from "../store";
 import type { Annotation } from "../model";
 import { uid } from "../model";
 import { copyToClipboard } from "../../output/useOutput";
+import { toSafeBlobUrl } from "../../../lib/blobUtils";
 
 export interface StageHandle {
   exportPng: () => string | null;
@@ -170,28 +171,7 @@ function drawRoundedRect(
  * Hỗ trợ vẽ vector annotations (text, arrow, rect, ellipse, step counter, highlight, blur)
  * và tương tác chuột mượt mà 60 FPS (zoom quanh con trỏ, pan Space/Middle drag, crop, crop history).
  */
-function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
-  if (src.startsWith("data:")) {
-    try {
-      const parts = src.split(",");
-      const mimeMatch = parts[0].match(/:(.*?);/);
-      const mime = mimeMatch ? mimeMatch[1] : "image/png";
-      const b64 = atob(parts[1]);
-      if (b64.length > 500_000) {
-        const byteNumbers = new Uint8Array(b64.length);
-        for (let i = 0; i < b64.length; i++) {
-          byteNumbers[i] = b64.charCodeAt(i);
-        }
-        const blob = new Blob([byteNumbers], { type: mime });
-        const blobUrl = URL.createObjectURL(blob);
-        return { url: blobUrl, revoke: () => URL.revokeObjectURL(blobUrl) };
-      }
-    } catch (e) {
-      console.error("Lỗi chuyển đổi Blob URL:", e);
-    }
-  }
-  return { url: src };
-}
+const toSafeImageUrl = (src: string) => toSafeBlobUrl(src, 500_000);
 
 const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoomBar, onFlash }, ref) => {
   const { t } = useTranslation();

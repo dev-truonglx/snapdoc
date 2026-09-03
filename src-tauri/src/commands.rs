@@ -1000,6 +1000,13 @@ pub async fn finalize_scroll_stitch(
             return Err("Chiều cao ảnh ghép bằng 0".to_string());
         }
 
+        const MAX_TOTAL_HEIGHT: u32 = 32_768;
+        if total_height > MAX_TOTAL_HEIGHT {
+            return Err(format!(
+                "Chiều cao ảnh ghép ({total_height}px) vượt quá giới hạn an toàn ({MAX_TOTAL_HEIGHT}px). Hãy dừng cuộn sớm hơn."
+            ));
+        }
+
         let mut final_img = image::RgbaImage::new(width, total_height);
 
         let mut current_y = 0u32;
@@ -1036,7 +1043,12 @@ pub async fn finalize_scroll_stitch(
             current_y += inst.src_h;
         }
 
+        // Dọn bộ nhớ lát cắt thô ngay lập tức trước khi mã hoá PNG để tránh đỉnh RAM
+        drop(committed);
+        drop(uncommitted);
+
         let cap = crate::capture::persist(&final_img)?;
+        drop(final_img);
         Ok(cap)
     })
     .await
