@@ -35,6 +35,7 @@ export interface TextAnn extends Base {
   type: "text";
   text: string;
   fontSize: number;
+  width?: number;
 }
 export interface StepAnn extends Base {
   type: "step";
