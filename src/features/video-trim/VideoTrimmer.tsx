@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
+import GifExportModal from "./GifExportModal";
 import {
   type Segment,
   MIN_SEG_MS,
@@ -51,7 +52,10 @@ export interface VideoTrimmerProps {
    * (chế độ video), tránh tự trigger "refresh-capture" khiến Editor nạp lại
    * pending ảnh và mất video đang xem (xem `Editor.tsx`). */
   frameCaptureMode?: "open-editor" | "in-place";
+  sourceHistoryId?: string;
+  onFlash?: (msg: string) => void;
 }
+
 
 /** Chỉ giữ cạnh dài nhất chưa gộp, dùng lặp lại cho track/playhead math. */
 function clamp(v: number, lo: number, hi: number): number {
@@ -182,6 +186,8 @@ export default function VideoTrimmer({
   onSaveAs,
   onStateChange,
   frameCaptureMode = "open-editor",
+  sourceHistoryId,
+  onFlash,
 }: VideoTrimmerProps) {
   const { t } = useTranslation();
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -231,9 +237,15 @@ export default function VideoTrimmer({
   });
   const [editState, setEditState] = useState<EditState>(makeInitialEditState);
   const { segments, removeAudio, past, future, selectedSegmentId } = editState;
+  const [gifModalOpen, setGifModalOpen] = useState(false);
+  const selectedSegment = useMemo(
+    () => segments.find((s) => s.id === selectedSegmentId) ?? null,
+    [segments, selectedSegmentId],
+  );
   // Popover "Chọn nơi lưu…" gắn cạnh nút "Lưu thành video mới" (split button)
   // — đóng khi click ra ngoài, cùng cơ chế popover "Save As…" ở `Toolbar.tsx`.
   const [showSaveAsMenu, setShowSaveAsMenu] = useState(false);
+
   const saveAsMenuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!showSaveAsMenu) return;
@@ -1183,7 +1195,11 @@ export default function VideoTrimmer({
         <button style={iconToolBtn} disabled={capturingFrame} onClick={doCaptureFrame} title={t("videoTrimmer.exportFrame")}>
           <CameraIcon />
         </button>
+        <button style={iconToolBtn} onClick={() => setGifModalOpen(true)} title={t("videoTrimmer.exportGif")}>
+          <GifIcon />
+        </button>
         <div style={toolDivider} />
+
         {/* Tách nhạc nền: xoá HẲN track âm thanh khỏi file khi Áp dụng cắt —
             chỉ 1 click để bật/tắt, gộp chung lịch sử undo với các thao tác
             cắt đoạn (xem `doToggleRemoveAudio`) nên Ctrl+Z hoàn tác đúng. */}
@@ -1384,6 +1400,17 @@ export default function VideoTrimmer({
           <span style={hoverPreviewTime}>{fmtDuration(hoverInfo.srcMs)}</span>
         </div>
       )}
+
+      <GifExportModal
+        open={gifModalOpen}
+        onClose={() => setGifModalOpen(false)}
+        filePath={filePath}
+        videoSrc={src}
+        durationMs={durationMs}
+        selectedSegment={selectedSegment}
+        sourceHistoryId={sourceHistoryId}
+        onFlash={onFlash}
+      />
     </div>
   );
 }
@@ -1440,6 +1467,19 @@ function CameraIcon() {
     </svg>
   );
 }
+
+function GifIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="4" />
+      <path d="M8 9.5H6.2A1.2 1.2 0 0 0 5 10.7v2.6a1.2 1.2 0 0 0 1.2 1.2H8v-2H6.8" />
+      <path d="M12 9.5v5" />
+      <path d="M16 14.5v-5h3" />
+      <path d="M16 12h2.2" />
+    </svg>
+  );
+}
+
 
 function SpeakerIcon() {
   return (

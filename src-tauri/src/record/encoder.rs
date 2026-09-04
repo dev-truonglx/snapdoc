@@ -600,6 +600,120 @@ pub fn trim(
     result
 }
 
+/// Tuỳ chọn xuất video sang ảnh GIF động.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GifExportOptions {
+    pub start_ms: i64,
+    pub duration_ms: i64,
+    pub fps: u32,
+    pub max_width: Option<u32>,
+    pub speed: f64,
+    pub loop_count: i32, // 0 = lặp vô hạn, -1 = phát 1 lần
+}
+
+/// Xuất 1 đoạn video (hoặc toàn bộ) ra file ảnh GIF chất lượng cao.
+///
+/// Dùng ffmpeg filter 2-pass (palettegen + paletteuse với Bayer dithering)
+/// để bảng màu 256 màu đạt độ mịn tối đa, hạn chế răng cưa và giảm kích thước
+/// file so với bộ encoder mặc định.
+pub fn export_gif(
+    input_path: &Path,
+    output_path: &Path,
+    options: &GifExportOptions,
+    mut on_progress: impl FnMut(f64),
+) -> Result<(), String> {
+    if !input_path.exists() {
+        return Err(format!("File nguồn không tồn tại: {}", input_path.display()));
+    }
+    if options.duration_ms <= 0 {
+        return Err("Thời lượng xuất GIF phải lớn hơn 0".to_string());
+    }
+
+    let ffmpeg = sidecar_path("ffmpeg")?;
+    let start_s = (options.start_ms.max(0) as f64) / 1000.0;
+    let dur_s = (options.duration_ms.max(100) as f64) / 1000.0;
+    let speed = if options.speed > 0.05 { options.speed } else { 1.0 };
+    let fps = options.fps.clamp(5, 60);
+
+    let pts_filter = if (speed - 1.0).abs() > 0.01 {
+        format!("setpts={:.4}*PTS,", 1.0 / speed)
+    } else {
+        String::new()
+    };
+
+    let scale_filter = match options.max_width {
+        Some(w) if w > 0 => format!("scale='min({w},iw)':-2:flags=lanczos"),
+        _ => "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=lanczos".to_string(),
+    };
+
+    let filter_complex = format!(
+        "[0:v] {pts_filter}fps={fps},{scale_filter},split [s0][s1]; [s0] palettegen=stats_mode=diff [p]; [s1][p] paletteuse=dither=bayer:bayer_scale=3"
+    );
+
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
+        .arg("-ss")
+        .arg(format!("{:.3}", start_s))
+        .arg("-t")
+        .arg(format!("{:.3}", dur_s))
+        .arg("-i")
+        .arg(input_path)
+        .args(["-filter_complex", &filter_complex])
+        .args(["-loop", &options.loop_count.to_string()])
+        .args(["-progress", "pipe:1"])
+        .arg(output_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    on_progress(0.0);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
+
+    let mut stderr_pipe = child.stderr.take().expect("stderr đã piped");
+    let stderr_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let _ = stderr_pipe.read_to_string(&mut buf);
+        buf
+    });
+
+    let total_us = ((dur_s / speed) * 1_000_000.0) as i64;
+    let stdout = child.stdout.take().expect("stdout đã piped");
+    {
+        use std::io::{BufRead, BufReader};
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(v) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = v.trim().parse::<i64>() {
+                    let frac = (us as f64 / total_us.max(1) as f64).clamp(0.0, 0.99);
+                    on_progress(frac);
+                }
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("ffmpeg lỗi khi chờ tiến trình: {e}"))?;
+    let stderr = stderr_thread.join().unwrap_or_default();
+    if !status.success() {
+        return Err(format!("Xuất GIF thất bại: {status} — {stderr}"));
+    }
+
+    on_progress(1.0);
+    Ok(())
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,3 +852,5 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
+
+

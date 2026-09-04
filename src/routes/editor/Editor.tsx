@@ -919,6 +919,8 @@ export default function Editor() {
             onSaveAs={doSaveAsVideo}
             onStateChange={setVideoTrimState}
             frameCaptureMode="in-place"
+            sourceHistoryId={videoDoc.historyId}
+            onFlash={flash}
           />
         ) : (
           <AnnotationStage ref={stageRef} onFlash={flash} />
