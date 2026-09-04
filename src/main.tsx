@@ -1,42 +1,33 @@
-import React from "react";
+import React, { Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import "./styles/global.css";
 import "./i18n/config"; // Initialize i18next
-import CaptureBar from "./routes/capture-bar/CaptureBar";
-import Overlay from "./routes/overlay/Overlay";
-import Editor from "./routes/editor/Editor";
-import Thumbnail from "./routes/thumbnail/Thumbnail";
-import Settings from "./routes/settings/Settings";
-import UpdateWindow from "./routes/update/UpdateWindow";
-import ScrollControl from "./routes/scroll-control/ScrollControl";
-import HistoryWindow from "./routes/history/HistoryWindow";
-import RecordingIndicator from "./routes/recording-indicator/RecordingIndicator";
-import RecordStopControl from "./routes/record-stop-control/RecordStopControl";
-import RecordBorder from "./routes/record-border/RecordBorder";
-import WindowPickerDialog from "./routes/window-picker/WindowPickerDialog";
-import CaptureTimer from "./routes/capture-timer/CaptureTimer";
-import CaptureBarPopover from "./routes/capture-bar/CaptureBarPopover";
 
 const which = new URLSearchParams(window.location.search).get("win") ?? "capture-bar";
 
-const routes: Record<string, React.ComponentType> = {
-  "capture-bar": CaptureBar,
-  "capture-bar-popover": CaptureBarPopover,
-  overlay: Overlay,
-  editor: Editor,
-  thumbnail: Thumbnail,
-  settings: Settings,
-  update: UpdateWindow,
-  "scroll-control": ScrollControl,
-  history: HistoryWindow,
-  "recording-indicator": RecordingIndicator,
-  "record-stop-control": RecordStopControl,
-  "record-border": RecordBorder,
-  "window-picker": WindowPickerDialog,
-  "capture-timer": CaptureTimer,
+const routeLoaders: Record<string, () => Promise<{ default: React.ComponentType<any> }>> = {
+  "capture-bar": () => import("./routes/capture-bar/CaptureBar"),
+  "capture-bar-popover": () => import("./routes/capture-bar/CaptureBarPopover"),
+  overlay: () => import("./routes/overlay/Overlay"),
+  editor: () => import("./routes/editor/Editor"),
+  thumbnail: () => import("./routes/thumbnail/Thumbnail"),
+  settings: () => import("./routes/settings/Settings"),
+  update: () => import("./routes/update/UpdateWindow"),
+  "scroll-control": () => import("./routes/scroll-control/ScrollControl"),
+  history: () => import("./routes/history/HistoryWindow"),
+  "recording-indicator": () => import("./routes/recording-indicator/RecordingIndicator"),
+  "record-stop-control": () => import("./routes/record-stop-control/RecordStopControl"),
+  "record-border": () => import("./routes/record-border/RecordBorder"),
+  "window-picker": () => import("./routes/window-picker/WindowPickerDialog"),
+  "capture-timer": () => import("./routes/capture-timer/CaptureTimer"),
 };
 
-const Route = routes[which] ?? CaptureBar;
+const loader = routeLoaders[which] ?? routeLoaders["capture-bar"];
+const Route = React.lazy(loader);
 
 // Không dùng StrictMode: effects chạy 2 lần ở dev sẽ phá logic take_pending (xoá state).
-ReactDOM.createRoot(document.getElementById("root")!).render(<Route />);
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <Suspense fallback={null}>
+    <Route />
+  </Suspense>
+);

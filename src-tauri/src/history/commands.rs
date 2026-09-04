@@ -134,21 +134,52 @@ fn permanently_delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(),
     Ok(())
 }
 
-fn empty_trash_sync(app: &AppHandle) -> Result<u32, String> {
-    let ids: Vec<String> = {
+struct TrashFile {
+    asset_path: String,
+    thumb_path: String,
+}
+
+fn delete_trash_items_batch(app: &AppHandle, where_clause: &str, params: &[&dyn ToSql]) -> Result<u32, String> {
+    let items: Vec<TrashFile> = {
         let st = state(app)?;
         let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
-        let mut stmt = conn
-            .prepare("SELECT id FROM history WHERE deleted_at IS NOT NULL")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        let sql = format!("SELECT asset_path, thumb_path FROM history WHERE {where_clause}");
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params, |r| {
+            Ok(TrashFile {
+                asset_path: r.get(0)?,
+                thumb_path: r.get(1)?,
+            })
+        }).map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
     };
-    let count = ids.len() as u32;
-    for id in ids {
-        let _ = permanently_delete_history_item_sync(app, &id);
+
+    if items.is_empty() {
+        return Ok(0);
     }
+
+    let count = items.len() as u32;
+
+    for item in &items {
+        for path in [&item.asset_path, &item.thumb_path] {
+            if let Err(e) = std::fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("[SnapDoc][history] Không xoá được file {path} (file sẽ mồ côi trên đĩa): {e}");
+                }
+            }
+        }
+    }
+
+    let st = state(app)?;
+    let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+    let sql = format!("DELETE FROM history WHERE {where_clause}");
+    conn.execute(&sql, params).map_err(|e| e.to_string())?;
+
     Ok(count)
+}
+
+fn empty_trash_sync(app: &AppHandle) -> Result<u32, String> {
+    delete_trash_items_batch(app, "deleted_at IS NOT NULL", &[])
 }
 
 /// Thời gian giữ item trong Trash trước khi tự động xoá vĩnh viễn. Xem
@@ -162,22 +193,7 @@ const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// khác điều kiện lọc theo `deleted_at`.
 pub fn purge_old_trash(app: &AppHandle) -> Result<u32, String> {
     let cutoff = now_ms() - TRASH_RETENTION_MS;
-    let ids: Vec<String> = {
-        let st = state(app)?;
-        let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
-        let mut stmt = conn
-            .prepare("SELECT id FROM history WHERE deleted_at IS NOT NULL AND deleted_at < ?1")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([cutoff], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        rows.filter_map(|r| r.ok()).collect()
-    };
-    let count = ids.len() as u32;
-    for id in ids {
-        let _ = permanently_delete_history_item_sync(app, &id);
-    }
-    Ok(count)
+    delete_trash_items_batch(app, "deleted_at IS NOT NULL AND deleted_at < ?1", &[&cutoff])
 }
 
 fn rename_history_item_sync(app: &AppHandle, id: &str, title: &str) -> Result<(), String> {

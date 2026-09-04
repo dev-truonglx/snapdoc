@@ -92,24 +92,133 @@ impl Drop for Encoder {
     }
 }
 
+static DETECTED_ENCODER_ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+fn test_encoder(ffmpeg: &Path, encoder_name: &str, extra_args: &[&str]) -> bool {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=64x64:d=0.04",
+        "-c:v",
+        encoder_name,
+    ]);
+    cmd.args(extra_args);
+    cmd.args(["-f", "null", "-"]);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    match cmd.status() {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+fn best_h264_encoder_args(ffmpeg: &Path) -> &'static [String] {
+    DETECTED_ENCODER_ARGS.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        {
+            // 1. Thử NVIDIA NVENC (card rời NVIDIA)
+            if test_encoder(ffmpeg, "h264_nvenc", &["-preset", "p4", "-cq", "23", "-pix_fmt", "yuv420p"]) {
+                eprintln!("[SnapDoc][record] Dùng hardware encoder: h264_nvenc (NVIDIA)");
+                return vec![
+                    "-c:v".to_string(), "h264_nvenc".to_string(),
+                    "-preset".to_string(), "p4".to_string(),
+                    "-cq".to_string(), "23".to_string(),
+                    "-pix_fmt".to_string(), "yuv420p".to_string(),
+                ];
+            }
+            // 2. Thử Intel QuickSync (card onboard hoặc rời Intel)
+            if test_encoder(ffmpeg, "h264_qsv", &["-global_quality", "23", "-pix_fmt", "nv12"]) {
+                eprintln!("[SnapDoc][record] Dùng hardware encoder: h264_qsv (Intel QuickSync)");
+                return vec![
+                    "-c:v".to_string(), "h264_qsv".to_string(),
+                    "-global_quality".to_string(), "23".to_string(),
+                    "-pix_fmt".to_string(), "nv12".to_string(),
+                ];
+            }
+            // 3. Thử AMD AMF (card rời AMD)
+            if test_encoder(ffmpeg, "h264_amf", &["-quality", "speed", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23", "-pix_fmt", "yuv420p"]) {
+                eprintln!("[SnapDoc][record] Dùng hardware encoder: h264_amf (AMD)");
+                return vec![
+                    "-c:v".to_string(), "h264_amf".to_string(),
+                    "-quality".to_string(), "speed".to_string(),
+                    "-rc".to_string(), "cqp".to_string(),
+                    "-qp_i".to_string(), "23".to_string(),
+                    "-qp_p".to_string(), "23".to_string(),
+                    "-pix_fmt".to_string(), "yuv420p".to_string(),
+                ];
+            }
+            // 4. Thử Windows Media Foundation (tích hợp sẵn trên Windows 10/11)
+            if test_encoder(ffmpeg, "h264_mf", &["-b:v", "5M", "-pix_fmt", "yuv420p"]) {
+                eprintln!("[SnapDoc][record] Dùng hardware encoder: h264_mf (Windows Media Foundation)");
+                return vec![
+                    "-c:v".to_string(), "h264_mf".to_string(),
+                    "-b:v".to_string(), "5M".to_string(),
+                    "-pix_fmt".to_string(), "yuv420p".to_string(),
+                ];
+            }
+            // 5. Fallback: libx264 siêu nhẹ (ultrafast + zerolatency) cho máy Windows yếu
+            eprintln!("[SnapDoc][record] Không có hardware encoder, fallback libx264 ultrafast cho máy yếu");
+            vec![
+                "-c:v".to_string(), "libx264".to_string(),
+                "-preset".to_string(), "ultrafast".to_string(),
+                "-tune".to_string(), "zerolatency".to_string(),
+                "-crf".to_string(), "23".to_string(),
+                "-pix_fmt".to_string(), "yuv420p".to_string(),
+            ]
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if test_encoder(ffmpeg, "h264_videotoolbox", &["-q:v", "60", "-pix_fmt", "yuv420p"]) {
+                eprintln!("[SnapDoc][record] Dùng hardware encoder: h264_videotoolbox (Apple Silicon / Intel Mac)");
+                return vec![
+                    "-c:v".to_string(), "h264_videotoolbox".to_string(),
+                    "-q:v".to_string(), "60".to_string(),
+                    "-pix_fmt".to_string(), "yuv420p".to_string(),
+                ];
+            }
+            eprintln!("[SnapDoc][record] Dùng fallback libx264 veryfast");
+            vec![
+                "-c:v".to_string(), "libx264".to_string(),
+                "-preset".to_string(), "veryfast".to_string(),
+                "-crf".to_string(), "20".to_string(),
+                "-pix_fmt".to_string(), "yuv420p".to_string(),
+            ]
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            vec![
+                "-c:v".to_string(), "libx264".to_string(),
+                "-preset".to_string(), "veryfast".to_string(),
+                "-crf".to_string(), "20".to_string(),
+                "-pix_fmt".to_string(), "yuv420p".to_string(),
+            ]
+        }
+    })
+}
+
 impl Encoder {
     /// Bắt đầu 1 tiến trình ffmpeg nhận rawvideo BGRA (`width`x`height`,
-    /// `fps` khung/giây) qua stdin, encode H.264 (`libx264`), ghi mp4 tại
-    /// `output_path`. `-movflags +faststart` để file phát ngay khi mở
+    /// `fps` khung/giây) qua stdin, encode H.264 (hardware nếu có, fallback libx264),
+    /// ghi mp4 tại `output_path`. `-movflags +faststart` để file phát ngay khi mở
     /// (moov atom ở đầu file thay vì cuối).
-    ///
-    /// CHỈ video — KHÔNG nhận thêm input audio nào ở đây nữa (khác Phase 4
-    /// ban đầu). Lý do: ffmpeg (scheduler đa luồng bản mới) đồng bộ nhiều
-    /// input SỐNG (pipe/fifo) với nhau — hễ 1 bên (audio) khựng lại vì bất kỳ
-    /// lý do gì, ffmpeg tạm dừng đọc luôn CẢ VIDEO để tránh 2 stream lệch xa
-    /// nhau, kéo theo kênh buffer riêng của app (`record/mod.rs`) đầy sau
-    /// đúng vài giây rồi bắt đầu drop frame lặng lẽ — quay bao lâu file cũng
-    /// chỉ có vài giây đầu. Audio giờ ghi ra file thô RIÊNG (không qua
-    /// ffmpeg lúc quay), rồi ghép vào SAU khi quay xong bằng `mux_audio` —
-    /// lúc đó cả 2 input đều là file tĩnh, không còn kiểu đồng bộ "sống" gây
-    /// treo này nữa.
     pub fn start(output_path: &Path, width: u32, height: u32, fps: u32) -> Result<Self, String> {
         let ffmpeg = sidecar_path("ffmpeg")?;
+        let enc_args = best_h264_encoder_args(&ffmpeg);
 
         let mut cmd = Command::new(&ffmpeg);
         cmd.args([
@@ -127,14 +236,9 @@ impl Encoder {
             &fps.to_string(),
             "-i",
             "pipe:0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
+        ]);
+        cmd.args(enc_args);
+        cmd.args([
             "-movflags",
             "+faststart",
         ])
@@ -381,8 +485,8 @@ pub fn trim(
                 .args([
                     "-ss", &start_s.to_string(),
                     "-t", &dur_s.to_string(),
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
                 ]);
+            cmd.args(best_h264_encoder_args(&ffmpeg));
             // `-an` bỏ hẳn track âm thanh khi user bấm "Tách nhạc nền" — ngược
             // lại encode audio AAC như cũ. Đặt SAU nhóm arg video ở trên (thứ
             // tự option ffmpeg không quan trọng ở đây) để dễ đọc theo nhánh.

@@ -30,6 +30,7 @@ import { ipc, type Pending, type HistoryItem } from "../../lib/ipc";
 import { editorToolFromKey } from "../../lib/toolShortcuts";
 import StitchDialog from "../../features/annotation/compose/StitchDialog";
 import type { StitchResult } from "../../features/annotation/compose/stitch";
+import { base64ToBlob } from "../../lib/blobUtils";
 
 interface VideoDoc {
   historyId: string;
@@ -245,12 +246,7 @@ export default function Editor() {
     let imageUrl = `data:image/png;base64,${p.base64}`;
     if (p.base64 && p.base64.length > 200_000) {
       try {
-        const byteChars = atob(p.base64);
-        const byteNumbers = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) {
-          byteNumbers[i] = byteChars.charCodeAt(i);
-        }
-        const blob = new Blob([byteNumbers], { type: "image/png" });
+        const blob = base64ToBlob(p.base64, "image/png");
         imageUrl = URL.createObjectURL(blob);
       } catch (e) {
         console.error("Lỗi tạo Blob URL trong loadPending:", e);

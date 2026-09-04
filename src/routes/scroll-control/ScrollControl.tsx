@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
+import { toSafeBlobUrl } from "../../lib/blobUtils";
 
 const params = new URLSearchParams(window.location.search);
 const mx = Number(params.get("mx") ?? "0");
@@ -10,31 +11,7 @@ const ry = Number(params.get("ry") ?? "0");
 const rw = Number(params.get("rw") ?? "0");
 const rh = Number(params.get("rh") ?? "0");
 
-function toSafeImageUrl(src: string): { url: string; revoke?: () => void } {
-  if (!src) return { url: "" };
-  if (src.startsWith("data:") && src.length > 200_000) {
-    try {
-      const commaIdx = src.indexOf(",");
-      if (commaIdx !== -1) {
-        const meta = src.slice(0, commaIdx);
-        const rawBase64 = src.slice(commaIdx + 1);
-        const mimeMatch = meta.match(/:(.*?);/);
-        const mime = mimeMatch ? mimeMatch[1] : "image/png";
-        const byteChars = atob(rawBase64);
-        const byteNumbers = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) {
-          byteNumbers[i] = byteChars.charCodeAt(i);
-        }
-        const blob = new Blob([byteNumbers], { type: mime });
-        const blobUrl = URL.createObjectURL(blob);
-        return { url: blobUrl, revoke: () => URL.revokeObjectURL(blobUrl) };
-      }
-    } catch (e) {
-      console.error("Lỗi chuyển đổi Blob URL:", e);
-    }
-  }
-  return { url: src };
-}
+const toSafeImageUrl = (src: string) => toSafeBlobUrl(src, 200_000);
 
 function loadImage(src: string, t: any): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -563,6 +540,7 @@ export default function ScrollControl() {
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const cropWrapperRef = useRef<HTMLDivElement | null>(null);
+  const tempCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const cleanupMemory = () => {
     stopLoop();
@@ -571,6 +549,11 @@ export default function ScrollControl() {
       masterRef.current.height = 0;
       masterRef.current = null;
       masterCtxRef.current = null;
+    }
+    if (tempCanvasRef.current) {
+      tempCanvasRef.current.width = 0;
+      tempCanvasRef.current.height = 0;
+      tempCanvasRef.current = null;
     }
     if (cropWrapperRef.current) {
       cropWrapperRef.current.replaceChildren();
@@ -600,16 +583,23 @@ export default function ScrollControl() {
     return () => window.removeEventListener("keydown", onKey);
   }, [status]);
 
-  // Bảo đảm master canvas đủ chỗ cho `neededHeight` dòng
+  // Giới hạn chiều cao tối đa cho preview canvas để không vượt trần texture GPU WebGL/Browser (16,384px)
+  const MAX_PREVIEW_CANVAS_HEIGHT = 16384;
+
+  // Bảo đảm master canvas đủ chỗ cho `neededHeight` dòng (tối đa 16K px cho preview UI)
   const ensureCapacity = (neededHeight: number, width: number) => {
     const current = masterRef.current;
     if (current && current.width === width && current.height >= neededHeight) {
       return;
     }
-    const newCapacity = Math.max(
-      neededHeight,
-      current ? current.height * 2 : neededHeight,
+    const clampedNeeded = Math.min(neededHeight, MAX_PREVIEW_CANVAS_HEIGHT);
+    const newCapacity = Math.min(
+      MAX_PREVIEW_CANVAS_HEIGHT,
+      Math.max(clampedNeeded, current ? current.height * 2 : clampedNeeded),
     );
+    if (current && current.height >= newCapacity) {
+      return;
+    }
     const next = document.createElement("canvas");
     next.width = width;
     next.height = newCapacity;
@@ -713,10 +703,15 @@ export default function ScrollControl() {
       const fw = img.naturalWidth;
       const fh = img.naturalHeight;
 
-      // Lấy ImageData của frame mới để so khớp
-      const tempCanvas = document.createElement("canvas");
-      tempCanvas.width = fw;
-      tempCanvas.height = fh;
+      // Tái sử dụng canvas ẩn thay vì tạo mới mỗi 120ms tick để triệt tiêu áp lực garbage collection
+      if (!tempCanvasRef.current) {
+        tempCanvasRef.current = document.createElement("canvas");
+      }
+      const tempCanvas = tempCanvasRef.current;
+      if (tempCanvas.width !== fw || tempCanvas.height !== fh) {
+        tempCanvas.width = fw;
+        tempCanvas.height = fh;
+      }
       const tempCtx = tempCanvas.getContext("2d", { willReadFrequently: true });
       if (!tempCtx) return;
       tempCtx.drawImage(img, 0, 0);
