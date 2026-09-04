@@ -25,6 +25,8 @@
     "audioSystem": "Âm thanh hệ thống",
     "audioBoth": "Cả Mic & Hệ thống",
     "audioHint": "Ghi âm từ Micro, Âm thanh hệ thống hoặc kết hợp cả 2 nguồn cùng lúc (tự động đồng bộ ngay cả khi Tạm dừng/Tiếp tục).",
+    "recordSelf": "Ghi lại giao diện SnapDoc",
+    "recordSelfDesc": "Bao gồm cả khung overlay, công cụ và cửa sổ của SnapDoc khi quay màn hình (dùng để quay video hướng dẫn, demo app)",
     "startup": "KHỞI ĐỘNG",
     "launchAtLogin": "Khởi động cùng hệ thống",
     "launchAtLoginDesc": "SnapDoc tự chạy nền khi bật máy",

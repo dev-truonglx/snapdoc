@@ -29,6 +29,7 @@ fn defaults() -> Value {
         "rememberLastRegion": false,
         "launchAtLogin": true,
         "recordAudioSource": "off",
+        "recordSelf": false,
         "language": "vi",
         "shortcuts": {
             "captureBar": "CmdOrCtrl+Shift+5",
@@ -81,6 +82,15 @@ pub fn save(config_dir: &PathBuf, value: &Value) -> Result<(), String> {
         *guard = Some((path, value.clone()));
     }
     Ok(())
+}
+
+pub fn is_record_self(app: &tauri::AppHandle) -> bool {
+    use tauri::Manager;
+    let config_dir = app.path().app_config_dir().unwrap_or_default();
+    load(&config_dir)
+        .get("recordSelf")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

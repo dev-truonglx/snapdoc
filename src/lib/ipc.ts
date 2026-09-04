@@ -126,6 +126,8 @@ export interface Settings {
   launchAtLogin: boolean;
   /** Nguồn audio ghi kèm khi quay màn hình — mặc định "off". */
   recordAudioSource: AudioSource;
+  /** Ghi lại cả giao diện SnapDoc (overlay, toolbar) khi quay video — mặc định false. */
+  recordSelf?: boolean;
   shortcuts: Record<string, string>;
   /** Thư mục lần cuối user chọn qua "Save As…" ở editor (ảnh) — dùng làm mặc
    * định cho lần Save As kế tiếp, xem `useOutput.saveAsToFile`. */

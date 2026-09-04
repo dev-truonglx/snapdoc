@@ -24,7 +24,7 @@ fn cursor_points() -> Option<(f64, f64)> {
 /// 2. collectionBehavior → hiện trên Space đang active của TỪNG màn hình
 ///    (mấu chốt khi macOS bật "Displays have separate Spaces").
 #[cfg(target_os = "macos")]
-fn configure_overlay_ns_window_main_thread(win: &tauri::WebviewWindow, display_id: u32) {
+fn configure_overlay_ns_window_main_thread(win: &tauri::WebviewWindow, display_id: u32, record_self: bool) {
     use objc2::msg_send;
     use objc2_app_kit::NSScreen;
     use objc2_foundation::{ns_string, MainThreadMarker};
@@ -53,13 +53,20 @@ fn configure_overlay_ns_window_main_thread(win: &tauri::WebviewWindow, display_i
         let no_animation: i64 = 2;
         let _: () = msg_send![ns_win, setAnimationBehavior: no_animation];
 
-        // Đặt window level CAO HƠN menu bar của macOS để overlay phủ kín toàn
-        // màn hình, bao gồm cả thanh menu (NSMenuBarWindowLevel ≈ 24).
-        // NSScreenSaverWindowLevel = 1000 — đảm bảo phủ mọi thứ kể cả
-        // Spotlight, Notification Center và menu bar.
-        // CGWindowLevel của NSScreenSaverWindowLevel là 1000.
-        let screen_saver_level: i64 = 1000;
-        let _: () = msg_send![ns_win, setLevel: screen_saver_level];
+        // Đặt window level & sharingType:
+        // - Khi record_self == false (mặc định): NSScreenSaverWindowLevel = 1000
+        //   để overlay phủ kín mọi thứ kể cả Spotlight, Notification Center và menu bar.
+        //   sharingType = NSWindowSharingNone (0) để overlay hoàn toàn "tàng hình" khi quay.
+        // - Khi record_self == true: NSPopUpMenuWindowLevel = 101 để overlay vẫn phủ kín
+        //   toàn bộ màn hình và menu bar (NSMenuBarWindowLevel ≈ 24), nhưng KHÔNG bị
+        //   ScreenCaptureKit nhận diện là ScreenSaver layer (kCGScreenSaverWindowLevel = 1000)
+        //   rồi tự động loại trừ khỏi video stream. Đồng thời sharingType = NSWindowSharingReadOnly (1)
+        //   để macOS cho phép ScreenCaptureKit ghi hình cửa sổ.
+        let window_level: i64 = if record_self { 101 } else { 1000 };
+        let _: () = msg_send![ns_win, setLevel: window_level];
+
+        let sharing_type: usize = if record_self { 1 } else { 0 };
+        let _: () = msg_send![ns_win, setSharingType: sharing_type];
 
         // Tìm NSScreen có NSScreenNumber == display_id rồi setFrame theo đúng
         // frame (points, hệ AppKit) của nó.
@@ -89,7 +96,7 @@ fn configure_overlay_ns_window_main_thread(win: &tauri::WebviewWindow, display_i
 
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
-fn configure_overlay_ns_window_main_thread(_win: &tauri::WebviewWindow, _display_id: u32) {}
+fn configure_overlay_ns_window_main_thread(_win: &tauri::WebviewWindow, _display_id: u32, _record_self: bool) {}
 
 /// macOS: PID của app đang frontmost NGAY LÚC GỌI, CHỈ KHI đó KHÔNG phải
 /// chính SnapDoc — dùng để trả lại focus cho app đó sau khi Chụp nhanh
@@ -1224,8 +1231,9 @@ fn position_overlay(
         // Đặt frame qua NSScreen (points, native) trên main thread.
         let win_main = win.clone();
         let did = snap.id;
+        let record_self = crate::storage::settings::is_record_self(app);
         let _ = app.run_on_main_thread(move || {
-            configure_overlay_ns_window_main_thread(&win_main, did);
+            configure_overlay_ns_window_main_thread(&win_main, did, record_self);
         });
     }
     #[cfg(not(target_os = "macos"))]
@@ -1253,6 +1261,9 @@ fn reveal_overlay(
     win: &tauri::WebviewWindow,
     snap: &MonitorSnap,
 ) {
+    let record_self = crate::storage::settings::is_record_self(app);
+    let _ = win.set_content_protected(!record_self);
+
     // macOS đặt NSWindowAnimationBehaviorNone trong configure_overlay...;
     // Windows dùng thuộc tính DWM tương đương và phải đặt TRƯỚC show() để
     // frame đầu tiên của ảnh freeze không bị transition/fade.
@@ -1266,7 +1277,7 @@ fn reveal_overlay(
         let win_main = win.clone();
         let did = snap.id;
         let _ = app.run_on_main_thread(move || {
-            configure_overlay_ns_window_main_thread(&win_main, did);
+            configure_overlay_ns_window_main_thread(&win_main, did, record_self);
         });
     }
     #[cfg(not(target_os = "macos"))]
@@ -1424,7 +1435,8 @@ pub fn prewarm_overlays(app: &AppHandle) {
                 continue;
             }
         };
-        let _ = win.set_content_protected(true);
+        let record_self = crate::storage::settings::is_record_self(app);
+        let _ = win.set_content_protected(!record_self);
         // Định vị đúng ngay từ lúc prewarm (dù đang ẩn) — tránh 1 nhịp "nhảy
         // vị trí" nếu lỡ bị show() trước khi kịp navigate() lần dùng thật.
         #[cfg(target_os = "macos")]
@@ -1432,7 +1444,7 @@ pub fn prewarm_overlays(app: &AppHandle) {
             let win_main = win.clone();
             let did = snap.id;
             let _ = app.run_on_main_thread(move || {
-                configure_overlay_ns_window_main_thread(&win_main, did);
+                configure_overlay_ns_window_main_thread(&win_main, did, record_self);
             });
         }
         #[cfg(not(target_os = "macos"))]
@@ -1627,7 +1639,8 @@ pub fn open_overlays_ex(
             let query = build_overlay_query(mode, i, snap, record, preset, gen);
             let win = build_overlay_window_with_retry(app, &label, &query)?;
 
-            let _ = win.set_content_protected(true);
+            let record_self = crate::storage::settings::is_record_self(app);
+            let _ = win.set_content_protected(!record_self);
             // Chỉ định vị (ẩn) — CHƯA show(), giống nhánh reuse ở trên.
             position_overlay(app, &win, snap);
             wins.push(win);

@@ -25,6 +25,8 @@
     "audioSystem": "System audio",
     "audioBoth": "Mic & System audio",
     "audioHint": "Record audio from Microphone, System audio, or both simultaneously (seamlessly synchronized across Pause/Resume).",
+    "recordSelf": "Record SnapDoc interface",
+    "recordSelfDesc": "Include SnapDoc overlay, tools, and windows in screen recordings (useful for creating tutorials or demo videos)",
     "startup": "STARTUP",
     "launchAtLogin": "Launch at startup",
     "launchAtLoginDesc": "SnapDoc runs in the background when you start your computer",

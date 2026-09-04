@@ -625,15 +625,21 @@ pub fn start(
     target: RecordTarget,
     fps: u32,
     capture_system_audio: bool,
+    exclude_own_app: bool,
 ) -> Result<(RecordingHandle, mpsc::Receiver<Arc<Frame>>, Option<mpsc::Receiver<Vec<u8>>>), String> {
     // `source_rect`: Some khi quay 1 VÙNG (crop qua `SCStreamConfiguration`),
     // None khi quay trọn nội dung của filter (toàn màn hình hoặc cả cửa sổ).
     let (filter, source_rect): (Retained<SCContentFilter>, Option<CGRect>) = match &target {
         RecordTarget::Display(display_id) => {
             let (display, own_apps) = find_display_and_own_apps(*display_id)?;
-            let own_apps_arr = NSArray::from_retained_slice(&own_apps);
+            let empty_apps: Vec<Retained<SCRunningApplication>> = vec![];
+            let own_apps_arr = if exclude_own_app {
+                NSArray::from_retained_slice(&own_apps)
+            } else {
+                NSArray::from_retained_slice(&empty_apps)
+            };
             let no_exceptions = NSArray::from_slice(&[]);
-            // Loại trừ toàn bộ các cửa sổ, popup và Tray Menu của SnapDoc ra khỏi video.
+            // Loại trừ toàn bộ các cửa sổ, popup và Tray Menu của SnapDoc ra khỏi video (khi exclude_own_app=true).
             let filter = unsafe {
                 SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
                     SCContentFilter::alloc(),
@@ -646,9 +652,14 @@ pub fn start(
         }
         RecordTarget::Region { display_id, x, y, w, h } => {
             let (display, own_apps) = find_display_and_own_apps(*display_id)?;
-            let own_apps_arr = NSArray::from_retained_slice(&own_apps);
+            let empty_apps: Vec<Retained<SCRunningApplication>> = vec![];
+            let own_apps_arr = if exclude_own_app {
+                NSArray::from_retained_slice(&own_apps)
+            } else {
+                NSArray::from_retained_slice(&empty_apps)
+            };
             let no_exceptions = NSArray::from_slice(&[]);
-            // Loại trừ toàn bộ các cửa sổ, popup và Tray Menu của SnapDoc ra khỏi video.
+            // Loại trừ toàn bộ các cửa sổ, popup và Tray Menu của SnapDoc ra khỏi video (khi exclude_own_app=true).
             let filter = unsafe {
                 SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
                     SCContentFilter::alloc(),

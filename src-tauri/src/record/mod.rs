@@ -110,6 +110,10 @@ fn audio_source_setting(app: &AppHandle) -> AudioSource {
     }
 }
 
+fn record_self_setting(app: &AppHandle) -> bool {
+    crate::storage::settings::is_record_self(app)
+}
+
 /// 1 track audio ghi PCM thô nhận từ `mac_stream`/`audio_mic`/`audio_wasapi`.
 struct AudioTrack {
     writer: std::thread::JoinHandle<()>,
@@ -455,8 +459,9 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
     let want_system_audio = audio_source == AudioSource::System || audio_source == AudioSource::Both;
     let want_mic = audio_source == AudioSource::Mic || audio_source == AudioSource::Both;
 
+    let record_self = record_self_setting(app);
     let (stream, frame_rx, system_audio_rx) =
-        crate::capture::mac_stream::start(target, FPS, want_system_audio)?;
+        crate::capture::mac_stream::start(target, FPS, want_system_audio, !record_self)?;
     let (width, height) = (stream.width, stream.height);
 
     // Mic là nguồn ĐỘC LẬP với SCStream (xem `audio_mic.rs`) — lỗi ở đây

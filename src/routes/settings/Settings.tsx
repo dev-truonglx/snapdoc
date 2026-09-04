@@ -294,6 +294,16 @@ export default function Settings() {
           <p style={hint}>
             {t("settings.audioHint")}
           </p>
+          <div style={{ ...toggleRow, marginTop: 16 }}>
+            <div>
+              <div style={toggleLabel}>{t("settings.recordSelf")}</div>
+              <div style={toggleDesc}>{t("settings.recordSelfDesc")}</div>
+            </div>
+            <Toggle
+              checked={s.recordSelf ?? false}
+              onChange={(v) => update({ recordSelf: v })}
+            />
+          </div>
         </Card>
 
         {/* STARTUP */}
