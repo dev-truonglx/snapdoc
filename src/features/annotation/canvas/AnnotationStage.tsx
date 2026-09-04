@@ -252,6 +252,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const [cropHistory, setCropHistory] = useState<Draft[]>([]); // Lưu lại crop history
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
   const [textareaSize, setTextareaSize] = useState({ width: 120, height: 60 });
+  const hasResizedTextareaRef = useRef(false);
+  const minHeightRef = useRef(32);
   // Cờ đồng bộ: bật khi cú click ra ngoài vừa kết thúc 1 ô nhập, để mousedown
   // ngay sau đó KHÔNG tạo ô nhập mới (phải click thêm lần nữa mới tạo).
   const suppressCreateRef = useRef(false);
@@ -1141,7 +1143,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
             ax2 = a.x + a.radius;
             ay2 = a.y + a.radius;
           } else if (a.type === "text") {
-            ax2 = a.x + 80;
+            ax2 = a.x + (a.width || 80);
             ay2 = a.y + (a.fontSize || 22) * 1.5;
           }
 
@@ -1279,6 +1281,18 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         y: node.y(),
         radius: Math.max(8, a.radius * s),
       } as Partial<Annotation>);
+    } else if (a.type === "text") {
+      const textNode = node as Konva.Text;
+      const textSx = textNode.scaleX();
+      textNode.scaleX(1);
+      textNode.scaleY(1);
+      const newW = Math.max(30, Math.round(textNode.width() * textSx));
+      textNode.width(newW);
+      useEditor.getState().updateAnnotation(a.id, {
+        x: textNode.x(),
+        y: textNode.y(),
+        width: newW,
+      } as Partial<Annotation>);
     }
   };
 
@@ -1304,6 +1318,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   // textarea render đồng bộ để ref sẵn sàng — bắt buộc cho WKWebView (Tauri),
   // nơi .focus() chỉ ăn khi chạy trong stack sự kiện chuột gốc.
   const beginEdit = (id: string, value: string, node?: Konva.Node) => {
+    hasResizedTextareaRef.current = false;
     // Chiều cao 1 dòng theo cỡ chữ hiển thị (fontSize × scale) + padding — vừa
     // phải thay vì cố định 60px (quá cao cho 1 dòng).
     const lineH = Math.max(32, Math.round(fontSize * scale * 1.35) + 12);
@@ -1312,7 +1327,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     if (node) {
       w = Math.max(120, node.width() * scale + 24);
       h = Math.max(lineH, node.height() * scale + 12);
+    } else {
+      const ann = doc?.annotations.find((a) => a.id === id);
+      if (ann && ann.type === "text" && ann.width) {
+        w = Math.max(120, ann.width * scale + 24);
+      }
     }
+    minHeightRef.current = h;
     setTextareaSize({ width: w, height: h });
     flushSync(() => setEditing({ id, value }));
     const ta = textareaRef.current;
@@ -1325,6 +1346,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const handleTextareaResize = (e: React.MouseEvent, handle: string) => {
     e.preventDefault();
     e.stopPropagation();
+    hasResizedTextareaRef.current = true;
     
     const startWidth = textareaSize.width;
     const startHeight = textareaSize.height;
@@ -1340,8 +1362,14 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       
       if (handle.includes("right")) newWidth = Math.max(120, Math.min(600, startWidth + dx));
       if (handle.includes("left")) newWidth = Math.max(120, Math.min(600, startWidth - dx));
-      if (handle.includes("bottom")) newHeight = Math.max(30, Math.min(400, startHeight + dy));
-      if (handle.includes("top")) newHeight = Math.max(30, Math.min(400, startHeight - dy));
+      if (handle.includes("bottom")) {
+        newHeight = Math.max(30, Math.min(400, startHeight + dy));
+        minHeightRef.current = newHeight;
+      }
+      if (handle.includes("top")) {
+        newHeight = Math.max(30, Math.min(400, startHeight - dy));
+        minHeightRef.current = newHeight;
+      }
       
       setTextareaSize({ width: newWidth, height: newHeight });
     };
@@ -1355,6 +1383,21 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     window.addEventListener("mouseup", onMouseUp);
   };
 
+  // Tự động mở rộng chiều cao khung textarea khi gõ enter hoặc nội dung vượt quá chiều cao hiện tại
+  useLayoutEffect(() => {
+    if (!editing) return;
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    const borderOffset = 4;
+    const requiredH = Math.max(minHeightRef.current, ta.scrollHeight + borderOffset);
+    ta.style.height = "100%";
+    setTextareaSize((prev) => {
+      if (Math.abs(prev.height - requiredH) < 2) return prev;
+      return { ...prev, height: requiredH };
+    });
+  }, [editing?.value, textareaSize.width, scale]);
+
   const commitText = () => {
     if (!editing) return;
     const value = editing.value.trim();
@@ -1362,7 +1405,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       useEditor.getState().select(editing.id);
       useEditor.getState().removeSelected();
     } else {
-      useEditor.getState().updateAnnotation(editing.id, { text: value } as Partial<Annotation>);
+      const patch: Partial<Annotation> = { text: value };
+      if (hasResizedTextareaRef.current && textareaSize.width > 0) {
+        patch.width = Math.round(textareaSize.width / scale);
+      }
+      useEditor.getState().updateAnnotation(editing.id, patch as Partial<Annotation>);
+      useEditor.getState().select(editing.id);
+      useEditor.getState().setTool("select");
     }
     setEditing(null);
   };
@@ -1394,6 +1443,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const isNumberedRectSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "numbered-rect");
   // Line / arrow / numbered-arrow → Transformer ẩn (kéo di chuyển trực tiếp, không resize bounding box)
   const isLineSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "line" || a.type === "arrow" || a.type === "numbered-arrow");
+  const isTextSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "text");
 
   if (!doc) {
     return (
@@ -1702,6 +1752,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       fontSize={a.fontSize}
                       fill={a.color}
                       fontStyle="bold"
+                      width={a.width}
+                      wrap="word"
                       shadowColor={isSelected ? "#3b82f6" : undefined}
                       shadowBlur={isSelected ? 6 : 0}
                       shadowOpacity={isSelected ? 0.9 : 0}
@@ -1709,13 +1761,24 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                       onDblClick={(e) => beginEdit(a.id, a.text, e.target)}
                       onDragEnd={(e) => onDragEnd(a.id, e)}
+                      onTransform={(e) => {
+                        const node = e.target as Konva.Text;
+                        const sx = node.scaleX();
+                        const newW = Math.max(30, node.width() * sx);
+                        node.setAttrs({
+                          width: newW,
+                          scaleX: 1,
+                          scaleY: 1,
+                        });
+                      }}
+                      onTransformEnd={(e) => onTransformEnd(a, e.target)}
                       visible={editing?.id !== a.id}
                     />
                     {isSelected && activeIds.length > 1 && (
                       <SelectionFrame
                         x={a.x}
                         y={a.y}
-                        width={Math.max(40, (a.text?.length || 1) * (a.fontSize || 22) * 0.6)}
+                        width={a.width || Math.max(40, (a.text?.length || 1) * (a.fontSize || 22) * 0.6)}
                         height={(a.fontSize || 22) * 1.35}
                       />
                     )}
@@ -2253,9 +2316,16 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               enabledAnchors={
                 isCircleSelected || isNumberedRectSelected
                   ? ["top-left", "top-right", "bottom-left", "bottom-right"]
+                  : isTextSelected
+                  ? ["middle-left", "middle-right"]
                   : ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
               }
-              boundBoxFunc={(_old, next) => next}
+              boundBoxFunc={(_old, next) => {
+                if (isTextSelected) {
+                  next.width = Math.max(30, next.width);
+                }
+                return next;
+              }}
             />
             </Group>
           </Layer>
@@ -2299,6 +2369,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                   width: "100%",
                   height: "100%",
                   fontSize: activeFontSize,
+                  lineHeight: 1.35,
                   fontWeight: "bold",
                   color: activeColor,
                   fontFamily: "Arial, sans-serif",
