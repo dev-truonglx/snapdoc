@@ -94,16 +94,19 @@ pub(crate) fn hide_editor_for_freeze(app: &AppHandle) {
     #[cfg(target_os = "windows")]
     {
         use crate::capture::win_affinity;
-        // Danh sách tất cả labels cần loại khỏi capture
-        let labels = ["editor", "capture-bar"]; // thêm "settings", "history" nếu cần
-        // Set EXCLUDE trước khi hide — DWM loại ngay lập tức
-        for label in &labels {
-            if let Some(hwnd) = get_hwnd(app, label) {
-                let _ = win_affinity::exclude_from_capture(hwnd);
+        use tauri::Manager;
+        if !crate::storage::settings::is_record_self(app) {
+            // Danh sách tất cả labels cần loại khỏi capture
+            let labels = ["editor", "capture-bar"]; // thêm "settings", "history" nếu cần
+            // Set EXCLUDE trước khi hide — DWM loại ngay lập tức
+            for label in &labels {
+                if let Some(hwnd) = get_hwnd(app, label) {
+                    let _ = win_affinity::exclude_from_capture(hwnd);
+                }
             }
+            // Chờ DWM commit frame (thay thế sleep cố định)
+            win_affinity::dwm_flush();
         }
-        // Chờ DWM commit frame (thay thế sleep cố định)
-        win_affinity::dwm_flush();
     }
 
     windows::hide_editor(app);

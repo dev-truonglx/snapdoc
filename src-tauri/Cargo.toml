@@ -1,6 +1,6 @@
 [package]
 name = "snapdoc"
-version = "3.5.5"
+version = "3.6.4"
 description = "SnapDoc — fast screenshot + annotation app"
 authors = ["SnapDoc"]
 edition = "2021"
@@ -117,6 +117,7 @@ core-foundation-sys = "0.8.7"
 windows-sys = { version = "0.59", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Com",
+    "Win32_System_Threading",
     # DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) — đọc kích thước THẬT
     # của 1 cửa sổ (không tính viền bóng đổ vô hình mà GetWindowRect trả về),
     # dùng trong capture/windows_stream.rs để khởi tạo encoder đúng kích thước
