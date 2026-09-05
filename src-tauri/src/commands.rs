@@ -668,6 +668,16 @@ pub fn request_screen_permission() -> bool {
     permissions::request_capture()
 }
 
+#[tauri::command]
+pub fn check_accessibility_permission() -> bool {
+    permissions::can_use_accessibility()
+}
+
+#[tauri::command]
+pub fn request_accessibility_permission() -> bool {
+    permissions::request_accessibility()
+}
+
 /// Lỗi đăng ký global shortcut lúc khởi động (nếu có) — Settings gọi lúc mount
 /// để hiện banner cảnh báo phím tắt bị trùng/không đăng ký được.
 #[tauri::command]

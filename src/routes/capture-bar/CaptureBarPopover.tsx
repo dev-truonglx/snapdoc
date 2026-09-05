@@ -7,6 +7,7 @@ export default function CaptureBarPopover() {
   const { t } = useTranslation();
   const [output, setOutput] = useState<OutputMode>("editor");
   const [audioSource, setAudioSource] = useState<AudioSource>("off");
+  const [showKeystrokes, setShowKeystrokes] = useState(false);
   const [delaySeconds, setDelaySeconds] = useState<0 | 5 | 10>(0);
   const userPickedRef = useRef(false);
 
@@ -35,6 +36,7 @@ export default function CaptureBarPopover() {
     ipc.getSettings().then((s) => {
       if (s?.defaultOutput) setOutput(s.defaultOutput);
       if (s?.recordAudioSource) setAudioSource(s.recordAudioSource);
+      if (typeof s?.recordShowKeystrokes === "boolean") setShowKeystrokes(s.recordShowKeystrokes);
       if (s?.timerSeconds === 0 || s?.timerSeconds === 5 || s?.timerSeconds === 10) {
         setDelaySeconds(s.timerSeconds);
       }
@@ -51,6 +53,9 @@ export default function CaptureBarPopover() {
       }
       if (e.payload?.recordAudioSource) {
         setAudioSource(e.payload.recordAudioSource as AudioSource);
+      }
+      if (typeof e.payload?.recordShowKeystrokes === "boolean") {
+        setShowKeystrokes(e.payload.recordShowKeystrokes as boolean);
       }
       const timer = e.payload?.timerSeconds;
       if (timer === 0 || timer === 5 || timer === 10) {
@@ -92,6 +97,22 @@ export default function CaptureBarPopover() {
     setAudioSource(a);
     ipc.getSettings().then((s) => {
       if (s) return ipc.setSettings({ ...s, recordAudioSource: a });
+    }).catch(() => {}).finally(() => {
+      ipc.hideCaptureBarPopover().catch(() => {});
+    });
+  };
+
+  const toggleShowKeystrokes = async () => {
+    const next = !showKeystrokes;
+    setShowKeystrokes(next);
+    if (next) {
+      const ok = await ipc.checkAccessibilityPermission().catch(() => true);
+      if (!ok) {
+        await ipc.requestAccessibilityPermission().catch(() => {});
+      }
+    }
+    ipc.getSettings().then((s) => {
+      if (s) return ipc.setSettings({ ...s, recordShowKeystrokes: next });
     }).catch(() => {}).finally(() => {
       ipc.hideCaptureBarPopover().catch(() => {});
     });
@@ -139,6 +160,14 @@ export default function CaptureBarPopover() {
             {audioSource === a.id && <span style={checkMark}>✓</span>}
           </button>
         ))}
+        <button
+          style={popItem(showKeystrokes)}
+          onClick={toggleShowKeystrokes}
+          className="popover-btn"
+        >
+          <span style={{ flex: 1, textAlign: "left" }}>{t("captureBar.showKeystrokes")}</span>
+          {showKeystrokes && <span style={checkMark}>✓</span>}
+        </button>
 
         {/* Divider */}
         <div style={popDivider} />
