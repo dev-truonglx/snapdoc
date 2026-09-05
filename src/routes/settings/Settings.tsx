@@ -304,6 +304,25 @@ export default function Settings() {
               onChange={(v) => update({ recordSelf: v })}
             />
           </div>
+
+          <div style={{ ...toggleRow, marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+            <div>
+              <div style={toggleLabel}>{t("settings.showKeystrokes")}</div>
+              <div style={toggleDesc}>{t("settings.showKeystrokesDesc")}</div>
+            </div>
+            <Toggle
+              checked={s.recordShowKeystrokes ?? false}
+              onChange={async (v) => {
+                update({ recordShowKeystrokes: v });
+                if (v) {
+                  const ok = await ipc.checkAccessibilityPermission().catch(() => true);
+                  if (!ok) {
+                    await ipc.requestAccessibilityPermission().catch(() => {});
+                  }
+                }
+              }}
+            />
+          </div>
         </Card>
 
         {/* STARTUP */}

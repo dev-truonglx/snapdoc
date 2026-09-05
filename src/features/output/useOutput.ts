@@ -20,6 +20,15 @@ export function stampVideoName(): string {
   )}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
+/** Tên file mặc định cho ảnh động GIF: `Animation_YYYY-MM-DD_HHMMSS.gif`. */
+export function stampGifName(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `Animation_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(
+    d.getHours(),
+  )}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
 export async function copyToClipboard(dataUrl: string): Promise<void> {
   await ipc.copyImage(dataUrl);
 }
@@ -48,6 +57,15 @@ export async function promptSaveVideoPath(defaultPath: string): Promise<string |
     filters: [{ name: "MP4", extensions: ["mp4"] }],
   });
 }
+
+/** Mở dialog lưu file cho ảnh GIF (.gif). */
+export async function promptSaveGifPath(defaultPath: string): Promise<string | null> {
+  return await save({
+    defaultPath,
+    filters: [{ name: "GIF", extensions: ["gif"] }],
+  });
+}
+
 
 /**
  * Tự động lưu vào saveDir từ settings (không mở dialog).

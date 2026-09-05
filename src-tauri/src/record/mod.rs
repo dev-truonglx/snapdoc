@@ -23,6 +23,7 @@
 
 pub mod encoder;
 pub mod filmstrip;
+pub mod keystroke;
 mod audio_mic;
 #[cfg(target_os = "windows")]
 mod audio_wasapi;
@@ -114,6 +115,12 @@ fn record_self_setting(app: &AppHandle) -> bool {
     crate::storage::settings::is_record_self(app)
 }
 
+fn keystroke_overlay_setting(app: &AppHandle) -> bool {
+    let config_dir = app.path().app_config_dir().unwrap_or_default();
+    let settings = crate::storage::settings::load(&config_dir);
+    settings.get("recordShowKeystrokes").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
 /// 1 track audio ghi PCM thô nhận từ `mac_stream`/`audio_mic`/`audio_wasapi`.
 struct AudioTrack {
     writer: std::thread::JoinHandle<()>,
@@ -175,6 +182,7 @@ pub struct ActiveRecording {
     /// `None` khi đang chạy. Dùng để tính thêm khoảng ms cho
     /// `paused_accumulated_ms` khi resume (xem `resume_recording`).
     pause_started_at: Arc<Mutex<Option<Instant>>>,
+    keystroke_listener: Option<keystroke::KeystrokeListener>,
 }
 
 #[derive(Default)]
@@ -401,6 +409,38 @@ fn record_border_rect(target: &crate::capture::mac_stream::RecordTarget) -> Opti
     }
 }
 
+#[cfg(target_os = "macos")]
+fn record_keystroke_rect(target: &crate::capture::mac_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
+    use crate::capture::mac_stream::RecordTarget;
+    use xcap::Monitor;
+    let (rx, ry, rw, rh) = match target {
+        RecordTarget::Display(display_id) => {
+            let m = Monitor::all()
+                .ok()?
+                .into_iter()
+                .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
+            (m.x().ok()? as f64, m.y().ok()? as f64, m.width().ok()? as f64, m.height().ok()? as f64)
+        }
+        RecordTarget::Window(window_id) => {
+            let list = crate::capture::window::list(0.0, 0.0, 1.0).ok()?;
+            let w = list.into_iter().find(|w| w.id == *window_id)?;
+            (w.x, w.y, w.width, w.height)
+        }
+        RecordTarget::Region { display_id, x, y, w, h } => {
+            let m = Monitor::all()
+                .ok()?
+                .into_iter()
+                .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
+            (m.x().ok()? as f64 + *x, m.y().ok()? as f64 + *y, *w, *h)
+        }
+    };
+    let kw = 780.0_f64.min(rw - 20.0).max(220.0);
+    let kh = 130.0;
+    let kx = rx + (rw - kw) / 2.0;
+    let ky = (ry + rh - kh - 44.0).max(ry);
+    Some((kx, ky, kw, kh))
+}
+
 #[cfg(target_os = "windows")]
 fn record_border_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
     use crate::capture::windows_stream::RecordTarget;
@@ -426,6 +466,45 @@ fn record_border_rect(target: &crate::capture::windows_stream::RecordTarget) -> 
         }
         RecordTarget::Region { .. } => None,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn record_keystroke_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
+    use crate::capture::windows_stream::RecordTarget;
+    use xcap::Monitor;
+    let (rx, ry, rw, rh) = match target {
+        RecordTarget::Display(display_id) => {
+            let m = Monitor::all()
+                .ok()?
+                .into_iter()
+                .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
+            let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
+            (
+                m.x().ok()? as f64 / scale,
+                m.y().ok()? as f64 / scale,
+                m.width().ok()? as f64 / scale,
+                m.height().ok()? as f64 / scale,
+            )
+        }
+        RecordTarget::Window(window_id) => {
+            let list = crate::capture::window::list(0.0, 0.0, 1.0).ok()?;
+            let w = list.into_iter().find(|w| w.id == *window_id)?;
+            (w.x, w.y, w.width, w.height)
+        }
+        RecordTarget::Region { display_id, x, y, w, h } => {
+            let m = Monitor::all()
+                .ok()?
+                .into_iter()
+                .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
+            let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
+            (m.x().ok()? as f64 / scale + *x, m.y().ok()? as f64 / scale + *y, *w, *h)
+        }
+    };
+    let kw = 780.0_f64.min(rw - 20.0).max(220.0);
+    let kh = 130.0;
+    let kx = rx + (rw - kw) / 2.0;
+    let ky = (ry + rh - kh - 44.0).max(ry);
+    Some((kx, ky, kw, kh))
 }
 
 /// Chặn bắt đầu quay mới khi đã có 1 phiên đang chạy. Dùng chung cho cả 2
@@ -454,14 +533,49 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
 
     // Phải tính TRƯỚC khi `target` bị move vào `mac_stream::start` bên dưới.
     let border_rect = record_border_rect(&target);
+    let keystroke_rect = record_keystroke_rect(&target);
 
     let audio_source = audio_source_setting(app);
     let want_system_audio = audio_source == AudioSource::System || audio_source == AudioSource::Both;
     let want_mic = audio_source == AudioSource::Mic || audio_source == AudioSource::Both;
 
     let record_self = record_self_setting(app);
+
+    let show_keystrokes = keystroke_overlay_setting(app);
+    let (keystroke_win_id, keystroke_listener) = if show_keystrokes {
+        let win_id = if let Some((kx, ky, kw, kh)) = keystroke_rect {
+            match crate::windows::open_record_keystroke(app, kx, ky, kw, kh) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("[SnapDoc][record] Không hiện được overlay phím bấm: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let listener = match keystroke::KeystrokeListener::start(app.clone()) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                notify_warning(app, &format!("Phím bấm: {e}"));
+                None
+            }
+        };
+        (win_id, listener)
+    } else {
+        (None, None)
+    };
+
+    let excepting_ids = keystroke_win_id.map(|id| vec![id]).unwrap_or_default();
+
     let (stream, frame_rx, system_audio_rx) =
-        crate::capture::mac_stream::start(target, FPS, want_system_audio, !record_self)?;
+        match crate::capture::mac_stream::start(target, FPS, want_system_audio, !record_self, &excepting_ids) {
+            Ok(res) => res,
+            Err(e) => {
+                crate::windows::close_record_keystroke(app);
+                return Err(e);
+            }
+        };
     let (width, height) = (stream.width, stream.height);
 
     // Mic là nguồn ĐỘC LẬP với SCStream (xem `audio_mic.rs`) — lỗi ở đây
@@ -565,6 +679,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
         encoder.finish()
     });
 
+
     {
         let mut guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
         *guard = Some(ActiveRecording {
@@ -580,6 +695,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
             paused,
             paused_accumulated_ms,
             pause_started_at,
+            keystroke_listener,
         });
     }
 
@@ -704,6 +820,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
     // mic đã là 1 capture riêng từ trước.
     // Phải tính TRƯỚC khi `target` bị move vào `windows_stream::start` bên dưới.
     let border_rect = record_border_rect(&target);
+    let keystroke_rect = record_keystroke_rect(&target);
 
     let audio_source = audio_source_setting(app);
     let want_system_audio = audio_source == AudioSource::System || audio_source == AudioSource::Both;
@@ -838,6 +955,24 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
         encoder.finish()
     });
 
+    let show_keystrokes = keystroke_overlay_setting(app);
+    let keystroke_listener = if show_keystrokes {
+        if let Some((kx, ky, kw, kh)) = keystroke_rect {
+            if let Err(e) = crate::windows::open_record_keystroke(app, kx, ky, kw, kh) {
+                eprintln!("[SnapDoc][record] Không hiện được overlay phím bấm: {e}");
+            }
+        }
+        match keystroke::KeystrokeListener::start(app.clone()) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                notify_warning(app, &format!("Phím bấm: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     {
         let mut guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
         *guard = Some(ActiveRecording {
@@ -853,6 +988,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
             paused,
             paused_accumulated_ms,
             pause_started_at,
+            keystroke_listener,
         });
     }
 
@@ -983,6 +1119,11 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
         return Ok(String::new());
     };
 
+    let mut active = active;
+    if let Some(mut kl) = active.keystroke_listener.take() {
+        kl.stop();
+    }
+
     // Thời lượng thật của video = đúng khoảng thời gian ghi thật sự (không kể
     // thời gian đã tạm dừng). Tính TRƯỚC khi `stream.stop()` tiêu thụ field
     // `stream` (partial move). Nếu đang pause tại thời điểm dừng, cộng thêm
@@ -1042,6 +1183,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
     crate::windows::close_overlays(app);
     crate::windows::close_stop_control(app);
     crate::windows::close_record_border(app);
+    crate::windows::close_record_keystroke(app);
     #[cfg(target_os = "windows")]
     crate::windows::close_recording_indicator(app);
 

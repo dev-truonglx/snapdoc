@@ -20,6 +20,7 @@ const routeLoaders: Record<string, () => Promise<{ default: React.ComponentType<
   "record-border": () => import("./routes/record-border/RecordBorder"),
   "window-picker": () => import("./routes/window-picker/WindowPickerDialog"),
   "capture-timer": () => import("./routes/capture-timer/CaptureTimer"),
+  "record-keystroke": () => import("./routes/record-keystroke/RecordKeystroke"),
 };
 
 const loader = routeLoaders[which] ?? routeLoaders["capture-bar"];

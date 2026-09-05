@@ -111,6 +111,8 @@ pub fn run() {
             commands::set_settings,
             commands::check_screen_permission,
             commands::request_screen_permission,
+            commands::check_accessibility_permission,
+            commands::request_accessibility_permission,
             commands::capture_all_screens,
             commands::reload_shortcuts,
             commands::suspend_shortcuts,
@@ -162,7 +164,11 @@ pub fn run() {
             history::commands::open_history,
             history::commands::finish_quick_capture,
             history::commands::update_history_thumb,
+            commands::export_video_gif,
+            commands::copy_gif_to_clipboard,
+            history::commands::save_gif_to_history,
         ])
+
         .setup(|app| {
             let handle = app.handle().clone();
 

@@ -646,7 +646,7 @@ pub fn prewarm_capture_bar_popover(app: &AppHandle) -> Result<(), String> {
     }
     let _win = WebviewWindowBuilder::new(app, "capture-bar-popover", url("capture-bar-popover"))
         .title("SnapDoc Options")
-        .inner_size(220.0, 390.0)
+        .inner_size(220.0, 425.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)
@@ -716,7 +716,7 @@ pub fn open_capture_bar_popover(
     let bar_pos = bar_win.outer_position().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
 
     let popover_w = 220.0;
-    let popover_h = 390.0;
+    let popover_h = 425.0;
 
     // Căn mép phải của popover khớp với mép phải của nút Options trên thanh bar
     let pop_x = (bar_pos.x + anchor_x + anchor_w - popover_w).max(bar_pos.x);
@@ -997,6 +997,82 @@ pub fn open_record_border(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> Re
 /// Đóng khung viền đang quay (nếu có) — an toàn khi gọi dù chưa từng mở.
 pub fn close_record_border(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("record-border") {
+        let _ = win.close();
+    }
+}
+
+/// Cửa sổ hiển thị phím bấm khi quay video (`record-keystroke`).
+/// Trong suốt, click-through (`set_ignore_cursor_events(true)`), không giành focus,
+/// và KHÔNG bật `set_content_protected(true)` để SCK/WGC tự động ghi nhận vào video.
+pub fn open_record_keystroke(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<Option<u32>, String> {
+    close_record_keystroke(app);
+    let win = WebviewWindowBuilder::new(app, "record-keystroke", url("record-keystroke"))
+        .title("SnapDoc — Phím bấm")
+        .position(x, y)
+        .inner_size(w, h)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .focused(false)
+        .build()
+        .map_err(|e| format!("Không tạo được overlay phím bấm: {e}"))?;
+    let _ = win.set_ignore_cursor_events(true);
+    let _ = win.set_content_protected(false);
+    let _ = win.show();
+
+    #[cfg(target_os = "macos")]
+    let window_id: Option<u32> = {
+        use objc2::msg_send;
+        let (tx, rx) = std::sync::mpsc::channel::<Option<u32>>();
+        let win_main = win.clone();
+        let _ = app.run_on_main_thread(move || {
+            let mut wid = None;
+            if let Ok(ptr) = win_main.ns_window() {
+                let ptr = ptr as *mut objc2_app_kit::NSWindow;
+                if !ptr.is_null() {
+                    unsafe {
+                        let ns_win: &objc2_app_kit::NSWindow = &*ptr;
+                        // CanJoinAllSpaces=1 | Stationary=1<<4 | FullScreenAuxiliary=1<<8
+                        let behavior: usize = 1 | (1 << 4) | (1 << 8);
+                        let _: () = msg_send![ns_win, setCollectionBehavior: behavior];
+                        let no_animation: i64 = 2;
+                        let _: () = msg_send![ns_win, setAnimationBehavior: no_animation];
+
+                        // Đảm bảo chia sẻ cửa sổ (NSWindowSharingReadOnly = 1) để ScreenCaptureKit đọc được
+                        let sharing_type: usize = 1;
+                        let _: () = msg_send![ns_win, setSharingType: sharing_type];
+
+                        // NSPopUpMenuWindowLevel = 101 để nổi trên các app nhưng không bị coi là screensaver layer
+                        let window_level: i64 = 101;
+                        let _: () = msg_send![ns_win, setLevel: window_level];
+
+                        let _: () = msg_send![ns_win, orderFrontRegardless];
+
+                        let num: isize = msg_send![ns_win, windowNumber];
+                        if num > 0 {
+                            wid = Some(num as u32);
+                        }
+                    }
+                }
+            }
+            let _ = tx.send(wid);
+        });
+        rx.recv_timeout(std::time::Duration::from_millis(500)).unwrap_or(None)
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let window_id: Option<u32> = None;
+
+    eprintln!("[SnapDoc][record] open_record_keystroke -> window_id = {:?}", window_id);
+    Ok(window_id)
+}
+
+/// Đóng cửa sổ hiển thị phím bấm đang quay.
+pub fn close_record_keystroke(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("record-keystroke") {
         let _ = win.close();
     }
 }
@@ -2040,6 +2116,7 @@ fn force_to_foreground(win: &tauri::WebviewWindow) {
 /// Trên macOS: gọi activateIgnoringOtherApps + makeKeyAndOrderFront + orderFrontRegardless trên main thread.
 /// Trên Windows: gọi SetWindowPos always_on_top toggle + set_focus.
 pub fn bring_to_front(app: &AppHandle, win: &tauri::WebviewWindow) {
+    let _ = app;
     #[cfg(target_os = "macos")]
     {
         use tauri::ActivationPolicy;
