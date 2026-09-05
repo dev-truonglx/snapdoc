@@ -462,7 +462,22 @@
     "saveAsPickLocation": "Chọn nơi lưu…",
     "exitFullscreen": "Thoát toàn màn hình",
     "enterFullscreen": "Phóng to toàn màn hình",
-    "resetButton": "Đặt lại"
+    "resetButton": "Đặt lại",
+    "drawBox": "Vẽ khung (R)",
+    "drawBlur": "Che mờ (B)",
+    "drawText": "Chèn chữ (T)",
+    "drawArrow": "Mũi tên (A)",
+    "blurSoft": "Mờ sương",
+    "blurBlackout": "Hộp đen",
+    "badgeOn": "Nền: Bật",
+    "badgeOff": "Nền: Tắt",
+    "toggleBackground": "Bật/Tắt nền mờ cho chữ",
+    "defaultNoteText": "Ghi chú",
+    "enterNote": "Nhập ghi chú...",
+    "arrowStartPoint": "Điểm gốc mũi tên",
+    "arrowEndPoint": "Điểm ngọn mũi tên",
+    "dragToMove": "Kéo để di chuyển",
+    "deleteOverlay": "Xoá hiệu ứng"
   },
   "gifExport": {
     "title": "Xuất ảnh GIF",

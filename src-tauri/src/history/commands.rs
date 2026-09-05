@@ -590,6 +590,7 @@ fn trim_history_video_sync(
     keep_ranges_ms: &[(i64, i64)],
     remove_audio: bool,
     output_path: Option<&str>,
+    overlays: Option<&[crate::record::encoder::VideoOverlay]>,
 ) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type != "video" {
@@ -612,13 +613,35 @@ fn trim_history_video_sync(
         }
         None => crate::record::new_output_path(app)?,
     };
-    // Báo tiến độ % cho Editor (chế độ video) qua event toàn app — xem
-    // doc-comment `encoder::trim` + listener ở `Editor.tsx`.
-    let progress_app = app.clone();
-    crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path, remove_audio, move |frac| {
-        use tauri::Emitter;
-        let _ = progress_app.emit("trim-progress", frac);
-    })?;
+    let orig_dur = rec.duration_ms.unwrap_or(0);
+    let has_overlays = overlays.map(|o| !o.is_empty()).unwrap_or(false);
+    let is_untrimmed = keep_ranges_ms.len() == 1 && {
+        let (s, e) = keep_ranges_ms[0];
+        s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
+    };
+
+    if is_untrimmed && !has_overlays {
+        if !remove_audio {
+            // Fast-path 1: Copy file trực tiếp (Save As không chỉnh sửa), 0.01s!
+            std::fs::copy(asset_path, &new_path)
+                .map_err(|e| format!("Không thể sao chép video gốc: {e}"))?;
+            use tauri::Emitter;
+            let _ = app.emit("trim-progress", 1.0);
+        } else {
+            // Fast-path 2: Stream copy loại bỏ âm thanh (-c:v copy -an), 0.05s!
+            crate::record::encoder::copy_without_audio(asset_path, &new_path)?;
+            use tauri::Emitter;
+            let _ = app.emit("trim-progress", 1.0);
+        }
+    } else {
+        // Báo tiến độ % cho Editor (chế độ video) qua event toàn app — xem
+        // doc-comment `encoder::trim` + listener ở `Editor.tsx`.
+        let progress_app = app.clone();
+        crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path, remove_audio, overlays, move |frac| {
+            use tauri::Emitter;
+            let _ = progress_app.emit("trim-progress", frac);
+        })?;
+    }
 
     let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
     let file_size = std::fs::metadata(&new_path).ok().map(|m| m.len() as i64);
@@ -679,6 +702,7 @@ fn overwrite_history_video_sync(
     id: &str,
     keep_ranges_ms: &[(i64, i64)],
     remove_audio: bool,
+    overlays: Option<&[crate::record::encoder::VideoOverlay]>,
 ) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type != "video" {
@@ -686,12 +710,34 @@ fn overwrite_history_video_sync(
     }
     let asset_path = std::path::Path::new(&rec.asset_path);
     let tmp_output = asset_path.with_extension("trimtmp.mp4");
-    let progress_app = app.clone();
-    crate::record::encoder::trim(asset_path, keep_ranges_ms, &tmp_output, remove_audio, move |frac| {
-        use tauri::Emitter;
-        let _ = progress_app.emit("trim-progress", frac);
-    })?;
-    std::fs::rename(&tmp_output, asset_path).map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
+    let orig_dur = rec.duration_ms.unwrap_or(0);
+    let has_overlays = overlays.map(|o| !o.is_empty()).unwrap_or(false);
+    let is_untrimmed = keep_ranges_ms.len() == 1 && {
+        let (s, e) = keep_ranges_ms[0];
+        s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
+    };
+
+    if is_untrimmed && !has_overlays {
+        if !remove_audio {
+            // Không có thay đổi gì so với gốc, trả về luôn không cần ghi đĩa lại
+            use tauri::Emitter;
+            let _ = app.emit("trim-progress", 1.0);
+            return Ok(rec);
+        } else {
+            // Chỉ bỏ âm thanh: stream copy sang file tạm rồi rename đè
+            crate::record::encoder::copy_without_audio(asset_path, &tmp_output)?;
+            std::fs::rename(&tmp_output, asset_path).map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
+            use tauri::Emitter;
+            let _ = app.emit("trim-progress", 1.0);
+        }
+    } else {
+        let progress_app = app.clone();
+        crate::record::encoder::trim(asset_path, keep_ranges_ms, &tmp_output, remove_audio, overlays, move |frac| {
+            use tauri::Emitter;
+            let _ = progress_app.emit("trim-progress", frac);
+        })?;
+        std::fs::rename(&tmp_output, asset_path).map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
+    }
 
     let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
     let file_size = std::fs::metadata(asset_path).ok().map(|m| m.len() as i64);
@@ -918,13 +964,25 @@ pub async fn list_items_with_draft(app: AppHandle) -> Result<Vec<String>, String
 pub async fn trim_history_video(
     app: AppHandle,
     id: String,
-    ranges: Vec<(i64, i64)>,
+    ranges: Vec<(f64, f64)>,
     remove_audio: bool,
     output_path: Option<String>,
+    overlays: Option<Vec<crate::record::encoder::VideoOverlay>>,
 ) -> Result<HistoryRecord, String> {
+    let int_ranges: Vec<(i64, i64)> = ranges
+        .into_iter()
+        .map(|(s, e)| (s.round() as i64, e.round() as i64))
+        .collect();
     let app_for_blocking = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        trim_history_video_sync(&app_for_blocking, &id, &ranges, remove_audio, output_path.as_deref())
+        trim_history_video_sync(
+            &app_for_blocking,
+            &id,
+            &int_ranges,
+            remove_audio,
+            output_path.as_deref(),
+            overlays.as_deref(),
+        )
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))??;
@@ -938,12 +996,19 @@ pub async fn trim_history_video(
 pub async fn overwrite_history_video(
     app: AppHandle,
     id: String,
-    ranges: Vec<(i64, i64)>,
+    ranges: Vec<(f64, f64)>,
     remove_audio: bool,
+    overlays: Option<Vec<crate::record::encoder::VideoOverlay>>,
 ) -> Result<HistoryRecord, String> {
-    tauri::async_runtime::spawn_blocking(move || overwrite_history_video_sync(&app, &id, &ranges, remove_audio))
-        .await
-        .map_err(|e| format!("Task join error: {e}"))?
+    let int_ranges: Vec<(i64, i64)> = ranges
+        .into_iter()
+        .map(|(s, e)| (s.round() as i64, e.round() as i64))
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        overwrite_history_video_sync(&app, &id, &int_ranges, remove_audio, overlays.as_deref())
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// Copy nhanh 1 item History vào clipboard (đọc thẳng từ asset trên đĩa) —

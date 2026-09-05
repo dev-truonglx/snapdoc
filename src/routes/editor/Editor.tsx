@@ -7,6 +7,8 @@ import Toolbar from "./Toolbar";
 import HistoryStrip from "./HistoryStrip";
 import AnnotationStage, { type StageHandle, imageAnnCache } from "../../features/annotation/canvas/AnnotationStage";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
+import type { VideoOverlayItem } from "../../features/video-trim/types";
+import { dropVideoSession } from "../../features/video-trim/videoSessions";
 import { useEditor } from "../../features/annotation/store";
 import {
   beginSwitch,
@@ -39,7 +41,12 @@ interface VideoDoc {
   durationMs: number;
 }
 
-const EMPTY_TRIM_STATE = { hasChanges: false, keepRanges: [] as [number, number][], removeAudio: false };
+const EMPTY_TRIM_STATE = {
+  hasChanges: false,
+  keepRanges: [] as [number, number][],
+  removeAudio: false,
+  overlays: [] as VideoOverlayItem[],
+};
 
 /** "Dấu vân tay" của trạng thái cắt video — dùng để so với lần lưu gần nhất.
  *
@@ -48,7 +55,7 @@ const EMPTY_TRIM_STATE = { hasChanges: false, keepRanges: [] as [number, number]
  * bản gốc không hề đổi nên `hasChanges` vẫn `true` → user bị nhắc về đúng
  * việc vừa export xong. (Sau "Lưu đè" thì đã đúng sẵn vì `doSaveVideo` reset
  * `videoTrimState` và bump `videoVersion` để remount trimmer.) */
-const trimSig = (s: typeof EMPTY_TRIM_STATE) => JSON.stringify([s.keepRanges, s.removeAudio]);
+const trimSig = (s: typeof EMPTY_TRIM_STATE) => JSON.stringify([s.keepRanges, s.removeAudio, s.overlays]);
 
 export default function Editor() {
   const { t } = useTranslation();
@@ -397,7 +404,13 @@ export default function Editor() {
     if (!videoDoc || !videoTrimState.hasChanges) return;
     setBusy(true);
     try {
-      const updated = await ipc.overwriteHistoryVideo(videoDoc.historyId, videoTrimState.keepRanges, videoTrimState.removeAudio);
+      const updated = await ipc.overwriteHistoryVideo(
+        videoDoc.historyId,
+        videoTrimState.keepRanges,
+        videoTrimState.removeAudio,
+        videoTrimState.overlays,
+      );
+      dropVideoSession(`history:${videoDoc.historyId}`);
       setVideoDoc({
         historyId: updated.id,
         filePath: updated.assetPath,
@@ -442,6 +455,7 @@ export default function Editor() {
         videoTrimState.keepRanges,
         videoTrimState.removeAudio,
         outputPath,
+        videoTrimState.overlays,
       );
       if (outputPath) {
         const settings = await ipc.getSettings().catch(() => null);
@@ -886,18 +900,20 @@ export default function Editor() {
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      <Toolbar
-        mode={videoDoc ? "video" : "image"}
-        onSave={() => doSave(false)}
-        onSaveAs={doSaveAs}
-        onCopy={doCopy}
-        onSaveCopy={() => doSave(true)}
-        onFlatten={doFlatten}
-        onNew={doNew}
-        onOpen={doOpen}
-        onStitch={doStitch}
-        busy={busy}
-      />
+      {!videoDoc && (
+        <Toolbar
+          mode="image"
+          onSave={() => doSave(false)}
+          onSaveAs={doSaveAs}
+          onCopy={doCopy}
+          onSaveCopy={() => doSave(true)}
+          onFlatten={doFlatten}
+          onNew={doNew}
+          onOpen={doOpen}
+          onStitch={doStitch}
+          busy={busy}
+        />
+      )}
       <div
         style={{
           flex: 1,
@@ -930,6 +946,7 @@ export default function Editor() {
         onFlash={flash}
         currentId={videoDoc ? videoDoc.historyId : docHistoryId}
         onOpenVideo={(item: HistoryItem) => {
+          if (videoDoc && videoDoc.historyId === item.id) return;
           // `HistoryStrip.openItem` chỉ gọi `suspendActive` ở nhánh ẢNH
           // (`openImageInEditor`), nhánh video đi thẳng vào đây — nên treo ở
           // đây, nếu không đổi từ ảnh-đang-sửa sang video là mất việc.

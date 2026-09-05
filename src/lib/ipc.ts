@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { VideoOverlayItem } from "../features/video-trim/types";
 
 /** Video đang chờ mở trong Editor — đã CÓ SẴN trong History (`historyId`
  * luôn là id thật): mở từ Library hoặc vừa quay xong (ingest ngay lập tức,
@@ -351,18 +352,35 @@ export const ipc = {
   /** Cắt 1 video ĐÃ LƯU trong History, tạo THÀNH 1 ITEM MỚI trong Library
    * (giữ nguyên item gốc) — lựa chọn "Lưu thành video mới" ở Editor. Trả về
    * item MỚI (id khác `id` truyền vào). */
-  trimHistoryVideo: (id: string, ranges: [number, number][], removeAudio: boolean, outputPath?: string) =>
+  trimHistoryVideo: (
+    id: string,
+    ranges: [number, number][],
+    removeAudio: boolean,
+    outputPath?: string,
+    overlays?: VideoOverlayItem[],
+  ) =>
     invoke<HistoryItem>("trim_history_video", {
       id,
       ranges: roundRanges(ranges),
       removeAudio,
       outputPath: outputPath ?? null,
+      overlays: sanitizeOverlays(overlays),
     }),
   /** Cắt 1 video ĐÃ LƯU trong History, ghi ĐÈ TẠI CHỖ asset/thumbnail của
    * ĐÚNG item đó — lựa chọn "Lưu đè bản gốc" ở Editor. Vĩnh viễn, không giữ
    * bản gốc. */
-  overwriteHistoryVideo: (id: string, ranges: [number, number][], removeAudio: boolean) =>
-    invoke<HistoryItem>("overwrite_history_video", { id, ranges: roundRanges(ranges), removeAudio }),
+  overwriteHistoryVideo: (
+    id: string,
+    ranges: [number, number][],
+    removeAudio: boolean,
+    overlays?: VideoOverlayItem[],
+  ) =>
+    invoke<HistoryItem>("overwrite_history_video", {
+      id,
+      ranges: roundRanges(ranges),
+      removeAudio,
+      overlays: sanitizeOverlays(overlays),
+    }),
   /** Trích frame tại các mốc ms cho trước — trả data URL JPEG base64, `null`
    * cho mốc nào trích lỗi. `scaleW` là bề rộng đích (px): filmstrip zoom của
    * `VideoTrimmer` dùng nhỏ (160, nhiều tile), hover-scrub preview dùng lớn
@@ -401,4 +419,20 @@ export const ipc = {
  * làm tròn ở biên IPC để tránh lỗi deserialize "expected i64". */
 function roundRanges(ranges: [number, number][]): [number, number][] {
   return ranges.map(([s, e]) => [Math.round(s), Math.round(e)]);
+}
+
+/** Làm sạch và chuẩn hoá các overlay trước khi truyền sang backend qua IPC,
+ * đảm bảo toạ độ/thời lượng là số hữu hạn hợp lệ và làm tròn mili-giây. */
+function sanitizeOverlays(overlays?: VideoOverlayItem[]): VideoOverlayItem[] {
+  if (!overlays || !Array.isArray(overlays)) return [];
+  return overlays.map((o) => ({
+    ...o,
+    relX: Number.isFinite(o.relX) ? o.relX : 0,
+    relY: Number.isFinite(o.relY) ? o.relY : 0,
+    relW: Number.isFinite(o.relW) ? Math.max(0, o.relW) : 0,
+    relH: Number.isFinite(o.relH) ? Math.max(0, o.relH) : 0,
+    startTimeMs: Math.round(Number.isFinite(o.startTimeMs) ? o.startTimeMs : 0),
+    endTimeMs: Math.round(Number.isFinite(o.endTimeMs) ? o.endTimeMs : 0),
+    strokeWidth: o.strokeWidth != null && Number.isFinite(o.strokeWidth) ? Math.round(o.strokeWidth) : undefined,
+  }));
 }

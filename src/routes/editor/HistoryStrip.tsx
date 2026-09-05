@@ -10,6 +10,7 @@ import {
   dropSession,
   noteActiveKey,
 } from "../../features/annotation/sessions";
+import { dropVideoSession } from "../../features/video-trim/videoSessions";
 import { useEditor } from "../../features/annotation/store";
 import { fmtDuration } from "../history/formatUtils";
 
@@ -139,6 +140,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
   };
 
   const openItem = (item: HistoryItem) => {
+    if (item.id === currentId) return;
     if (item.mediaType === "video") {
       onOpenVideo(item);
       return;
@@ -173,6 +175,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
     try {
       await ipc.deleteHistoryItem(id);
       dropSession(id);
+      dropVideoSession(`history:${id}`);
       onFlash(t("historyStrip.movedToTrash"));
 
       // Nếu tài liệu đang bị xoá chính là tài liệu đang mở trong Editor:
@@ -202,6 +205,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
     try {
       await ipc.permanentlyDeleteHistoryItem(id);
       dropSession(id);
+      dropVideoSession(`history:${id}`);
       onFlash(t("historyStrip.deletedPermanent"));
 
       // Nếu tài liệu đang bị xoá chính là tài liệu đang mở trong Editor:

@@ -508,12 +508,12 @@ export default function Toolbar({
   // Tools dùng color + strokeWidth: hiển thị đầy đủ khi ở chế độ vẽ hoặc khi ở chế độ chọn/sửa
   const hasStroke = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop && !isImage && !isBackground);
 
+  if (mode === "video") return null;
+
   return (
     <div style={bar}>
-      {mode === "image" && (
-        <>
-          {/* CỘT TRÁI: 2 DÒNG CỐ ĐỊNH CHIỀU CAO (Dòng 1: Danh sách công cụ, Dòng 2: Tùy chọn thuộc tính) */}
-          <div style={leftSection}>
+      {/* CỘT TRÁI: 2 DÒNG CỐ ĐỊNH CHIỀU CAO (Dòng 1: Danh sách công cụ, Dòng 2: Tùy chọn thuộc tính) */}
+      <div style={leftSection}>
             {/* DÒNG 1: THAO TÁC ẢNH & TOÀN BỘ CÔNG CỤ VẼ & UNDO/REDO */}
             <div style={toolbarRow}>
               {/* File / Doc actions */}
@@ -1248,8 +1248,6 @@ export default function Toolbar({
               <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.copyBtn")}</span>
             </button>
           </div>
-        </>
-      )}
     </div>
   );
 }
