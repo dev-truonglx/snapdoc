@@ -146,15 +146,15 @@ const containerStyle: React.CSSProperties = {
 const badgeStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  gap: 6,
-  padding: "7px 12px",
-  background: "rgba(20, 22, 28, 0.92)",
-  backdropFilter: "blur(20px)",
-  WebkitBackdropFilter: "blur(20px)",
-  borderRadius: 12,
-  border: "1px solid rgba(255, 255, 255, 0.16)",
+  gap: 12,
+  padding: "14px 22px",
+  background: "rgba(18, 20, 26, 0.94)",
+  backdropFilter: "blur(28px)",
+  WebkitBackdropFilter: "blur(28px)",
+  borderRadius: 22,
+  border: "1.5px solid rgba(255, 255, 255, 0.20)",
   boxShadow:
-    "0 10px 28px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08)",
+    "0 18px 48px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.12)",
   transition: "opacity 0.2s ease-out, transform 0.2s cubic-bezier(0.16, 1, 0.3, 1)",
 };
 
@@ -162,10 +162,10 @@ const keycapBaseStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  height: 32,
-  minWidth: 32,
+  height: 72,
+  minWidth: 72,
   boxSizing: "border-box",
-  borderRadius: 7,
+  borderRadius: 14,
   color: "#ffffff",
   fontFamily:
     '-apple-system, BlinkMacSystemFont, "SF Pro", "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
@@ -176,37 +176,37 @@ const keycapBaseStyle: React.CSSProperties = {
 
 // Phím modifier (⌘ Cmd, ⇧ Shift, etc.)
 const modifierKeycapStyle: React.CSSProperties = {
-  padding: "0 10px",
-  fontSize: 13,
+  padding: "0 20px",
+  fontSize: 24,
   fontWeight: 600,
-  background: "linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.1) 100%)",
-  border: "1px solid rgba(255, 255, 255, 0.22)",
-  boxShadow: "0 2px 0 rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.3)",
+  background: "linear-gradient(180deg, rgba(255, 255, 255, 0.20) 0%, rgba(255, 255, 255, 0.11) 100%)",
+  border: "1.5px solid rgba(255, 255, 255, 0.24)",
+  boxShadow: "0 3px 0 rgba(0, 0, 0, 0.5), inset 0 1.5px 0 rgba(255, 255, 255, 0.35)",
 };
 
 // Phím chính thông thường (Esc, Enter, Space...)
 const mainKeycapStyle: React.CSSProperties = {
-  padding: "0 10px",
-  fontSize: 13,
+  padding: "0 20px",
+  fontSize: 24,
   fontWeight: 600,
-  background: "linear-gradient(180deg, rgba(255, 255, 255, 0.26) 0%, rgba(255, 255, 255, 0.16) 100%)",
-  border: "1px solid rgba(255, 255, 255, 0.32)",
-  boxShadow: "0 2px 0 rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.35)",
+  background: "linear-gradient(180deg, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0.17) 100%)",
+  border: "1.5px solid rgba(255, 255, 255, 0.34)",
+  boxShadow: "0 3px 0 rgba(0, 0, 0, 0.55), inset 0 1.5px 0 rgba(255, 255, 255, 0.4)",
 };
 
 // Phím độc lập 1 ký tự (A, B, C, 1, 2...) vuông vức cân đối
 const singleCharKeycapStyle: React.CSSProperties = {
-  width: 32,
-  minWidth: 32,
+  width: 72,
+  minWidth: 72,
   padding: 0,
-  fontSize: 16,
+  fontSize: 36,
   fontWeight: 700,
   letterSpacing: "0.02em",
 };
 
 const separatorStyle: React.CSSProperties = {
-  color: "rgba(255, 255, 255, 0.45)",
-  fontSize: 13,
+  color: "rgba(255, 255, 255, 0.5)",
+  fontSize: 24,
   fontWeight: 600,
-  margin: "0 1px",
+  margin: "0 3px",
 };

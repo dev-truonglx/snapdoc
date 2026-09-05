@@ -430,10 +430,10 @@ fn record_keystroke_rect(target: &crate::capture::mac_stream::RecordTarget) -> O
             (m.x().ok()? as f64 + *x, m.y().ok()? as f64 + *y, *w, *h)
         }
     };
-    let kw = 340.0_f64.min(rw - 20.0).max(140.0);
-    let kh = 64.0;
+    let kw = 780.0_f64.min(rw - 20.0).max(220.0);
+    let kh = 130.0;
     let kx = rx + (rw - kw) / 2.0;
-    let ky = (ry + rh - kh - 30.0).max(ry);
+    let ky = (ry + rh - kh - 44.0).max(ry);
     Some((kx, ky, kw, kh))
 }
 
@@ -496,10 +496,10 @@ fn record_keystroke_rect(target: &crate::capture::windows_stream::RecordTarget) 
             (m.x().ok()? as f64 / scale + *x, m.y().ok()? as f64 / scale + *y, *w, *h)
         }
     };
-    let kw = 340.0_f64.min(rw - 20.0).max(140.0);
-    let kh = 64.0;
+    let kw = 780.0_f64.min(rw - 20.0).max(220.0);
+    let kh = 130.0;
     let kx = rx + (rw - kw) / 2.0;
-    let ky = (ry + rh - kh - 30.0).max(ry);
+    let ky = (ry + rh - kh - 44.0).max(ry);
     Some((kx, ky, kw, kh))
 }
 
