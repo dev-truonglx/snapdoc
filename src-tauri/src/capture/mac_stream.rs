@@ -430,10 +430,16 @@ fn f32_to_i16_le(sample: f32) -> [u8; 2] {
 }
 
 /// Tìm `SCDisplay` khớp `CGDirectDisplayID` và danh sách `SCRunningApplication`
-/// của chính SnapDoc (`processID == my_pid`) để loại trừ khỏi stream quay video.
-fn find_display_and_own_apps(display_id: u32) -> Result<(Retained<SCDisplay>, Vec<Retained<SCRunningApplication>>), String> {
+/// của chính SnapDoc (`processID == my_pid`) để loại trừ khỏi stream quay video,
+/// đồng thời tìm các `SCWindow` ngoại lệ (như overlay phím bấm `record-keystroke`)
+/// để cho phép xuất hiện trong video quay.
+fn find_display_and_own_apps(
+    display_id: u32,
+    excepting_window_ids: &[u32],
+) -> Result<(Retained<SCDisplay>, Vec<Retained<SCRunningApplication>>, Vec<Retained<SCWindow>>), String> {
     let my_pid = std::process::id();
-    let (tx, rx) = mpsc::channel::<Result<(Retained<SCDisplay>, Vec<Retained<SCRunningApplication>>), String>>();
+    let excepting_ids = excepting_window_ids.to_vec();
+    let (tx, rx) = mpsc::channel::<Result<(Retained<SCDisplay>, Vec<Retained<SCRunningApplication>>, Vec<Retained<SCWindow>>), String>>();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, err: *mut objc2_foundation::NSError| {
         if content.is_null() {
             let msg = if err.is_null() {
@@ -460,7 +466,34 @@ fn find_display_and_own_apps(display_id: u32) -> Result<(Retained<SCDisplay>, Ve
             .filter(|a| unsafe { a.processID() } as u32 == my_pid)
             .collect();
 
-        let _ = tx.send(Ok((display, own_apps)));
+        let windows = unsafe { content.windows() };
+        let excepting_windows: Vec<Retained<SCWindow>> = windows
+            .iter()
+            .filter(|w| {
+                let wid = unsafe { w.windowID() };
+                if excepting_ids.contains(&wid) {
+                    return true;
+                }
+                let is_own = unsafe { w.owningApplication() }
+                    .map(|a| unsafe { a.processID() } as u32 == my_pid)
+                    .unwrap_or(false);
+                if is_own && !excepting_ids.is_empty() {
+                    if let Some(t) = unsafe { w.title() } {
+                        let t_str = t.to_string();
+                        if t_str.contains("Phím bấm") || t_str.contains("record-keystroke") {
+                            return true;
+                        }
+                    }
+                }
+                false
+            })
+            .collect();
+
+        if !excepting_windows.is_empty() {
+            eprintln!("[SnapDoc][record] SCContentFilter: đã thêm {} cửa sổ ngoại lệ (phím bấm) vào video", excepting_windows.len());
+        }
+
+        let _ = tx.send(Ok((display, own_apps, excepting_windows)));
     });
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
     rx.recv_timeout(TIMEOUT)
@@ -625,36 +658,37 @@ pub fn start(
     target: RecordTarget,
     fps: u32,
     capture_system_audio: bool,
+    excepting_window_ids: &[u32],
 ) -> Result<(RecordingHandle, mpsc::Receiver<Arc<Frame>>, Option<mpsc::Receiver<Vec<u8>>>), String> {
     // `source_rect`: Some khi quay 1 VÙNG (crop qua `SCStreamConfiguration`),
     // None khi quay trọn nội dung của filter (toàn màn hình hoặc cả cửa sổ).
     let (filter, source_rect): (Retained<SCContentFilter>, Option<CGRect>) = match &target {
         RecordTarget::Display(display_id) => {
-            let (display, own_apps) = find_display_and_own_apps(*display_id)?;
+            let (display, own_apps, excepting_windows) = find_display_and_own_apps(*display_id, excepting_window_ids)?;
             let own_apps_arr = NSArray::from_retained_slice(&own_apps);
-            let no_exceptions = NSArray::from_slice(&[]);
-            // Loại trừ toàn bộ các cửa sổ, popup và Tray Menu của SnapDoc ra khỏi video.
+            let excepting_windows_arr = NSArray::from_retained_slice(&excepting_windows);
+            // Loại trừ toàn bộ các cửa sổ của SnapDoc (CaptureBar, border, tray...), NGOẠI TRỪ các cửa sổ trong exceptingWindows (overlay phím bấm).
             let filter = unsafe {
                 SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
                     SCContentFilter::alloc(),
                     &display,
                     &own_apps_arr,
-                    &no_exceptions,
+                    &excepting_windows_arr,
                 )
             };
             (filter, None)
         }
         RecordTarget::Region { display_id, x, y, w, h } => {
-            let (display, own_apps) = find_display_and_own_apps(*display_id)?;
+            let (display, own_apps, excepting_windows) = find_display_and_own_apps(*display_id, excepting_window_ids)?;
             let own_apps_arr = NSArray::from_retained_slice(&own_apps);
-            let no_exceptions = NSArray::from_slice(&[]);
-            // Loại trừ toàn bộ các cửa sổ, popup và Tray Menu của SnapDoc ra khỏi video.
+            let excepting_windows_arr = NSArray::from_retained_slice(&excepting_windows);
+            // Loại trừ toàn bộ các cửa sổ của SnapDoc (CaptureBar, border, tray...), NGOẠI TRỪ các cửa sổ trong exceptingWindows (overlay phím bấm).
             let filter = unsafe {
                 SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
                     SCContentFilter::alloc(),
                     &display,
                     &own_apps_arr,
-                    &no_exceptions,
+                    &excepting_windows_arr,
                 )
             };
             let rect = CGRect {

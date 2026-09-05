@@ -136,6 +136,8 @@ export interface Settings {
   launchAtLogin: boolean;
   /** Nguồn audio ghi kèm khi quay màn hình — mặc định "off". */
   recordAudioSource: AudioSource;
+  /** Hiển thị phím bấm trên màn hình khi đang quay video — mặc định false. */
+  recordShowKeystrokes?: boolean;
   shortcuts: Record<string, string>;
   /** Thư mục lần cuối user chọn qua "Save As…" ở editor (ảnh) — dùng làm mặc
    * định cho lần Save As kế tiếp, xem `useOutput.saveAsToFile`. */
@@ -250,6 +252,8 @@ export const ipc = {
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (value: Settings) => invoke<void>("set_settings", { value }),
   checkPermission: () => invoke<boolean>("check_screen_permission"),
+  checkAccessibilityPermission: () => invoke<boolean>("check_accessibility_permission"),
+  requestAccessibilityPermission: () => invoke<boolean>("request_accessibility_permission"),
   reloadShortcuts: () => invoke<void>("reload_shortcuts"),
   suspendShortcuts: () => invoke<void>("suspend_shortcuts"),
   resumeShortcuts: () => invoke<void>("resume_shortcuts"),
