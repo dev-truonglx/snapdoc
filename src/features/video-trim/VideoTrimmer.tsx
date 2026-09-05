@@ -20,7 +20,7 @@ import {
   trimTail,
   computeKeepRanges,
 } from "./segments";
-import { type VideoOverlayItem, renderOverlayToDataUrl } from "./types";
+import { type VideoOverlayItem, renderOverlayToDataUrl, drawOverlaysOnCanvas } from "./types";
 import VideoCanvasOverlay, { type VideoOverlayTool } from "./VideoCanvasOverlay";
 import OverlayTimelineTrack from "./OverlayTimelineTrack";
 import { getVideoSession, saveVideoSession, dropVideoSession } from "./videoSessions";
@@ -878,13 +878,52 @@ export default function VideoTrimmer({
       const w = v.videoWidth;
       const h = v.videoHeight;
       if (!w || !h) return;
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.drawImage(v, 0, 0, w, h);
-      const dataUrl = canvas.toDataURL("image/png");
+
+      let dataUrl: string | null = null;
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(v, 0, 0, w, h);
+          // Vẽ tất cả text, khung, che mờ, mũi tên đang hiển thị lên khung hình
+          drawOverlaysOnCanvas(ctx, canvas, overlays, playheadMs, selectedOverlayId, w, h);
+          dataUrl = canvas.toDataURL("image/png");
+        }
+      } catch (err) {
+        console.warn("[SnapDoc] Canvas capture failed (tainted canvas or context error), attempting fallback:", err);
+      }
+
+      // Fallback: nếu canvas bị tainted (thường gặp trên Windows khi thiếu CORS) hoặc lỗi toDataURL,
+      // dùng ffmpeg qua backend để trích đúng frame tại currentTime
+      if (!dataUrl && filePath) {
+        const curMs = Math.round(v.currentTime * 1000);
+        const frames = await ipc.generateVideoFrames(filePath, [curMs], w);
+        if (frames && frames[0]) {
+          const fallbackCanvas = document.createElement("canvas");
+          fallbackCanvas.width = w;
+          fallbackCanvas.height = h;
+          const fallbackCtx = fallbackCanvas.getContext("2d");
+          if (fallbackCtx) {
+            const img = new Image();
+            await new Promise<void>((resolve, reject) => {
+              img.onload = () => resolve();
+              img.onerror = () => reject();
+              img.src = frames[0]!;
+            });
+            fallbackCtx.drawImage(img, 0, 0, w, h);
+            drawOverlaysOnCanvas(fallbackCtx, fallbackCanvas, overlays, playheadMs, selectedOverlayId, w, h);
+            dataUrl = fallbackCanvas.toDataURL("image/png");
+          }
+        }
+      }
+
+      if (!dataUrl) {
+        console.error("[SnapDoc] Không thể chụp khung hình hiện tại của video");
+        return;
+      }
+
       // `setPendingImage` tự ingest vào History (emit "history:item-added" khi
       // ghi asset xong) — luôn gọi dù ở chế độ nào, chỉ khác ở bước sau.
       await ipc.setPendingImage(dataUrl, w, h);
@@ -892,6 +931,8 @@ export default function VideoTrimmer({
         await ipc.keepCaptureFocus().catch(() => {});
         await ipc.openEditor();
       }
+    } catch (err) {
+      console.error("[SnapDoc] Lỗi khi trích xuất khung hình video:", err);
     } finally {
       setCapturingFrame(false);
     }
@@ -1273,6 +1314,7 @@ export default function VideoTrimmer({
         <video
           ref={videoRef}
           key={src}
+          crossOrigin="anonymous"
           src={src}
           style={videoStyle}
           onClick={togglePlay}
