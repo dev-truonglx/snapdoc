@@ -20,6 +20,10 @@ import {
   trimTail,
   computeKeepRanges,
 } from "./segments";
+import { type VideoOverlayItem, renderOverlayToDataUrl } from "./types";
+import VideoCanvasOverlay, { type VideoOverlayTool } from "./VideoCanvasOverlay";
+import OverlayTimelineTrack from "./OverlayTimelineTrack";
+import { getVideoSession, saveVideoSession, dropVideoSession } from "./videoSessions";
 
 export interface VideoTrimmerProps {
   src: string;
@@ -44,7 +48,12 @@ export interface VideoTrimmerProps {
    * đổi/đoạn giữ lại/đã tách nhạc nền) — dùng để hiện toast/điều hướng khác,
    * KHÔNG dùng để tính disabled cho `onSave` (VideoTrimmer tự tính `canSave`
    * nội bộ, xem khai báo `canSave`). */
-  onStateChange?: (state: { hasChanges: boolean; keepRanges: [number, number][]; removeAudio: boolean }) => void;
+  onStateChange?: (state: {
+    hasChanges: boolean;
+    keepRanges: [number, number][];
+    removeAudio: boolean;
+    overlays: VideoOverlayItem[];
+  }) => void;
   /** "open-editor" (mặc định): sau khi chụp frame, ingest xong rồi mở/focus
    * cửa sổ Editor riêng — dùng khi VideoTrimmer đang chạy trong 1 cửa sổ KHÁC
    * Editor. "in-place": chỉ ingest (ảnh vào History ngay), KHÔNG gọi
@@ -220,23 +229,53 @@ export default function VideoTrimmer({
   interface HistorySnapshot {
     segments: Segment[];
     removeAudio: boolean;
+    overlays: VideoOverlayItem[];
   }
   interface EditState {
     segments: Segment[];
     removeAudio: boolean;
+    overlays: VideoOverlayItem[];
     past: HistorySnapshot[];
     future: HistorySnapshot[];
     selectedSegmentId: string | null;
+    selectedOverlayId: string | null;
   }
-  const makeInitialEditState = (): EditState => ({
-    segments: initialSegments(durationMs),
-    removeAudio: false,
-    past: [],
-    future: [],
-    selectedSegmentId: null,
-  });
+
+  const sessionKey = sourceHistoryId
+    ? `history:${sourceHistoryId}`
+    : filePath
+    ? `file:${filePath}`
+    : null;
+
+  const savedSession = useMemo(() => {
+    return sessionKey ? getVideoSession(sessionKey, durationMs) : null;
+  }, [sessionKey, durationMs]);
+
+  const makeInitialEditState = (): EditState => {
+    if (savedSession) {
+      return {
+        segments: savedSession.segments,
+        removeAudio: savedSession.removeAudio,
+        overlays: savedSession.overlays,
+        past: savedSession.past,
+        future: savedSession.future,
+        selectedSegmentId: savedSession.selectedSegmentId,
+        selectedOverlayId: savedSession.selectedOverlayId,
+      };
+    }
+    return {
+      segments: initialSegments(durationMs),
+      removeAudio: false,
+      overlays: [],
+      past: [],
+      future: [],
+      selectedSegmentId: null,
+      selectedOverlayId: null,
+    };
+  };
   const [editState, setEditState] = useState<EditState>(makeInitialEditState);
-  const { segments, removeAudio, past, future, selectedSegmentId } = editState;
+  const { segments, removeAudio, overlays, past, future, selectedSegmentId, selectedOverlayId } = editState;
+  const [overlayTool, setOverlayTool] = useState<VideoOverlayTool>("select");
   const [gifModalOpen, setGifModalOpen] = useState(false);
   const selectedSegment = useMemo(
     () => segments.find((s) => s.id === selectedSegmentId) ?? null,
@@ -257,7 +296,7 @@ export default function VideoTrimmer({
     window.addEventListener("mousedown", onClickOutside);
     return () => window.removeEventListener("mousedown", onClickOutside);
   }, [showSaveAsMenu]);
-  const [playheadMs, setPlayheadMs] = useState(0);
+  const [playheadMs, setPlayheadMs] = useState(() => savedSession?.playheadMs ?? 0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -393,6 +432,8 @@ export default function VideoTrimmer({
     };
   }, []);
 
+  const isInitialMountRef = useRef(true);
+
   // Đồng bộ `<video>` với `segments` mỗi khi đổi (split/xoá/undo/redo) HOẶC
   // lúc mount: nếu vị trí đang đứng rơi vào 1 đoạn vừa bị xoá thì snap về mốc
   // hợp lệ gần nhất; đồng thời đăng ký lại listener `timeupdate` để closure
@@ -402,15 +443,30 @@ export default function VideoTrimmer({
     const v = videoRef.current;
     if (!v) return;
 
-    const srcMs = v.currentTime * 1000;
-    let idx = segments.findIndex((s) => srcMs >= s.srcStart && srcMs <= s.srcEnd);
-    if (idx < 0) {
-      const snapped = nearestValidSourceMs(segments, srcMs);
-      v.currentTime = snapped / 1000;
-      idx = Math.max(0, segments.findIndex((s) => snapped >= s.srcStart && snapped <= s.srcEnd));
+    if (isInitialMountRef.current) {
+      isInitialMountRef.current = false;
+      const targetMs = savedSession?.playheadMs ?? 0;
+      if (targetMs > 0) {
+        const pos = timelineMsToSource(segments, targetMs);
+        if (pos) {
+          v.currentTime = pos.srcMs / 1000;
+          currentSegIndexRef.current = pos.segIndex;
+          setPlayheadMs(targetMs);
+        }
+      } else {
+        setPlayheadMs(sourceMsToTimeline(segments, v.currentTime * 1000) ?? 0);
+      }
+    } else {
+      const srcMs = v.currentTime * 1000;
+      let idx = segments.findIndex((s) => srcMs >= s.srcStart && srcMs <= s.srcEnd);
+      if (idx < 0) {
+        const snapped = nearestValidSourceMs(segments, srcMs);
+        v.currentTime = snapped / 1000;
+        idx = Math.max(0, segments.findIndex((s) => snapped >= s.srcStart && snapped <= s.srcEnd));
+      }
+      currentSegIndexRef.current = idx;
+      setPlayheadMs(sourceMsToTimeline(segments, v.currentTime * 1000) ?? 0);
     }
-    currentSegIndexRef.current = idx;
-    setPlayheadMs(sourceMsToTimeline(segments, v.currentTime * 1000) ?? 0);
 
     const onTime = () => {
       const seg = segments[currentSegIndexRef.current];
@@ -502,6 +558,21 @@ export default function VideoTrimmer({
       } else if (!mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "w") {
         e.preventDefault();
         if (canTrimTail(segments, playheadMs)) doTrimTail();
+      } else if (!mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "r") {
+        e.preventDefault();
+        setOverlayTool((cur) => (cur === "rect" ? "select" : "rect"));
+      } else if (!mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setOverlayTool((cur) => (cur === "blur" ? "select" : "blur"));
+      } else if (!mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        setOverlayTool((cur) => (cur === "text" ? "select" : "text"));
+      } else if (!mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        setOverlayTool((cur) => (cur === "arrow" ? "select" : "arrow"));
+      } else if (e.key === "Escape") {
+        setOverlayTool("select");
+        setEditState((st) => ({ ...st, selectedOverlayId: null }));
       } else if (!mod && !e.shiftKey && !e.altKey && e.code === "Space") {
         // preventDefault: chặn hành vi mặc định (cuộn trang / bấm lại nút
         // đang focus bằng bàn phím) khi Space dùng để play/pause thay vào đó.
@@ -971,9 +1042,9 @@ export default function VideoTrimmer({
       const next = compute(st.segments);
       if (next === st.segments) return st;
       return {
+        ...st,
         segments: next,
-        removeAudio: st.removeAudio,
-        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio }],
+        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
         future: [],
         selectedSegmentId: selectAfter ? selectAfter(next) : null,
       };
@@ -1001,9 +1072,9 @@ export default function VideoTrimmer({
       const next = deleteSegment(st.segments, st.selectedSegmentId);
       if (next === st.segments) return st;
       return {
+        ...st,
         segments: next,
-        removeAudio: st.removeAudio,
-        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio }],
+        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
         future: [],
         selectedSegmentId: null,
       };
@@ -1018,11 +1089,45 @@ export default function VideoTrimmer({
    * Ctrl+Z hoàn tác đúng bất kể đây là thao tác gần nhất hay không. */
   const doToggleRemoveAudio = () => {
     setEditState((st) => ({
-      segments: st.segments,
+      ...st,
       removeAudio: !st.removeAudio,
-      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio }],
+      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
       future: [],
-      selectedSegmentId: st.selectedSegmentId,
+    }));
+  };
+
+  const handleAddOverlay = (item: VideoOverlayItem) => {
+    setEditState((st) => ({
+      ...st,
+      overlays: [...st.overlays, item],
+      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      future: [],
+      selectedOverlayId: item.id,
+    }));
+  };
+
+  const handleChangeOverlay = (item: VideoOverlayItem) => {
+    setEditState((st) => ({
+      ...st,
+      overlays: st.overlays.map((o) => (o.id === item.id ? item : o)),
+    }));
+  };
+
+  const handleDeleteOverlay = (id: string) => {
+    setEditState((st) => ({
+      ...st,
+      overlays: st.overlays.filter((o) => o.id !== id),
+      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      future: [],
+      selectedOverlayId: null,
+    }));
+  };
+
+  const handleCommitOverlaySnapshot = () => {
+    setEditState((st) => ({
+      ...st,
+      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      future: [],
     }));
   };
 
@@ -1031,11 +1136,14 @@ export default function VideoTrimmer({
       if (st.past.length === 0) return st;
       const prev = st.past[st.past.length - 1];
       return {
+        ...st,
         segments: prev.segments,
         removeAudio: prev.removeAudio,
+        overlays: prev.overlays,
         past: st.past.slice(0, -1),
-        future: [{ segments: st.segments, removeAudio: st.removeAudio }, ...st.future],
+        future: [{ segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }, ...st.future],
         selectedSegmentId: null,
+        selectedOverlayId: null,
       };
     });
   };
@@ -1045,36 +1153,106 @@ export default function VideoTrimmer({
       if (st.future.length === 0) return st;
       const next = st.future[0];
       return {
+        ...st,
         segments: next.segments,
         removeAudio: next.removeAudio,
-        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio }],
+        overlays: next.overlays,
+        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
         future: st.future.slice(1),
         selectedSegmentId: null,
+        selectedOverlayId: null,
       };
     });
   };
 
-  const doReset = () => setEditState(makeInitialEditState());
+  const doReset = () => {
+    if (sessionKey) dropVideoSession(sessionKey);
+    setEditState({
+      segments: initialSegments(durationMs),
+      removeAudio: false,
+      overlays: [],
+      past: [],
+      future: [],
+      selectedSegmentId: null,
+      selectedOverlayId: null,
+    });
+    setPlayheadMs(0);
+    seekTo(0);
+  };
 
   const total = totalTimelineMs(segments);
   // useMemo (không tính thẳng mỗi render như trước) — tham chiếu ổn định
   // giữa các lần render KHÔNG đổi `segments` (phát video/hover-scrub/zoom đổi
   // liên tục) để effect báo `onStateChange` bên dưới không bắn dồn dập.
   const keepRanges = useMemo(() => computeKeepRanges(segments), [segments]);
-  const hasChanges = past.length > 0;
-  // "Lưu đè" cần CÓ thay đổi để ghi đè (không có gì để lưu nếu chưa cắt) VÀ
+  const hasChanges =
+    past.length > 0 ||
+    overlays.length > 0 ||
+    removeAudio ||
+    segments.length > 1 ||
+    (segments[0] && (segments[0].srcStart > 0 || (durationMs > 0 && Math.abs(segments[0].srcEnd - durationMs) > 200)));
+  // "Lưu đè" cần CÓ thay đổi để ghi đè (không có gì để lưu nếu chưa cắt hoặc chưa vẽ overlay) VÀ
   // đoạn giữ lại còn đủ dài (không cho ghi đè thành video gần như rỗng).
-  // "Lưu thành video mới" không cần điều kiện này — chưa cắt gì thì kết quả
-  // chỉ là 1 bản sao y nguyên, vẫn hợp lệ (giống Save As của ảnh).
   const canSave = hasChanges && total >= MIN_SEG_MS && !busy;
 
   // Báo cho cha biết trạng thái chỉnh sửa — cha (Editor.tsx) dùng để quyết
   // định tham số truyền vào `onSave`/`onSaveAs`; vô hại nếu không ai lắng
   // (`onStateChange` optional).
   useEffect(() => {
-    onStateChange?.({ hasChanges, keepRanges, removeAudio });
+    const preparedOverlays = overlays.map((o) => {
+      if (o.type === "text" || o.type === "arrow") {
+        const vw = videoRef.current?.videoWidth || 1920;
+        const vh = videoRef.current?.videoHeight || 1080;
+        const dataUrl = renderOverlayToDataUrl(o, vw, vh);
+        return dataUrl ? { ...o, imageData: dataUrl } : o;
+      }
+      return o;
+    });
+    onStateChange?.({ hasChanges, keepRanges, removeAudio, overlays: preparedOverlays });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasChanges, keepRanges, removeAudio]);
+  }, [hasChanges, keepRanges, removeAudio, overlays]);
+
+  const editStateRef = useRef(editState);
+  editStateRef.current = editState;
+  const playheadMsRef = useRef(playheadMs);
+  playheadMsRef.current = playheadMs;
+
+  // Tự động lưu phiên vào RAM & localStorage khi có thay đổi
+  useEffect(() => {
+    if (!sessionKey) return;
+    saveVideoSession(sessionKey, {
+      ...editState,
+      playheadMs,
+    }, durationMs);
+  }, [sessionKey, editState, playheadMs, durationMs]);
+
+  // Luôn chốt lưu phiên tại thời điểm unmount (khi mở ảnh khác hoặc đổi video) hoặc trước khi đóng tab/app
+  useEffect(() => {
+    const flush = () => {
+      if (sessionKey) {
+        saveVideoSession(sessionKey, {
+          ...editStateRef.current,
+          playheadMs: playheadMsRef.current,
+        }, durationMs);
+      }
+    };
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      flush();
+    };
+  }, [sessionKey, durationMs]);
+
+  // Khôi phục mốc tua nếu phiên trước đó đang dừng ở một vị trí cụ thể
+  useEffect(() => {
+    if (savedSession?.playheadMs && savedSession.playheadMs > 0) {
+      const timer = setTimeout(() => {
+        seekTo(savedSession.playheadMs!);
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const pct = (ms: number) => (total <= 0 ? 0 : (clamp(ms, 0, total) / total) * 100);
 
@@ -1092,7 +1270,34 @@ export default function VideoTrimmer({
           QuickTime/CapCut) thay vì 1 hàng riêng chiếm chỗ bên dưới — nhường
           tối đa chiều cao cho khung xem, chỉ hiện chrome khi cần nhìn thấy. */}
       <div style={videoWrap} onMouseEnter={() => setWrapHover(true)} onMouseLeave={() => setWrapHover(false)}>
-        <video ref={videoRef} key={src} src={src} style={videoStyle} onClick={togglePlay} />
+        <video
+          ref={videoRef}
+          key={src}
+          src={src}
+          style={videoStyle}
+          onClick={togglePlay}
+          onLoadedMetadata={() => {
+            if (savedSession?.playheadMs && savedSession.playheadMs > 0) {
+              seekTo(savedSession.playheadMs);
+            }
+          }}
+        />
+
+        <VideoCanvasOverlay
+          videoRef={videoRef}
+          playheadMs={playheadMs}
+          durationMs={total}
+          tool={overlayTool}
+          onToolChange={setOverlayTool}
+          overlays={overlays}
+          selectedId={selectedOverlayId}
+          onSelect={(id) => setEditState((st) => ({ ...st, selectedOverlayId: id }))}
+          onChangeOverlay={handleChangeOverlay}
+          onCommitSnapshot={handleCommitOverlaySnapshot}
+          onAddOverlay={handleAddOverlay}
+          onDeleteOverlay={handleDeleteOverlay}
+          isPlaying={isPlaying}
+        />
 
         <div style={playbackOverlay}>
           {/* Cột trái RỖNG — chỉ để `overlayCenterGroup` (cột giữa, "auto")
@@ -1200,6 +1405,37 @@ export default function VideoTrimmer({
         </button>
         <div style={toolDivider} />
 
+        {/* Vẽ khung, Che mờ, Chèn chữ & Mũi tên */}
+        <button
+          style={{ ...iconToolBtn, ...(overlayTool === "rect" ? iconToolBtnActive : null) }}
+          onClick={() => setOverlayTool((cur) => (cur === "rect" ? "select" : "rect"))}
+          title={t("videoTrimmer.drawBox", "Vẽ khung (R)")}
+        >
+          <RectIcon />
+        </button>
+        <button
+          style={{ ...iconToolBtn, ...(overlayTool === "blur" ? iconToolBtnActive : null) }}
+          onClick={() => setOverlayTool((cur) => (cur === "blur" ? "select" : "blur"))}
+          title={t("videoTrimmer.drawBlur", "Che mờ (B)")}
+        >
+          <BlurIcon />
+        </button>
+        <button
+          style={{ ...iconToolBtn, ...(overlayTool === "text" ? iconToolBtnActive : null) }}
+          onClick={() => setOverlayTool((cur) => (cur === "text" ? "select" : "text"))}
+          title={t("videoTrimmer.drawText", "Chèn chữ (T)")}
+        >
+          <TextIcon />
+        </button>
+        <button
+          style={{ ...iconToolBtn, ...(overlayTool === "arrow" ? iconToolBtnActive : null) }}
+          onClick={() => setOverlayTool((cur) => (cur === "arrow" ? "select" : "arrow"))}
+          title={t("videoTrimmer.drawArrow", "Mũi tên (A)")}
+        >
+          <ArrowIcon />
+        </button>
+        <div style={toolDivider} />
+
         {/* Tách nhạc nền: xoá HẲN track âm thanh khỏi file khi Áp dụng cắt —
             chỉ 1 click để bật/tắt, gộp chung lịch sử undo với các thao tác
             cắt đoạn (xem `doToggleRemoveAudio`) nên Ctrl+Z hoàn tác đúng. */}
@@ -1275,6 +1511,19 @@ export default function VideoTrimmer({
             với nhau vì là con trực tiếp của `trackScroll`, không cần đồng bộ
             scrollLeft riêng cho ruler. */}
         <div style={{ width: `${zoom * 100}%` }}>
+          {/* Track hiệu ứng (Khung vẽ / Che mờ) */}
+          <OverlayTimelineTrack
+            overlays={overlays}
+            totalMs={total}
+            playheadMs={playheadMs}
+            selectedId={selectedOverlayId}
+            onSelect={(id) => setEditState((st) => ({ ...st, selectedOverlayId: id }))}
+            onChangeOverlay={handleChangeOverlay}
+            onCommitSnapshot={handleCommitOverlaySnapshot}
+            onSeek={(ms) => seekTo(ms)}
+            snapPoints={segmentBoundariesMs(segments)}
+          />
+
           {/* Thước thời gian — mốc giờ:phút dọc timeline, mật độ tự đổi theo
               zoom (xem `timeTicks`). Thay cho dòng thời lượng cũ ở metaRow. */}
           <div style={timeRuler}>
@@ -1455,6 +1704,46 @@ function ScissorsIcon() {
       <circle cx="6" cy="18" r="2.6" />
       <line x1="8.2" y1="7.6" x2="20" y2="19" />
       <line x1="8.2" y1="16.4" x2="20" y2="5" />
+    </svg>
+  );
+}
+
+function RectIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="18" height="18" rx="2.5" />
+    </svg>
+  );
+}
+
+function BlurIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.6}>
+      <rect x="3" y="3" width="18" height="18" rx="2.5" stroke="currentColor" />
+      <circle cx="8" cy="8" r="1.3" fill="currentColor" opacity="0.9" />
+      <circle cx="16" cy="8" r="1.3" fill="currentColor" opacity="0.5" />
+      <circle cx="12" cy="12" r="1.3" fill="currentColor" opacity="0.7" />
+      <circle cx="8" cy="16" r="1.3" fill="currentColor" opacity="0.4" />
+      <circle cx="16" cy="16" r="1.3" fill="currentColor" opacity="0.8" />
+    </svg>
+  );
+}
+
+function TextIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="4 7 4 4 20 4 20 7" />
+      <line x1="12" y1="4" x2="12" y2="20" />
+      <line x1="9" y1="20" x2="15" y2="20" />
+    </svg>
+  );
+}
+
+function ArrowIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <line x1="5" y1="19" x2="19" y2="5" />
+      <polyline points="10 5 19 5 19 14" />
     </svg>
   );
 }

@@ -457,7 +457,22 @@
     "saveAsPickLocation": "Choose location…",
     "exitFullscreen": "Exit fullscreen",
     "enterFullscreen": "Enter fullscreen",
-    "resetButton": "Reset"
+    "resetButton": "Reset",
+    "drawBox": "Draw Box (R)",
+    "drawBlur": "Censor / Blur (B)",
+    "drawText": "Add Text (T)",
+    "drawArrow": "Arrow (A)",
+    "blurSoft": "Gaussian Blur",
+    "blurBlackout": "Blackout",
+    "badgeOn": "Badge: On",
+    "badgeOff": "Badge: Off",
+    "toggleBackground": "Toggle text badge background",
+    "defaultNoteText": "Note",
+    "enterNote": "Enter note...",
+    "arrowStartPoint": "Arrow start point",
+    "arrowEndPoint": "Arrow end point",
+    "dragToMove": "Drag to move",
+    "deleteOverlay": "Delete overlay"
   },
   "gifExport": {
     "title": "Export Animated GIF",
