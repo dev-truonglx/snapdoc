@@ -1100,3 +1100,40 @@ pub fn notify_overlay_ready(state: State<AppState>, gen: u64, idx: usize) {
         }
     }
 }
+
+/// Xuất video hoặc một đoạn video sang ảnh GIF động chất lượng cao.
+#[tauri::command]
+pub async fn export_video_gif(
+    app: AppHandle,
+    input_path: String,
+    output_path: String,
+    options: crate::record::encoder::GifExportOptions,
+) -> Result<String, String> {
+    let app_for_blocking = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let in_p = std::path::PathBuf::from(&input_path);
+        let out_p = std::path::PathBuf::from(&output_path);
+        if let Some(parent) = out_p.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Không tạo được thư mục lưu: {e}"))?;
+            crate::record::allow_asset_scope(&app_for_blocking, parent);
+        }
+
+        let progress_app = app_for_blocking.clone();
+        crate::record::encoder::export_gif(&in_p, &out_p, &options, move |frac| {
+            let _ = progress_app.emit("gif-export-progress", frac);
+        })?;
+
+        Ok(out_p.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Sao chép file ảnh GIF vào clipboard hệ thống.
+#[tauri::command]
+pub fn copy_gif_to_clipboard(file_path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&file_path);
+    crate::clipboard::copy_gif_file(p)
+}
+

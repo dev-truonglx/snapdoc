@@ -1055,3 +1055,83 @@ pub async fn update_history_thumb(
     .await
     .map_err(|e| format!("Task join error: {e}"))?
 }
+
+fn save_gif_to_history_sync(
+    app: &AppHandle,
+    source_history_id: Option<&str>,
+    gif_path: &str,
+    duration_ms: i64,
+) -> Result<HistoryRecord, String> {
+    let p = std::path::Path::new(gif_path);
+    if !p.exists() {
+        return Err(format!("File GIF không tồn tại: {gif_path}"));
+    }
+    let file_size = std::fs::metadata(p).ok().map(|m| m.len() as i64);
+
+    let (capture_mode, scale_factor, title, w, h) = if let Some(id) = source_history_id {
+        if let Ok(rec) = get_history_item_sync(app, id) {
+            let t = rec.title.as_ref().map(|s| format!("{s} (GIF)"));
+            (rec.capture_mode, rec.scale_factor, t, rec.width, rec.height)
+        } else {
+            ("region".to_string(), 1.0, None, 800, 600)
+        }
+    } else {
+        ("region".to_string(), 1.0, None, 800, 600)
+    };
+
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let thumb_path = super::assets::thumb_path_for(app, &new_id)?;
+    if let Err(e) = super::video_thumbnail::generate(p, &thumb_path) {
+        eprintln!("[SnapDoc][history] Sinh thumbnail cho GIF thất bại: {e}");
+    }
+
+    let asset_path_str = p.to_string_lossy().to_string();
+    let thumb_path_str = thumb_path.to_string_lossy().to_string();
+    let now = now_ms();
+
+    let st = state(app)?;
+    {
+        let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+        conn.execute(
+            "INSERT INTO history (id, created_at, updated_at, capture_mode, media_type, width, height, scale_factor, duration_ms, asset_path, thumb_path, file_size, title, is_edited) \
+             VALUES (?1,?2,?3,?4,'gif',?5,?6,?7,?8,?9,?10,?11,?12,1)",
+            rusqlite::params![
+                new_id,
+                now,
+                now,
+                capture_mode,
+                w,
+                h,
+                scale_factor,
+                duration_ms,
+                asset_path_str,
+                thumb_path_str,
+                file_size,
+                title,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    get_history_item_sync(app, &new_id)
+}
+
+/// Lưu bản ghi ảnh GIF vào thư viện History.
+#[tauri::command]
+pub async fn save_gif_to_history(
+    app: AppHandle,
+    source_history_id: Option<String>,
+    gif_path: String,
+    duration_ms: i64,
+) -> Result<HistoryRecord, String> {
+    let app_for_blocking = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        save_gif_to_history_sync(&app_for_blocking, source_history_id.as_deref(), &gif_path, duration_ms)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))??;
+    use tauri::Emitter;
+    let _ = app.emit("history:item-added", &result);
+    Ok(result)
+}
+

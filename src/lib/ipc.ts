@@ -82,8 +82,18 @@ export interface HistoryPage {
   total: number;
 }
 
+export interface GifExportOptions {
+  startMs: number;
+  durationMs: number;
+  fps: number;
+  maxWidth?: number | null;
+  speed: number;
+  loopCount: number; // 0 = loop vô hạn, -1 = phát 1 lần
+}
+
 export type CaptureMode = "full" | "window" | "region" | "all" | "scroll";
 export type OutputMode = "editor" | "clipboard" | "save" | "save_copy" | "copy_editor";
+
 
 export interface WindowInfo {
   id: number;
@@ -136,7 +146,11 @@ export interface Settings {
    * thành video mới" ở VideoTrimmer — dùng làm mặc định cho lần kế tiếp,
    * xem `useOutput.promptSaveVideoPath` + `Editor.doSaveAsVideo`. */
   lastVideoSaveAsDir?: string;
+  /** Thư mục lần cuối user chọn qua "Lưu file (.gif)" ở GifExportModal — dùng làm
+   * mặc định cho lần kế tiếp. */
+  lastGifSaveAsDir?: string;
   /** Ngôn ngữ giao diện ("vi"/"en") — đồng bộ với i18next ở webview VÀ ghi
+
    * xuống settings.json để tray menu (native, Rust-side) đọc được, xem
    * `Settings.tsx` language switcher + `tray::current_lang`. */
   language?: string;
@@ -355,7 +369,28 @@ export const ipc = {
       timestampsMs: timestampsMs.map(Math.round),
       scaleW,
     }),
+  exportVideoGif: (inputPath: string, outputPath: string, options: GifExportOptions) =>
+    invoke<string>("export_video_gif", {
+      inputPath,
+      outputPath,
+      options: {
+        ...options,
+        startMs: Math.round(options.startMs),
+        durationMs: Math.round(options.durationMs),
+        fps: Math.round(options.fps),
+        maxWidth: options.maxWidth ? Math.round(options.maxWidth) : null,
+      },
+    }),
+  copyGifToClipboard: (filePath: string) =>
+    invoke<void>("copy_gif_to_clipboard", { filePath }),
+  saveGifToHistory: (sourceHistoryId: string | null, gifPath: string, durationMs: number) =>
+    invoke<HistoryItem>("save_gif_to_history", {
+      sourceHistoryId,
+      gifPath,
+      durationMs: Math.round(durationMs),
+    }),
 };
+
 
 /** Rust nhận `Vec<(i64, i64)>` — `ranges` tính từ tỉ lệ pixel kéo-thả
  * (`VideoTrimmer.tsx`) luôn ra số thập phân (JS không phân biệt int/float),
