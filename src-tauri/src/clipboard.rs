@@ -32,3 +32,54 @@ pub fn copy_png_bytes(bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("Không copy được ảnh: {e}"))?;
     Ok(())
 }
+
+/// Copy file ảnh GIF vào clipboard hệ thống dưới dạng ảnh động (hoặc file drop).
+#[cfg(target_os = "macos")]
+pub fn copy_gif_file(path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("File GIF không tồn tại: {}", path.display()));
+    }
+    let path_str = path.to_string_lossy();
+    let script = format!(
+        "set the clipboard to (read (POSIX file \"{}\") as «class GIFf»)",
+        path_str.replace('"', "\\\"")
+    );
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .map_err(|e| format!("Lỗi gọi osascript: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "osascript copy GIF thất bại: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn copy_gif_file(path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("File GIF không tồn tại: {}", path.display()));
+    }
+    let path_str = path.to_string_lossy();
+    let script = format!("Set-Clipboard -Path '{}'", path_str.replace('\'', "''"));
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|e| format!("Lỗi gọi powershell: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "powershell copy GIF thất bại: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn copy_gif_file(_path: &std::path::Path) -> Result<(), String> {
+    Err("Nền tảng này chưa hỗ trợ copy file GIF vào clipboard".to_string())
+}
+

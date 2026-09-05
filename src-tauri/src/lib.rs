@@ -162,7 +162,11 @@ pub fn run() {
             history::commands::open_history,
             history::commands::finish_quick_capture,
             history::commands::update_history_thumb,
+            commands::export_video_gif,
+            commands::copy_gif_to_clipboard,
+            history::commands::save_gif_to_history,
         ])
+
         .setup(|app| {
             let handle = app.handle().clone();
 
