@@ -616,6 +616,46 @@ pub fn build_overlay_filter_graph(
     Some(fg)
 }
 
+/// Stream copy video nhanh mà không cần re-encode, chỉ loại bỏ audio stream (-an).
+pub fn copy_without_audio(input_path: &Path, output_path: &Path) -> Result<(), String> {
+    let ffmpeg = sidecar_path("ffmpeg")?;
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+    ])
+    .arg(input_path)
+    .args([
+        "-c:v",
+        "copy",
+        "-an",
+        "-movflags",
+        "+faststart",
+    ])
+    .arg(output_path)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg tách âm thanh thất bại: {stderr}"));
+    }
+    Ok(())
+}
+
 pub fn trim(
     input_path: &Path,
     keep_ranges_ms: &[(i64, i64)],
@@ -633,11 +673,127 @@ pub fn trim(
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("Không tạo được thư mục tạm: {e}"))?;
 
     let total_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum::<i64>().max(1);
-    let mut done_ms: i64 = 0;
     on_progress(0.0);
 
     let mut run = || -> Result<(), String> {
+        // Giải mã các overlay dạng ảnh (Text, Arrow, ...) ra file PNG tạm trước
+        let mut image_overlays: Vec<(std::path::PathBuf, &VideoOverlay)> = Vec::new();
+        if let Some(ovls) = overlays {
+            for (idx, o) in ovls.iter().enumerate() {
+                if let Some(data_url) = &o.image_data {
+                    let clean_b64 = if let Some(comma_pos) = data_url.find(',') {
+                        &data_url[comma_pos + 1..]
+                    } else {
+                        data_url.as_str()
+                    };
+                    use base64::Engine;
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(clean_b64.trim()) {
+                        let img_path = tmp_dir.join(format!("ovl_img_{idx}.png"));
+                        if std::fs::write(&img_path, bytes).is_ok() {
+                            image_overlays.push((img_path, o));
+                        }
+                    }
+                }
+            }
+        }
+
+        let img_refs: Vec<&VideoOverlay> = image_overlays.iter().map(|(_, o)| *o).collect();
+        let filter_graph = overlays.and_then(|ovls| build_overlay_filter_graph(ovls, &img_refs));
+
+        // TỐI ƯU HOÁ: Nếu chỉ có 1 đoạn giữ lại (chiếm đa số các tác vụ cắt hoặc thêm overlay),
+        // chạy Single-Pass: cắt thời lượng + áp dụng filter graph + encode trong 1 lệnh duy nhất!
+        // Tránh hoàn toàn việc encode seg_0.mp4 rồi lại re-encode lần 2 khi có overlay.
+        if keep_ranges_ms.len() == 1 {
+            let (start_ms, end_ms) = keep_ranges_ms[0];
+            let start_s = (start_ms as f64) / 1000.0;
+            let dur_ms = (end_ms - start_ms).max(0);
+            let dur_s = (dur_ms as f64) / 1000.0;
+
+            let mut cmd = Command::new(&ffmpeg);
+            cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
+            if start_ms > 0 {
+                // Fast input seek: -ss trước -i
+                cmd.args(["-ss", &format!("{start_s:.3}")]);
+            }
+            cmd.arg("-i").arg(input_path);
+            cmd.args(["-t", &format!("{dur_s:.3}")]);
+
+            for (img_path, _) in &image_overlays {
+                cmd.args(["-loop", "1", "-i"]).arg(img_path);
+            }
+
+            if let Some(fg) = &filter_graph {
+                cmd.args(["-filter_complex", fg])
+                    .args(["-map", "[outv]"]);
+                cmd.arg("-shortest");
+            } else {
+                cmd.args(["-map", "0:v:0"]);
+            }
+
+            cmd.args(best_h264_encoder_args(&ffmpeg));
+
+            if remove_audio {
+                cmd.arg("-an");
+            } else if start_ms > 0 {
+                // Tránh lệch sync âm thanh khi seek
+                cmd.args(["-map", "0:a?", "-c:a", "aac", "-b:a", "160k"]);
+            } else {
+                cmd.args(["-map", "0:a?", "-c:a", "copy"]);
+            }
+
+            cmd.args(["-movflags", "+faststart"])
+                .args(["-progress", "pipe:1"])
+                .arg(output_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
+
+            let mut stderr_pipe = child.stderr.take().expect("stderr đã piped");
+            let stderr_thread = std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = String::new();
+                let _ = stderr_pipe.read_to_string(&mut buf);
+                buf
+            });
+
+            let stdout = child.stdout.take().expect("stdout đã piped");
+            {
+                use std::io::{BufRead, BufReader};
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if let Some(v) = line.strip_prefix("out_time_us=") {
+                        if let Ok(us) = v.trim().parse::<i64>() {
+                            let cur_ms = (us / 1000).clamp(0, dur_ms);
+                            on_progress((cur_ms as f64 / dur_ms.max(1) as f64).min(1.0));
+                        }
+                    }
+                }
+            }
+
+            let status = child
+                .wait()
+                .map_err(|e| format!("ffmpeg lỗi khi chờ tiến trình: {e}"))?;
+            let stderr = stderr_thread.join().unwrap_or_default();
+            if !status.success() {
+                return Err(format!("ffmpeg xử lý video thất bại: {status} — {stderr}"));
+            }
+
+            on_progress(1.0);
+            return Ok(());
+        }
+
+        // Trường hợp nhiều đoạn giữ lại (xoá đoạn ở giữa): encode từng đoạn với fast seeking
         let mut seg_paths = Vec::with_capacity(keep_ranges_ms.len());
+        let mut done_ms: i64 = 0;
         for (i, (start_ms, end_ms)) in keep_ranges_ms.iter().enumerate() {
             let seg_path = tmp_dir.join(format!("seg_{i}.mp4"));
             let start_s = (*start_ms as f64) / 1000.0;
@@ -645,13 +801,13 @@ pub fn trim(
             let dur_s = (dur_ms as f64) / 1000.0;
 
             let mut cmd = Command::new(&ffmpeg);
-            cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
-                .arg("-i")
-                .arg(input_path)
-                .args([
-                    "-ss", &start_s.to_string(),
-                    "-t", &dur_s.to_string(),
-                ]);
+            cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
+            if *start_ms > 0 {
+                cmd.args(["-ss", &format!("{start_s:.3}")]);
+            }
+            cmd.arg("-i").arg(input_path);
+            cmd.args(["-t", &format!("{dur_s:.3}")]);
+
             cmd.args(best_h264_encoder_args(&ffmpeg));
             if remove_audio {
                 cmd.arg("-an");
@@ -716,29 +872,6 @@ pub fn trim(
         std::fs::write(&list_path, list_content)
             .map_err(|e| format!("Không ghi được danh sách ghép: {e}"))?;
 
-        // Giải mã các overlay dạng ảnh (Text, Arrow, ...) ra file PNG tạm
-        let mut image_overlays: Vec<(std::path::PathBuf, &VideoOverlay)> = Vec::new();
-        if let Some(ovls) = overlays {
-            for (idx, o) in ovls.iter().enumerate() {
-                if let Some(data_url) = &o.image_data {
-                    let clean_b64 = if let Some(comma_pos) = data_url.find(',') {
-                        &data_url[comma_pos + 1..]
-                    } else {
-                        data_url.as_str()
-                    };
-                    use base64::Engine;
-                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(clean_b64.trim()) {
-                        let img_path = tmp_dir.join(format!("ovl_img_{idx}.png"));
-                        if std::fs::write(&img_path, bytes).is_ok() {
-                            image_overlays.push((img_path, o));
-                        }
-                    }
-                }
-            }
-        }
-
-        let img_refs: Vec<&VideoOverlay> = image_overlays.iter().map(|(_, o)| *o).collect();
-        let filter_graph = overlays.and_then(|ovls| build_overlay_filter_graph(ovls, &img_refs));
         let concat_target = if filter_graph.is_some() {
             tmp_dir.join("concat.mp4")
         } else {
@@ -774,7 +907,7 @@ pub fn trim(
             return Err(format!("ffmpeg ghép các đoạn thất bại: {} — {stderr}", output.status));
         }
 
-        // Nếu có overlay (vẽ khung, che mờ, chèn chữ, mũi tên), chạy tiếp bước lọc
+        // Nếu có overlay trên nhiều đoạn ghép, áp dụng filter graph từ concat_target
         if let Some(fg) = filter_graph {
             let mut filter_cmd = Command::new(&ffmpeg);
             filter_cmd

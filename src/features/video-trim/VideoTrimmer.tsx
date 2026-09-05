@@ -108,7 +108,7 @@ const FETCH_DEBOUNCE_MS = 120;
  * "nháy" khi đổi zoom, vì mỗi mức zoom cần mật độ khác nên cache theo tile cũ
  * gần như luôn miss. Xem `nearestFrameUrl` — tile hiển thị frame GẦN NHẤT đã
  * có trong cache (kể cả từ lớp nền này) thay vì đợi đúng mốc rồi mới hiện. */
-const BASE_FRAME_COUNT = 40;
+const BASE_FRAME_COUNT = 16;
 /** Bề rộng đích (px) khi trích frame cho tile filmstrip — nhỏ, vì mỗi tile
  * trên timeline chỉ rộng ~100px (xem `THUMB_TARGET_PX`). */
 const FILMSTRIP_SCALE_W = 160;
@@ -746,11 +746,13 @@ export default function VideoTrimmer({
   // nào, không cần huỷ/bỏ qua kết quả trễ như 1 request thông thường).
   useEffect(() => {
     if (!filePath || visibleTiles.length === 0) return;
+    // Nếu mảng frames còn trống và mẻ base frames đang được fetch lúc zoom 1x, tránh fetch trùng lặp
+    if (frames.size === 0 && fetchInFlightRef.current && zoom === 1) return;
     const missing = Array.from(new Set(visibleTiles.map((t) => t.srcMs))).filter((ms) => !frames.has(ms));
     if (missing.length === 0) return;
     const timer = setTimeout(() => runFetch(missing), FETCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [filePath, visibleTiles, frames]);
+  }, [filePath, visibleTiles, frames, zoom]);
 
   // Fetch riêng đúng mốc đang rê chuột (hover-scrub), ở độ phân giải CAO
   // (`HOVER_PREVIEW_SCALE_W`) — cache riêng `hoverFrames`, KHÔNG dùng chung
@@ -1315,6 +1317,7 @@ export default function VideoTrimmer({
           ref={videoRef}
           key={src}
           crossOrigin="anonymous"
+          preload="auto"
           src={src}
           style={videoStyle}
           onClick={togglePlay}
