@@ -75,6 +75,7 @@ pub struct PendingVideo {
     pub height: u32,
     pub duration_ms: i64,
     pub history_id: String,
+    pub thumb_path: Option<String>,
 }
 
 /// Chế độ chụp + output gần nhất — dùng cho nút "New" ở editor.

@@ -10,6 +10,7 @@ export interface PendingVideo {
   height: number;
   durationMs: number;
   historyId: string;
+  thumbPath?: string;
 }
 
 export interface Pending {

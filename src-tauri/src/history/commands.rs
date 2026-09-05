@@ -304,6 +304,7 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
             height: rec.height,
             duration_ms: rec.duration_ms.unwrap_or(0),
             history_id: id.to_string(),
+            thumb_path: Some(rec.thumb_path.clone()),
         });
         drop(g);
         return windows::open_editor(app);

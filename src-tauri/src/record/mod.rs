@@ -256,8 +256,13 @@ pub fn cleanup_stale_temp(app: &AppHandle) {
     if let Ok(entries) = std::fs::read_dir(&tmp) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("snapdoc-rec-audio-") || name.starts_with("snapdoc-trim-") {
+            if name.starts_with("snapdoc-rec-audio-")
+                || name.starts_with("snapdoc-trim-")
+                || name.starts_with("snapdoc-filmstrip-")
+            {
                 let _ = std::fs::remove_dir_all(entry.path());
+            } else if name.starts_with("snapdoc-frame-") && name.ends_with(".jpg") {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     }
@@ -1293,6 +1298,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
                     height: active.height,
                     duration_ms,
                     history_id: record.id,
+                    thumb_path: Some(record.thumb_path),
                 });
                 drop(g);
                 // Video đã lưu vào Library — Editor mở lên (chế độ video) chỉ để

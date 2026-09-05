@@ -39,6 +39,7 @@ interface VideoDoc {
   filePath: string;
   src: string;
   durationMs: number;
+  thumbUrl?: string;
 }
 
 const EMPTY_TRIM_STATE = {
@@ -352,6 +353,7 @@ export default function Editor() {
           filePath: pv.path,
           src: convertFileSrc(pv.path),
           durationMs: pv.durationMs,
+          thumbUrl: pv.thumbPath ? convertFileSrc(pv.thumbPath) : undefined,
         });
         setVideoTrimState(EMPTY_TRIM_STATE);
         setVideoSavedSig(null);
@@ -930,6 +932,7 @@ export default function Editor() {
             src={videoDoc.src}
             filePath={videoDoc.filePath}
             durationMs={videoDoc.durationMs}
+            initialThumbUrl={videoDoc.thumbUrl}
             busy={busy}
             onSave={doSaveVideo}
             onSaveAs={doSaveAsVideo}
@@ -960,6 +963,7 @@ export default function Editor() {
             filePath: item.assetPath,
             src: convertFileSrc(item.assetPath),
             durationMs: item.durationMs ?? 0,
+            thumbUrl: item.thumbPath ? convertFileSrc(item.thumbPath) : undefined,
           });
           setVideoTrimState(EMPTY_TRIM_STATE);
           setVideoSavedSig(null);
