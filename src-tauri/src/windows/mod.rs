@@ -2098,6 +2098,7 @@ fn force_to_foreground(win: &tauri::WebviewWindow) {
 /// Trên macOS: gọi activateIgnoringOtherApps + makeKeyAndOrderFront + orderFrontRegardless trên main thread.
 /// Trên Windows: gọi SetWindowPos always_on_top toggle + set_focus.
 pub fn bring_to_front(app: &AppHandle, win: &tauri::WebviewWindow) {
+    let _ = app;
     #[cfg(target_os = "macos")]
     {
         use tauri::ActivationPolicy;

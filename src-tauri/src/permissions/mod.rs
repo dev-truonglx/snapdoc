@@ -28,14 +28,26 @@ pub fn request_capture() -> bool {
 }
 
 /// Kiểm tra quyền Accessibility (không side-effect) — xem `macos::accessibility_ok`.
-#[cfg(target_os = "macos")]
 pub fn can_use_accessibility() -> bool {
-    macos::accessibility_ok()
+    #[cfg(target_os = "macos")]
+    {
+        macos::accessibility_ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
 }
 
 /// Yêu cầu quyền Accessibility (mở prompt hệ thống lần đầu nếu chưa cấp) —
 /// xem `macos::request_accessibility`.
-#[cfg(target_os = "macos")]
 pub fn request_accessibility() -> bool {
-    macos::request_accessibility()
+    #[cfg(target_os = "macos")]
+    {
+        macos::request_accessibility()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
 }
