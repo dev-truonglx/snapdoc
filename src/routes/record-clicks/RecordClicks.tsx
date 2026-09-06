@@ -21,21 +21,39 @@ const ANIMATION_DURATION = 450; // ms
 export default function RecordClicks() {
   const [clicks, setClicks] = useState<ActiveClickItem[]>([]);
   const idCounter = useRef(0);
+  const lastClickRef = useRef<{ x: number; y: number; time: number } | null>(null);
 
   useEffect(() => {
     const unlisten = listen<MouseClickEvent>("record-mouse-click", (event) => {
       const payload = event.payload;
       if (!payload) return;
 
+      const now = Date.now();
+      const last = lastClickRef.current;
+
+      // Nhận diện nhấp đúp: OS báo count >= 2 hoặc 2 lần click liên tiếp cách nhau < 450ms và < 30px
+      const isRecent = last !== null && now - last.time < 450;
+      const isClose =
+        last !== null &&
+        Math.hypot(payload.x - last.x, payload.y - last.y) < 30;
+      const isDouble = (payload.count ?? 1) >= 2 || (isRecent && isClose);
+
+      // Nếu là nhấp đúp (double-click), BẮT BUỘC khoá toạ độ đúng bằng tâm của click đầu tiên.
+      // Điều này ngăn ngừa hiện tượng tay người dùng bị xê dịch vài pixel giữa 2 lần click,
+      // đảm bảo 100% các vòng sóng phải ĐỒNG TÂM tuyệt đối.
+      const posX = isDouble && last ? last.x : Math.round(payload.x);
+      const posY = isDouble && last ? last.y : Math.round(payload.y);
+
+      lastClickRef.current = { x: posX, y: posY, time: now };
+
       const newId = ++idCounter.current;
-      const isDouble = (payload.count ?? 1) >= 2;
 
       setClicks((prev) => [
         ...prev,
         {
           id: newId,
-          x: payload.x,
-          y: payload.y,
+          x: posX,
+          y: posY,
           button: payload.button || "left",
           isDouble,
         },
@@ -44,7 +62,7 @@ export default function RecordClicks() {
       // Tự động giải phóng phần tử sau khi animation kết thúc
       setTimeout(() => {
         setClicks((prev) => prev.filter((c) => c.id !== newId));
-      }, ANIMATION_DURATION + 100);
+      }, ANIMATION_DURATION + 250);
     });
 
     return () => {
@@ -75,7 +93,7 @@ export default function RecordClicks() {
             opacity: 0;
           }
           20% {
-            transform: translate(-50%, -50%) scale(0.3);
+            transform: translate(-50%, -50%) scale(0.35);
             opacity: 0.9;
           }
           100% {
@@ -104,6 +122,8 @@ export default function RecordClicks() {
           border-radius: 50%;
           pointer-events: none;
           box-sizing: border-box;
+          transform: translate(-50%, -50%);
+          transform-origin: center center;
           will-change: transform, opacity;
         }
 
@@ -166,20 +186,20 @@ export default function RecordClicks() {
                 top: item.y,
                 width: 52,
                 height: 52,
-                animation: `snapdoc-click-ripple ${ANIMATION_DURATION}ms cubic-bezier(0.16, 1, 0.3, 1) forwards`,
+                animation: `snapdoc-click-ripple ${ANIMATION_DURATION}ms cubic-bezier(0.16, 1, 0.3, 1) both`,
               }}
             />
 
-            {/* Vòng sóng phụ khi nhấp đúp (Double click wave) */}
+            {/* Vòng sóng phụ khi nhấp đúp (Double click wave) - cùng kích thước, cùng tâm tuyệt đối */}
             {item.isDouble && (
               <div
                 className={`snapdoc-ripple-base ${colorClass}`}
                 style={{
                   left: item.x,
                   top: item.y,
-                  width: 56,
-                  height: 56,
-                  animation: `snapdoc-click-ripple-second ${ANIMATION_DURATION + 80}ms cubic-bezier(0.16, 1, 0.3, 1) 70ms forwards`,
+                  width: 52,
+                  height: 52,
+                  animation: `snapdoc-click-ripple-second ${ANIMATION_DURATION}ms cubic-bezier(0.16, 1, 0.3, 1) 75ms both`,
                 }}
               />
             )}
@@ -192,7 +212,7 @@ export default function RecordClicks() {
                 top: item.y,
                 width: 8,
                 height: 8,
-                animation: `snapdoc-click-dot 220ms ease-out forwards`,
+                animation: `snapdoc-click-dot 220ms ease-out both`,
               }}
             />
           </React.Fragment>

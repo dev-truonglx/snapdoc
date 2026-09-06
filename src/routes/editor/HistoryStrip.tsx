@@ -52,8 +52,19 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
   // Id của lần bấm gần nhất — chỉ để quản spinner theo id. Việc chống race
   // "2 promise resolve sai thứ tự bấm" (từng gây hiện sai ảnh + gắn nhầm
   // `historyId`, khiến Save ghi đè nhầm record) nay do bộ đếm thế hệ DÙNG
-  // CHUNG trong `sessions.ts` đảm nhiệm — xem `beginSwitch`/`isCurrentSwitch`.
   const latestRequestRef = useRef<string | null>(null);
+  const activeItemRef = useRef<HTMLDivElement | null>(null);
+
+  // Tự động cuộn dải "Gần đây" để item đang chọn luôn nằm trong vùng nhìn thấy
+  useEffect(() => {
+    if (currentId && activeItemRef.current) {
+      activeItemRef.current.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+        inline: "nearest",
+      });
+    }
+  }, [currentId, items]);
 
   const load = useCallback(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -246,10 +257,22 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
       <div style={scrollRow}>
         {items.map((item) => {
           const isVideo = item.mediaType === "video";
+          const isCurrent = item.id === currentId;
+          const isOpening = openingId === item.id;
           return (
             <div
               key={item.id}
+              ref={isCurrent ? activeItemRef : undefined}
               className="history-thumb"
+              data-active={isCurrent ? "true" : "false"}
+              tabIndex={0}
+              role="button"
+              aria-label={
+                isVideo
+                  ? t("historyStrip.openVideoEditor")
+                  : t("historyStrip.reopenEditor")
+              }
+              aria-current={isCurrent ? "true" : undefined}
               draggable={!isVideo}
               onDragStart={(e) => {
                 isDraggingRef.current = true;
@@ -283,13 +306,21 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                   );
                 }
               }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openItem(item);
+                }
+              }}
               style={{
                 ...thumbBtn,
-                outline:
-                  item.id === currentId
-                    ? "2px solid var(--accent)"
-                    : "2px solid transparent",
-                opacity: openingId === item.id ? 0.55 : 1,
+                boxShadow: isCurrent
+                  ? "0 0 0 2px var(--bg-elevated), 0 0 0 4.5px var(--accent), 0 4px 14px rgba(59, 130, 246, 0.45)"
+                  : "0 0 0 1px rgba(255, 255, 255, 0.12)",
+                transform: isCurrent ? "scale(1.025)" : "none",
+                zIndex: isCurrent ? 2 : 1,
+                opacity: isOpening ? 0.6 : isCurrent ? 1 : 0.75,
+                filter: isCurrent ? "brightness(1.02)" : "brightness(0.92)",
                 cursor: openingId ? "wait" : "pointer",
               }}
               onClick={() => {
@@ -341,7 +372,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                   {item.durationMs != null && <span style={durationBadge}>{fmtDuration(item.durationMs)}</span>}
                 </>
               )}
-              {openingId === item.id && <div style={spinner}>···</div>}
+              {isOpening && <div style={spinner}>···</div>}
               {/* Copy nhanh vào clipboard chưa hỗ trợ video — ẩn nút cho item video. */}
               {!isVideo && (
                 <button
@@ -415,7 +446,7 @@ const strip: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 10,
-  padding: "14px 12px",
+  padding: "10px 12px",
   borderTop: "1px solid var(--border)",
   background: "var(--bg-elevated)",
   flexShrink: 0,
@@ -430,8 +461,11 @@ const label: React.CSSProperties = {
 
 const scrollRow: React.CSSProperties = {
   display: "flex",
-  gap: 6,
+  alignItems: "center",
+  gap: 8,
   overflowX: "auto",
+  overflowY: "hidden",
+  padding: "6px 6px",
   flex: 1,
   minWidth: 0,
 };
@@ -481,6 +515,7 @@ const copyBtn: React.CSSProperties = {
   borderRadius: 5,
   background: "rgba(0,0,0,0.65)",
   color: "#fff",
+  zIndex: 4,
 };
 
 /** Nút xoá nhanh — góc TRÊN TRÁI (đối xứng `copyBtn` ở trên phải), luôn hiện
@@ -497,7 +532,7 @@ const deleteBtn: React.CSSProperties = {
   borderRadius: 5,
   background: "rgba(0,0,0,0.65)",
   color: "#fff",
-  zIndex: 1,
+  zIndex: 4,
 };
 
 const playBadge: React.CSSProperties = {
@@ -524,6 +559,7 @@ const durationBadge: React.CSSProperties = {
   fontSize: 10,
   padding: "1px 4px",
   borderRadius: 3,
+  zIndex: 3,
 };
 
 const viewAllBtn: React.CSSProperties = {
