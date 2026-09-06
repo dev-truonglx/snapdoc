@@ -486,7 +486,11 @@ fn find_display_and_own_apps(
                 if is_own {
                     if let Some(t) = unsafe { w.title() } {
                         let t_str = t.to_string();
-                        if t_str.contains("Phím bấm") || t_str.contains("record-keystroke") {
+                        if t_str.contains("Phím bấm")
+                            || t_str.contains("record-keystroke")
+                            || t_str.contains("Click chuột")
+                            || t_str.contains("record-clicks")
+                        {
                             return true;
                         }
                     }

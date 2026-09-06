@@ -170,6 +170,8 @@ export interface Settings {
   recordSelf?: boolean;
   /** Hiển thị phím bấm trên màn hình khi đang quay video — mặc định false. */
   recordShowKeystrokes?: boolean;
+  /** Hiển thị hiệu ứng click chuột khi quay video — mặc định true. */
+  recordShowClicks?: boolean;
   shortcuts: Record<string, string>;
   /** Thư mục lần cuối user chọn qua "Save As…" ở editor (ảnh) — dùng làm mặc
    * định cho lần Save As kế tiếp, xem `useOutput.saveAsToFile`. */

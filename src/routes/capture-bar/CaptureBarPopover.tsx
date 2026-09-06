@@ -8,6 +8,7 @@ export default function CaptureBarPopover() {
   const [output, setOutput] = useState<OutputMode>("editor");
   const [audioSource, setAudioSource] = useState<AudioSource>("off");
   const [showKeystrokes, setShowKeystrokes] = useState(false);
+  const [showClicks, setShowClicks] = useState(true);
   const [delaySeconds, setDelaySeconds] = useState<0 | 5 | 10>(0);
   const userPickedRef = useRef(false);
 
@@ -37,6 +38,7 @@ export default function CaptureBarPopover() {
       if (s?.defaultOutput) setOutput(s.defaultOutput);
       if (s?.recordAudioSource) setAudioSource(s.recordAudioSource);
       if (typeof s?.recordShowKeystrokes === "boolean") setShowKeystrokes(s.recordShowKeystrokes);
+      if (typeof s?.recordShowClicks === "boolean") setShowClicks(s.recordShowClicks);
       if (s?.timerSeconds === 0 || s?.timerSeconds === 5 || s?.timerSeconds === 10) {
         setDelaySeconds(s.timerSeconds);
       }
@@ -56,6 +58,9 @@ export default function CaptureBarPopover() {
       }
       if (typeof e.payload?.recordShowKeystrokes === "boolean") {
         setShowKeystrokes(e.payload.recordShowKeystrokes as boolean);
+      }
+      if (typeof e.payload?.recordShowClicks === "boolean") {
+        setShowClicks(e.payload.recordShowClicks as boolean);
       }
       const timer = e.payload?.timerSeconds;
       if (timer === 0 || timer === 5 || timer === 10) {
@@ -118,6 +123,22 @@ export default function CaptureBarPopover() {
     });
   };
 
+  const toggleShowClicks = async () => {
+    const next = !showClicks;
+    setShowClicks(next);
+    if (next) {
+      const ok = await ipc.checkAccessibilityPermission().catch(() => true);
+      if (!ok) {
+        await ipc.requestAccessibilityPermission().catch(() => {});
+      }
+    }
+    ipc.getSettings().then((s) => {
+      if (s) return ipc.setSettings({ ...s, recordShowClicks: next });
+    }).catch(() => {}).finally(() => {
+      ipc.hideCaptureBarPopover().catch(() => {});
+    });
+  };
+
   const selectDelay = (d: 0 | 5 | 10) => {
     setDelaySeconds(d);
     ipc.getSettings().then((s) => {
@@ -167,6 +188,14 @@ export default function CaptureBarPopover() {
         >
           <span style={{ flex: 1, textAlign: "left" }}>{t("captureBar.showKeystrokes")}</span>
           {showKeystrokes && <span style={checkMark}>✓</span>}
+        </button>
+        <button
+          style={popItem(showClicks)}
+          onClick={toggleShowClicks}
+          className="popover-btn"
+        >
+          <span style={{ flex: 1, textAlign: "left" }}>{t("captureBar.showClicks")}</span>
+          {showClicks && <span style={checkMark}>✓</span>}
         </button>
 
         {/* Divider */}
