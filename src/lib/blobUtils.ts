@@ -5,6 +5,17 @@
  */
 
 export function base64ToBlob(base64: string, mime: string = "image/png"): Blob {
+  // Tận dụng API chuẩn mới của JS runtime (Uint8Array.fromBase64) để giải mã ở tầng C++
+  // cực nhanh, không cấp phát chuỗi nhị phân lớn và không block UI thread.
+  if (typeof (Uint8Array as any).fromBase64 === "function") {
+    try {
+      const bytes = (Uint8Array as any).fromBase64(base64);
+      return new Blob([bytes], { type: mime });
+    } catch {
+      // Fallback về cách truyền thống nếu base64 format có ký tự không tương thích
+    }
+  }
+
   const binary = atob(base64);
   const len = binary.length;
   const bytes = new Uint8Array(len);

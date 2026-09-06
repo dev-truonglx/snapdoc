@@ -20,20 +20,28 @@ export default function Thumbnail() {
   };
 
   useEffect(() => {
-    // Nhận data trực tiếp qua event từ Rust — không cần IPC peekPending roundtrip.
-    // Rust emit "show-thumbnail" với base64 string ngay sau khi show window.
+    const loadThumbnail = async () => {
+      const p = await ipc.peekPending();
+      if (p?.imageUrl) {
+        setSrc((prev) => prev || p.imageUrl!);
+      } else if (p?.base64) {
+        setSrc((prev) => prev || `data:image/png;base64,${p.base64}`);
+      }
+    };
+
     const unlisten = listen<string>("show-thumbnail", (e) => {
-      if (e.payload) setSrc(`data:image/png;base64,${e.payload}`);
+      if (e.payload) {
+        setSrc(`data:image/png;base64,${e.payload}`);
+      } else {
+        loadThumbnail();
+      }
       startAutoClose();
     });
 
     // Fallback: window vừa được show nhưng event "show-thumbnail" có thể đến
     // trước listener mount (race condition). Dùng peekPending để lấy ảnh nếu src chưa có.
-    // Chạy sau một tick nhỏ để listener trên đăng ký trước.
     const fallbackTimer = setTimeout(() => {
-      ipc.peekPending().then((p) => {
-        if (p?.base64) setSrc((prev) => prev || `data:image/png;base64,${p.base64}`);
-      });
+      loadThumbnail();
     }, 100);
 
     startAutoClose();

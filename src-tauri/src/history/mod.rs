@@ -414,8 +414,11 @@ pub fn ingest_quick(
     let effective_doc = doc_json.unwrap_or(EMPTY_DOC_JSON);
     let preview_str = if base_data.is_some() { Some(data) } else { None };
 
+    let b64 = strip_data_url_prefix(base_str).to_string();
+    let bytes = STANDARD.decode(&b64).unwrap_or_default();
     let cap = capture::Capture {
-        base64: strip_data_url_prefix(base_str).to_string(),
+        bytes,
+        base64: b64,
         width,
         height,
     };

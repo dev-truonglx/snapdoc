@@ -15,6 +15,7 @@ import type { Annotation } from "../model";
 import { uid } from "../model";
 import { copyToClipboard } from "../../output/useOutput";
 import { toSafeBlobUrl } from "../../../lib/blobUtils";
+import { getCachedImage, setCachedImage } from "./imageCache";
 
 export interface StageHandle {
   exportPng: () => string | null;
@@ -327,13 +328,25 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       setImgLoading(false);
       return;
     }
+    const safe = toSafeImageUrl(doc.image);
+    // Kiểm tra cache: nếu ảnh đã từng giải mã (decode) trong RAM, nạp ngay lập tức 0ms, không hiển thị spinner
+    const cached = getCachedImage(safe.url);
+    if (cached) {
+      setImg(cached);
+      setImgLoading(false);
+      safe.revoke?.();
+      return;
+    }
+
     let cancelled = false;
     setImgLoading(true);
-    const safe = toSafeImageUrl(doc.image);
     const el = new window.Image();
 
     const onDone = () => {
       if (!cancelled) {
+        if (el.complete && el.naturalWidth > 0) {
+          setCachedImage(safe.url, el);
+        }
         setImg(el);
         setImgLoading(false);
       }

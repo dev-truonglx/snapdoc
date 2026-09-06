@@ -262,19 +262,22 @@ fn save_last_region(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h:
 
 /// Chụp "đóng băng" tất cả màn hình (JPEG) và lưu vào AppState — gọi TRƯỚC
 /// `open_overlays` để overlay có background tĩnh ngay khi hiện ra, tránh user
-/// tương tác nhầm với app phía sau (như Snagit/Lightshot). Chạy đồng bộ ở
-/// thread hiện tại (thường là `std::thread::spawn`), không block UI.
-/// Bỏ qua màn hình chứa cửa sổ editor (nếu có mở) để không "đóng băng" editor.
-fn take_frozen_screens(app: &AppHandle) {
+/// Chụp ảnh đóng băng màn hình bất đồng bộ (streaming): khởi chạy ngay trên thread riêng
+/// và stream từng màn hình vào AppState, đồng thời cho phép luồng chính mở overlay song song.
+fn take_frozen_screens_async(app: &AppHandle) {
     let exclude_ids = get_editor_window_monitor_ids(app);
-    let screens = capture::freeze::capture_frozen_screens_ex(&exclude_ids);
-    
-    #[cfg(target_os = "windows")]
-    restore_capture_affinity(app);
-    
-    if let Ok(mut g) = app.state::<AppState>().frozen_screens.lock() {
-        *g = screens;
+    let state = app.state::<AppState>();
+    if let Ok(mut g) = state.frozen_screens.lock() {
+        g.clear();
     }
+    state.frozen_screens_cvar.notify_all();
+
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        capture::freeze::capture_frozen_screens_streaming(&app_handle, &exclude_ids);
+        #[cfg(target_os = "windows")]
+        restore_capture_affinity(&app_handle);
+    });
 }
 
 /// Lấy danh sách monitor IDs của các cửa sổ editor đang mở.
@@ -310,9 +313,11 @@ fn get_editor_window_monitor_ids(app: &AppHandle) -> Vec<u32> {
 
 /// Dọn dẹp frozen screens sau khi overlay đóng — giải phóng bộ nhớ.
 fn clear_frozen_screens(app: &AppHandle) {
-    if let Ok(mut g) = app.state::<AppState>().frozen_screens.lock() {
+    let state = app.state::<AppState>();
+    if let Ok(mut g) = state.frozen_screens.lock() {
         g.clear();
     }
+    state.frozen_screens_cvar.notify_all();
 }
 
 /// Chỉ số overlay (`overlay-{i}`) từ label cửa sổ — cùng key với
@@ -346,13 +351,12 @@ fn crop_frozen(
     rw: f64,
     rh: f64,
 ) -> Option<capture::Capture> {
-    // Lấy JPEG base64 (đúng bản đang hiển thị) rồi giải mã ra RGBA để crop.
-    let b64 = {
+    // Lấy JPEG bytes (đúng bản đang hiển thị) rồi giải mã ra RGBA để crop.
+    let bytes = {
         let state = app.state::<AppState>();
         let guard = state.frozen_screens.lock().ok()?;
         guard.get(&idx).cloned()?
     };
-    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64).ok()?;
     let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
 
     let (bw, bh) = (img.width() as f64, img.height() as f64);
@@ -489,7 +493,7 @@ fn store(app: &AppHandle, cap: &capture::Capture, output: &str, scale_factor: f6
         Err(_) => return,
     };
     *guard = Some(PendingCapture {
-        base64: cap.base64.clone(),
+        bytes: cap.bytes.clone(),
         width: cap.width,
         height: cap.height,
         output: output.to_string(),
@@ -607,13 +611,18 @@ pub fn finish(
             windows::open_thumbnail(app)
         }
         _ => {
-            auto_export_copy(app, &cap, ingested_id.as_deref());
+            let app_clone = app.clone();
+            let cap_clone = cap.clone();
+            let ingested_id_clone = ingested_id.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                auto_export_copy(&app_clone, &cap_clone, ingested_id_clone.as_deref());
+            });
             windows::open_editor(app)
         }
     }
 }
 
-/// Tự động ghi thêm 1 bản PNG vào `saveDir` cấu hình cho các output mode
+/// Tự động ghi thêm 1 bản PNG/JPG vào `saveDir` cấu hình cho các output mode
 /// KHÔNG chủ động ghi ra đó (khác "save"/"save_copy", đã tự làm việc này với
 /// xử lý lỗi chặt hơn ở `finish()`) — để "Xem file trong Thư mục" ở
 /// Editor/Library luôn có sẵn 1 bản trong đúng folder user cấu hình, không
@@ -623,8 +632,14 @@ pub fn finish(
 /// BẠI nghĩa là chính hành động user vừa chọn thất bại, phải báo lỗi rõ ràng.
 fn auto_export_copy(app: &AppHandle, cap: &capture::Capture, history_id: Option<&str>) {
     let save_dir = resolve_save_dir(app);
-    let path = format!("{save_dir}/{}.png", stamp_filename("Screenshot"));
-    let data = format!("data:image/png;base64,{}", cap.base64);
+    let is_jpeg = cap.bytes.starts_with(&[0xFF, 0xD8]);
+    let ext = if is_jpeg { "jpg" } else { "png" };
+    let path = format!("{save_dir}/{}.{ext}", stamp_filename("Screenshot"));
+    let data = if is_jpeg {
+        format!("data:image/jpeg;base64,{}", cap.base64)
+    } else {
+        format!("data:image/png;base64,{}", cap.base64)
+    };
     match storage::save::write_png(&path, &data) {
         Ok(saved) => {
             if let Some(id) = history_id {
@@ -674,19 +689,28 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
     // mở overlay) — vì bản thân open_overlays() cũng gọi set_focus() lên 1
     // cửa sổ của app, có thể tự kích hoạt app và đẩy cửa sổ ẩn lên trước NGAY
     // TỪ ĐÂY, tức là TRƯỚC khi user kịp bấm phím tắt Copy/Save. Nếu snapshot
-    // sau open_overlays thì đã quá trễ — window đã bị đẩy lên rồi.
+    let t0 = std::time::Instant::now();
     snapshot_product_windows(app);
+    let t_snap = t0.elapsed();
+
     // Đóng băng màn hình: ẩn capture-bar TRƯỚC rồi mới chụp frozen — đảm bảo
     // capture-bar không lọt vào ảnh frozen. Sau đó mở overlay với frozen
     // image đã sẵn sàng trong AppState.
     if bar_is_visible(app) {
         hide_bar_for_freeze(app);
     }
-    take_frozen_screens(app);
+    let t1 = std::time::Instant::now();
+    take_frozen_screens_async(app);
+    let t_freeze = t1.elapsed();
+
+    let t2 = std::time::Instant::now();
     let result: Result<(), String> = (|| {
         let overlay_mode = if mode == "full" { "monitor" } else { mode };
         windows::open_overlays(app, overlay_mode)
     })();
+    let t_overlays = t2.elapsed();
+    eprintln!("[SnapDoc Timing] flow::run total: {:?}, snapshot: {:?}, freeze_launch: {:?}, open_overlays: {:?}", 
+        t0.elapsed(), t_snap, t_freeze, t_overlays);
     if let Err(e) = result {
         clear_frozen_screens(app);
         let _ = app.emit("snapdoc-error", e);
@@ -727,7 +751,7 @@ pub fn run_record_picker(app: &AppHandle, mode: &str) {
     if bar_is_visible(app) {
         hide_bar_for_freeze(app);
     }
-    take_frozen_screens(app);
+    take_frozen_screens_async(app);
     let result: Result<(), String> = (|| {
         *app.state::<AppState>().pending_record.lock().unwrap_or_else(|e| e.into_inner()) = true;
         let overlay_mode = if mode == "full" { "monitor" } else { mode };
@@ -1159,7 +1183,7 @@ pub fn start_quick(app: &AppHandle) {
     if bar_is_visible(app) {
         hide_bar_for_freeze(app);
     }
-    take_frozen_screens(app);
+    take_frozen_screens_async(app);
     let result: Result<(), String> = (|| {
         windows::open_overlays(app, "quick")
     })();

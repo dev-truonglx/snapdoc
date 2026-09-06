@@ -89,6 +89,50 @@ unsafe fn cgimage_to_rgba(img: *mut CGImage) -> CapResult {
         .ok_or_else(|| "Tạo RgbaImage thất bại".to_string())
 }
 
+/// Chuyển *mut CGImage thành JPEG bytes bằng NSBitmapImageRep (tận dụng phần cứng Media Engine của Apple Silicon).
+/// Tốc độ: ~10-20ms cho màn hình Retina 8MP thay vì ~890ms khi dùng CPU software JpegEncoder.
+pub unsafe fn cgimage_to_jpeg(img: *mut CGImage, quality: f32) -> Result<Vec<u8>, String> {
+    if img.is_null() {
+        return Err("ScreenCaptureKit trả ảnh rỗng".to_string());
+    }
+    use objc2::{class, msg_send, rc::autoreleasepool, runtime::AnyObject};
+    use objc2_foundation::ns_string;
+
+    autoreleasepool(|_| {
+        let rep_alloc: *mut AnyObject = msg_send![class!(NSBitmapImageRep), alloc];
+        if rep_alloc.is_null() {
+            return Err("Tạo NSBitmapImageRep (alloc) thất bại".to_string());
+        }
+        let rep: *mut AnyObject = msg_send![rep_alloc, initWithCGImage: img];
+        if rep.is_null() {
+            return Err("Khởi tạo NSBitmapImageRep từ CGImage thất bại".to_string());
+        }
+
+        let num: *mut AnyObject = msg_send![class!(NSNumber), numberWithDouble: quality as f64];
+        let key = ns_string!("NSImageCompressionFactor");
+        let props: *mut AnyObject = msg_send![class!(NSDictionary), dictionaryWithObject: num, forKey: key];
+
+        // 3 = NSBitmapImageFileTypeJPEG
+        let data: *mut AnyObject = msg_send![rep, representationUsingType: 3usize, properties: props];
+
+        let result = if !data.is_null() {
+            let len: usize = msg_send![data, length];
+            let bytes: *const u8 = msg_send![data, bytes];
+            if !bytes.is_null() && len > 0 {
+                let slice = std::slice::from_raw_parts(bytes, len);
+                Ok(slice.to_vec())
+            } else {
+                Err("Dữ liệu NSData JPEG rỗng".to_string())
+            }
+        } else {
+            Err("Nén JPEG bằng NSBitmapImageRep thất bại".to_string())
+        };
+
+        let _: () = msg_send![rep, release];
+        result
+    })
+}
+
 /// Chụp một hình chữ nhật theo POINTS trong không gian global (đa màn hình).
 /// Dùng cho cả chế độ vùng chọn và chụp nguyên màn hình.
 pub fn capture_rect(x: f64, y: f64, w: f64, h: f64) -> CapResult {
@@ -131,6 +175,7 @@ pub fn capture_rect(x: f64, y: f64, w: f64, h: f64) -> CapResult {
 ///
 /// Yêu cầu macOS 14+ (đã là baseline `minimumSystemVersion` của app, xem
 /// module-doc đầu file).
+#[allow(dead_code)]
 pub fn capture_display_excluding_own_app(display_id: u32) -> CapResult {
     let (tx, rx) = mpsc::channel::<CapResult>();
     let my_pid = std::process::id();
@@ -206,6 +251,109 @@ pub fn capture_display_excluding_own_app(display_id: u32) -> CapResult {
     }
     rx.recv_timeout(TIMEOUT)
         .map_err(|_| "Hết thời gian chờ ScreenCaptureKit".to_string())?
+}
+
+/// Chụp N màn hình (theo CGDirectDisplayID) SONG SONG trong CÙNG 1 lần fetch
+/// `SCShareableContent` — loại trừ toàn bộ cửa sổ của chính app.
+/// Nén JPEG bằng phần cứng Apple (NSBitmapImageRep / ImageIO) ngay trong completion handler
+/// và gọi `on_result(idx, result)` khi từng màn hình hoàn tất.
+pub fn capture_displays_excluding_own_app_jpeg(
+    targets: &[(usize, u32)],
+    quality: f32,
+    mut on_result: impl FnMut(usize, Result<Vec<u8>, String>),
+) {
+    if targets.is_empty() {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<(usize, Result<Vec<u8>, String>)>();
+    let my_pid = std::process::id();
+    let targets_owned: Vec<(usize, u32)> = targets.to_vec();
+    let n = targets_owned.len();
+
+    let handler = RcBlock::new(move |content: *mut SCShareableContent, err: *mut NSError| {
+        if content.is_null() {
+            let msg = format!(
+                "Không lấy được nội dung chia sẻ: {}",
+                unsafe { err_msg(err) }
+            );
+            for &(idx, _) in &targets_owned {
+                let _ = tx.send((idx, Err(msg.clone())));
+            }
+            return;
+        }
+        let content: &SCShareableContent = unsafe { &*content };
+        let displays = unsafe { content.displays() };
+
+        let apps = unsafe { content.applications() };
+        let own_apps: Vec<_> = apps
+            .iter()
+            .filter(|a| unsafe { a.processID() } as u32 == my_pid)
+            .collect();
+        let own_apps = NSArray::from_retained_slice(&own_apps);
+        let no_exceptions = NSArray::from_slice(&[]);
+
+        for &(idx, display_id) in &targets_owned {
+            let Some(display) = displays.iter().find(|d| unsafe { d.displayID() } == display_id) else {
+                let _ = tx.send((idx, Err("Không tìm thấy màn hình để chụp".to_string())));
+                continue;
+            };
+
+            let filter = unsafe {
+                SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
+                    SCContentFilter::alloc(),
+                    &display,
+                    &own_apps,
+                    &no_exceptions,
+                )
+            };
+            let scale = unsafe { filter.pointPixelScale() } as f64;
+            let content_rect = unsafe { filter.contentRect() };
+            let px_w = ((content_rect.size.width * scale).round() as usize).max(1);
+            let px_h = ((content_rect.size.height * scale).round() as usize).max(1);
+
+            let config = unsafe { SCStreamConfiguration::new() };
+            unsafe {
+                config.setWidth(px_w);
+                config.setHeight(px_h);
+                config.setShowsCursor(false);
+            }
+
+            let tx_inner = tx.clone();
+            let inner = RcBlock::new(move |img: *mut CGImage, err2: *mut NSError| {
+                let t_start = std::time::Instant::now();
+                let r = if img.is_null() {
+                    Err(format!("Chụp màn hình lỗi: {}", unsafe { err_msg(err2) }))
+                } else {
+                    let res = unsafe { cgimage_to_jpeg(img, quality) };
+                    eprintln!(
+                        "[SnapDoc Timing] display {} hardware jpeg encode took: {:?}",
+                        idx,
+                        t_start.elapsed()
+                    );
+                    res
+                };
+                let _ = tx_inner.send((idx, r));
+            });
+            unsafe {
+                SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
+                    &filter,
+                    &config,
+                    Some(&inner),
+                );
+            }
+        }
+    });
+
+    unsafe {
+        SCShareableContent::getShareableContentWithCompletionHandler(&handler);
+    }
+
+    for _ in 0..n {
+        match rx.recv_timeout(TIMEOUT) {
+            Ok((idx, res)) => on_result(idx, res),
+            Err(_) => break,
+        }
+    }
 }
 
 /// Chụp đúng một cửa sổ theo CGWindowID — kể cả khi bị cửa sổ khác che.

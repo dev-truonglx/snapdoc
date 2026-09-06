@@ -6,16 +6,24 @@ use crate::capture::window::WindowInfo;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
-/// Đọc (không xoá) ảnh đang chờ — dùng cho overlay & thumbnail.
+/// Đọc (không xoá) ảnh đang chờ — trả về Binary IPC Response.
 #[tauri::command]
-pub fn peek_pending(state: State<AppState>) -> Option<PendingCapture> {
-    state.pending.lock().ok().and_then(|g| g.clone())
+pub fn peek_pending(state: State<AppState>) -> Result<tauri::ipc::Response, String> {
+    let guard = state.pending.lock().map_err(|_| "Lỗi lock pending".to_string())?;
+    match guard.as_ref() {
+        Some(p) => Ok(tauri::ipc::Response::new(p.to_binary_payload())),
+        None => Ok(tauri::ipc::Response::new(Vec::new())),
+    }
 }
 
-/// Lấy và xoá ảnh đang chờ — editor gọi khi mở.
+/// Lấy và xoá ảnh đang chờ — trả về Binary IPC Response.
 #[tauri::command]
-pub fn take_pending(state: State<AppState>) -> Option<PendingCapture> {
-    state.pending.lock().ok().and_then(|mut g| g.take())
+pub fn take_pending(state: State<AppState>) -> Result<tauri::ipc::Response, String> {
+    let mut guard = state.pending.lock().map_err(|_| "Lỗi lock pending".to_string())?;
+    match guard.take() {
+        Some(p) => Ok(tauri::ipc::Response::new(p.to_binary_payload())),
+        None => Ok(tauri::ipc::Response::new(Vec::new())),
+    }
 }
 
 /// Đọc (không xoá) video đang chờ mở trong Editor.
@@ -33,11 +41,8 @@ pub fn take_pending_video(state: State<AppState>) -> Option<PendingVideo> {
 /// Ghi đè ảnh đang chờ với output="editor" — dùng cho nút "Mở Editor" ở
 /// "Chụp nhanh" để bàn giao sang cửa sổ Editor đầy đủ qua đúng pipeline
 /// `take_pending` có sẵn.
-/// `data`: data URL đầy đủ (`data:image/png;base64,...`) hoặc base64 trần —
-/// tách bỏ phần prefix nếu có, giữ đúng quy ước của `PendingCapture.base64`.
-/// `doc_json`: lớp annotation đã serialize (DocPayload JSON) — khi có, Editor
-/// dựng lại đúng các annotation object để user chỉnh tiếp, thay vì nhận ảnh
-/// phẳng mà không còn annotation nào. `None` = không có annotation, ảnh sạch.
+/// `data`: data URL đầy đủ (`data:image/png;base64,...`) hoặc base64 trần.
+/// `doc_json`: lớp annotation đã serialize (DocPayload JSON).
 #[tauri::command]
 pub fn set_pending_image(
     app: AppHandle,
@@ -48,15 +53,21 @@ pub fn set_pending_image(
     doc_json: Option<String>,
     scale_factor: Option<f64>,
 ) {
-    let base64 = data.split(',').next_back().unwrap_or(&data).to_string();
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let base64_str = data.split(',').next_back().unwrap_or(&data);
+    let bytes = STANDARD.decode(base64_str).unwrap_or_default();
+    let base64 = base64_str.to_string();
     let scale = scale_factor.unwrap_or(1.0);
 
     // "Mở Editor" từ Quick Capture cũng là một capture hoàn chỉnh (đối xứng với
     // nhánh `_ => open_editor` của `flow::finish`) — ingest ngay để History
     // ghi nhận mọi đường ra editor, không chỉ Copy/Save.
-    // Ảnh ingest là ảnh NỀN THÔ (screenshot chưa ghép annotation): annotation
-    // đi riêng qua doc_json và được lưu non-destructive, giữ pixel nền sạch.
-    let cap = crate::capture::Capture { base64: base64.clone(), width, height };
+    let cap = crate::capture::Capture {
+        bytes: bytes.clone(),
+        base64,
+        width,
+        height,
+    };
     let history_id = match crate::history::ingest(&app, &cap, "quick", scale) {
         Ok(rec) => Some(rec.id),
         Err(e) => {
@@ -67,7 +78,7 @@ pub fn set_pending_image(
 
     if let Ok(mut g) = state.pending.lock() {
         *g = Some(PendingCapture {
-            base64,
+            bytes,
             width,
             height,
             output: "editor".to_string(),
@@ -390,8 +401,6 @@ pub fn take_open_file(window: tauri::WebviewWindow, app: AppHandle) -> Option<St
 /// liệu của app, ingest chỉ tạo ra một bản sao thứ hai để user phải tự hỏi bản
 /// nào là thật.
 fn open_snapdoc_path(app: &AppHandle, path: &str) -> Result<(), String> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
-
     let f = crate::snapdoc_file::read_snapdoc(std::path::Path::new(path))?;
     let img = image::load_from_memory(&f.base_png)
         .map_err(|e| format!("Ảnh nền trong .snapdoc không hợp lệ: {e}"))?;
@@ -401,7 +410,7 @@ fn open_snapdoc_path(app: &AppHandle, path: &str) -> Result<(), String> {
         let state = app.state::<AppState>();
         let mut guard = state.pending.lock().map_err(|_| "Lock error".to_string())?;
         *guard = Some(PendingCapture {
-            base64: STANDARD.encode(&f.base_png),
+            bytes: f.base_png,
             width: img.width(),
             height: img.height(),
             output: "editor".to_string(),
@@ -787,15 +796,8 @@ pub fn start_scroll_session(state: State<'_, AppState>) {
 /// 300 lát tương ứng chiều cao hàng chục nghìn pixel, đủ cho mọi trang web siêu dài.
 const MAX_SCROLL_SLICES: usize = 300;
 
-#[derive(serde::Serialize)]
-pub struct ScrollSliceResult {
-    #[serde(rename = "sliceIndex")]
-    pub slice_index: usize,
-    pub base64: String,
-}
-
 /// Chụp một lát cắt trong tính năng chụp cuộn.
-/// Trả về `ScrollSliceResult` chứa `slice_index` và ảnh base64.
+/// Trả về Binary IPC `tauri::ipc::Response`: [slice_index: 4 bytes u32 LE] + [png_bytes].
 /// Lát cắt được đưa vào bộ đệm `uncommitted` (tối đa 16 lát gần nhất).
 #[tauri::command]
 pub async fn capture_scroll_slice(
@@ -806,7 +808,7 @@ pub async fn capture_scroll_slice(
     ry: u32,
     rw: u32,
     rh: u32,
-) -> Result<ScrollSliceResult, String> {
+) -> Result<tauri::ipc::Response, String> {
     let raw_img = tauri::async_runtime::spawn_blocking(move || -> Result<image::RgbaImage, String> {
         let m = crate::capture::monitor::at_point(mx, my)?;
         let img = crate::capture::region::capture_region_raw(&m, rx, ry, rw, rh)?;
@@ -815,7 +817,7 @@ pub async fn capture_scroll_slice(
     .await
     .map_err(|e| format!("Task join error: {e}"))??;
 
-    let cap = crate::capture::persist(&raw_img)?;
+    let png_bytes = crate::capture::encode_png(&raw_img)?;
     let slice_index = {
         let mut slices = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
         let idx = slices.next_id;
@@ -829,10 +831,11 @@ pub async fn capture_scroll_slice(
         idx
     };
 
-    Ok(ScrollSliceResult {
-        slice_index,
-        base64: cap.base64,
-    })
+    let mut payload = Vec::with_capacity(4 + png_bytes.len());
+    payload.extend_from_slice(&(slice_index as u32).to_le_bytes());
+    payload.extend_from_slice(&png_bytes);
+
+    Ok(tauri::ipc::Response::new(payload))
 }
 
 /// Xác nhận một lát cắt được đưa vào danh sách ghép (chuyển từ `uncommitted` sang `committed`).
@@ -865,7 +868,10 @@ pub fn finalize_scroll_capture(
     // `end_scroll_session` để đóng overlay đó VÀ dọn state phòng "kích hoạt
     // lại" (xem hàm đó).
     crate::windows::end_scroll_session(&app);
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let bytes = STANDARD.decode(&base64).unwrap_or_default();
     let cap = crate::capture::Capture {
+        bytes,
         base64,
         width,
         height,
@@ -1053,11 +1059,11 @@ pub async fn finalize_scroll_stitch(
             current_y += inst.src_h;
         }
 
-        // Dọn bộ nhớ lát cắt thô ngay lập tức trước khi mã hoá PNG để tránh đỉnh RAM
+        // Dọn bộ nhớ lát cắt thô ngay lập tức trước khi mã hoá để tránh đỉnh RAM
         drop(committed);
         drop(uncommitted);
 
-        let cap = crate::capture::persist(&final_img)?;
+        let cap = crate::capture::persist_scroll(&final_img)?;
         drop(final_img);
         Ok(cap)
     })
@@ -1085,17 +1091,31 @@ pub async fn finalize_scroll_stitch(
     crate::flow::finish(&app, cap, &output, scale_factor)
 }
 
-/// Lấy ảnh "đóng băng màn hình" (JPEG base64 trần) cho overlay có chỉ số `idx`.
+/// Lấy ảnh "đóng băng màn hình" (JPEG binary bytes) cho overlay có chỉ số `idx`.
 /// Frontend gọi khi mount overlay để lấy background tĩnh thay vì nhìn xuyên
 /// qua overlay trong suốt vào app đang chạy phía sau.
-/// Trả `None` nếu chưa có dữ liệu (lỗi chụp, hoặc chưa gọi `take_frozen_screens`).
+/// Trả binary IPC response (ArrayBuffer ở frontend).
+/// Nếu luồng chụp freeze đang chạy song song, hàm này chờ tối đa 2s trên Condvar
+/// và trả về ngay khi màn hình `idx` nén xong mà không phải chờ các màn khác.
 #[tauri::command]
-pub fn get_frozen_screen(state: State<AppState>, idx: usize) -> Option<String> {
-    state
-        .frozen_screens
-        .lock()
-        .ok()
-        .and_then(|g| g.get(&idx).cloned())
+pub fn get_frozen_screen(state: State<AppState>, idx: usize) -> Result<tauri::ipc::Response, String> {
+    let mut g = state.frozen_screens.lock().map_err(|e| e.to_string())?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+    while !g.contains_key(&idx) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        g = state
+            .frozen_screens_cvar
+            .wait_timeout(g, remaining)
+            .map_err(|e| e.to_string())?
+            .0;
+    }
+    g.get(&idx)
+        .cloned()
+        .map(tauri::ipc::Response::new)
+        .ok_or_else(|| "No frozen screen available".to_string())
 }
 
 /// Frontend gọi NGAY SAU KHI đã paint xong ảnh đóng băng (double rAF, xem
@@ -1107,6 +1127,8 @@ pub fn notify_overlay_ready(state: State<AppState>, gen: u64, idx: usize) {
     if let Ok(slot) = state.overlay_ready_tx.lock() {
         if let Some(tx) = slot.as_ref() {
             let _ = tx.send((gen, idx));
+        } else {
+            eprintln!("[SnapDoc Timing] notify_overlay_ready dropped (no receiver): gen={gen}, idx={idx}");
         }
     }
 }

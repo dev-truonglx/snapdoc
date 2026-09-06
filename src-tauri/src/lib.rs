@@ -22,8 +22,32 @@ use tauri_plugin_global_shortcut::ShortcutState;
 /// Instance đó là editor tạm: không tray, không chạy nền — đóng cửa sổ là thoát.
 static OPEN_WITH_MODE: AtomicBool = AtomicBool::new(false);
 
+#[cfg(debug_assertions)]
+fn redirect_stdio_to_dev_log() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        extern "C" {
+            fn dup2(oldfd: i32, newfd: i32) -> i32;
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let log_dir = std::path::PathBuf::from(home).join("Library/Logs/com.snapdoc.app");
+            let _ = std::fs::create_dir_all(&log_dir);
+            let log_file = log_dir.join("SnapDoc.log");
+            if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(log_file) {
+                use std::os::fd::AsRawFd;
+                let fd = file.as_raw_fd();
+                dup2(fd, 1);
+                dup2(fd, 2);
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(debug_assertions)]
+    redirect_stdio_to_dev_log();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             eprintln!("[SnapDoc] Single instance launched with argv: {:?}", argv);

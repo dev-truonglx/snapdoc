@@ -1382,12 +1382,13 @@ fn wait_for_overlays_ready(app: &AppHandle, gen: u64, expected: usize) {
     use std::sync::mpsc;
     use std::time::Instant;
 
+    let t_start = Instant::now();
     let (tx, rx) = mpsc::channel::<(u64, usize)>();
     if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
         *slot = Some(tx);
     }
 
-    let deadline = Instant::now() + Duration::from_millis(220);
+    let deadline = Instant::now() + Duration::from_millis(350);
     let mut seen: HashSet<usize> = HashSet::with_capacity(expected);
     while seen.len() < expected {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1398,10 +1399,14 @@ fn wait_for_overlays_ready(app: &AppHandle, gen: u64, expected: usize) {
             Ok((g, idx)) if g == gen => {
                 seen.insert(idx);
             }
-            Ok(_) => {} // tín hiệu trễ từ phiên overlay cũ — bỏ qua
+            Ok((g, idx)) => {
+                eprintln!("[SnapDoc Timing] wait_for_overlays_ready: ignored stale signal g={g} != gen={gen}, idx={idx}");
+            }
             Err(_) => break, // timeout
         }
     }
+
+    eprintln!("[SnapDoc Timing] wait_for_overlays_ready: {:?}, seen={}/{}", t_start.elapsed(), seen.len(), expected);
 
     if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
         *slot = None;
@@ -1580,18 +1585,25 @@ fn try_reuse_prewarmed_overlays(
     }
 
     for (i, (snap, win)) in snaps.iter().zip(wins.iter()).enumerate() {
-        let query = build_overlay_query(mode, i, snap, record, preset, gen);
-        let navigated = win.url().ok().and_then(|mut u| {
-            u.set_query(Some(&query));
-            win.navigate(u).ok()
+        position_overlay(app, win, snap);
+        let preset_json = preset.and_then(|(preset_display, px, py, pw, ph)| {
+            if preset_display == snap.id {
+                Some(serde_json::json!({
+                    "x": px, "y": py, "w": pw, "h": ph
+                }))
+            } else {
+                None
+            }
         });
-        if navigated.is_none() {
-            eprintln!("[SnapDoc] Tái sử dụng overlay pre-warm thất bại — để build() dựng lại từ đầu");
+        if let Err(e) = win.emit("overlay-session-start", serde_json::json!({
+            "mode": mode,
+            "gen": gen,
+            "record": record,
+            "preset": preset_json,
+        })) {
+            eprintln!("[SnapDoc] Gửi session tới overlay-{i} thất bại: {e}");
             return false;
         }
-        // Chỉ định vị (ẩn) — CHƯA show(). show() đồng loạt sau khi
-        // `wait_for_overlays_ready` xác nhận nội dung đã paint xong, xem đó.
-        position_overlay(app, win, snap);
     }
 
     // Chờ frontend từng overlay báo đã paint xong ảnh đóng băng, rồi mới
@@ -1705,9 +1717,11 @@ pub fn open_overlays_ex(
         .fetch_add(1, Ordering::SeqCst)
         + 1;
 
-    // P8: thử tái sử dụng pool overlay đã pre-warm trước khi đóng+build lại
-    // từ đầu — xem `try_reuse_prewarmed_overlays`/`prewarm_overlays`.
-    if !try_reuse_prewarmed_overlays(app, mode, record, preset, &snaps, cursor_idx, gen) {
+    let t_reuse = std::time::Instant::now();
+    let reused = try_reuse_prewarmed_overlays(app, mode, record, preset, &snaps, cursor_idx, gen);
+    eprintln!("[SnapDoc Timing] try_reuse_prewarmed_overlays: {:?}, reused={}", t_reuse.elapsed(), reused);
+    if !reused {
+        let t_build = std::time::Instant::now();
         close_overlays(app);
         let mut wins = Vec::with_capacity(snaps.len());
         for (i, snap) in snaps.iter().enumerate() {
@@ -1729,6 +1743,7 @@ pub fn open_overlays_ex(
                 let _ = win.set_focus();
             }
         }
+        eprintln!("[SnapDoc Timing] rebuild overlays total: {:?}", t_build.elapsed());
     }
 
     let handle = app.clone();
@@ -1950,6 +1965,9 @@ pub fn close_overlays(app: &AppHandle) {
     // cửa sổ vừa đóng nhưng OS/DWM chưa xử lý xong dễ lỗi/không ổn định).
     let handle = app.clone();
     std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(Duration::from_millis(50));
+        #[cfg(not(target_os = "macos"))]
         std::thread::sleep(Duration::from_millis(300));
         prewarm_overlays(&handle);
     });
@@ -2525,7 +2543,7 @@ pub fn open_thumbnail(app: &AppHandle) -> Result<(), String> {
             .pending
             .lock()
             .ok()
-            .and_then(|g| g.as_ref().map(|p| p.base64.clone()))
+            .and_then(|g| g.as_ref().map(|p| p.base64()))
             .unwrap_or_default()
     };
 

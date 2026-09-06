@@ -251,15 +251,18 @@ export default function Editor() {
   const loadPending = (p: Pending | null) => {
     if (!p) return false;
     const payload = parseDocPayload(p.docJson);
-    let imageUrl = `data:image/png;base64,${p.base64}`;
-    if (p.base64 && p.base64.length > 200_000) {
+    const isJpeg = p.base64 ? p.base64.startsWith("/9j/") : false;
+    const mime = isJpeg ? "image/jpeg" : "image/png";
+    let imageUrl = p.imageUrl || (p.base64 ? `data:${mime};base64,${p.base64}` : "");
+    if (!p.imageUrl && p.base64 && p.base64.length > 200_000) {
       try {
-        const blob = base64ToBlob(p.base64, "image/png");
+        const blob = base64ToBlob(p.base64, mime);
         imageUrl = URL.createObjectURL(blob);
       } catch (e) {
         console.error("Lỗi tạo Blob URL trong loadPending:", e);
       }
     }
+    if (!imageUrl) return false;
 
     loadDoc(
       {
@@ -274,15 +277,16 @@ export default function Editor() {
       },
       true,
     );
-    if (p.history_id && imageUrl.startsWith("blob:")) {
-      ownBlobUrl(p.history_id, imageUrl);
+    const sessionKey = p.history_id ?? `file:${uid()}`;
+    if (imageUrl.startsWith("blob:")) {
+      ownBlobUrl(sessionKey, imageUrl);
     }
     if (payload) {
       useEditor.getState().setStepCounter(payload.stepCounter);
       useEditor.getState().setArrowCounter(payload.arrowCounter);
       if (payload.rectCounter) useEditor.getState().setRectCounter(payload.rectCounter);
     }
-    noteActiveKey(p.history_id ?? `file:${uid()}`);
+    noteActiveKey(sessionKey);
     return true;
   };
 
@@ -298,7 +302,11 @@ export default function Editor() {
       });
       // Ảnh từ file ngoài chưa có mặt trong Library → khoá tổng hợp, chỉ sống
       // trong phiên app này (xem `sessions.ts`).
-      noteActiveKey(`file:${uid()}`);
+      const sessionKey = `file:${uid()}`;
+      if (dataUrl.startsWith("blob:")) {
+        ownBlobUrl(sessionKey, dataUrl);
+      }
+      noteActiveKey(sessionKey);
     };
     img.src = dataUrl;
   };
