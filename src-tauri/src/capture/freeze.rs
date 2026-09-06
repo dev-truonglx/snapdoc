@@ -28,7 +28,7 @@ pub fn capture_frozen_screens() -> HashMap<usize, Vec<u8>> {
 /// nhận ảnh và vẽ ngay lập tức.
 pub fn capture_frozen_screens_streaming(
     app: &tauri::AppHandle,
-    _exclude_monitor_ids: &[u32],
+    exclude_monitor_ids: &[u32],
 ) {
     let monitors = match Monitor::all() {
         Ok(m) => m,
@@ -40,6 +40,7 @@ pub fn capture_frozen_screens_streaming(
 
     #[cfg(target_os = "macos")]
     {
+        let _ = exclude_monitor_ids;
         let t_total = std::time::Instant::now();
         let targets: Vec<(usize, u32)> = monitors
             .iter()
@@ -106,7 +107,7 @@ pub fn capture_frozen_screens_streaming(
 
 /// Phiên bản nội bộ nhận danh sách monitor IDs cần exclude (để không chụp freeze).
 /// Được gọi từ `flow.rs` để loại bỏ editor/settings/history monitors.
-pub fn capture_frozen_screens_ex(_exclude_monitor_ids: &[u32]) -> HashMap<usize, Vec<u8>> {
+pub fn capture_frozen_screens_ex(exclude_monitor_ids: &[u32]) -> HashMap<usize, Vec<u8>> {
     let monitors = match Monitor::all() {
         Ok(m) => m,
         Err(e) => {
@@ -117,6 +118,7 @@ pub fn capture_frozen_screens_ex(_exclude_monitor_ids: &[u32]) -> HashMap<usize,
 
     #[cfg(target_os = "macos")]
     {
+        let _ = exclude_monitor_ids;
         let targets: Vec<(usize, u32)> = monitors
             .iter()
             .enumerate()

@@ -512,7 +512,7 @@ pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> 
             let mut guard = state.pending.lock()
                 .map_err(|_| "Lock error".to_string())?;
             *guard = Some(PendingCapture {
-                base64: b64,
+                bytes,
                 width,
                 height,
                 output: "editor".to_string(),

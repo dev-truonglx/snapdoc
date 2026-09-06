@@ -94,7 +94,6 @@ pub(crate) fn hide_editor_for_freeze(app: &AppHandle) {
     #[cfg(target_os = "windows")]
     {
         use crate::capture::win_affinity;
-        use tauri::Manager;
         if !crate::storage::settings::is_record_self(app) {
             // Danh sách tất cả labels cần loại khỏi capture
             let labels = ["editor", "capture-bar"]; // thêm "settings", "history" nếu cần
