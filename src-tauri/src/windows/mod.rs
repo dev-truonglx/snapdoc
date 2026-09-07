@@ -2198,8 +2198,53 @@ pub fn prewarm_editor(app: &AppHandle) -> Result<(), String> {
 /// từ chối; gọi `set_focus()` lại sau đó để có luôn bàn phím nếu OS cho phép.
 #[cfg(target_os = "windows")]
 fn force_to_foreground(win: &tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, BringWindowToTop, GetForegroundWindow,
+        GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+
+    // Cấp quyền SetForegroundWindow cho bất kỳ tiến trình nào (ASFW_ANY = 0xFFFFFFFF),
+    // giúp vượt qua cơ chế Foreground Lock của Windows khi vừa đóng overlay.
+    unsafe {
+        AllowSetForegroundWindow(0xFFFFFFFF);
+    }
+
     let _ = win.set_always_on_top(true);
     let _ = win.set_always_on_top(false);
+
+    if let Ok(raw_hwnd) = win.hwnd() {
+        let target_hwnd = raw_hwnd.0 as HWND;
+        unsafe {
+            if IsIconic(target_hwnd) != 0 {
+                ShowWindow(target_hwnd, SW_RESTORE);
+            }
+
+            let fg_hwnd = GetForegroundWindow();
+            if !fg_hwnd.is_null() && fg_hwnd != target_hwnd {
+                let cur_thread = GetCurrentThreadId();
+                let fg_thread = GetWindowThreadProcessId(fg_hwnd, std::ptr::null_mut());
+                if cur_thread != fg_thread && fg_thread != 0 {
+                    AttachThreadInput(cur_thread, fg_thread, 1);
+                    SetForegroundWindow(target_hwnd);
+                    BringWindowToTop(target_hwnd);
+                    SetFocus(target_hwnd);
+                    AttachThreadInput(cur_thread, fg_thread, 0);
+                } else {
+                    SetForegroundWindow(target_hwnd);
+                    BringWindowToTop(target_hwnd);
+                    SetFocus(target_hwnd);
+                }
+            } else {
+                SetForegroundWindow(target_hwnd);
+                BringWindowToTop(target_hwnd);
+                SetFocus(target_hwnd);
+            }
+        }
+    }
+
     let _ = win.set_focus();
 }
 
@@ -2260,6 +2305,10 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
     app.state::<AppState>()
         .editor_hidden_dirty
         .store(false, Ordering::SeqCst);
+
+    // Đóng toàn bộ overlay trước khi hiển thị/focus Editor để tránh việc overlay
+    // đóng sau đó cướp mất active window / keyboard focus trên Windows.
+    close_overlays(app);
 
     if let Some(win) = app.get_webview_window("editor") {
         let _ = win.show();
