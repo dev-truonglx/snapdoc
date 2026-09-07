@@ -223,7 +223,13 @@
     "startButton": "Bắt đầu (Space)",
     "finishButton": "Hoàn thành (Enter)",
     "processingButton": "Đang xử lý...",
-    "cancelButton": "Huỷ"
+    "cancelButton": "Huỷ",
+    "pinFooter": "Ghim footer ở đáy",
+    "removeFooter": "Ẩn footer cố định",
+    "footerDetected": "Footer cố định",
+    "extendSidebar": "Kéo dài nền Sidebar",
+    "normalSidebar": "Không kéo dài Sidebar",
+    "sidebarDetected": "Phát hiện Sidebar"
   },
   "history": {
     "selectItem": "Chọn một ảnh để xem chi tiết",

@@ -985,6 +985,10 @@ pub struct StitchInstruction {
     src_y: u32,
     #[serde(rename = "srcH")]
     src_h: u32,
+    #[serde(default, rename = "contentX")]
+    content_x: Option<u32>,
+    #[serde(default, rename = "sidebarBg")]
+    sidebar_bg: Option<[u8; 4]>,
 }
 
 /// Ghép ảnh cuộn ở backend dựa trên danh sách các lát cắt đã lưu và hướng dẫn ghép.
@@ -1037,9 +1041,10 @@ pub async fn finalize_scroll_stitch(
             // Nối toàn bộ bề rộng nội dung khớp với preview, copy theo hàng siêu tốc
             let copy_w = width.min(slice_w);
             if copy_w > 0 {
-                let row_len = (copy_w * 4) as usize;
                 let src_raw: &[u8] = slice.as_raw();
                 let dst_raw: &mut [u8] = &mut final_img;
+                let content_x = inst.content_x.unwrap_or(0).min(copy_w);
+
                 for y in 0..inst.src_h {
                     let src_pixel_y = inst.src_y + y;
                     if src_pixel_y >= slice_h {
@@ -1049,10 +1054,28 @@ pub async fn finalize_scroll_stitch(
                     if dest_pixel_y >= total_height {
                         continue;
                     }
-                    let src_off = (src_pixel_y as usize * slice_w as usize) * 4;
-                    let dst_off = (dest_pixel_y as usize * width as usize) * 4;
-                    dst_raw[dst_off..dst_off + row_len]
-                        .copy_from_slice(&src_raw[src_off..src_off + row_len]);
+
+                    let dst_row_off = (dest_pixel_y as usize * width as usize) * 4;
+
+                    // 1. Cột Sidebar bên trái: điền màu nền Sidebar vào vùng 0..content_x
+                    if content_x > 0 {
+                        if let Some(bg) = inst.sidebar_bg {
+                            for x in 0..content_x as usize {
+                                let px_off = dst_row_off + x * 4;
+                                dst_raw[px_off..px_off + 4].copy_from_slice(&bg);
+                            }
+                        }
+                    }
+
+                    // 2. Cột nội dung cuộn bên phải: copy từ lát cắt thô
+                    let content_w = copy_w - content_x;
+                    if content_w > 0 {
+                        let content_len = (content_w * 4) as usize;
+                        let src_off = (src_pixel_y as usize * slice_w as usize + content_x as usize) * 4;
+                        let dst_off = dst_row_off + (content_x as usize * 4);
+                        dst_raw[dst_off..dst_off + content_len]
+                            .copy_from_slice(&src_raw[src_off..src_off + content_len]);
+                    }
                 }
             }
 

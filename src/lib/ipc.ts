@@ -324,8 +324,18 @@ export const ipc = {
     invoke<void>("finalize_scroll_capture", { base64, width, height, mx, my }),
   startScrollSession: () =>
     invoke<void>("start_scroll_session"),
-  finalizeScrollStitch: (width: number, instructions: { sliceIndex: number; srcY: number; srcH: number }[], mx?: number, my?: number) =>
-    invoke<void>("finalize_scroll_stitch", { width, instructions, mx, my }),
+  finalizeScrollStitch: (
+    width: number,
+    instructions: {
+      sliceIndex: number;
+      srcY: number;
+      srcH: number;
+      contentX?: number;
+      sidebarBg?: [number, number, number, number];
+    }[],
+    mx?: number,
+    my?: number,
+  ) => invoke<void>("finalize_scroll_stitch", { width, instructions, mx, my }),
   // History / Library
   listHistory: (filter: HistoryFilter) => invoke<HistoryPage>("list_history", { filter }),
   getHistoryItem: (id: string) => invoke<HistoryItem>("get_history_item", { id }),
