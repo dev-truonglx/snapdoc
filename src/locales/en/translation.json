@@ -223,7 +223,13 @@
     "startButton": "Start (Space)",
     "finishButton": "Finish (Enter)",
     "processingButton": "Processing…",
-    "cancelButton": "Cancel"
+    "cancelButton": "Cancel",
+    "pinFooter": "Pin footer to bottom",
+    "removeFooter": "Hide sticky footer",
+    "footerDetected": "Sticky footer",
+    "extendSidebar": "Extend sidebar background",
+    "normalSidebar": "Don't extend sidebar",
+    "sidebarDetected": "Sidebar detected"
   },
   "history": {
     "selectItem": "Select an image to view details",

@@ -44,6 +44,7 @@ const NCC_ACCEPT = 0.52; // NCC tại đỉnh ≥ ngưỡng này thì đưa vào
 const CHANGE_TOL = 16; // độ lệch sáng để coi 1 điểm là "đã đổi" giữa 2 khung
 const FIXED_FG_FRAC = 0.05; // mật độ nội dung tối thiểu để 1 ô được xét là cột cố định
 const FIXED_CHANGE_MAX = 0.2; // tỉ lệ nội dung thay đổi tối đa để coi ô là CỐ ĐỊNH (sidebar dính)
+const FOOTER_SHADOW_MARGIN = 14; // khoảng đệm an toàn loại trừ dải bóng đổ (box-shadow) trên đỉnh footer cố định
 const DEBUG = false; // bật true để hiện log chẩn đoán trên panel khi cần dò lỗi cuộn
 
 // Độ sáng (luminance) gần đúng của 1 pixel — dùng phân biệt nền/nội dung.
@@ -355,6 +356,248 @@ function refineDyLocal(
   return bestDy;
 }
 
+export interface DetectedSidebar {
+  width: number;
+  bg: [number, number, number, number];
+  hex: string;
+}
+
+// Nhận diện cột Sidebar cố định bên trái dựa trên ma trận so sánh vi phân 2D:
+// Cột Sidebar đứng yên (P == C) trong khi nội dung bên phải cuộn (P != C tại cùng toạ độ và P == C(y - dy)).
+function detectSidebar(
+  prev: Uint8ClampedArray,
+  cur: Uint8ClampedArray,
+  w: number,
+  h: number,
+  scrollTop: number,
+  scrollBottom: number,
+  dy: number,
+): DetectedSidebar | null {
+  if (dy < 4) return null;
+  const stride = w * 4;
+  const y0 = Math.max(0, scrollTop + 16);
+  const y1 = Math.min(h, scrollBottom - 16);
+  const span = y1 - y0;
+  if (span < 40) return null;
+
+  // Sidebar luôn ở nửa trái màn hình (tối đa 48% chiều rộng và không quá 640px)
+  const maxCol = Math.min(Math.floor(w * 0.48), 640);
+  if (maxCol < 60) return null;
+
+  const stepY = Math.max(6, Math.min(12, Math.floor(span / 45)));
+  const testRows: number[] = [];
+  for (let y = y0; y < y1; y += stepY) {
+    testRows.push(y);
+  }
+  const nRows = testRows.length;
+  if (nRows < 6) return null;
+
+  const colStep = 4;
+  const testLimitX = Math.min(w - 20, Math.max(maxCol + 80, Math.floor(w * 0.65)));
+
+  interface ColStat {
+    x: number;
+    sameRate: number;
+    diffRate: number;
+    structRate: number;
+  }
+  const colStats: ColStat[] = [];
+
+  for (let x = 0; x < testLimitX; x += colStep) {
+    let same = 0;
+    let diff = 0;
+    let struct = 0;
+    let testedDy = 0;
+
+    for (const y of testRows) {
+      const idx = y * stride + x * 4;
+      const d0 =
+        Math.abs(prev[idx] - cur[idx]) +
+        Math.abs(prev[idx + 1] - cur[idx + 1]) +
+        Math.abs(prev[idx + 2] - cur[idx + 2]);
+
+      if (d0 <= 24) {
+        same++;
+      } else if (d0 > 30) {
+        diff++;
+      }
+
+      const yShift = y - dy;
+      if (yShift >= scrollTop && yShift < scrollBottom) {
+        testedDy++;
+        const idxShift = yShift * stride + x * 4;
+        const dShift =
+          Math.abs(prev[idx] - cur[idxShift]) +
+          Math.abs(prev[idx + 1] - cur[idxShift + 1]) +
+          Math.abs(prev[idx + 2] - cur[idxShift + 2]);
+        // Pixel đứng yên tại chỗ nhưng khi dịch dy thì khác biệt -> đặc trưng cố định (icon/chữ/kẻ viền)
+        if (d0 <= 24 && dShift > 30) {
+          struct++;
+        }
+      }
+    }
+
+    colStats.push({
+      x,
+      sameRate: same / nRows,
+      diffRate: diff / nRows,
+      structRate: testedDy > 0 ? struct / testedDy : 0,
+    });
+  }
+
+  // Tìm cột đầu tiên bắt đầu có chuyển động cuộn rõ rệt
+  let firstMoveIdx = -1;
+  for (let i = 0; i < colStats.length; i++) {
+    const stat = colStats[i];
+    if (stat.diffRate >= 0.12 || (stat.sameRate < 0.82 && stat.diffRate >= 0.06)) {
+      const next1 = colStats[i + 1];
+      const next2 = colStats[i + 2];
+      if (stat.diffRate >= 0.22 || (next1 && next1.diffRate >= 0.06) || (next2 && next2.diffRate >= 0.06)) {
+        firstMoveIdx = i;
+        break;
+      }
+    }
+  }
+
+  if (firstMoveIdx === -1) return null;
+  const xMove = colStats[firstMoveIdx].x;
+  // Nếu nội dung cuộn bắt đầu ngay sát mép trái (< 60px): không có sidebar
+  if (xMove < 60) return null;
+
+  // Kiểm tra dải bên trái [0..xMove] có thực sự đứng yên không
+  let stationaryColumns = 0;
+  let structColumns = 0;
+  for (let i = 0; i < firstMoveIdx; i++) {
+    if (colStats[i].sameRate >= 0.85) {
+      stationaryColumns++;
+    }
+    if (colStats[i].structRate >= 0.03) {
+      structColumns++;
+    }
+  }
+
+  const stationaryFrac = stationaryColumns / firstMoveIdx;
+  if (stationaryFrac < 0.82) return null;
+
+  // Kiểm tra xem đây có phải là Sidebar thực sự (có icon/chữ hoặc màu nền khác nội dung)
+  // hay chỉ là lề trắng vô vị của tài liệu căn giữa
+  const testSbX = Math.max(8, Math.floor(xMove * 0.4));
+  const testContentX = Math.min(w - 20, xMove + 80);
+  const midY = Math.floor((y0 + y1) / 2);
+  const idxSb = midY * stride + testSbX * 4;
+  const idxCnt = midY * stride + testContentX * 4;
+  const diffBg =
+    Math.abs(cur[idxSb] - cur[idxCnt]) +
+    Math.abs(cur[idxSb + 1] - cur[idxCnt + 1]) +
+    Math.abs(cur[idxSb + 2] - cur[idxCnt + 2]);
+
+  if (structColumns < 2 && diffBg < 15) {
+    // Không có icon/chữ và màu nền giống hệt vùng cuộn -> chỉ là lề trống
+    return null;
+  }
+
+  // Xác định toạ độ cắt sidebar chính xác
+  let sidebarW = xMove;
+  const searchStartX = Math.max(50, xMove - 60);
+  const searchEndX = Math.min(maxCol, xMove + 4);
+
+  // 1. Tìm đường kẻ phân cách (divider border line)
+  let bestBorderX = -1;
+  let maxBorderScore = -1;
+
+  for (let bx = searchStartX; bx <= searchEndX; bx++) {
+    let borderScore = 0;
+    for (const y of testRows) {
+      const idx = y * stride + bx * 4;
+      const lum = lumAt(cur, idx);
+      const lumL = lumAt(cur, idx - 8); // bx - 2
+      const lumR = lumAt(cur, idx + 8); // bx + 2
+      if (Math.abs(lum - lumL) >= 8 || Math.abs(lum - lumR) >= 8) {
+        borderScore++;
+      }
+    }
+    if (borderScore >= nRows * 0.55 && borderScore > maxBorderScore) {
+      maxBorderScore = borderScore;
+      bestBorderX = bx;
+    }
+  }
+
+  if (bestBorderX !== -1) {
+    sidebarW = bestBorderX + 1;
+  } else {
+    // 2. Dò lùi pixel từ xMove để tìm mép pixel dừng cuộn
+    for (let px = xMove; px >= searchStartX; px--) {
+      let pxDiff = 0;
+      for (const y of testRows) {
+        const idx = y * stride + px * 4;
+        const d =
+          Math.abs(prev[idx] - cur[idx]) +
+          Math.abs(prev[idx + 1] - cur[idx + 1]) +
+          Math.abs(prev[idx + 2] - cur[idx + 2]);
+        if (d > 28) pxDiff++;
+      }
+      if (pxDiff / nRows <= 0.04) {
+        sidebarW = px + 1;
+        break;
+      }
+    }
+  }
+
+  sidebarW = Math.max(60, Math.min(maxCol, sidebarW));
+
+  // Lấy mẫu màu nền đại diện của Sidebar (lấy màu xuất hiện áp đảo)
+  const sampleXs = [
+    Math.max(8, Math.floor(sidebarW * 0.2)),
+    Math.max(8, Math.floor(sidebarW * 0.4)),
+    Math.max(8, Math.floor(sidebarW * 0.6)),
+    Math.max(8, Math.floor(sidebarW * 0.8)),
+  ];
+
+  const colorSamples: [number, number, number, number][] = [];
+  for (const sx of sampleXs) {
+    for (const y of testRows) {
+      const idx = y * stride + sx * 4;
+      colorSamples.push([cur[idx], cur[idx + 1], cur[idx + 2], cur[idx + 3]]);
+    }
+  }
+
+  let bestColor = colorSamples[0] || [245, 245, 247, 255];
+  let maxCount = 0;
+
+  for (let i = 0; i < colorSamples.length; i++) {
+    const c1 = colorSamples[i];
+    let count = 0;
+    for (let j = 0; j < colorSamples.length; j++) {
+      const c2 = colorSamples[j];
+      if (
+        Math.abs(c1[0] - c2[0]) <= 12 &&
+        Math.abs(c1[1] - c2[1]) <= 12 &&
+        Math.abs(c1[2] - c2[2]) <= 12
+      ) {
+        count++;
+      }
+    }
+    if (count > maxCount) {
+      maxCount = count;
+      bestColor = c1;
+    }
+  }
+
+  const bg: [number, number, number, number] = [
+    bestColor[0],
+    bestColor[1],
+    bestColor[2],
+    255,
+  ];
+  const hex = `rgb(${bg[0]}, ${bg[1]}, ${bg[2]})`;
+
+  return {
+    width: sidebarW,
+    bg,
+    hex,
+  };
+}
+
 interface ScrollAnalysis {
   dy: number; // số pixel nội dung mới (0 = không cuộn, -1 = không khớp được)
   topFixed: number; // chiều cao dải cố định trên (header dính)
@@ -519,6 +762,18 @@ export default function ScrollControl() {
   const seqRef = useRef(0);
   const [copied, setCopied] = useState(false);
 
+  // Nhận diện & ghim footer cố định (Sticky Footer Bottom Pinning)
+  const detectedFooterHeightRef = useRef(0);
+  const hasTrimmedInitialFrameRef = useRef(false);
+  const [pinFooterToBottom, setPinFooterToBottom] = useState(true);
+  const [hasStickyFooter, setHasStickyFooter] = useState(false);
+
+  // Nhận diện & kéo dài màu nền Sidebar cố định (Sidebar Background Extension)
+  const detectedSidebarRef = useRef<DetectedSidebar | null>(null);
+  const [extendSidebar, setExtendSidebar] = useState(true);
+  const extendSidebarRef = useRef(true);
+  const [hasSidebar, setHasSidebar] = useState(false);
+
   // Master canvas dùng "capacity doubling"
   const masterRef = useRef<HTMLCanvasElement | null>(null);
   const masterCtxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -530,7 +785,13 @@ export default function ScrollControl() {
   // Vận tốc cuộn ước tính (px/tick) để hỗ trợ phân biệt chu kỳ bảng biểu
   const velocityRef = useRef(0);
 
-  const instructionsRef = useRef<{ sliceIndex: number; srcY: number; srcH: number }[]>([]);
+  const instructionsRef = useRef<{
+    sliceIndex: number;
+    srcY: number;
+    srcH: number;
+    contentX?: number;
+    sidebarBg?: [number, number, number, number];
+  }[]>([]);
   const totalSlicesRef = useRef(0);
 
   const isCapturingRef = useRef(false);
@@ -562,6 +823,10 @@ export default function ScrollControl() {
     lastRawImgDataRef.current = null;
     latestRawFrameRef.current = null;
     instructionsRef.current = [];
+    detectedFooterHeightRef.current = 0;
+    hasTrimmedInitialFrameRef.current = false;
+    detectedSidebarRef.current = null;
+    setHasSidebar(false);
   };
 
   // Phím tắt bắt đầu / hoàn thành / huỷ
@@ -654,15 +919,37 @@ export default function ScrollControl() {
     const fw = img.naturalWidth;
     const fh = img.naturalHeight;
 
+    const footerH = detectedFooterHeightRef.current;
+    const bridgeH = footerH > 0 ? Math.max(0, fh - footerH) : fh;
+    if (bridgeH === 0) return;
+
+    const useSidebar = extendSidebarRef.current && !!detectedSidebarRef.current;
+    const contentX = useSidebar ? detectedSidebarRef.current!.width : 0;
+    const sidebarBg = useSidebar ? detectedSidebarRef.current!.bg : undefined;
+
     const at = usedHeightRef.current;
-    ensureCapacity(at + fh, fw);
-    masterCtxRef.current?.drawImage(img, 0, 0, fw, fh, 0, at, fw, fh);
-    usedHeightRef.current = at + fh;
+    ensureCapacity(at + bridgeH, fw);
+
+    if (useSidebar && contentX > 0 && contentX < fw) {
+      masterCtxRef.current!.fillStyle = detectedSidebarRef.current!.hex;
+      masterCtxRef.current!.fillRect(0, at, contentX, bridgeH);
+      const contentW = fw - contentX;
+      masterCtxRef.current?.drawImage(
+        img,
+        contentX, 0, contentW, bridgeH,
+        contentX, at, contentW, bridgeH
+      );
+    } else {
+      masterCtxRef.current?.drawImage(img, 0, 0, fw, bridgeH, 0, at, fw, bridgeH);
+    }
+    usedHeightRef.current = at + bridgeH;
 
     instructionsRef.current.push({
       sliceIndex: sliceIdx,
       srcY: 0,
-      srcH: fh,
+      srcH: bridgeH,
+      contentX: useSidebar && contentX > 0 ? contentX : undefined,
+      sidebarBg: useSidebar && contentX > 0 ? sidebarBg : undefined,
     });
 
     await ipc.commitScrollSlice(sliceIdx).catch(console.error);
@@ -672,7 +959,7 @@ export default function ScrollControl() {
         imgData,
         img,
         sliceIdx,
-        botFixed: 0,
+        botFixed: footerH,
         usedHeightAtFrame: usedHeightRef.current,
       }
     ];
@@ -792,6 +1079,14 @@ export default function ScrollControl() {
             usedHeightAtFrame: fh,
           }
         ];
+        instructionsRef.current = [
+          { sliceIndex, srcY: 0, srcH: fh }
+        ];
+        detectedFooterHeightRef.current = 0;
+        hasTrimmedInitialFrameRef.current = false;
+        setHasStickyFooter(false);
+        detectedSidebarRef.current = null;
+        setHasSidebar(false);
         masterCtxRef.current?.drawImage(img, 0, 0);
         usedHeightRef.current = fh;
         setStitchedHeight(fh);
@@ -852,7 +1147,74 @@ export default function ScrollControl() {
           setLostTracking(false);
         }
 
+        // 1. Nhận diện & khóa ổn định dải Footer cố định (Sticky Footer)
+        // Mở rộng thêm FOOTER_SHADOW_MARGIN để loại trừ hoàn toàn dải bóng đổ (box-shadow) / viền mờ
+        let effectiveBotFixed = botFixed;
+        if (botFixed >= 16) {
+          const fullFooterH = Math.min(Math.floor(fh * 0.35), botFixed + FOOTER_SHADOW_MARGIN);
+          if (detectedFooterHeightRef.current === 0) {
+            detectedFooterHeightRef.current = fullFooterH;
+            setHasStickyFooter(true);
+          } else if (Math.abs(fullFooterH - detectedFooterHeightRef.current) <= 8) {
+            effectiveBotFixed = detectedFooterHeightRef.current;
+          } else {
+            detectedFooterHeightRef.current = fullFooterH;
+          }
+        }
+        // Khi đã phát hiện footer cố định, LUÔN khóa effectiveBotFixed ở độ cao an toàn này.
+        // Tuyệt đối không để rơi về 0 làm lát cắt bị liếm vào footer/bóng đổ!
+        if (detectedFooterHeightRef.current > 0) {
+          effectiveBotFixed = detectedFooterHeightRef.current;
+        }
+
+        // 2. Cắt tỉa hồi tố Frame 0: loại bỏ dải footer bị dính vào đáy Frame 0 ban đầu
+        const footerH = detectedFooterHeightRef.current;
+        if (footerH > 0 && !hasTrimmedInitialFrameRef.current && instructionsRef.current.length > 0) {
+          hasTrimmedInitialFrameRef.current = true;
+          const trimmedH = Math.max(0, fh - footerH);
+          instructionsRef.current[0].srcH = trimmedH;
+
+          if (history.length > 0) {
+            history[0].usedHeightAtFrame = trimmedH;
+            history[0].botFixed = footerH;
+          }
+
+          if (matchedIdx === 0) {
+            usedHeightRef.current = trimmedH;
+            // Xóa dải footer cũ trên master canvas để các nhịp tiếp theo vẽ đè sạch sẽ
+            masterCtxRef.current?.clearRect(0, trimmedH, fw, footerH);
+          }
+        }
+
         const matchedItem = history[matchedIdx];
+
+        // 3. Nhận diện & lấy mẫu màu nền Sidebar cố định (nếu có)
+        if (!detectedSidebarRef.current && dy >= 4 && matchedIdx >= 0) {
+          const sb = detectSidebar(
+            matchedItem.imgData.data,
+            newImgData.data,
+            fw,
+            fh,
+            topFixed,
+            fh - effectiveBotFixed,
+            dy,
+          );
+          if (sb) {
+            detectedSidebarRef.current = sb;
+            setHasSidebar(true);
+
+            // Tô màu nền đè lên cột sidebar cho các lát cắt đã ghép trước đó sau Frame 0
+            const initialTopH = history[0]?.usedHeightAtFrame ?? (fh - effectiveBotFixed);
+            if (masterCtxRef.current && usedHeightRef.current > initialTopH) {
+              masterCtxRef.current.fillStyle = sb.hex;
+              masterCtxRef.current.fillRect(0, initialTopH, sb.width, usedHeightRef.current - initialTopH);
+            }
+            for (let k = 1; k < instructionsRef.current.length; k++) {
+              instructionsRef.current[k].contentX = sb.width;
+              instructionsRef.current[k].sidebarBg = sb.bg;
+            }
+          }
+        }
 
         // Nếu khớp với frame cũ hơn trong buffer, rollback usedHeight và instructions
         if (matchedIdx < history.length - 1) {
@@ -865,16 +1227,38 @@ export default function ScrollControl() {
           }
         }
 
-        const srcY = Math.max(topFixed, fh - botFixed - dy);
+        const useSidebar = extendSidebarRef.current && !!detectedSidebarRef.current;
+        const contentX = useSidebar ? detectedSidebarRef.current!.width : 0;
+        const sidebarBg = useSidebar ? detectedSidebarRef.current!.bg : undefined;
+
+        const srcY = Math.max(topFixed, fh - effectiveBotFixed - dy);
         const at = usedHeightRef.current;
         ensureCapacity(at + dy, fw);
-        masterCtxRef.current?.drawImage(img, 0, srcY, fw, dy, 0, at, fw, dy);
+
+        if (useSidebar && contentX > 0 && contentX < fw) {
+          // 1. Cột Sidebar bên trái: đổ màu nền Sidebar trơn
+          masterCtxRef.current!.fillStyle = detectedSidebarRef.current!.hex;
+          masterCtxRef.current!.fillRect(0, at, contentX, dy);
+
+          // 2. Cột nội dung bên phải: chỉ ghép phần nội dung cuộn
+          const contentW = fw - contentX;
+          masterCtxRef.current?.drawImage(
+            img,
+            contentX, srcY, contentW, dy,
+            contentX, at,   contentW, dy
+          );
+        } else {
+          masterCtxRef.current?.drawImage(img, 0, srcY, fw, dy, 0, at, fw, dy);
+        }
+
         usedHeightRef.current = at + dy;
 
         instructionsRef.current.push({
           sliceIndex,
           srcY,
           srcH: dy,
+          contentX: useSidebar && contentX > 0 ? contentX : undefined,
+          sidebarBg: useSidebar && contentX > 0 ? sidebarBg : undefined,
         });
 
         // Xác nhận lát cắt vào backend Rust
@@ -889,7 +1273,7 @@ export default function ScrollControl() {
           imgData: newImgData,
           img,
           sliceIdx: sliceIndex,
-          botFixed,
+          botFixed: effectiveBotFixed,
           usedHeightAtFrame: usedHeightRef.current,
         });
         if (updatedHistory.length > 8) {
@@ -955,6 +1339,13 @@ export default function ScrollControl() {
     totalSlicesRef.current = 0;
     recentFramesRef.current = [];
     velocityRef.current = 0;
+    detectedFooterHeightRef.current = 0;
+    hasTrimmedInitialFrameRef.current = false;
+    setHasStickyFooter(false);
+    detectedSidebarRef.current = null;
+    extendSidebarRef.current = true;
+    setExtendSidebar(true);
+    setHasSidebar(false);
     await ipc.startScrollSession().catch(console.error);
 
     // Chụp lát cắt đầu tiên ngay lập tức.
@@ -988,8 +1379,56 @@ export default function ScrollControl() {
       return;
     }
 
+    // Nếu người dùng chọn giữ footer ở đáy và đã phát hiện footer cố định:
+    // Ghim dải footer từ frame cuối cùng vào đáy bức ảnh ghép
+    const footerH = detectedFooterHeightRef.current;
+    if (pinFooterToBottom && footerH > 0 && latestRawFrameRef.current) {
+      const { sliceIdx, img } = latestRawFrameRef.current;
+      const fw = frameWidthRef.current || img.naturalWidth;
+      const fh = img.naturalHeight;
+      const at = usedHeightRef.current;
+      ensureCapacity(at + footerH, fw);
+      masterCtxRef.current?.drawImage(
+        img,
+        0,
+        fh - footerH,
+        fw,
+        footerH,
+        0,
+        at,
+        fw,
+        footerH
+      );
+      usedHeightRef.current = at + footerH;
+
+      instructionsRef.current.push({
+        sliceIndex: sliceIdx,
+        srcY: fh - footerH,
+        srcH: footerH,
+      });
+
+      await ipc.commitScrollSlice(sliceIdx).catch(console.error);
+    }
+
     setStatus("processing");
     try {
+      // Đồng bộ thiết lập kéo dài màu nền sidebar vào danh sách chỉ dẫn ghép Rust
+      if (!extendSidebarRef.current) {
+        for (const inst of instructionsRef.current) {
+          delete inst.contentX;
+          delete inst.sidebarBg;
+        }
+      } else if (detectedSidebarRef.current) {
+        const sb = detectedSidebarRef.current;
+        for (let k = 1; k < instructionsRef.current.length; k++) {
+          if (pinFooterToBottom && footerH > 0 && k === instructionsRef.current.length - 1) {
+            continue;
+          }
+          instructionsRef.current[k].contentX = sb.width;
+          instructionsRef.current[k].sidebarBg = sb.bg;
+        }
+      }
+
       const w = frameWidthRef.current;
       await ipc.finalizeScrollStitch(w, instructionsRef.current, mx, my);
       cleanupMemory();
@@ -1064,6 +1503,36 @@ export default function ScrollControl() {
           <span>{t("scroll.frameCount")} {frameCount}</span>
           <span>·</span>
           <span>{t("scroll.height")} {stitchedHeight}px</span>
+          {hasStickyFooter && (
+            <>
+              <span>·</span>
+              <button
+                onClick={() => setPinFooterToBottom((p) => !p)}
+                style={pinFooterToBottom ? footerPinBtnActive : footerPinBtnInactive}
+                title={pinFooterToBottom ? t("scroll.removeFooter") : t("scroll.pinFooter")}
+              >
+                {pinFooterToBottom ? `📌 ${t("scroll.pinFooter")}` : `🚫 ${t("scroll.removeFooter")}`}
+              </button>
+            </>
+          )}
+          {hasSidebar && (
+            <>
+              <span>·</span>
+              <button
+                onClick={() => {
+                  setExtendSidebar((p) => {
+                    const next = !p;
+                    extendSidebarRef.current = next;
+                    return next;
+                  });
+                }}
+                style={extendSidebar ? footerPinBtnActive : footerPinBtnInactive}
+                title={extendSidebar ? t("scroll.normalSidebar") : t("scroll.extendSidebar")}
+              >
+                {extendSidebar ? `📁 ${t("scroll.extendSidebar")}` : `📁 ${t("scroll.normalSidebar")}`}
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -1279,9 +1748,40 @@ const statusWarn: React.CSSProperties = {
 
 const statsRow: React.CSSProperties = {
   display: "flex",
+  alignItems: "center",
   gap: 6,
   fontSize: 11,
   color: "#94a3b8",
+};
+
+const footerPinBtnActive: React.CSSProperties = {
+  background: "rgba(99, 102, 241, 0.18)",
+  border: "1px solid rgba(99, 102, 241, 0.4)",
+  borderRadius: 6,
+  padding: "1px 6px",
+  fontSize: 10,
+  fontWeight: 500,
+  color: "#a5b4fc",
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 3,
+  transition: "all 0.15s ease",
+};
+
+const footerPinBtnInactive: React.CSSProperties = {
+  background: "rgba(255, 255, 255, 0.05)",
+  border: "1px solid rgba(255, 255, 255, 0.1)",
+  borderRadius: 6,
+  padding: "1px 6px",
+  fontSize: 10,
+  fontWeight: 500,
+  color: "#64748b",
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 3,
+  transition: "all 0.15s ease",
 };
 
 const debugRow: React.CSSProperties = {
