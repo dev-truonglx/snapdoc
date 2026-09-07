@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame as WgcFrame;
-use windows_capture::graphics_capture_api::InternalCaptureControl;
+use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
 use windows_capture::monitor::Monitor as WgcMonitor;
 use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
@@ -463,6 +463,14 @@ pub fn start(
     // `spawn_ticker`, không còn phụ thuộc `MinimumUpdateIntervalSettings`.
     let min_interval = MinimumUpdateIntervalSettings::Default;
 
+    // Tắt viền vàng mặc định của Windows (WGC) nếu hệ thống hỗ trợ (Windows 10 2004+ / Windows 11),
+    // vì SnapDoc đã có khung viền riêng (RecordBorder / overlay).
+    let draw_border = if GraphicsCaptureApi::is_border_settings_supported().unwrap_or(false) {
+        DrawBorderSettings::WithoutBorder
+    } else {
+        DrawBorderSettings::Default
+    };
+
     // `Settings<Flags, T>` khác kiểu cụ thể giữa `Monitor` và `Window` (T khác
     // nhau) nên không thể dùng chung 1 biến `settings` — mỗi nhánh tự dựng
     // settings + gọi `start_free_threaded` + trả `RecordingHandle` riêng,
@@ -476,7 +484,7 @@ pub fn start(
             let settings = Settings::new(
                 monitor,
                 CursorCaptureSettings::Default,
-                DrawBorderSettings::Default,
+                draw_border,
                 SecondaryWindowSettings::Default,
                 min_interval,
                 DirtyRegionSettings::Default,
@@ -501,7 +509,7 @@ pub fn start(
             let settings = Settings::new(
                 window,
                 CursorCaptureSettings::Default,
-                DrawBorderSettings::Default,
+                draw_border,
                 SecondaryWindowSettings::Default,
                 min_interval,
                 DirtyRegionSettings::Default,
@@ -536,7 +544,7 @@ pub fn start(
             let settings = Settings::new(
                 monitor,
                 CursorCaptureSettings::Default,
-                DrawBorderSettings::Default,
+                draw_border,
                 SecondaryWindowSettings::Default,
                 min_interval,
                 DirtyRegionSettings::Default,

@@ -24,7 +24,8 @@
 pub mod encoder;
 pub mod filmstrip;
 pub mod keystroke;
-mod audio_mic;
+pub mod mouse_click;
+pub mod audio_mic;
 #[cfg(target_os = "windows")]
 mod audio_wasapi;
 
@@ -111,6 +112,7 @@ fn audio_source_setting(app: &AppHandle) -> AudioSource {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn record_self_setting(app: &AppHandle) -> bool {
     crate::storage::settings::is_record_self(app)
 }
@@ -119,6 +121,12 @@ fn keystroke_overlay_setting(app: &AppHandle) -> bool {
     let config_dir = app.path().app_config_dir().unwrap_or_default();
     let settings = crate::storage::settings::load(&config_dir);
     settings.get("recordShowKeystrokes").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn click_overlay_setting(app: &AppHandle) -> bool {
+    let config_dir = app.path().app_config_dir().unwrap_or_default();
+    let settings = crate::storage::settings::load(&config_dir);
+    settings.get("recordShowClicks").and_then(|v| v.as_bool()).unwrap_or(true)
 }
 
 /// 1 track audio ghi PCM thô nhận từ `mac_stream`/`audio_mic`/`audio_wasapi`.
@@ -131,17 +139,231 @@ struct AudioTrack {
 
 /// 1 phiên ghi audio đang chạy song song với video — lưu riêng từng nguồn (mic / audio hệ thống)
 /// để căn chỉnh gain boost và balance âm lượng chính xác khi mux.
+#[cfg(target_os = "macos")]
 struct ActiveAudio {
-    /// `Some` khi có thu mic — cần dừng TRƯỚC `stream.stop()` ở
-    /// `stop_recording` để đóng kênh PCM.
     mic: Option<audio_mic::MicCapture>,
-    /// `Some` khi có thu audio hệ thống TRÊN WINDOWS.
-    #[cfg(target_os = "windows")]
-    system_audio: Option<audio_wasapi::SystemAudioCapture>,
     mic_track: Option<AudioTrack>,
     system_track: Option<AudioTrack>,
-    /// Thư mục tạm chứa các file PCM + video tạm — dọn ở `stop_recording` sau khi ghép xong.
     tmp_dir: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl ActiveAudio {
+    fn stop_and_collect(mut self) -> (Option<(PathBuf, u32, u16)>, Option<(PathBuf, u32, u16)>, PathBuf) {
+        if let Some(mic) = self.mic.take() {
+            mic.stop();
+        }
+        let mic_meta = self.mic_track.take().map(|t| {
+            let _ = t.writer.join();
+            (t.raw_path, t.sample_rate, t.channels)
+        });
+        let sys_meta = self.system_track.take().map(|t| {
+            let _ = t.writer.join();
+            (t.raw_path, t.sample_rate, t.channels)
+        });
+        (mic_meta, sys_meta, self.tmp_dir)
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct ActiveAudio {
+    mic: Arc<Mutex<Option<audio_mic::MicCapture>>>,
+    system_audio: Arc<Mutex<Option<audio_wasapi::SystemAudioCapture>>>,
+    mic_track: Arc<Mutex<Option<AudioTrack>>>,
+    system_track: Arc<Mutex<Option<AudioTrack>>>,
+    init_thread: Option<std::thread::JoinHandle<()>>,
+    stop_signal: Arc<AtomicBool>,
+    tmp_dir: PathBuf,
+}
+
+#[cfg(target_os = "windows")]
+impl ActiveAudio {
+    fn start_async(
+        app: AppHandle,
+        want_mic: bool,
+        want_system_audio: bool,
+        tmp_dir: PathBuf,
+        paused: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        let mic = Arc::new(Mutex::new(None));
+        let system_audio = Arc::new(Mutex::new(None));
+        let mic_track = Arc::new(Mutex::new(None));
+        let system_track = Arc::new(Mutex::new(None));
+        let stop_signal = Arc::new(AtomicBool::new(false));
+
+        let mic_clone = mic.clone();
+        let sys_clone = system_audio.clone();
+        let mic_track_clone = mic_track.clone();
+        let sys_track_clone = system_track.clone();
+        let stop_signal_clone = stop_signal.clone();
+        let tmp_dir_clone = tmp_dir.clone();
+        let paused_clone = paused.clone();
+
+        let t_audio_start = Instant::now();
+
+        let init_thread = std::thread::Builder::new()
+            .name("snapdoc-audio-init".into())
+            .spawn(move || {
+                std::thread::scope(|s| {
+                    if want_mic {
+                        let mic_target = mic_clone.clone();
+                        let mic_track_target = mic_track_clone.clone();
+                        let stop_sig = stop_signal_clone.clone();
+                        let dir = tmp_dir_clone.clone();
+                        let p = paused_clone.clone();
+                        let app_ref = app.clone();
+
+                        s.spawn(move || {
+                            if stop_sig.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            let mic_res = audio_mic::start();
+
+                            if stop_sig.load(Ordering::SeqCst) {
+                                if let Ok((mic_cap, _, _, _)) = mic_res {
+                                    mic_cap.stop();
+                                }
+                                return;
+                            }
+
+                            match mic_res {
+                                Ok((mic_cap, rx, sample_rate, channels)) => {
+                                    let delta_ms = t_audio_start.elapsed().as_millis() as usize;
+                                    let frame_size = channels as usize * 2;
+                                    let num_frames = (sample_rate as usize * delta_ms) / 1000;
+                                    let silence_bytes = num_frames * frame_size;
+
+                                    let raw_path = dir.join("mic.pcm");
+                                    let writer = spawn_pcm_file_writer(raw_path.clone(), rx, p, silence_bytes);
+
+                                    if let Ok(mut g) = mic_target.lock() {
+                                        *g = Some(mic_cap);
+                                    }
+                                    if let Ok(mut g) = mic_track_target.lock() {
+                                        *g = Some(AudioTrack {
+                                            writer,
+                                            raw_path,
+                                            sample_rate,
+                                            channels,
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    notify_warning(&app_ref, &format!("Không ghi được mic — vẫn tiếp tục quay: {e}"));
+                                }
+                            }
+                        });
+                    }
+
+                    if want_system_audio {
+                        let sys_target = sys_clone.clone();
+                        let sys_track_target = sys_track_clone.clone();
+                        let stop_sig = stop_signal_clone.clone();
+                        let dir = tmp_dir_clone.clone();
+                        let p = paused_clone.clone();
+                        let app_ref = app.clone();
+
+                        s.spawn(move || {
+                            if stop_sig.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            let sys_res = audio_wasapi::start();
+
+                            if stop_sig.load(Ordering::SeqCst) {
+                                if let Ok((sys_cap, _, _, _)) = sys_res {
+                                    sys_cap.stop();
+                                }
+                                return;
+                            }
+
+                            match sys_res {
+                                Ok((sys_cap, rx, sample_rate, channels)) => {
+                                    let delta_ms = t_audio_start.elapsed().as_millis() as usize;
+                                    let frame_size = channels as usize * 2;
+                                    let num_frames = (sample_rate as usize * delta_ms) / 1000;
+                                    let silence_bytes = num_frames * frame_size;
+
+                                    let raw_path = dir.join("system.pcm");
+                                    let writer = spawn_pcm_file_writer(raw_path.clone(), rx, p, silence_bytes);
+
+                                    if let Ok(mut g) = sys_target.lock() {
+                                        *g = Some(sys_cap);
+                                    }
+                                    if let Ok(mut g) = sys_track_target.lock() {
+                                        *g = Some(AudioTrack {
+                                            writer,
+                                            raw_path,
+                                            sample_rate,
+                                            channels,
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    notify_warning(&app_ref, &format!("Không ghi được audio hệ thống — vẫn tiếp tục quay: {e}"));
+                                }
+                            }
+                        });
+                    }
+                });
+            })
+            .map_err(|e| format!("Không tạo được luồng khởi tạo audio: {e}"))?;
+
+        Ok(ActiveAudio {
+            mic,
+            system_audio,
+            mic_track,
+            system_track,
+            init_thread: Some(init_thread),
+            stop_signal,
+            tmp_dir,
+        })
+    }
+
+    fn stop_and_collect(mut self) -> (Option<(PathBuf, u32, u16)>, Option<(PathBuf, u32, u16)>, PathBuf) {
+        self.stop_signal.store(true, Ordering::SeqCst);
+        if let Some(t) = self.init_thread.take() {
+            let _ = t.join();
+        }
+
+        if let Ok(mut g) = self.mic.lock() {
+            if let Some(mic) = g.take() {
+                mic.stop();
+            }
+        }
+        if let Ok(mut g) = self.system_audio.lock() {
+            if let Some(sys) = g.take() {
+                sys.stop();
+            }
+        }
+
+        let mic_meta = self.mic_track.lock().ok().and_then(|mut g| g.take()).map(|t| {
+            let _ = t.writer.join();
+            (t.raw_path, t.sample_rate, t.channels)
+        });
+        let sys_meta = self.system_track.lock().ok().and_then(|mut g| g.take()).map(|t| {
+            let _ = t.writer.join();
+            (t.raw_path, t.sample_rate, t.channels)
+        });
+
+        (mic_meta, sys_meta, self.tmp_dir.clone())
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for ActiveAudio {
+    fn drop(&mut self) {
+        self.stop_signal.store(true, Ordering::SeqCst);
+        if let Ok(mut g) = self.mic.lock() {
+            if let Some(mic) = g.take() {
+                mic.stop();
+            }
+        }
+        if let Ok(mut g) = self.system_audio.lock() {
+            if let Some(sys) = g.take() {
+                sys.stop();
+            }
+        }
+    }
 }
 
 /// 1 phiên quay đang chạy. Field `stream` chỉ tồn tại trên macOS (nguồn frame
@@ -183,6 +405,7 @@ pub struct ActiveRecording {
     /// `paused_accumulated_ms` khi resume (xem `resume_recording`).
     pause_started_at: Arc<Mutex<Option<Instant>>>,
     keystroke_listener: Option<keystroke::KeystrokeListener>,
+    mouse_click_listener: Option<mouse_click::MouseClickListener>,
 }
 
 #[derive(Default)]
@@ -256,8 +479,13 @@ pub fn cleanup_stale_temp(app: &AppHandle) {
     if let Ok(entries) = std::fs::read_dir(&tmp) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("snapdoc-rec-audio-") || name.starts_with("snapdoc-trim-") {
+            if name.starts_with("snapdoc-rec-audio-")
+                || name.starts_with("snapdoc-trim-")
+                || name.starts_with("snapdoc-filmstrip-")
+            {
                 let _ = std::fs::remove_dir_all(entry.path());
+            } else if name.starts_with("snapdoc-frame-") && name.ends_with(".jpg") {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     }
@@ -313,6 +541,7 @@ fn spawn_pcm_file_writer(
     path: PathBuf,
     rx: Receiver<Vec<u8>>,
     paused: Arc<AtomicBool>,
+    initial_silence_bytes: usize,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use std::io::Write;
@@ -323,6 +552,22 @@ fn spawn_pcm_file_writer(
                 return;
             }
         };
+
+        if initial_silence_bytes > 0 {
+            // Đệm khoảng lặng (zeros) lúc đầu để bù thời gian khởi động driver audio,
+            // bảo đảm audio timeline khớp chính xác 100% với video frame từ frame 0.
+            let silence_chunk_size = 4096.min(initial_silence_bytes);
+            let silence = vec![0u8; silence_chunk_size];
+            let mut remaining = initial_silence_bytes;
+            while remaining > 0 {
+                let to_write = remaining.min(silence.len());
+                if file.write_all(&silence[..to_write]).is_err() {
+                    break;
+                }
+                remaining -= to_write;
+            }
+        }
+
         while let Ok(chunk) = rx.recv() {
             // Khi đang paused: drop chunk âm thanh — không ghi vào file,
             // giữ đồng bộ với video (video cũng bị drop cùng khoảng thời
@@ -410,30 +655,35 @@ fn record_border_rect(target: &crate::capture::mac_stream::RecordTarget) -> Opti
 }
 
 #[cfg(target_os = "macos")]
-fn record_keystroke_rect(target: &crate::capture::mac_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
+fn record_target_rect(target: &crate::capture::mac_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
     use crate::capture::mac_stream::RecordTarget;
     use xcap::Monitor;
-    let (rx, ry, rw, rh) = match target {
+    match target {
         RecordTarget::Display(display_id) => {
             let m = Monitor::all()
                 .ok()?
                 .into_iter()
                 .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
-            (m.x().ok()? as f64, m.y().ok()? as f64, m.width().ok()? as f64, m.height().ok()? as f64)
+            Some((m.x().ok()? as f64, m.y().ok()? as f64, m.width().ok()? as f64, m.height().ok()? as f64))
         }
         RecordTarget::Window(window_id) => {
             let list = crate::capture::window::list(0.0, 0.0, 1.0).ok()?;
             let w = list.into_iter().find(|w| w.id == *window_id)?;
-            (w.x, w.y, w.width, w.height)
+            Some((w.x, w.y, w.width, w.height))
         }
         RecordTarget::Region { display_id, x, y, w, h } => {
             let m = Monitor::all()
                 .ok()?
                 .into_iter()
                 .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
-            (m.x().ok()? as f64 + *x, m.y().ok()? as f64 + *y, *w, *h)
+            Some((m.x().ok()? as f64 + *x, m.y().ok()? as f64 + *y, *w, *h))
         }
-    };
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn record_keystroke_rect(target: &crate::capture::mac_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
+    let (rx, ry, rw, rh) = record_target_rect(target)?;
     let kw = 780.0_f64.min(rw - 20.0).max(220.0);
     let kh = 130.0;
     let kx = rx + (rw - kw) / 2.0;
@@ -469,37 +719,43 @@ fn record_border_rect(target: &crate::capture::windows_stream::RecordTarget) -> 
 }
 
 #[cfg(target_os = "windows")]
-fn record_keystroke_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
+fn record_target_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64, f64)> {
     use crate::capture::windows_stream::RecordTarget;
     use xcap::Monitor;
-    let (rx, ry, rw, rh) = match target {
+    match target {
         RecordTarget::Display(display_id) => {
             let m = Monitor::all()
                 .ok()?
                 .into_iter()
                 .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
             let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
-            (
+            Some((
                 m.x().ok()? as f64 / scale,
                 m.y().ok()? as f64 / scale,
                 m.width().ok()? as f64 / scale,
                 m.height().ok()? as f64 / scale,
-            )
+                scale,
+            ))
         }
         RecordTarget::Window(window_id) => {
             let list = crate::capture::window::list(0.0, 0.0, 1.0).ok()?;
             let w = list.into_iter().find(|w| w.id == *window_id)?;
-            (w.x, w.y, w.width, w.height)
+            Some((w.x, w.y, w.width, w.height, 1.0))
         }
         RecordTarget::Region { display_id, x, y, w, h } => {
-            let m = Monitor::all()
-                .ok()?
+            let monitors = Monitor::all().ok()?;
+            let m = monitors
                 .into_iter()
                 .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
             let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
-            (m.x().ok()? as f64 / scale + *x, m.y().ok()? as f64 / scale + *y, *w, *h)
+            Some((m.x().ok()? as f64 / scale + *x, m.y().ok()? as f64 / scale + *y, *w, *h, scale))
         }
-    };
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn record_keystroke_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
+    let (rx, ry, rw, rh, _) = record_target_rect(target)?;
     let kw = 780.0_f64.min(rw - 20.0).max(220.0);
     let kh = 130.0;
     let kx = rx + (rw - kw) / 2.0;
@@ -534,6 +790,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
     // Phải tính TRƯỚC khi `target` bị move vào `mac_stream::start` bên dưới.
     let border_rect = record_border_rect(&target);
     let keystroke_rect = record_keystroke_rect(&target);
+    let click_target_rect = record_target_rect(&target);
 
     let audio_source = audio_source_setting(app);
     let want_system_audio = audio_source == AudioSource::System || audio_source == AudioSource::Both;
@@ -566,13 +823,46 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
         (None, None)
     };
 
-    let excepting_ids = keystroke_win_id.map(|id| vec![id]).unwrap_or_default();
+    let show_clicks = click_overlay_setting(app);
+    let (click_win_id, mouse_click_listener) = if show_clicks {
+        let (win_id, listener) = if let Some((cx, cy, cw, ch)) = click_target_rect {
+            let wid = match crate::windows::open_record_clicks(app, cx, cy, cw, ch) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("[SnapDoc][record] Không hiện được overlay click chuột: {e}");
+                    None
+                }
+            };
+            let l = match mouse_click::MouseClickListener::start(app.clone(), (cx, cy, cw, ch)) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    notify_warning(app, &format!("Click chuột: {e}"));
+                    None
+                }
+            };
+            (wid, l)
+        } else {
+            (None, None)
+        };
+        (win_id, listener)
+    } else {
+        (None, None)
+    };
+
+    let mut excepting_ids = Vec::new();
+    if let Some(id) = keystroke_win_id {
+        excepting_ids.push(id);
+    }
+    if let Some(id) = click_win_id {
+        excepting_ids.push(id);
+    }
 
     let (stream, frame_rx, system_audio_rx) =
         match crate::capture::mac_stream::start(target, FPS, want_system_audio, !record_self, &excepting_ids) {
             Ok(res) => res,
             Err(e) => {
                 crate::windows::close_record_keystroke(app);
+                crate::windows::close_record_clicks(app);
                 return Err(e);
             }
         };
@@ -608,7 +898,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
         let final_path = new_output_path(app)?;
         let system_track = if let Some(sys_rx) = system_audio_rx {
             let sys_raw_path = tmp_dir.join("system.pcm");
-            let writer = spawn_pcm_file_writer(sys_raw_path.clone(), sys_rx, paused.clone());
+            let writer = spawn_pcm_file_writer(sys_raw_path.clone(), sys_rx, paused.clone(), 0);
             Some(AudioTrack {
                 writer,
                 raw_path: sys_raw_path,
@@ -621,7 +911,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
 
         let (mic_capture, mic_track) = if let Some((mic, mic_rx, sample_rate, channels)) = mic_result {
             let mic_raw_path = tmp_dir.join("mic.pcm");
-            let writer = spawn_pcm_file_writer(mic_raw_path.clone(), mic_rx, paused.clone());
+            let writer = spawn_pcm_file_writer(mic_raw_path.clone(), mic_rx, paused.clone(), 0);
             (
                 Some(mic),
                 Some(AudioTrack {
@@ -696,6 +986,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::Record
             paused_accumulated_ms,
             pause_started_at,
             keystroke_listener,
+            mouse_click_listener,
         });
     }
 
@@ -821,121 +1112,41 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
     // Phải tính TRƯỚC khi `target` bị move vào `windows_stream::start` bên dưới.
     let border_rect = record_border_rect(&target);
     let keystroke_rect = record_keystroke_rect(&target);
+    let click_target_rect = record_target_rect(&target);
 
     let audio_source = audio_source_setting(app);
     let want_system_audio = audio_source == AudioSource::System || audio_source == AudioSource::Both;
     let want_mic = audio_source == AudioSource::Mic || audio_source == AudioSource::Both;
-
-    // Khởi tạo song song: Video capture (WGC), Mic audio (CPAL), và System audio (WASAPI)
-    // để loại bỏ độ trễ tuần tự khi bắt đầu quay.
-    let (stream_res, mic_res, sys_res) = std::thread::scope(|s| {
-        let stream_handle = s.spawn(|| crate::capture::windows_stream::start(target, FPS, false));
-        let mic_handle = s.spawn(|| if want_mic { Some(audio_mic::start()) } else { None });
-        let sys_handle = s.spawn(|| if want_system_audio { Some(audio_wasapi::start()) } else { None });
-        (
-            stream_handle.join().unwrap_or_else(|_| Err("Video capture thread bị lỗi".to_string())),
-            mic_handle.join().unwrap_or_else(|_| Some(Err("Mic thread bị lỗi".to_string()))),
-            sys_handle.join().unwrap_or_else(|_| Some(Err("Audio hệ thống thread bị lỗi".to_string()))),
-        )
-    });
-
-    let (stream, frame_rx, _system_audio_rx) = match stream_res {
-        Ok(res) => res,
-        Err(e) => {
-            // Nếu luồng video lỗi, dọn dẹp các luồng audio đã khởi chạy thành công
-            if let Some(Ok((mic, _, _, _))) = mic_res {
-                mic.stop();
-            }
-            if let Some(Ok((sys, _, _, _))) = sys_res {
-                sys.stop();
-            }
-            return Err(e);
-        }
-    };
-    let (width, height) = (stream.width, stream.height);
-
-    let mic_result = match mic_res {
-        Some(Ok((mic, rx, sample_rate, channels))) => {
-            Some((mic, rx, sample_rate, channels as u16))
-        }
-        Some(Err(e)) => {
-            notify_warning(app, &format!("Không ghi được mic — vẫn tiếp tục quay: {e}"));
-            None
-        }
-        None => None,
-    };
-
-    let sys_result = match sys_res {
-        Some(Ok((sys, rx, sample_rate, channels))) => {
-            Some((sys, rx, sample_rate, channels))
-        }
-        Some(Err(e)) => {
-            notify_warning(app, &format!("Không ghi được audio hệ thống — vẫn tiếp tục quay: {e}"));
-            None
-        }
-        None => None,
-    };
+    let has_any_audio = want_system_audio || want_mic;
 
     // Cờ pause dùng chung giữa writer thread video, writer thread audio, và ticker.
     let paused = Arc::new(AtomicBool::new(false));
     let paused_accumulated_ms = Arc::new(AtomicU64::new(0));
     let pause_started_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
-    let has_any_audio = sys_result.is_some() || mic_result.is_some();
+    // Khởi tạo audio phi đồng bộ (chạy nền) để không chặn việc bắt đầu quay video và hiển thị indicator popup
     let (video_path, output_path, audio) = if has_any_audio {
         let tmp_dir = std::env::temp_dir().join(format!("snapdoc-rec-audio-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp_dir)
             .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
         let video_tmp_path = tmp_dir.join("video.mp4");
         let final_path = new_output_path(app)?;
-
-        let (system_audio, system_track) = if let Some((sys, sys_rx, sample_rate, channels)) = sys_result {
-            let sys_raw_path = tmp_dir.join("system.pcm");
-            let writer = spawn_pcm_file_writer(sys_raw_path.clone(), sys_rx, paused.clone());
-            (
-                Some(sys),
-                Some(AudioTrack {
-                    writer,
-                    raw_path: sys_raw_path,
-                    sample_rate,
-                    channels,
-                }),
-            )
-        } else {
-            (None, None)
-        };
-
-        let (mic_capture, mic_track) = if let Some((mic, mic_rx, sample_rate, channels)) = mic_result {
-            let mic_raw_path = tmp_dir.join("mic.pcm");
-            let writer = spawn_pcm_file_writer(mic_raw_path.clone(), mic_rx, paused.clone());
-            (
-                Some(mic),
-                Some(AudioTrack {
-                    writer,
-                    raw_path: mic_raw_path,
-                    sample_rate,
-                    channels,
-                }),
-            )
-        } else {
-            (None, None)
-        };
-
-        (
-            video_tmp_path,
-            final_path,
-            Some(ActiveAudio {
-                mic: mic_capture,
-                system_audio,
-                mic_track,
-                system_track,
-                tmp_dir,
-            }),
-        )
+        let audio = ActiveAudio::start_async(
+            app.clone(),
+            want_mic,
+            want_system_audio,
+            tmp_dir,
+            paused.clone(),
+        )?;
+        (video_tmp_path, final_path, Some(audio))
     } else {
         let final_path = new_output_path(app)?;
         (final_path.clone(), final_path, None)
     };
+
+    // Khởi tạo Video capture (WGC)
+    let (stream, frame_rx, _system_audio_rx) = crate::capture::windows_stream::start(target, FPS, false)?;
+    let (width, height) = (stream.width, stream.height);
 
     let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
     let paused_for_writer = paused.clone();
@@ -973,6 +1184,26 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
         None
     };
 
+    let show_clicks = click_overlay_setting(app);
+    let mouse_click_listener = if show_clicks {
+        if let Some((cx, cy, cw, ch, scale)) = click_target_rect {
+            if let Err(e) = crate::windows::open_record_clicks(app, cx, cy, cw, ch) {
+                eprintln!("[SnapDoc][record] Không hiện được overlay click chuột: {e}");
+            }
+            match mouse_click::MouseClickListener::start(app.clone(), (cx, cy, cw, ch), scale) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    notify_warning(app, &format!("Click chuột: {e}"));
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     {
         let mut guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
         *guard = Some(ActiveRecording {
@@ -989,19 +1220,35 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
             paused_accumulated_ms,
             pause_started_at,
             keystroke_listener,
+            mouse_click_listener,
         });
     }
 
-    crate::tray::show_recording_tray(app);
+    // 1. Hiển thị ngay lập tức khung viền và popup indicator cho người dùng thấy phản hồi tức thì (<5ms)
     if let Some((bx, by, bw, bh)) = border_rect {
         if let Err(e) = crate::windows::open_record_border(app, bx, by, bw, bh) {
             eprintln!("[SnapDoc][record] Không hiện được khung viền đang quay: {e}");
         }
     }
+
     if let Err(e) = crate::windows::open_recording_indicator(app) {
         eprintln!("[SnapDoc][record] Không hiện được popup đang quay: {e}");
     }
+
+    // 2. Chạy ticker để cập nhật thời gian đếm cho indicator ngay lập tức
     spawn_tray_ticker(app.clone());
+
+    // 3. Tạo tray icon trong background thread để không chặn UI (Shell_NotifyIconW có thể mất ~760ms trên Windows)
+    let app_for_tray = app.clone();
+    std::thread::Builder::new()
+        .name("snapdoc-tray-init".into())
+        .spawn(move || {
+            if crate::record::status(&app_for_tray).is_some() {
+                crate::tray::show_recording_tray(&app_for_tray);
+            }
+        })
+        .ok();
+
     Ok(())
 }
 
@@ -1123,6 +1370,9 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
     if let Some(mut kl) = active.keystroke_listener.take() {
         kl.stop();
     }
+    if let Some(mut ml) = active.mouse_click_listener.take() {
+        ml.stop();
+    }
 
     // Thời lượng thật của video = đúng khoảng thời gian ghi thật sự (không kể
     // thời gian đã tạm dừng). Tính TRƯỚC khi `stream.stop()` tiêu thụ field
@@ -1135,20 +1385,8 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
     let duration_ms = (active.started_at.elapsed().as_millis() as i64)
         .saturating_sub(total_paused_ms as i64);
 
-    // Dừng mic/audio hệ thống (Windows) TRƯỚC `stream.stop()` — đóng kênh PCM
-    // để `spawn_pcm_file_writer` thấy channel đóng mà tự kết thúc (đóng
-    // file). Audio hệ thống trên macOS tự đóng theo `stream.stop()` bên dưới
-    // (chung sender với video, không có field riêng ở đây).
-    let audio = active.audio.map(|mut a| {
-        if let Some(mic) = a.mic.take() {
-            mic.stop();
-        }
-        #[cfg(target_os = "windows")]
-        if let Some(sys) = a.system_audio.take() {
-            sys.stop();
-        }
-        a
-    });
+    // Dừng audio TRƯỚC `stream.stop()` — thu hồi các stream mic/loa và đợi các luồng ghi PCM hoàn tất.
+    let audio_meta = active.audio.map(|a| a.stop_and_collect());
 
     // Clone cờ drop-frame TRƯỚC khi `stop()` tiêu thụ (move) field `stream`
     // — để còn cảnh báo người dùng sau khi dừng xong (xem `notify_warning`).
@@ -1160,20 +1398,6 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
     #[cfg(target_os = "windows")]
     active.stream.stop()?;
 
-    // Ghi file audio KHÔNG qua ffmpeg lúc quay (chỉ `File::write_all`) nên
-    // join ở đây luôn nhanh — không có rủi ro treo như hướng fifo cũ.
-    let audio_meta = audio.map(|mut a| {
-        let mic_meta = a.mic_track.take().map(|t| {
-            let _ = t.writer.join();
-            (t.raw_path, t.sample_rate, t.channels)
-        });
-        let sys_meta = a.system_track.take().map(|t| {
-            let _ = t.writer.join();
-            (t.raw_path, t.sample_rate, t.channels)
-        });
-        (mic_meta, sys_meta, a.tmp_dir)
-    });
-
     let write_join_res = active.writer.join();
 
     // Luôn dọn dẹp giao diện UI (khung viền, overlay, thanh dừng quay, tray icon)
@@ -1184,6 +1408,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
     crate::windows::close_stop_control(app);
     crate::windows::close_record_border(app);
     crate::windows::close_record_keystroke(app);
+    crate::windows::close_record_clicks(app);
     #[cfg(target_os = "windows")]
     crate::windows::close_recording_indicator(app);
 
@@ -1293,6 +1518,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
                     height: active.height,
                     duration_ms,
                     history_id: record.id,
+                    thumb_path: Some(record.thumb_path),
                 });
                 drop(g);
                 // Video đã lưu vào Library — Editor mở lên (chế độ video) chỉ để

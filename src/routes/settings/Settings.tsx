@@ -323,6 +323,25 @@ export default function Settings() {
               }}
             />
           </div>
+
+          <div style={{ ...toggleRow, marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+            <div>
+              <div style={toggleLabel}>{t("settings.showClicks")}</div>
+              <div style={toggleDesc}>{t("settings.showClicksDesc")}</div>
+            </div>
+            <Toggle
+              checked={s.recordShowClicks ?? true}
+              onChange={async (v) => {
+                update({ recordShowClicks: v });
+                if (v) {
+                  const ok = await ipc.checkAccessibilityPermission().catch(() => true);
+                  if (!ok) {
+                    await ipc.requestAccessibilityPermission().catch(() => {});
+                  }
+                }
+              }}
+            />
+          </div>
         </Card>
 
         {/* STARTUP */}

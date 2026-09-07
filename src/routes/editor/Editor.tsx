@@ -39,6 +39,7 @@ interface VideoDoc {
   filePath: string;
   src: string;
   durationMs: number;
+  thumbUrl?: string;
 }
 
 const EMPTY_TRIM_STATE = {
@@ -250,15 +251,18 @@ export default function Editor() {
   const loadPending = (p: Pending | null) => {
     if (!p) return false;
     const payload = parseDocPayload(p.docJson);
-    let imageUrl = `data:image/png;base64,${p.base64}`;
-    if (p.base64 && p.base64.length > 200_000) {
+    const isJpeg = p.base64 ? p.base64.startsWith("/9j/") : false;
+    const mime = isJpeg ? "image/jpeg" : "image/png";
+    let imageUrl = p.imageUrl || (p.base64 ? `data:${mime};base64,${p.base64}` : "");
+    if (!p.imageUrl && p.base64 && p.base64.length > 200_000) {
       try {
-        const blob = base64ToBlob(p.base64, "image/png");
+        const blob = base64ToBlob(p.base64, mime);
         imageUrl = URL.createObjectURL(blob);
       } catch (e) {
         console.error("Lỗi tạo Blob URL trong loadPending:", e);
       }
     }
+    if (!imageUrl) return false;
 
     loadDoc(
       {
@@ -273,15 +277,16 @@ export default function Editor() {
       },
       true,
     );
-    if (p.history_id && imageUrl.startsWith("blob:")) {
-      ownBlobUrl(p.history_id, imageUrl);
+    const sessionKey = p.history_id ?? `file:${uid()}`;
+    if (imageUrl.startsWith("blob:")) {
+      ownBlobUrl(sessionKey, imageUrl);
     }
     if (payload) {
       useEditor.getState().setStepCounter(payload.stepCounter);
       useEditor.getState().setArrowCounter(payload.arrowCounter);
       if (payload.rectCounter) useEditor.getState().setRectCounter(payload.rectCounter);
     }
-    noteActiveKey(p.history_id ?? `file:${uid()}`);
+    noteActiveKey(sessionKey);
     return true;
   };
 
@@ -297,7 +302,11 @@ export default function Editor() {
       });
       // Ảnh từ file ngoài chưa có mặt trong Library → khoá tổng hợp, chỉ sống
       // trong phiên app này (xem `sessions.ts`).
-      noteActiveKey(`file:${uid()}`);
+      const sessionKey = `file:${uid()}`;
+      if (dataUrl.startsWith("blob:")) {
+        ownBlobUrl(sessionKey, dataUrl);
+      }
+      noteActiveKey(sessionKey);
     };
     img.src = dataUrl;
   };
@@ -352,6 +361,7 @@ export default function Editor() {
           filePath: pv.path,
           src: convertFileSrc(pv.path),
           durationMs: pv.durationMs,
+          thumbUrl: pv.thumbPath ? convertFileSrc(pv.thumbPath) : undefined,
         });
         setVideoTrimState(EMPTY_TRIM_STATE);
         setVideoSavedSig(null);
@@ -362,13 +372,30 @@ export default function Editor() {
       if (!isCurrentSwitch(token)) return;
       if (p) setVideoDoc(null);
       loadPending(p);
+
+      // Focus vào window để đảm bảo WebView2 DOM sẵn sàng nhận phím tắt công cụ
+      // ngay lập tức trên Windows mà không cần người dùng click chuột trước.
+      requestAnimationFrame(() => {
+        window.focus();
+      });
+      setTimeout(() => {
+        window.focus();
+      }, 50);
     };
 
     loadAnyPending();
+    requestAnimationFrame(() => {
+      window.focus();
+    });
     // Bật autosave TƯỜNG MINH ở đây (không phải side-effect của module) — chỉ
     // cửa sổ `editor` được ghi nháp, xem `initAutosave`.
     const stopAutosave = initAutosave();
-    const un = listen("refresh-capture", loadAnyPending);
+    const un = listen("refresh-capture", () => {
+      loadAnyPending();
+      setTimeout(() => {
+        window.focus();
+      }, 100);
+    });
     // Windows "Open with" / double-click: Rust emit event này với data URL đầy đủ,
     // không cần round-trip IPC takePending (timing an toàn hơn).
     const unOpenFile = listen<string>("open-file", (e) => {
@@ -930,6 +957,7 @@ export default function Editor() {
             src={videoDoc.src}
             filePath={videoDoc.filePath}
             durationMs={videoDoc.durationMs}
+            initialThumbUrl={videoDoc.thumbUrl}
             busy={busy}
             onSave={doSaveVideo}
             onSaveAs={doSaveAsVideo}
@@ -960,6 +988,7 @@ export default function Editor() {
             filePath: item.assetPath,
             src: convertFileSrc(item.assetPath),
             durationMs: item.durationMs ?? 0,
+            thumbUrl: item.thumbPath ? convertFileSrc(item.thumbPath) : undefined,
           });
           setVideoTrimState(EMPTY_TRIM_STATE);
           setVideoSavedSig(null);

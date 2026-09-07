@@ -1077,6 +1077,79 @@ pub fn close_record_keystroke(app: &AppHandle) {
     }
 }
 
+/// Cửa sổ hiển thị hiệu ứng click chuột khi quay video (`record-clicks`).
+/// Bao phủ toàn bộ vùng quay, trong suốt, click-through (`set_ignore_cursor_events(true)`),
+/// không giành focus, và KHÔNG bật `set_content_protected(true)` để SCK/WGC tự động ghi nhận vào video.
+pub fn open_record_clicks(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<Option<u32>, String> {
+    close_record_clicks(app);
+    let win = WebviewWindowBuilder::new(app, "record-clicks", url("record-clicks"))
+        .title("SnapDoc — Click chuột")
+        .position(x, y)
+        .inner_size(w, h)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .focused(false)
+        .build()
+        .map_err(|e| format!("Không tạo được overlay click chuột: {e}"))?;
+    let _ = win.set_ignore_cursor_events(true);
+    let _ = win.set_content_protected(false);
+    let _ = win.show();
+
+    #[cfg(target_os = "macos")]
+    let window_id: Option<u32> = {
+        use objc2::msg_send;
+        let (tx, rx) = std::sync::mpsc::channel::<Option<u32>>();
+        let win_main = win.clone();
+        let _ = app.run_on_main_thread(move || {
+            let mut wid = None;
+            if let Ok(ptr) = win_main.ns_window() {
+                let ptr = ptr as *mut objc2_app_kit::NSWindow;
+                if !ptr.is_null() {
+                    unsafe {
+                        let ns_win: &objc2_app_kit::NSWindow = &*ptr;
+                        let behavior: usize = 1 | (1 << 4) | (1 << 8);
+                        let _: () = msg_send![ns_win, setCollectionBehavior: behavior];
+                        let no_animation: i64 = 2;
+                        let _: () = msg_send![ns_win, setAnimationBehavior: no_animation];
+
+                        let sharing_type: usize = 1;
+                        let _: () = msg_send![ns_win, setSharingType: sharing_type];
+
+                        let window_level: i64 = 101;
+                        let _: () = msg_send![ns_win, setLevel: window_level];
+
+                        let _: () = msg_send![ns_win, orderFrontRegardless];
+
+                        let num: isize = msg_send![ns_win, windowNumber];
+                        if num > 0 {
+                            wid = Some(num as u32);
+                        }
+                    }
+                }
+            }
+            let _ = tx.send(wid);
+        });
+        rx.recv_timeout(std::time::Duration::from_millis(500)).unwrap_or(None)
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let window_id: Option<u32> = None;
+
+    eprintln!("[SnapDoc][record] open_record_clicks -> window_id = {:?}", window_id);
+    Ok(window_id)
+}
+
+/// Đóng cửa sổ hiển thị hiệu ứng click chuột đang quay.
+pub fn close_record_clicks(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("record-clicks") {
+        let _ = win.close();
+    }
+}
+
 /// Cửa sổ nhỏ nổi hiển thị số đếm ngược "hẹn giờ chụp" (`flow::wait_capture_delay`)
 /// — TÁCH HẲN khỏi capture-bar để hoạt động đúng bất kể bar đang ẩn hay hiện
 /// (chụp qua hotkey toàn cục / nút "New" ở Editor đều chủ đích KHÔNG hiện bar,
@@ -1382,12 +1455,13 @@ fn wait_for_overlays_ready(app: &AppHandle, gen: u64, expected: usize) {
     use std::sync::mpsc;
     use std::time::Instant;
 
+    let t_start = Instant::now();
     let (tx, rx) = mpsc::channel::<(u64, usize)>();
     if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
         *slot = Some(tx);
     }
 
-    let deadline = Instant::now() + Duration::from_millis(220);
+    let deadline = Instant::now() + Duration::from_millis(350);
     let mut seen: HashSet<usize> = HashSet::with_capacity(expected);
     while seen.len() < expected {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1398,10 +1472,14 @@ fn wait_for_overlays_ready(app: &AppHandle, gen: u64, expected: usize) {
             Ok((g, idx)) if g == gen => {
                 seen.insert(idx);
             }
-            Ok(_) => {} // tín hiệu trễ từ phiên overlay cũ — bỏ qua
+            Ok((g, idx)) => {
+                eprintln!("[SnapDoc Timing] wait_for_overlays_ready: ignored stale signal g={g} != gen={gen}, idx={idx}");
+            }
             Err(_) => break, // timeout
         }
     }
+
+    eprintln!("[SnapDoc Timing] wait_for_overlays_ready: {:?}, seen={}/{}", t_start.elapsed(), seen.len(), expected);
 
     if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
         *slot = None;
@@ -1580,18 +1658,25 @@ fn try_reuse_prewarmed_overlays(
     }
 
     for (i, (snap, win)) in snaps.iter().zip(wins.iter()).enumerate() {
-        let query = build_overlay_query(mode, i, snap, record, preset, gen);
-        let navigated = win.url().ok().and_then(|mut u| {
-            u.set_query(Some(&query));
-            win.navigate(u).ok()
+        position_overlay(app, win, snap);
+        let preset_json = preset.and_then(|(preset_display, px, py, pw, ph)| {
+            if preset_display == snap.id {
+                Some(serde_json::json!({
+                    "x": px, "y": py, "w": pw, "h": ph
+                }))
+            } else {
+                None
+            }
         });
-        if navigated.is_none() {
-            eprintln!("[SnapDoc] Tái sử dụng overlay pre-warm thất bại — để build() dựng lại từ đầu");
+        if let Err(e) = win.emit("overlay-session-start", serde_json::json!({
+            "mode": mode,
+            "gen": gen,
+            "record": record,
+            "preset": preset_json,
+        })) {
+            eprintln!("[SnapDoc] Gửi session tới overlay-{i} thất bại: {e}");
             return false;
         }
-        // Chỉ định vị (ẩn) — CHƯA show(). show() đồng loạt sau khi
-        // `wait_for_overlays_ready` xác nhận nội dung đã paint xong, xem đó.
-        position_overlay(app, win, snap);
     }
 
     // Chờ frontend từng overlay báo đã paint xong ảnh đóng băng, rồi mới
@@ -1705,9 +1790,11 @@ pub fn open_overlays_ex(
         .fetch_add(1, Ordering::SeqCst)
         + 1;
 
-    // P8: thử tái sử dụng pool overlay đã pre-warm trước khi đóng+build lại
-    // từ đầu — xem `try_reuse_prewarmed_overlays`/`prewarm_overlays`.
-    if !try_reuse_prewarmed_overlays(app, mode, record, preset, &snaps, cursor_idx, gen) {
+    let t_reuse = std::time::Instant::now();
+    let reused = try_reuse_prewarmed_overlays(app, mode, record, preset, &snaps, cursor_idx, gen);
+    eprintln!("[SnapDoc Timing] try_reuse_prewarmed_overlays: {:?}, reused={}", t_reuse.elapsed(), reused);
+    if !reused {
+        let t_build = std::time::Instant::now();
         close_overlays(app);
         let mut wins = Vec::with_capacity(snaps.len());
         for (i, snap) in snaps.iter().enumerate() {
@@ -1729,6 +1816,7 @@ pub fn open_overlays_ex(
                 let _ = win.set_focus();
             }
         }
+        eprintln!("[SnapDoc Timing] rebuild overlays total: {:?}", t_build.elapsed());
     }
 
     let handle = app.clone();
@@ -1950,6 +2038,9 @@ pub fn close_overlays(app: &AppHandle) {
     // cửa sổ vừa đóng nhưng OS/DWM chưa xử lý xong dễ lỗi/không ổn định).
     let handle = app.clone();
     std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(Duration::from_millis(50));
+        #[cfg(not(target_os = "macos"))]
         std::thread::sleep(Duration::from_millis(300));
         prewarm_overlays(&handle);
     });
@@ -2107,8 +2198,53 @@ pub fn prewarm_editor(app: &AppHandle) -> Result<(), String> {
 /// từ chối; gọi `set_focus()` lại sau đó để có luôn bàn phím nếu OS cho phép.
 #[cfg(target_os = "windows")]
 fn force_to_foreground(win: &tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, BringWindowToTop, GetForegroundWindow,
+        GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+
+    // Cấp quyền SetForegroundWindow cho bất kỳ tiến trình nào (ASFW_ANY = 0xFFFFFFFF),
+    // giúp vượt qua cơ chế Foreground Lock của Windows khi vừa đóng overlay.
+    unsafe {
+        AllowSetForegroundWindow(0xFFFFFFFF);
+    }
+
     let _ = win.set_always_on_top(true);
     let _ = win.set_always_on_top(false);
+
+    if let Ok(raw_hwnd) = win.hwnd() {
+        let target_hwnd = raw_hwnd.0 as HWND;
+        unsafe {
+            if IsIconic(target_hwnd) != 0 {
+                ShowWindow(target_hwnd, SW_RESTORE);
+            }
+
+            let fg_hwnd = GetForegroundWindow();
+            if !fg_hwnd.is_null() && fg_hwnd != target_hwnd {
+                let cur_thread = GetCurrentThreadId();
+                let fg_thread = GetWindowThreadProcessId(fg_hwnd, std::ptr::null_mut());
+                if cur_thread != fg_thread && fg_thread != 0 {
+                    AttachThreadInput(cur_thread, fg_thread, 1);
+                    SetForegroundWindow(target_hwnd);
+                    BringWindowToTop(target_hwnd);
+                    SetFocus(target_hwnd);
+                    AttachThreadInput(cur_thread, fg_thread, 0);
+                } else {
+                    SetForegroundWindow(target_hwnd);
+                    BringWindowToTop(target_hwnd);
+                    SetFocus(target_hwnd);
+                }
+            } else {
+                SetForegroundWindow(target_hwnd);
+                BringWindowToTop(target_hwnd);
+                SetFocus(target_hwnd);
+            }
+        }
+    }
+
     let _ = win.set_focus();
 }
 
@@ -2169,6 +2305,10 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
     app.state::<AppState>()
         .editor_hidden_dirty
         .store(false, Ordering::SeqCst);
+
+    // Đóng toàn bộ overlay trước khi hiển thị/focus Editor để tránh việc overlay
+    // đóng sau đó cướp mất active window / keyboard focus trên Windows.
+    close_overlays(app);
 
     if let Some(win) = app.get_webview_window("editor") {
         let _ = win.show();
@@ -2525,7 +2665,7 @@ pub fn open_thumbnail(app: &AppHandle) -> Result<(), String> {
             .pending
             .lock()
             .ok()
-            .and_then(|g| g.as_ref().map(|p| p.base64.clone()))
+            .and_then(|g| g.as_ref().map(|p| p.base64()))
             .unwrap_or_default()
     };
 

@@ -22,11 +22,32 @@ pub struct MonitorSnap {
     pub scale: f64,
 }
 
+/// Metadata của ảnh vừa chụp (dùng để serialize JSON nhị phân qua IPC).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingCaptureMeta {
+    pub width: u32,
+    pub height: u32,
+    pub output: String,
+    pub scale_factor: f64,
+    #[serde(default)]
+    pub history_id: Option<String>,
+    #[serde(default)]
+    pub capture_mode: String,
+    #[serde(default)]
+    pub doc_json: Option<String>,
+    #[serde(default)]
+    pub doc_is_draft: bool,
+    #[serde(default)]
+    pub file_path: Option<String>,
+}
+
 /// Ảnh vừa chụp đang chờ xử lý (editor / clipboard / thumbnail).
-#[derive(Clone, serde::Serialize)]
+/// Lưu trữ raw bytes (PNG/JPEG) trong RAM thay vì Base64 string khổng lồ.
+#[derive(Clone)]
 pub struct PendingCapture {
-    /// Pixel NỀN (chưa ghép annotation) — base64 trần, không prefix data URL.
-    pub base64: String,
+    /// Raw image bytes (PNG/JPEG).
+    pub bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub output: String,
@@ -34,32 +55,60 @@ pub struct PendingCapture {
     pub scale_factor: f64,
     /// Id bản ghi History tương ứng (nếu đã ingest thành công) — Editor dùng
     /// để Save ghi đè tại chỗ đúng record thay vì chỉ save-as thông thường.
-    #[serde(default)]
     pub history_id: Option<String>,
     /// Mode đã chụp ra ảnh này ("region"/"window"/"full"/"all"/"scroll"/
     /// "quick"/"file") — Editor dùng để chọn zoom mặc định: "region" → 100%,
     /// còn lại → fit cả chiều rộng/cao (xem `AnnotationStage.tsx`).
-    #[serde(default)]
     pub capture_mode: String,
     /// Lớp annotation đi kèm (`doc.json` hiệu lực trong container `.snapdoc`,
     /// tức `draft.json` nếu có) — Editor dựng lại đúng trạng thái đang sửa thay
     /// vì mở ảnh trống. `None` cho ảnh vừa chụp (chưa có annotation nào) và cho
     /// item PNG thế hệ cũ.
-    #[serde(default, rename = "docJson")]
     pub doc_json: Option<String>,
     /// `true` khi `doc_json` là BẢN NHÁP (`draft.json`) chứ không phải bản đã
     /// lưu. Editor phải biết để (a) đánh dấu tài liệu là CHƯA LƯU — nháp phục
     /// hồi thì đúng nghĩa là chưa lưu, để clean thì badge tắt và autosave ngừng
     /// ghi — và (b) hỏi user muốn tiếp tục hay bỏ, thay vì lặng lẽ đắp annotation
     /// cũ lên một ảnh mà user tưởng còn nguyên.
-    #[serde(default, rename = "docIsDraft")]
     pub doc_is_draft: bool,
     /// Đường dẫn file `.snapdoc` trên đĩa mà tài liệu này ĐẾN TỪ (mở qua "Open
     /// with"/Cmd+O). Có giá trị → Editor Save ghi THẲNG lại chính file đó, không
     /// mở dialog và không đụng Library — đúng ngữ nghĩa một trình soạn tài liệu.
     /// `None` cho mọi thứ đến từ Library hoặc vừa chụp.
-    #[serde(default, rename = "filePath")]
     pub file_path: Option<String>,
+}
+
+impl PendingCapture {
+    pub fn to_meta(&self) -> PendingCaptureMeta {
+        PendingCaptureMeta {
+            width: self.width,
+            height: self.height,
+            output: self.output.clone(),
+            scale_factor: self.scale_factor,
+            history_id: self.history_id.clone(),
+            capture_mode: self.capture_mode.clone(),
+            doc_json: self.doc_json.clone(),
+            doc_is_draft: self.doc_is_draft,
+            file_path: self.file_path.clone(),
+        }
+    }
+
+    /// Đóng gói dữ liệu nhị phân: [meta_len: 4B u32 LE] + [meta_json] + [raw_bytes]
+    pub fn to_binary_payload(&self) -> Vec<u8> {
+        let meta = self.to_meta();
+        let meta_json = serde_json::to_vec(&meta).unwrap_or_default();
+        let mut buf = Vec::with_capacity(4 + meta_json.len() + self.bytes.len());
+        buf.extend_from_slice(&(meta_json.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&meta_json);
+        buf.extend_from_slice(&self.bytes);
+        buf
+    }
+
+    /// Base64 representation (dự phòng tương thích ngược).
+    pub fn base64(&self) -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        STANDARD.encode(&self.bytes)
+    }
 }
 
 /// Video đang chờ mở trong Editor — đã CÓ SẴN trong History (`history_id`
@@ -75,6 +124,7 @@ pub struct PendingVideo {
     pub height: u32,
     pub duration_ms: i64,
     pub history_id: String,
+    pub thumb_path: Option<String>,
 }
 
 /// Chế độ chụp + output gần nhất — dùng cho nút "New" ở editor.
@@ -199,12 +249,15 @@ pub struct AppState {
     /// `windows::restore_hidden_product_windows`.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub hidden_for_capture: Mutex<Vec<String>>,
-    /// Ảnh "đóng băng" màn hình (JPEG base64, không có prefix data URL) chụp
-    /// ngay trước khi mở overlay chọn vùng — overlay dùng làm background tĩnh
-    /// để tránh tương tác với app đang chạy phía sau (như Snagit/Lightshot).
-    /// Key = chỉ số màn hình (khớp với `overlay-{i}`), value = JPEG base64.
+    /// Ảnh "đóng băng" màn hình (JPEG binary bytes) chụp ngay trước khi mở
+    /// overlay chọn vùng — overlay dùng làm background tĩnh để tránh tương tác
+    /// với app đang chạy phía sau (như Snagit/Lightshot).
+    /// Key = chỉ số màn hình (khớp với `overlay-{i}`), value = JPEG bytes.
     /// Xoá sau khi overlay đóng (`close_overlays` / `cancel_overlay`).
-    pub frozen_screens: Mutex<HashMap<usize, String>>,
+    pub frozen_screens: Mutex<HashMap<usize, Vec<u8>>>,
+    /// Condvar để frontend gọi get_frozen_screen có thể chờ ngay khi thread chụp
+    /// freeze đang chạy song song, lập tức trả về khi màn hình tương ứng hoàn thành.
+    pub frozen_screens_cvar: std::sync::Condvar,
     /// Kênh báo "overlay-{idx} đã paint xong ảnh đóng băng" từ frontend, dùng
     /// bởi `windows::wait_for_overlays_ready` để trì hoãn `win.show()` cho
     /// tới khi frame đầu tiên hiện ra ĐÃ có sẵn nội dung đúng (tránh nhịp

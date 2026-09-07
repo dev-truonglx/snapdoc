@@ -3,7 +3,6 @@ use super::model::{HistoryFilter, HistoryPage, HistoryRecord};
 use super::{decode_image_data, now_ms};
 use crate::state::{AppState, PendingCapture, PendingVideo};
 use crate::windows;
-use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::ToSql;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -304,6 +303,7 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
             height: rec.height,
             duration_ms: rec.duration_ms.unwrap_or(0),
             history_id: id.to_string(),
+            thumb_path: Some(rec.thumb_path.clone()),
         });
         drop(g);
         return windows::open_editor(app);
@@ -311,12 +311,11 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
     // Nền + lớp annotation cùng đi qua `PendingCapture`, để editor dựng lại
     // đúng trạng thái đang sửa chứ không chỉ mở ảnh trống.
     let (base_bytes, doc_json, is_draft) = load_asset(&rec)?;
-    let base64 = STANDARD.encode(&base_bytes);
     {
         let state = app.state::<AppState>();
         let mut g = state.pending.lock().map_err(|_| "Lock error".to_string())?;
         *g = Some(PendingCapture {
-            base64,
+            bytes: base_bytes,
             width: rec.width,
             height: rec.height,
             output: "editor".to_string(),

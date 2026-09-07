@@ -31,6 +31,9 @@ export interface VideoTrimmerProps {
    * gọi `generate_video_frames` sinh filmstrip. */
   filePath: string;
   durationMs: number;
+  /** URL ảnh thumbnail có sẵn (từ History hoặc vừa quay xong) — dùng để phủ
+   * timeline NGAY LẬP TỨC trong 0ms khi vừa mount, không cần đợi FFmpeg. */
+  initialThumbUrl?: string;
   busy?: boolean;
   /** "Lưu đè" — ghi đè vĩnh viễn video gốc bằng đoạn đang giữ lại. Đặt ngay
    * trong `editToolbar` (cạnh các nút chỉnh sửa: chia/xoá/cắt đầu-cuối…) thay
@@ -101,7 +104,7 @@ const VISIBLE_PADDING_RATIO = 0.25;
  * NGUỒN nên không đổi bất kể segment nào chứa nó — xem `frames` bên dưới). */
 const FRAME_ROUND_MS = 10;
 const FETCH_DEBOUNCE_MS = 120;
-/** Số mốc lấy đều trên toàn video, fetch 1 lần duy nhất lúc mount — CapCut và
+/** Số mốc lấy đều trên toàn video, fetch lúc mount (Pha 2 hoàn thiện lớp nền) — CapCut và
  * các NLE khác luôn có sẵn 1 "lớp nền" thumbnail phủ toàn bộ clip trước khi
  * người dùng tương tác, để zoom/cuộn không bao giờ thấy ô trắng hoàn toàn:
  * ô trắng — không phải fetch chậm — mới là nguyên nhân chính gây cảm giác
@@ -190,6 +193,7 @@ export default function VideoTrimmer({
   src,
   filePath,
   durationMs,
+  initialThumbUrl,
   busy,
   onSave,
   onSaveAs,
@@ -332,7 +336,23 @@ export default function VideoTrimmer({
   const [zoom, setZoom] = useState(1);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [containerWidth, setContainerWidth] = useState(0);
-  const [frames, setFrames] = useState<Map<number, string>>(new Map());
+  const [frames, setFrames] = useState<Map<number, string>>(() => {
+    if (initialThumbUrl) {
+      return new Map([[0, initialThumbUrl]]);
+    }
+    return new Map();
+  });
+
+  useEffect(() => {
+    if (initialThumbUrl) {
+      setFrames((prev) => {
+        if (prev.has(0)) return prev;
+        const next = new Map(prev);
+        next.set(0, initialThumbUrl);
+        return next;
+      });
+    }
+  }, [initialThumbUrl]);
   /** Vị trí đang rê chuột trên timeline (chưa click) — hiện preview lớn nổi
    * theo con trỏ, kiểu "hover-scrub" của CapCut. `clientX`/`trackTop` là toạ
    * độ viewport (dùng `position: fixed` để không bị `trackScroll` cắt mất do
@@ -724,20 +744,35 @@ export default function VideoTrimmer({
       });
   };
 
-  // Lớp nền: fetch 1 lần duy nhất ~BASE_FRAME_COUNT mốc rải đều toàn video
-  // ngay khi có `filePath`/`durationMs` — không phụ thuộc zoom/cuộn, không
-  // debounce (chỉ chạy 1 lần nên không có gì để dồn). Nhờ `nearestFrameUrl`
-  // dùng khi render, những mốc này đóng vai trò "phao cứu sinh" cho MỌI tile
-  // ở MỌI mức zoom trong lúc chờ đúng mốc chính xác — xem const
-  // `BASE_FRAME_COUNT`.
+  // Lớp nền tải lũy tiến (Progressive Loading):
+  // - Pha 1: fetch cực nhanh 1 frame tại mốc 0 (hoặc dùng ngay `initialThumbUrl` nếu có).
+  //   Nhờ timestamps_ms.len() == 1, backend chạy `extract_one_frame` (fast seek ~50ms
+  //   thay vì decode toàn bộ video bằng filter `fps`).
+  //   Nhờ nearestFrameUrl, 1 frame này lập tức phủ kín toàn bộ timeline trong chớp mắt (~50ms).
+  // - Pha 2: đưa các mốc còn lại của BASE_FRAME_COUNT (16 frame) vào hàng đợi để
+  //   chạy ngầm phía sau, cập nhật các tile sắc nét và chính xác hơn mà không gây khựng.
   useEffect(() => {
     if (!filePath || durationMs <= 0) return;
+    const fastBase = [0];
     const step = durationMs / (BASE_FRAME_COUNT - 1);
-    const base = Array.from({ length: BASE_FRAME_COUNT }, (_, i) =>
+    const fullBase = Array.from({ length: BASE_FRAME_COUNT }, (_, i) =>
       Math.round((i * step) / FRAME_ROUND_MS) * FRAME_ROUND_MS,
     );
-    const missing = Array.from(new Set(base)).filter((ms) => !frames.has(ms));
-    if (missing.length > 0) runFetch(missing);
+
+    const fastMissing = fastBase.filter((ms) => !frames.has(ms));
+    const fastSet = new Set(fastBase);
+    const remainingMissing = Array.from(new Set(fullBase)).filter(
+      (ms) => !frames.has(ms) && !fastSet.has(ms),
+    );
+
+    if (fastMissing.length > 0) {
+      runFetch(fastMissing);
+      if (remainingMissing.length > 0) {
+        runFetch(remainingMissing);
+      }
+    } else if (remainingMissing.length > 0) {
+      runFetch(remainingMissing);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filePath, durationMs]);
 
@@ -746,8 +781,8 @@ export default function VideoTrimmer({
   // nào, không cần huỷ/bỏ qua kết quả trễ như 1 request thông thường).
   useEffect(() => {
     if (!filePath || visibleTiles.length === 0) return;
-    // Nếu mảng frames còn trống và mẻ base frames đang được fetch lúc zoom 1x, tránh fetch trùng lặp
-    if (frames.size === 0 && fetchInFlightRef.current && zoom === 1) return;
+    // Nếu mảng frames chưa đủ mẻ base frames và đang được fetch lúc zoom 1x, tránh fetch trùng lặp
+    if (frames.size < BASE_FRAME_COUNT && fetchInFlightRef.current && zoom === 1) return;
     const missing = Array.from(new Set(visibleTiles.map((t) => t.srcMs))).filter((ms) => !frames.has(ms));
     if (missing.length === 0) return;
     const timer = setTimeout(() => runFetch(missing), FETCH_DEBOUNCE_MS);

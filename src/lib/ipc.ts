@@ -10,11 +10,14 @@ export interface PendingVideo {
   height: number;
   durationMs: number;
   historyId: string;
+  thumbPath?: string;
 }
 
 export interface Pending {
-  /** Pixel NỀN (chưa ghép annotation) — base64 trần, không prefix data URL. */
-  base64: string;
+  /** Blob URL được tạo trực tiếp từ Binary IPC — không qua base64. */
+  imageUrl?: string;
+  /** Pixel NỀN (chưa ghép annotation) — base64 trần (dự phòng). */
+  base64?: string;
   width: number;
   height: number;
   /** DPI scale factor của màn hình nguồn (1.0 = normal, 2.0 = Retina 2×). */
@@ -35,6 +38,32 @@ export interface Pending {
   docIsDraft?: boolean;
   /** Đường dẫn file `.snapdoc` nguồn — có giá trị → Save ghi thẳng lại file đó. */
   filePath?: string | null;
+}
+
+function parseBinaryPending(buf: ArrayBuffer | null): Pending | null {
+  if (!buf || buf.byteLength < 4) return null;
+  const view = new DataView(buf);
+  const metaLen = view.getUint32(0, true);
+  if (metaLen === 0 || buf.byteLength < 4 + metaLen) return null;
+  const metaBytes = new Uint8Array(buf, 4, metaLen);
+  const metaJson = new TextDecoder().decode(metaBytes);
+  const meta = JSON.parse(metaJson);
+  const imgBytes = new Uint8Array(buf, 4 + metaLen);
+  // Tự động nhận diện MIME type từ magic numbers (JPEG: 0xFF 0xD8, PNG: 0x89 0x50)
+  const isJpeg = imgBytes.length >= 2 && imgBytes[0] === 0xff && imgBytes[1] === 0xd8;
+  const mime = isJpeg ? "image/jpeg" : "image/png";
+  const blob = new Blob([imgBytes], { type: mime });
+  const imageUrl = URL.createObjectURL(blob);
+  return {
+    ...meta,
+    scale_factor: meta.scaleFactor ?? 1,
+    history_id: meta.historyId ?? null,
+    capture_mode: meta.captureMode ?? "region",
+    docJson: meta.docJson ?? null,
+    docIsDraft: meta.docIsDraft ?? false,
+    filePath: meta.filePath ?? null,
+    imageUrl,
+  };
 }
 
 /** Lớp annotation kèm cờ "là bản nháp chưa lưu". */
@@ -141,6 +170,8 @@ export interface Settings {
   recordSelf?: boolean;
   /** Hiển thị phím bấm trên màn hình khi đang quay video — mặc định false. */
   recordShowKeystrokes?: boolean;
+  /** Hiển thị hiệu ứng click chuột khi quay video — mặc định true. */
+  recordShowClicks?: boolean;
   shortcuts: Record<string, string>;
   /** Thư mục lần cuối user chọn qua "Save As…" ở editor (ảnh) — dùng làm mặc
    * định cho lần Save As kế tiếp, xem `useOutput.saveAsToFile`. */
@@ -177,16 +208,31 @@ export interface UpdateInfo {
 }
 
 export const ipc = {
-  /** Lấy ảnh "đóng băng màn hình" (JPEG base64 trần) cho overlay `idx` —
+  /** Lấy ảnh "đóng băng màn hình" (JPEG binary bytes) cho overlay `idx` —
    * frontend dùng làm background tĩnh khi kéo chọn vùng, tránh tương tác
    * nhầm với app đang chạy phía sau (như Snagit/Lightshot). */
-  getFrozenScreen: (idx: number) => invoke<string | null>("get_frozen_screen", { idx }),
+  getFrozenScreen: (idx: number) =>
+    invoke<ArrayBuffer>("get_frozen_screen", { idx }).catch(() => null),
   /** Báo cho Rust biết overlay `idx` (phiên `gen`) đã paint xong ảnh đóng
    * băng — Rust chờ tín hiệu này (tất cả overlay) rồi mới show() đồng loạt,
    * tránh nhịp trống/nháy khi show() rồi mới paint sau (xem `useFrozenScreen`). */
   notifyOverlayReady: (idx: number, gen: number) => invoke<void>("notify_overlay_ready", { idx, gen }),
-  peekPending: () => invoke<Pending | null>("peek_pending"),
-  takePending: () => invoke<Pending | null>("take_pending"),
+  peekPending: async (): Promise<Pending | null> => {
+    try {
+      const buf = await invoke<ArrayBuffer>("peek_pending");
+      return parseBinaryPending(buf);
+    } catch {
+      return null;
+    }
+  },
+  takePending: async (): Promise<Pending | null> => {
+    try {
+      const buf = await invoke<ArrayBuffer>("take_pending");
+      return parseBinaryPending(buf);
+    } catch {
+      return null;
+    }
+  },
   peekPendingVideo: () => invoke<PendingVideo | null>("peek_pending_video"),
   takePendingVideo: () => invoke<PendingVideo | null>("take_pending_video"),
   /** Ghi đè ảnh đang chờ (output="editor") — dùng khi "Chụp nhanh" bàn giao sang Editor.
@@ -271,7 +317,7 @@ export const ipc = {
   restartApp: () => invoke<void>("restart_app"),
   // Scroll
   captureScrollSlice: (mx: number, my: number, rx: number, ry: number, rw: number, rh: number) =>
-    invoke<{ sliceIndex: number; base64: string }>("capture_scroll_slice", { mx, my, rx, ry, rw, rh }),
+    invoke<ArrayBuffer>("capture_scroll_slice", { mx, my, rx, ry, rw, rh }),
   commitScrollSlice: (sliceIndex: number) =>
     invoke<void>("commit_scroll_slice", { sliceIndex }),
   finalizeScrollCapture: (base64: string, width: number, height: number, mx?: number, my?: number) =>

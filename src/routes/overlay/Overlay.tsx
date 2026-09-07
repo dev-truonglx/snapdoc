@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
@@ -28,55 +28,27 @@ import { serializeDoc } from "../../features/annotation/sessions";
  * Double rAF: rAF đầu chờ trình duyệt schedule vẽ DOM mới (ready=true), rAF
  * thứ hai chạy sau khi frame đó đã thực sự được composite.
  */
-function useFrozenScreen(): { url: string | null; ready: boolean } {
-  const [state, setState] = useState<{ url: string | null; ready: boolean }>({
-    url: null,
-    ready: false,
-  });
-  useEffect(() => {
-    let cancelled = false;
-    ipc.getFrozenScreen(MY_IDX)
-      .then((b64) => {
-        if (!cancelled) {
-          setState({ url: b64 ? `data:image/jpeg;base64,${b64}` : null, ready: true });
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setState({ url: null, ready: true });
-      });
-    return () => { cancelled = true; };
-  }, []);
+interface Sel {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 
-  useEffect(() => {
-    if (!state.ready) return;
-    let raf2 = 0;
-    const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        ipc.notifyOverlayReady(MY_IDX, GEN).catch(() => {});
-      });
-    });
-    return () => {
-      cancelAnimationFrame(raf1);
-      if (raf2) cancelAnimationFrame(raf2);
-    };
-  }, [state.ready]);
-
-  return state;
+interface OverlaySession {
+  mode: string;
+  gen: number;
+  record: boolean;
+  preset: Sel | null;
 }
 
 const params = new URLSearchParams(window.location.search);
-const MODE = params.get("mode") ?? "region";
+const INIT_MODE = params.get("mode") ?? "region";
 const MY_IDX = Number(params.get("idx") ?? "0");
 const SCALE = Number(params.get("scale") ?? "1") || 1;
-// Phiên overlay hiện tại (Rust gán, xem `windows::open_overlays_ex`) — echo
-// lại qua `notifyOverlayReady` để Rust lọc bỏ tín hiệu trễ từ phiên cũ.
-const GEN = Number(params.get("gen") ?? "0");
-// "record=1" = đang chọn phạm vi QUAY (không phải chụp ảnh) — chỉ MODE=="region"
-// quan tâm tới cờ này (window/monitor picker chọn tức thì, không cần bước
-// chỉnh vùng). "px/py/pw/ph" (nếu có) = vùng đã quay lần gần nhất, đề xuất lại
-// ngay trên đúng màn hình đã lưu (xem `windows::open_overlays_ex`).
-const RECORD = params.get("record") === "1";
-const PRESET: Sel | null = (() => {
+const INIT_GEN = Number(params.get("gen") ?? "0");
+const INIT_RECORD = params.get("record") === "1";
+const INIT_PRESET: Sel | null = (() => {
   const px = params.get("px");
   const py = params.get("py");
   const pw = params.get("pw");
@@ -84,6 +56,68 @@ const PRESET: Sel | null = (() => {
   if (px == null || py == null || pw == null || ph == null) return null;
   return { x: Number(px), y: Number(py), w: Number(pw), h: Number(ph) };
 })();
+
+const OverlayContext = createContext<OverlaySession>({
+  mode: INIT_MODE,
+  gen: INIT_GEN,
+  record: INIT_RECORD,
+  preset: INIT_PRESET,
+});
+
+/**
+ * Lấy ảnh "đóng băng màn hình" từ Rust (JPEG binary) khi mount overlay.
+ * Trả { url, ready }:
+ *   - url: Blob URL để dùng làm CSS background-image (null khi chưa có)
+ *   - ready: true khi đã lấy xong (dù thành công hay thất bại)
+ */
+function useFrozenScreen(): { url: string | null; ready: boolean } {
+  const { gen } = useContext(OverlayContext);
+  const [state, setState] = useState<{ url: string | null; ready: boolean }>({
+    url: null,
+    ready: false,
+  });
+
+  useEffect(() => {
+    if (gen === 0) return;
+    let cancelled = false;
+    let blobUrl: string | null = null;
+    ipc.getFrozenScreen(MY_IDX)
+      .then((buf) => {
+        if (!cancelled) {
+          if (buf && buf.byteLength > 0) {
+            blobUrl = URL.createObjectURL(new Blob([buf], { type: "image/jpeg" }));
+            setState({ url: blobUrl, ready: true });
+          } else {
+            setState({ url: null, ready: true });
+          }
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setState({ url: null, ready: true });
+      });
+    return () => {
+      cancelled = true;
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+      }
+    };
+  }, [gen]);
+
+  useEffect(() => {
+    if (!state.ready || gen === 0) return;
+    // Window đang ẩn (`visible: false`) trong lúc chờ ảnh đóng băng — trên macOS WebKit
+    // và Chromium, `requestAnimationFrame` bị SUSPEND hoàn toàn khi window ẩn.
+    // Do đó dùng `setTimeout(..., 0)` để đẩy sang macrotask kế tiếp.
+    const timer = setTimeout(() => {
+      ipc.notifyOverlayReady(MY_IDX, gen).catch(() => {});
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [state.ready, gen]);
+
+  return state;
+}
 
 type Vec2 = [number, number];
 
@@ -126,21 +160,43 @@ function useInput(
 }
 
 export default function Overlay() {
+  const [session, setSession] = useState<OverlaySession>(() => ({
+    mode: INIT_MODE,
+    gen: INIT_GEN,
+    record: INIT_RECORD,
+    preset: INIT_PRESET,
+  }));
+
+  useEffect(() => {
+    const unlisten = listen<OverlaySession>("overlay-session-start", (e) => {
+      setSession(e.payload);
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+
+  // Cửa sổ prewarm chạy ngầm (gen === 0) giữ ở trạng thái rỗng, không render gì
+  // và không gọi getFrozenScreen cho tới khi có phiên chụp thật (gen > 0).
+  if (session.gen === 0) {
+    return null;
+  }
+
   return (
-    <>
+    <OverlayContext.Provider value={session}>
       {/* Keyframes dùng chung cho hiệu ứng "kiến bò" (marching ants) của mọi
           viền cam nét đứt trong overlay — xem `antsBorder()`. */}
       <style>{ANTS_KEYFRAMES}</style>
-      {MODE === "monitor" ? (
-        <MonitorPick />
-      ) : MODE === "quick" ? (
-        <QuickAnnotate />
-      ) : MODE === "region" && RECORD ? (
-        <RecordRegionSelect />
+      {session.mode === "monitor" ? (
+        <MonitorPick key={session.gen} />
+      ) : session.mode === "quick" ? (
+        <QuickAnnotate key={session.gen} />
+      ) : session.mode === "region" && session.record ? (
+        <RecordRegionSelect key={session.gen} />
       ) : (
-        <RegionSelect />
+        <RegionSelect key={session.gen} />
       )}
-    </>
+    </OverlayContext.Provider>
   );
 }
 
@@ -558,9 +614,10 @@ function isOverBoxOrBar(sel: Sel, winW: number, winH: number, x: number, y: numb
 
 function RecordRegionSelect() {
   const { t } = useTranslation();
+  const { preset } = useContext(OverlayContext);
   const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
-  const [phase, setPhase] = useState<RecPhase>(PRESET ? "adjusting" : "selecting");
-  const [sel, setSel] = useState<Sel | null>(PRESET);
+  const [phase, setPhase] = useState<RecPhase>(preset ? "adjusting" : "selecting");
+  const [sel, setSel] = useState<Sel | null>(preset);
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   // true khi con trỏ đang ở nền trống (ngoài khung + ngoài thanh nút) lúc

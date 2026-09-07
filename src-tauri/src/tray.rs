@@ -325,7 +325,15 @@ pub fn show_recording_tray(app: &AppHandle) {
         })
         .build(app);
     match result {
-        Ok(tray) => *guard = Some(tray),
+        Ok(tray) => {
+            // Kiểm tra an toàn: nếu phiên quay đã bị dừng trong lúc build tray, dọn dẹp ngay lập tức
+            if crate::record::status(app).is_none() {
+                drop(tray);
+                let _ = app.remove_tray_by_id("recording-tray");
+            } else {
+                *guard = Some(tray);
+            }
+        }
         Err(e) => {
             // Trước đây chỉ `eprintln!` (vô hình trong bản đóng gói, không có
             // console đính kèm) — quay vẫn chạy (file vẫn ghi) nhưng người

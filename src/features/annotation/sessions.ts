@@ -1,6 +1,7 @@
 import { useEditor } from "./store";
 import type { Annotation, BackgroundConfig, Doc } from "./model";
 import { ipc } from "../../lib/ipc";
+import { evictCachedImage } from "./canvas/imageCache";
 
 /**
  * Sổ đăng ký PHIÊN SỬA trong RAM — giữ nguyên trạng thái đang sửa của từng
@@ -252,6 +253,7 @@ function revokeAll(s: ImageSession, key: SessionKey): void {
   const activeDoc = key === activeKey ? null : useEditor.getState().doc;
   for (const url of s.blobUrls) {
     if (activeDoc && activeDoc.image === url) continue;
+    evictCachedImage(url);
     URL.revokeObjectURL(url);
   }
 }
@@ -347,7 +349,10 @@ export async function openLibraryImage(
   ]);
   if (!isCurrentSwitch(token)) return null;
 
-  const url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+  // Tự động nhận diện MIME type từ magic numbers (JPEG: 0xFF 0xD8, PNG: 0x89 0x50)
+  const isJpeg = bytes.byteLength >= 2 && new Uint8Array(bytes, 0, 2)[0] === 0xff && new Uint8Array(bytes, 0, 2)[1] === 0xd8;
+  const mime = isJpeg ? "image/jpeg" : "image/png";
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
   const payload = parseDocPayload(layer?.json);
   // Nạp từ bản nháp → tài liệu là CHƯA LƯU. Để clean thì badge tắt, autosave
   // ngừng ghi, và user tưởng đã lưu trong khi bản chính thức trên đĩa vẫn cũ.
@@ -416,6 +421,11 @@ function pendingDraftWrite(): { key: SessionKey; json: string } | null {
   if (!key || key.startsWith("file:")) return null;
   const s = useEditor.getState();
   if (!s.doc) return null;
+  // Chỉ ghi draft khi tài liệu THỰC SỰ có thay đổi chưa lưu (dirty).
+  // Tránh việc mỗi lần click đổi xem ảnh lại đọc/ghi file zip 30MB vô ích gây giật lag UI.
+  if (s.doc === s.savedRef && !s.baseDirty) {
+    return null;
+  }
   const json = serializeDoc();
   return json ? { key, json } : null;
 }

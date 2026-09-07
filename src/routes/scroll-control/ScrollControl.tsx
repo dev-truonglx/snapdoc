@@ -693,13 +693,18 @@ export default function ScrollControl() {
     if (!isCapturingRef.current || tickBusyRef.current) return;
     tickBusyRef.current = true;
     try {
-      const res = await ipc.captureScrollSlice(mx, my, rx, ry, rw, rh);
-      if (!res || !res.base64 || !isCapturingRef.current) return;
+      const buf = await ipc.captureScrollSlice(mx, my, rx, ry, rw, rh);
+      if (!buf || buf.byteLength < 4 || !isCapturingRef.current) return;
 
-      const { sliceIndex, base64 } = res;
+      const view = new DataView(buf);
+      const sliceIndex = view.getUint32(0, true);
+      const imgBytes = new Uint8Array(buf, 4);
+      const blob = new Blob([imgBytes], { type: "image/png" });
+      const sliceUrl = URL.createObjectURL(blob);
+
       totalSlicesRef.current++;
 
-      const img = await loadImage(`data:image/png;base64,${base64}`, t);
+      const img = await loadImage(sliceUrl, t);
       const fw = img.naturalWidth;
       const fh = img.naturalHeight;
 

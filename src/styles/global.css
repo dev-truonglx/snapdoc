@@ -136,9 +136,23 @@ select,
   animation: snapdoc-shimmer-sweep 1.4s ease-in-out infinite;
 }
 
-/* Nút Copy/Xoá trên mỗi thumbnail của dải "Gần đây" (HistoryStrip) — ẩn mặc
-   định, chỉ hiện khi hover vào đúng thumbnail đó, đỡ rối mắt lúc không thao
-   tác (xem `history-thumb`/`history-thumb-action` ở HistoryStrip.tsx). */
+/* Thumbnail và các nút tác vụ trên dải "Gần đây" (HistoryStrip) */
+.history-thumb {
+  transition: opacity 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+  outline: none !important;
+}
+
+.history-thumb:not([data-active="true"]):hover {
+  opacity: 1 !important;
+  filter: brightness(1) !important;
+  transform: translateY(-1px) scale(1.01);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25), 0 2px 8px rgba(0, 0, 0, 0.35) !important;
+}
+
+.history-thumb:focus-visible {
+  box-shadow: 0 0 0 2px var(--bg-elevated), 0 0 0 4.5px var(--accent), 0 4px 14px rgba(59, 130, 246, 0.5) !important;
+}
+
 .history-thumb-action {
   opacity: 0;
   transition: opacity 0.12s ease;

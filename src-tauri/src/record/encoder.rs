@@ -125,6 +125,19 @@ fn test_encoder(ffmpeg: &Path, encoder_name: &str, extra_args: &[&str]) -> bool 
     }
 }
 
+/// Pre-warm detection of best H.264 encoder in background during startup,
+/// avoiding ~1s delay when user starts their first recording.
+pub fn prewarm_encoder() {
+    std::thread::Builder::new()
+        .name("snapdoc-encoder-prewarm".into())
+        .spawn(|| {
+            if let Ok(ffmpeg) = sidecar_path("ffmpeg") {
+                let _ = best_h264_encoder_args(&ffmpeg);
+            }
+        })
+        .ok();
+}
+
 fn best_h264_encoder_args(ffmpeg: &Path) -> &'static [String] {
     DETECTED_ENCODER_ARGS.get_or_init(|| {
         #[cfg(target_os = "windows")]
@@ -175,7 +188,7 @@ fn best_h264_encoder_args(ffmpeg: &Path) -> &'static [String] {
                 "-c:v".to_string(), "libx264".to_string(),
                 "-preset".to_string(), "ultrafast".to_string(),
                 "-tune".to_string(), "zerolatency".to_string(),
-                "-crf".to_string(), "23".to_string(),
+                "-crf".to_string(), "26".to_string(),
                 "-pix_fmt".to_string(), "yuv420p".to_string(),
             ]
         }

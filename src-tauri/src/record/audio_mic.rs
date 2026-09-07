@@ -32,6 +32,19 @@ impl MicCapture {
     }
 }
 
+/// Pre-warm audio subsystem and default microphone endpoint in background.
+pub fn prewarm() {
+    std::thread::Builder::new()
+        .name("snapdoc-mic-prewarm".into())
+        .spawn(|| {
+            let host = cpal::default_host();
+            if let Some(device) = host.default_input_device() {
+                let _ = device.default_input_config();
+            }
+        })
+        .ok();
+}
+
 /// Bắt đầu ghi mic mặc định của hệ thống. Trả về tay cầm điều khiển +
 /// `Receiver<Vec<u8>>` PCM i16 interleaved (mỗi lần cpal callback 1 đợt) +
 /// sample rate/số kênh THẬT của thiết bị (không cố định như audio hệ thống —

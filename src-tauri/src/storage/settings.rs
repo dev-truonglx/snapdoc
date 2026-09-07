@@ -31,6 +31,7 @@ fn defaults() -> Value {
         "recordAudioSource": "off",
         "recordSelf": false,
         "recordShowKeystrokes": false,
+        "recordShowClicks": true,
         "language": "vi",
         "shortcuts": {
             "captureBar": "CmdOrCtrl+Shift+5",
