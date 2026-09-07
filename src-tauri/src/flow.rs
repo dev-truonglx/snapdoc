@@ -726,6 +726,9 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
 /// biết đường CHUYỂN HƯỚNG sang `record::start_recording_*` thay vì chụp ảnh
 /// + `finish()` như bình thường.
 pub fn run_record_picker(app: &AppHandle, mode: &str) {
+    // Đánh thức trước mic và audio subsystem trong lúc user đang chọn vùng
+    crate::record::audio_mic::prewarm();
+
     // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
     hide_editor_for_freeze(app);
 
@@ -848,8 +851,10 @@ pub fn finalize_region(
     if take_pending_record(app) {
         windows::close_overlays_except(app, win.label());
         windows::restore_regular_activation(app);
+
         let display_id = m.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
         save_last_region(app, display_id, rx, ry, rw, rh);
+
         crate::record::start_recording_region(app, display_id, rx, ry, rw, rh)?;
 
         // KHÔNG resize/reposition/ẩn/tạo lại BẤT KỲ cửa sổ nào cho phần
@@ -861,6 +866,7 @@ pub fn finalize_region(
         // không một khung hình nào bị bỏ lỡ, loại bỏ HOÀN TOÀN nguồn gây
         // nháy hình.
         let _ = win.set_ignore_cursor_events(true);
+
         // KHÔNG mở nút dừng quay nổi (`open_stop_control`) để tránh che khuất giao
         // diện và chặn thao tác chuột của người dùng trong lúc quay. Việc dừng/tạm
         // dừng quay được thực hiện tiện lợi và sạch sẽ qua Tray Icon trên Menu Bar

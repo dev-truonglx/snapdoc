@@ -326,6 +326,11 @@ pub fn run() {
                 std::thread::spawn(move || windows::prewarm_overlays(&h));
             }
 
+            // Pre-warm hardware encoder detection và audio subsystem (chạy nền, không chặn khởi động app)
+            // để khi người dùng bấm quay màn hình, encoder và mic đã sẵn sàng (0ms delay).
+            record::encoder::prewarm_encoder();
+            record::audio_mic::prewarm();
+
             // Pre-warm capture-bar (ẩn) NGAY khi app khởi động — giữ icon Dock
             // (macOS)/Taskbar (Windows) hiện diện xuyên suốt vòng đời app kể
             // từ lúc mở app, không còn im lặng ở tray như trước.

@@ -273,10 +273,10 @@ mod macos {
 mod windows {
     use super::MouseClickPayload;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
     use tauri::{AppHandle, Emitter};
-    use windows_sys::Win32::Foundation::{HMODULE, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::Foundation::{HMODULE, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
         TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL,
@@ -284,7 +284,7 @@ mod windows {
     };
 
     static mut HOOK_HANDLE: HHOOK = std::ptr::null_mut();
-    static mut APP_HANDLE_FOR_HOOK: Option<AppHandle> = None;
+    static APP_HANDLE_FOR_HOOK: Mutex<Option<AppHandle>> = Mutex::new(None);
     static mut TARGET_BOUNDS: (f64, f64, f64, f64, f64) = (0.0, 0.0, 0.0, 0.0, 1.0); // (x, y, w, h, scale)
     static mut LAST_CLICK_TIME: u32 = 0;
     static mut LAST_CLICK_POS: (i32, i32) = (0, 0);
@@ -330,14 +330,16 @@ mod windows {
                     LAST_CLICK_TIME = now;
                     LAST_CLICK_POS = (mouse_hook.pt.x, mouse_hook.pt.y);
 
-                    if let Some(app) = &APP_HANDLE_FOR_HOOK {
-                        let payload = MouseClickPayload {
-                            x: local_x,
-                            y: local_y,
-                            button: button.to_string(),
-                            count,
-                        };
-                        let _ = app.emit("record-mouse-click", payload);
+                    if let Ok(guard) = APP_HANDLE_FOR_HOOK.lock() {
+                        if let Some(app) = guard.as_ref() {
+                            let payload = MouseClickPayload {
+                                x: local_x,
+                                y: local_y,
+                                button: button.to_string(),
+                                count,
+                            };
+                            let _ = app.emit("record-mouse-click", payload);
+                        }
                     }
                 }
             }
@@ -358,7 +360,9 @@ mod windows {
             let thread_handle = thread::Builder::new()
                 .name("snapdoc-win-mouse-click".to_string())
                 .spawn(move || unsafe {
-                    APP_HANDLE_FOR_HOOK = Some(app);
+                    if let Ok(mut g) = APP_HANDLE_FOR_HOOK.lock() {
+                        *g = Some(app);
+                    }
                     TARGET_BOUNDS = (target_rect.0, target_rect.1, target_rect.2, target_rect.3, scale);
 
                     let hook = SetWindowsHookExW(
@@ -385,7 +389,9 @@ mod windows {
 
                     UnhookWindowsHookEx(HOOK_HANDLE);
                     HOOK_HANDLE = std::ptr::null_mut();
-                    APP_HANDLE_FOR_HOOK = None;
+                    if let Ok(mut g) = APP_HANDLE_FOR_HOOK.lock() {
+                        *g = None;
+                    }
                 })
                 .map_err(|e| format!("Không khởi động được thread nghe chuột: {e}"))?;
 

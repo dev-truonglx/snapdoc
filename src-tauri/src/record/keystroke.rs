@@ -318,14 +318,14 @@ mod macos {
 mod windows {
     use super::KeystrokePayload;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
     use tauri::{AppHandle, Emitter};
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-    static mut APP_HANDLE_FOR_HOOK: Option<AppHandle> = None;
+    static APP_HANDLE_FOR_HOOK: Mutex<Option<AppHandle>> = Mutex::new(None);
     static mut HOOK_HANDLE: HHOOK = std::ptr::null_mut();
 
     pub struct KeystrokeListener {
@@ -395,13 +395,15 @@ mod windows {
                 parts.push(key_name.to_string());
                 let label = parts.join(" + ");
 
-                if let Some(app) = &APP_HANDLE_FOR_HOOK {
-                    let payload = KeystrokePayload {
-                        key: key_name.to_string(),
-                        modifiers,
-                        label,
-                    };
-                    let _ = app.emit("record-keystroke-press", payload);
+                if let Ok(guard) = APP_HANDLE_FOR_HOOK.lock() {
+                    if let Some(app) = guard.as_ref() {
+                        let payload = KeystrokePayload {
+                            key: key_name.to_string(),
+                            modifiers,
+                            label,
+                        };
+                        let _ = app.emit("record-keystroke-press", payload);
+                    }
                 }
             }
         }
@@ -417,7 +419,9 @@ mod windows {
             let thread_handle = thread::Builder::new()
                 .name("snapdoc-win-keystroke".to_string())
                 .spawn(move || unsafe {
-                    APP_HANDLE_FOR_HOOK = Some(app);
+                    if let Ok(mut g) = APP_HANDLE_FOR_HOOK.lock() {
+                        *g = Some(app);
+                    }
                     let hook = SetWindowsHookExW(
                         WH_KEYBOARD_LL,
                         Some(low_level_keyboard_proc),
@@ -442,7 +446,9 @@ mod windows {
 
                     UnhookWindowsHookEx(HOOK_HANDLE);
                     HOOK_HANDLE = std::ptr::null_mut();
-                    APP_HANDLE_FOR_HOOK = None;
+                    if let Ok(mut g) = APP_HANDLE_FOR_HOOK.lock() {
+                        *g = None;
+                    }
                 })
                 .map_err(|e| format!("Không khởi động được thread nghe phím: {e}"))?;
 
