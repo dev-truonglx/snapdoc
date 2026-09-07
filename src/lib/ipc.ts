@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { VideoOverlayItem } from "../features/video-trim/types";
+import { type VideoOverlayItem, type VideoCrop, sanitizeCrop } from "../features/video-trim/types";
+export type { VideoCrop };
 
 /** Video đang chờ mở trong Editor — đã CÓ SẴN trong History (`historyId`
  * luôn là id thật): mở từ Library hoặc vừa quay xong (ingest ngay lập tức,
@@ -414,6 +415,7 @@ export const ipc = {
     removeAudio: boolean,
     outputPath?: string,
     overlays?: VideoOverlayItem[],
+    crop?: VideoCrop | null,
   ) =>
     invoke<HistoryItem>("trim_history_video", {
       id,
@@ -421,6 +423,7 @@ export const ipc = {
       removeAudio,
       outputPath: outputPath ?? null,
       overlays: sanitizeOverlays(overlays),
+      crop: sanitizeCrop(crop),
     }),
   /** Cắt 1 video ĐÃ LƯU trong History, ghi ĐÈ TẠI CHỖ asset/thumbnail của
    * ĐÚNG item đó — lựa chọn "Lưu đè bản gốc" ở Editor. Vĩnh viễn, không giữ
@@ -430,12 +433,14 @@ export const ipc = {
     ranges: [number, number][],
     removeAudio: boolean,
     overlays?: VideoOverlayItem[],
+    crop?: VideoCrop | null,
   ) =>
     invoke<HistoryItem>("overwrite_history_video", {
       id,
       ranges: roundRanges(ranges),
       removeAudio,
       overlays: sanitizeOverlays(overlays),
+      crop: sanitizeCrop(crop),
     }),
   /** Trích frame tại các mốc ms cho trước — trả data URL JPEG base64, `null`
    * cho mốc nào trích lỗi. `scaleW` là bề rộng đích (px): filmstrip zoom của

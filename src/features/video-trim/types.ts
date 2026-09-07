@@ -1,5 +1,25 @@
 export type VideoOverlayType = "rect" | "blur" | "text" | "arrow";
 
+/**
+ * Vùng cắt khung hình video (tính theo pixel thực tế của video nguồn).
+ */
+export interface VideoCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Đảm bảo kích thước chẵn và toạ độ hợp lệ trước khi gửi qua IPC xuống FFmpeg */
+export function sanitizeCrop(crop?: VideoCrop | null): VideoCrop | null {
+  if (!crop) return null;
+  const width = Math.max(2, Math.floor(crop.width / 2) * 2);
+  const height = Math.max(2, Math.floor(crop.height / 2) * 2);
+  const x = Math.max(0, Math.round(crop.x));
+  const y = Math.max(0, Math.round(crop.y));
+  return { x, y, width, height };
+}
+
 export interface VideoOverlayItem {
   id: string;
   type: VideoOverlayType;

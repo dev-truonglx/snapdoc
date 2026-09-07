@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import {
   type VideoOverlayItem,
   type VideoOverlayType,
+  type VideoCrop,
   OVERLAY_COLORS,
   OVERLAY_STROKE_WIDTHS,
   DEFAULT_OVERLAY_DURATION_MS,
@@ -26,6 +27,7 @@ interface VideoCanvasOverlayProps {
   onAddOverlay: (item: VideoOverlayItem) => void;
   onDeleteOverlay: (id: string) => void;
   isPlaying: boolean;
+  crop?: VideoCrop | null;
 }
 
 type HandleType = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "arrow-start" | "arrow-end";
@@ -176,6 +178,7 @@ export default function VideoCanvasOverlay({
   onAddOverlay,
   onDeleteOverlay,
   isPlaying,
+  crop,
 }: VideoCanvasOverlayProps) {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -190,6 +193,19 @@ export default function VideoCanvasOverlay({
   const updateRect = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
+
+    if (crop) {
+      // Khi đã crop: VideoCanvasOverlay nằm trong container stage có kích thước đúng tỷ lệ crop.
+      // Vùng hiển thị video chính là toàn bộ stage (parentElement của video).
+      const stage = video.parentElement;
+      const sw = stage ? stage.clientWidth : video.clientWidth;
+      const sh = stage ? stage.clientHeight : video.clientHeight;
+      if (sw > 0 && sh > 0) {
+        setVideoRect({ left: 0, top: 0, width: sw, height: sh });
+      }
+      return;
+    }
+
     const cw = video.clientWidth;
     const ch = video.clientHeight;
     const vw = video.videoWidth || (video as any).naturalWidth || 0;
@@ -218,7 +234,7 @@ export default function VideoCanvasOverlay({
       top = (ch - h) / 2;
     }
     setVideoRect({ left: Math.round(left), top: Math.round(top), width: Math.round(w), height: Math.round(h) });
-  }, [videoRef]);
+  }, [videoRef, crop]);
 
   useEffect(() => {
     updateRect();
