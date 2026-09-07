@@ -372,13 +372,30 @@ export default function Editor() {
       if (!isCurrentSwitch(token)) return;
       if (p) setVideoDoc(null);
       loadPending(p);
+
+      // Focus vào window để đảm bảo WebView2 DOM sẵn sàng nhận phím tắt công cụ
+      // ngay lập tức trên Windows mà không cần người dùng click chuột trước.
+      requestAnimationFrame(() => {
+        window.focus();
+      });
+      setTimeout(() => {
+        window.focus();
+      }, 50);
     };
 
     loadAnyPending();
+    requestAnimationFrame(() => {
+      window.focus();
+    });
     // Bật autosave TƯỜNG MINH ở đây (không phải side-effect của module) — chỉ
     // cửa sổ `editor` được ghi nháp, xem `initAutosave`.
     const stopAutosave = initAutosave();
-    const un = listen("refresh-capture", loadAnyPending);
+    const un = listen("refresh-capture", () => {
+      loadAnyPending();
+      setTimeout(() => {
+        window.focus();
+      }, 100);
+    });
     // Windows "Open with" / double-click: Rust emit event này với data URL đầy đủ,
     // không cần round-trip IPC takePending (timing an toàn hơn).
     const unOpenFile = listen<string>("open-file", (e) => {
