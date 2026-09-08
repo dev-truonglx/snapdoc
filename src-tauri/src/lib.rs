@@ -191,6 +191,7 @@ pub fn run() {
             commands::export_video_gif,
             commands::copy_gif_to_clipboard,
             history::commands::save_gif_to_history,
+            commands::get_video_mouse_telemetry,
         ])
 
         .setup(|app| {

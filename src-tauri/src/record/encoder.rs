@@ -508,15 +508,34 @@ pub struct VideoOverlay {
     pub arrow_end_y: Option<f64>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoomSegment {
+    pub id: String,
+    pub start_time_ms: f64,
+    pub end_time_ms: f64,
+    pub scale: f64,
+    pub focus_x: f64,
+    pub focus_y: f64,
+    #[serde(default)]
+    pub easing: Option<String>,
+}
+
 pub fn build_overlay_filter_graph(
     overlays: &[VideoOverlay],
     image_overlays: &[&VideoOverlay],
+    zoom_segments: Option<&[ZoomSegment]>,
+    video_size: Option<(u32, u32)>,
 ) -> Option<String> {
     let valid: Vec<&VideoOverlay> = overlays
         .iter()
         .filter(|o| o.rel_w > 0.001 && o.rel_h > 0.001 && o.end_time_ms > o.start_time_ms)
         .collect();
-    if valid.is_empty() && image_overlays.is_empty() {
+    let has_zooms = zoom_segments
+        .map(|zs| zs.iter().any(|z| z.scale > 1.01 && z.end_time_ms > z.start_time_ms))
+        .unwrap_or(false);
+
+    if valid.is_empty() && image_overlays.is_empty() && !has_zooms {
         return None;
     }
 
@@ -616,6 +635,49 @@ pub fn build_overlay_filter_graph(
         }
     }
 
+    if let Some(zooms) = zoom_segments {
+        let valid_zooms: Vec<&ZoomSegment> = zooms
+            .iter()
+            .filter(|z| z.scale > 1.01 && z.end_time_ms > z.start_time_ms)
+            .collect();
+        if !valid_zooms.is_empty() {
+            let (vw, vh) = video_size.unwrap_or((1920, 1080));
+            let vw = if vw > 0 { vw } else { 1920 };
+            let vh = if vh > 0 { vh } else { 1080 };
+
+            for (idx, z) in valid_zooms.iter().enumerate() {
+                let ts = z.start_time_ms / 1000.0;
+                let te = z.end_time_ms / 1000.0;
+                let dur = te - ts;
+                let tr = 0.65f64.min(dur * 0.35).max(0.25);
+                let scale = z.scale.max(1.05);
+                let fx = z.focus_x.clamp(0.0, 1.0);
+                let fy = z.focus_y.clamp(0.0, 1.0);
+
+                let ts_tr = ts + tr;
+                let te_tr = te - tr;
+
+                let z_expr = format!(
+                    "if(between(it,{ts:.3},{ts_tr:.3}),1.0+({scale}-1.0)*(6*pow((it-{ts:.3})/{tr:.3},5)-15*pow((it-{ts:.3})/{tr:.3},4)+10*pow((it-{ts:.3})/{tr:.3},3)),\
+                     if(between(it,{te_tr:.3},{te:.3}),1.0+({scale}-1.0)*(6*pow(({te:.3}-it)/{tr:.3},5)-15*pow(({te:.3}-it)/{tr:.3},4)+10*pow(({te:.3}-it)/{tr:.3},3)),\
+                     if(between(it,{ts_tr:.3},{te_tr:.3}),{scale},1.0)))"
+                );
+                let x_expr = format!(
+                    "min(max(0,(iw/2+(iw*{fx:.4}-iw/2)*(zoom-1)/({scale}-1))-iw/zoom/2),iw-iw/zoom)"
+                );
+                let y_expr = format!(
+                    "min(max(0,(ih/2+(ih*{fy:.4}-ih/2)*(zoom-1)/({scale}-1))-ih/zoom/2),ih-ih/zoom)"
+                );
+
+                let next_label = format!("zm{idx}");
+                fg.push_str(&format!(
+                    "[{prev}]zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={vw}x{vh}:fps=30[{next_label}];"
+                ));
+                prev = next_label;
+            }
+        }
+    }
+
     if prev != "0:v" {
         fg.push_str(&format!("[{prev}]null[outv];"));
     } else {
@@ -675,6 +737,8 @@ pub fn trim(
     output_path: &Path,
     remove_audio: bool,
     overlays: Option<&[VideoOverlay]>,
+    zoom_segments: Option<&[ZoomSegment]>,
+    video_size: Option<(u32, u32)>,
     mut on_progress: impl FnMut(f64),
 ) -> Result<(), String> {
     if keep_ranges_ms.is_empty() {
@@ -711,7 +775,12 @@ pub fn trim(
         }
 
         let img_refs: Vec<&VideoOverlay> = image_overlays.iter().map(|(_, o)| *o).collect();
-        let filter_graph = overlays.and_then(|ovls| build_overlay_filter_graph(ovls, &img_refs));
+        let filter_graph = build_overlay_filter_graph(
+            overlays.unwrap_or(&[]),
+            &img_refs,
+            zoom_segments,
+            video_size,
+        );
 
         // TỐI ƯU HOÁ: Nếu chỉ có 1 đoạn giữ lại (chiếm đa số các tác vụ cắt hoặc thêm overlay),
         // chạy Single-Pass: cắt thời lượng + áp dụng filter graph + encode trong 1 lệnh duy nhất!

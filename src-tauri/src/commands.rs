@@ -1192,3 +1192,21 @@ pub fn copy_gif_to_clipboard(file_path: String) -> Result<(), String> {
     crate::clipboard::copy_gif_file(p)
 }
 
+/// Đọc file telemetry chuột (.mouse.json) đi kèm với video (nếu có) để phục vụ tính năng
+/// Auto Focus & Zoom trong VideoTrimmer.
+#[tauri::command]
+pub fn get_video_mouse_telemetry(
+    file_path: String,
+) -> Result<Option<crate::record::mouse_click::MouseTelemetryFile>, String> {
+    let p = std::path::Path::new(&file_path);
+    let telemetry_path = crate::record::mouse_click::telemetry_path_for_video(p);
+    if !telemetry_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&telemetry_path)
+        .map_err(|e| format!("Không đọc được file telemetry: {e}"))?;
+    let data: crate::record::mouse_click::MouseTelemetryFile = serde_json::from_str(&content)
+        .map_err(|e| format!("Lỗi parse dữ liệu telemetry: {e}"))?;
+    Ok(Some(data))
+}
+

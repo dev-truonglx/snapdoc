@@ -1,5 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { VideoOverlayItem } from "../features/video-trim/types";
+import type { VideoOverlayItem, ZoomSegment } from "../features/video-trim/types";
+
+export interface MouseTelemetryItem {
+  t: number;
+  x: number;
+  y: number;
+  type: "click" | "move" | "drag";
+  button?: "left" | "right" | "middle";
+  count?: number;
+}
+
+export interface MouseTelemetryFile {
+  version: number;
+  videoWidth: number;
+  videoHeight: number;
+  durationMs: number;
+  events: MouseTelemetryItem[];
+}
 
 /** Video đang chờ mở trong Editor — đã CÓ SẴN trong History (`historyId`
  * luôn là id thật): mở từ Library hoặc vừa quay xong (ingest ngay lập tức,
@@ -414,6 +431,7 @@ export const ipc = {
     removeAudio: boolean,
     outputPath?: string,
     overlays?: VideoOverlayItem[],
+    zoomSegments?: ZoomSegment[],
   ) =>
     invoke<HistoryItem>("trim_history_video", {
       id,
@@ -421,6 +439,7 @@ export const ipc = {
       removeAudio,
       outputPath: outputPath ?? null,
       overlays: sanitizeOverlays(overlays),
+      zoomSegments: zoomSegments && zoomSegments.length > 0 ? zoomSegments : null,
     }),
   /** Cắt 1 video ĐÃ LƯU trong History, ghi ĐÈ TẠI CHỖ asset/thumbnail của
    * ĐÚNG item đó — lựa chọn "Lưu đè bản gốc" ở Editor. Vĩnh viễn, không giữ
@@ -430,13 +449,18 @@ export const ipc = {
     ranges: [number, number][],
     removeAudio: boolean,
     overlays?: VideoOverlayItem[],
+    zoomSegments?: ZoomSegment[],
   ) =>
     invoke<HistoryItem>("overwrite_history_video", {
       id,
       ranges: roundRanges(ranges),
       removeAudio,
       overlays: sanitizeOverlays(overlays),
+      zoomSegments: zoomSegments && zoomSegments.length > 0 ? zoomSegments : null,
     }),
+  /** Đọc dữ liệu telemetry con trỏ chuột của video (.mouse.json) nếu có */
+  getVideoMouseTelemetry: (filePath: string) =>
+    invoke<MouseTelemetryFile | null>("get_video_mouse_telemetry", { filePath }),
   /** Trích frame tại các mốc ms cho trước — trả data URL JPEG base64, `null`
    * cho mốc nào trích lỗi. `scaleW` là bề rộng đích (px): filmstrip zoom của
    * `VideoTrimmer` dùng nhỏ (160, nhiều tile), hover-scrub preview dùng lớn

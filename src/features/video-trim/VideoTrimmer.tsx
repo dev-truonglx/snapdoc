@@ -20,9 +20,17 @@ import {
   trimTail,
   computeKeepRanges,
 } from "./segments";
-import { type VideoOverlayItem, renderOverlayToDataUrl, drawOverlaysOnCanvas } from "./types";
+import { type VideoOverlayItem, type ZoomSegment, renderOverlayToDataUrl, drawOverlaysOnCanvas, makeZoomSegmentUid, MIN_ZOOM_DURATION_MS } from "./types";
 import VideoCanvasOverlay, { type VideoOverlayTool } from "./VideoCanvasOverlay";
 import OverlayTimelineTrack from "./OverlayTimelineTrack";
+import ZoomTimelineTrack from "./ZoomTimelineTrack";
+import {
+  generateAutoZoomSegments,
+  interpolateCamera,
+  calculateCameraTransform,
+  calculateSmartFocusPoint,
+} from "./mouseFocusEngine";
+import type { MouseTelemetryFile } from "../../lib/ipc";
 import { getVideoSession, saveVideoSession, dropVideoSession } from "./videoSessions";
 
 export interface VideoTrimmerProps {
@@ -56,6 +64,7 @@ export interface VideoTrimmerProps {
     keepRanges: [number, number][];
     removeAudio: boolean;
     overlays: VideoOverlayItem[];
+    zoomSegments: ZoomSegment[];
   }) => void;
   /** "open-editor" (mặc định): sau khi chụp frame, ingest xong rồi mở/focus
    * cửa sổ Editor riêng — dùng khi VideoTrimmer đang chạy trong 1 cửa sổ KHÁC
@@ -227,23 +236,35 @@ export default function VideoTrimmer({
   // thay vì áp tuần tự — lỗi này đã tự bắt được khi test 2 cú redo liên tiếp.
   // Gộp vào 1 object + luôn dùng dạng updater `setEditState(st => ...)` thì
   // React đảm bảo áp lần lượt, mỗi lần tính trên đúng kết quả của lần trước.
-  /** 1 mốc lịch sử undo/redo — gộp CẢ `segments` LẪN `removeAudio` (không chỉ
-   * riêng `segments` như trước khi thêm nút "Tách nhạc nền") để Ctrl+Z hoàn
-   * tác đúng bất kể lần sửa gần nhất là cắt đoạn hay bật/tắt xoá âm thanh. */
+  /** 1 mốc lịch sử undo/redo — gộp CẢ `segments` LẪN `removeAudio`, `overlays` và `zoomSegments`
+   * để Ctrl+Z hoàn tác đúng bất kể thao tác gần nhất là gì. */
   interface HistorySnapshot {
     segments: Segment[];
     removeAudio: boolean;
     overlays: VideoOverlayItem[];
+    zoomSegments: ZoomSegment[];
+    autoZoomEnabled: boolean;
   }
   interface EditState {
     segments: Segment[];
     removeAudio: boolean;
     overlays: VideoOverlayItem[];
+    zoomSegments: ZoomSegment[];
+    autoZoomEnabled: boolean;
     past: HistorySnapshot[];
     future: HistorySnapshot[];
     selectedSegmentId: string | null;
     selectedOverlayId: string | null;
+    selectedZoomId: string | null;
   }
+
+  const takeSnapshot = (st: EditState): HistorySnapshot => ({
+    segments: st.segments,
+    removeAudio: st.removeAudio,
+    overlays: st.overlays,
+    zoomSegments: st.zoomSegments,
+    autoZoomEnabled: st.autoZoomEnabled,
+  });
 
   const sessionKey = sourceHistoryId
     ? `history:${sourceHistoryId}`
@@ -261,24 +282,117 @@ export default function VideoTrimmer({
         segments: savedSession.segments,
         removeAudio: savedSession.removeAudio,
         overlays: savedSession.overlays,
-        past: savedSession.past,
-        future: savedSession.future,
+        zoomSegments: savedSession.zoomSegments ?? [],
+        autoZoomEnabled: savedSession.autoZoomEnabled ?? false,
+        past: (savedSession.past || []).map((p) => ({
+          ...p,
+          zoomSegments: p.zoomSegments ?? [],
+          autoZoomEnabled: p.autoZoomEnabled ?? false,
+        })),
+        future: (savedSession.future || []).map((f) => ({
+          ...f,
+          zoomSegments: f.zoomSegments ?? [],
+          autoZoomEnabled: f.autoZoomEnabled ?? false,
+        })),
         selectedSegmentId: savedSession.selectedSegmentId,
         selectedOverlayId: savedSession.selectedOverlayId,
+        selectedZoomId: null,
       };
     }
     return {
       segments: initialSegments(durationMs),
       removeAudio: false,
       overlays: [],
+      zoomSegments: [],
+      autoZoomEnabled: false,
       past: [],
       future: [],
       selectedSegmentId: null,
       selectedOverlayId: null,
+      selectedZoomId: null,
     };
   };
   const [editState, setEditState] = useState<EditState>(makeInitialEditState);
-  const { segments, removeAudio, overlays, past, future, selectedSegmentId, selectedOverlayId } = editState;
+  const {
+    segments,
+    removeAudio,
+    overlays,
+    zoomSegments,
+    autoZoomEnabled,
+    past,
+    future,
+    selectedSegmentId,
+    selectedOverlayId,
+    selectedZoomId,
+  } = editState;
+  const [mouseTelemetry, setMouseTelemetry] = useState<MouseTelemetryFile | null>(null);
+  const [isDraggingFocusPin, setIsDraggingFocusPin] = useState(false);
+
+  const selectedZoom = useMemo(
+    () => zoomSegments.find((z) => z.id === selectedZoomId) ?? null,
+    [zoomSegments, selectedZoomId],
+  );
+
+  // Tự động tải dữ liệu toạ độ chuột (.mouse.json) nếu có
+  useEffect(() => {
+    if (!filePath) return;
+    let cancelled = false;
+    ipc.getVideoMouseTelemetry(filePath).then((data) => {
+      if (cancelled || !data || !data.events || data.events.length === 0) return;
+      setMouseTelemetry(data);
+      // Tự động áp dụng smart auto-zoom nếu là video mới mở chưa có session lưu trước đó
+      setEditState((st) => {
+        if (savedSession !== null || st.zoomSegments.length > 0) return st;
+        const autoSegs = generateAutoZoomSegments(data, durationMs);
+        if (autoSegs.length > 0) {
+          return {
+            ...st,
+            zoomSegments: autoSegs,
+            autoZoomEnabled: true,
+          };
+        }
+        return st;
+      });
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath, durationMs, savedSession]);
+
+  const videoWrapRef = useRef<HTMLDivElement>(null);
+  const cameraWrapRef = useRef<HTMLDivElement>(null);
+  const zoomSegmentsRef = useRef(zoomSegments);
+  zoomSegmentsRef.current = zoomSegments;
+  const segmentsRef = useRef(segments);
+  segmentsRef.current = segments;
+
+  // Kéo dời tâm phóng to (Focus Pin) trực tiếp trên khung xem video
+  const handleFocusPinDragStart = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const videoEl = videoRef.current;
+    if (!videoEl || !selectedZoom) return;
+
+    setIsDraggingFocusPin(true);
+    const rect = videoEl.getBoundingClientRect();
+    const onMove = (ev: PointerEvent) => {
+      const rx = clamp((ev.clientX - rect.left) / rect.width, 0.05, 0.95);
+      const ry = clamp((ev.clientY - rect.top) / rect.height, 0.05, 0.95);
+      handleChangeZoomSegment({
+        ...selectedZoom,
+        focusX: Math.round(rx * 1000) / 1000,
+        focusY: Math.round(ry * 1000) / 1000,
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setIsDraggingFocusPin(false);
+      handleCommitZoomSnapshot();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
   const [overlayTool, setOverlayTool] = useState<VideoOverlayTool>("select");
   const [gifModalOpen, setGifModalOpen] = useState(false);
   const selectedSegment = useMemo(
@@ -302,6 +416,61 @@ export default function VideoTrimmer({
   }, [showSaveAsMenu]);
   const [playheadMs, setPlayheadMs] = useState(() => savedSession?.playheadMs ?? 0);
   const [isPlaying, setIsPlaying] = useState(false);
+
+  const [viewportSize, setViewportSize] = useState({ width: 800, height: 450 });
+  useEffect(() => {
+    const el = videoWrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setViewportSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const currentCamera = useMemo(() => {
+    return interpolateCamera(zoomSegments, playheadMs);
+  }, [zoomSegments, playheadMs]);
+
+  const cameraTransform = useMemo(() => {
+    return calculateCameraTransform(currentCamera, viewportSize.width, viewportSize.height);
+  }, [currentCamera, viewportSize.width, viewportSize.height]);
+
+  // Vòng lặp 60 FPS / 120 FPS ProMotion siêu mượt mà cho camera zoom
+  useEffect(() => {
+    if (!isPlaying) return;
+    let rafId: number;
+    let lastVideoSec = -1;
+    let lastWallClock = performance.now();
+
+    const updateCamera = () => {
+      const v = videoRef.current;
+      const wrap = cameraWrapRef.current;
+      const parent = videoWrapRef.current;
+      if (v && wrap && parent && zoomSegmentsRef.current.length > 0) {
+        const now = performance.now();
+        const currentSec = v.currentTime;
+        if (Math.abs(currentSec - lastVideoSec) > 0.001) {
+          lastVideoSec = currentSec;
+          lastWallClock = now;
+        }
+        // Nội suy mượt mà liên tục giữa các frame của video (khắc phục độ trễ 30fps của currentTime HTML5)
+        const elapsedSinceUpdateMs = (now - lastWallClock) * (v.playbackRate || 1);
+        const smoothSrcMs = lastVideoSec * 1000 + Math.min(elapsedSinceUpdateMs, 80);
+        const tlMs = sourceMsToTimeline(segmentsRef.current, smoothSrcMs) ?? 0;
+        const cam = interpolateCamera(zoomSegmentsRef.current, tlMs);
+        const rect = parent.getBoundingClientRect();
+        const tf = calculateCameraTransform(cam, rect.width, rect.height);
+        wrap.style.transform = tf.transform;
+      }
+      rafId = requestAnimationFrame(updateCamera);
+    };
+    rafId = requestAnimationFrame(updateCamera);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying]);
+
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
@@ -566,9 +735,14 @@ export default function VideoTrimmer({
       } else if (mod && (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))) {
         e.preventDefault();
         redo();
-      } else if ((e.key === "Delete" || e.key === "Backspace") && selectedSegmentId) {
-        e.preventDefault();
-        doDeleteSelected();
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedZoomId) {
+          e.preventDefault();
+          handleDeleteZoomSegment(selectedZoomId);
+        } else if (selectedSegmentId) {
+          e.preventDefault();
+          doDeleteSelected();
+        }
       } else if (mod && !e.shiftKey && e.key.toLowerCase() === "b") {
         e.preventDefault();
         if (canSplitAt(segments, playheadMs)) doSplit();
@@ -592,7 +766,7 @@ export default function VideoTrimmer({
         setOverlayTool((cur) => (cur === "arrow" ? "select" : "arrow"));
       } else if (e.key === "Escape") {
         setOverlayTool("select");
-        setEditState((st) => ({ ...st, selectedOverlayId: null }));
+        setEditState((st) => ({ ...st, selectedOverlayId: null, selectedZoomId: null }));
       } else if (!mod && !e.shiftKey && !e.altKey && e.code === "Space") {
         // preventDefault: chặn hành vi mặc định (cuộn trang / bấm lại nút
         // đang focus bằng bàn phím) khi Space dùng để play/pause thay vào đó.
@@ -1122,7 +1296,7 @@ export default function VideoTrimmer({
       return {
         ...st,
         segments: next,
-        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+        past: [...st.past, takeSnapshot(st)],
         future: [],
         selectedSegmentId: selectAfter ? selectAfter(next) : null,
       };
@@ -1152,7 +1326,7 @@ export default function VideoTrimmer({
       return {
         ...st,
         segments: next,
-        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+        past: [...st.past, takeSnapshot(st)],
         future: [],
         selectedSegmentId: null,
       };
@@ -1169,7 +1343,7 @@ export default function VideoTrimmer({
     setEditState((st) => ({
       ...st,
       removeAudio: !st.removeAudio,
-      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      past: [...st.past, takeSnapshot(st)],
       future: [],
     }));
   };
@@ -1178,9 +1352,10 @@ export default function VideoTrimmer({
     setEditState((st) => ({
       ...st,
       overlays: [...st.overlays, item],
-      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      past: [...st.past, takeSnapshot(st)],
       future: [],
       selectedOverlayId: item.id,
+      selectedZoomId: null,
     }));
   };
 
@@ -1195,7 +1370,7 @@ export default function VideoTrimmer({
     setEditState((st) => ({
       ...st,
       overlays: st.overlays.filter((o) => o.id !== id),
-      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      past: [...st.past, takeSnapshot(st)],
       future: [],
       selectedOverlayId: null,
     }));
@@ -1204,7 +1379,105 @@ export default function VideoTrimmer({
   const handleCommitOverlaySnapshot = () => {
     setEditState((st) => ({
       ...st,
-      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      past: [...st.past, takeSnapshot(st)],
+      future: [],
+    }));
+  };
+
+  // Các thao tác quản lý Zoom Focus
+  const handleToggleAutoZoom = () => {
+    setEditState((st) => {
+      if (st.autoZoomEnabled || st.zoomSegments.length > 0) {
+        return {
+          ...st,
+          autoZoomEnabled: false,
+          zoomSegments: [],
+          selectedZoomId: null,
+          past: [...st.past, takeSnapshot(st)],
+          future: [],
+        };
+      } else {
+        const total = totalTimelineMs(st.segments);
+        const segs = mouseTelemetry
+          ? generateAutoZoomSegments(mouseTelemetry, total)
+          : [];
+        return {
+          ...st,
+          autoZoomEnabled: true,
+          zoomSegments: segs,
+          selectedZoomId: segs.length > 0 ? segs[0].id : null,
+          past: [...st.past, takeSnapshot(st)],
+          future: [],
+        };
+      }
+    });
+  };
+
+  const handleAddZoomAtPlayhead = (targetMs?: number) => {
+    setEditState((st) => {
+      const total = totalTimelineMs(st.segments);
+      const dur = 2500;
+      const atMs = typeof targetMs === "number" ? targetMs : playheadMs;
+      const start = clamp(atMs, 0, Math.max(0, total - MIN_ZOOM_DURATION_MS));
+      const end = clamp(start + dur, start + MIN_ZOOM_DURATION_MS, total);
+      let focusX = 0.5;
+      let focusY = 0.5;
+      let zone: ZoomSegment["zone"] = "center";
+      if (mouseTelemetry && mouseTelemetry.events.length > 0) {
+        const nearest = mouseTelemetry.events.reduce((prev, curr) =>
+          Math.abs(curr.t - start) < Math.abs(prev.t - start) ? curr : prev
+        );
+        if (nearest) {
+          const vw = mouseTelemetry.videoWidth > 0 ? mouseTelemetry.videoWidth : 1920;
+          const vh = mouseTelemetry.videoHeight > 0 ? mouseTelemetry.videoHeight : 1080;
+          const smart = calculateSmartFocusPoint(nearest.x / vw, nearest.y / vh);
+          focusX = smart.focusX;
+          focusY = smart.focusY;
+          zone = smart.zone;
+        }
+      }
+      const newSeg: ZoomSegment = {
+        id: makeZoomSegmentUid(),
+        startTimeMs: Math.round(start),
+        endTimeMs: Math.round(end),
+        scale: 1.5,
+        focusX,
+        focusY,
+        zone,
+        easing: "smooth",
+      };
+      return {
+        ...st,
+        zoomSegments: [...st.zoomSegments, newSeg],
+        selectedZoomId: newSeg.id,
+        selectedOverlayId: null,
+        past: [...st.past, takeSnapshot(st)],
+        future: [],
+      };
+    });
+  };
+
+  const handleChangeZoomSegment = (item: ZoomSegment) => {
+    setEditState((st) => ({
+      ...st,
+      zoomSegments: st.zoomSegments.map((z) => (z.id === item.id ? item : z)),
+    }));
+  };
+
+  const handleDeleteZoomSegment = (id: string) => {
+    setEditState((st) => ({
+      ...st,
+      zoomSegments: st.zoomSegments.filter((z) => z.id !== id),
+      selectedZoomId: null,
+      past: [...st.past, takeSnapshot(st)],
+      future: [],
+    }));
+  };
+
+  const handleCommitZoomSnapshot = () => {
+    setEditState((st) => ({
+      ...st,
+      past: [...st.past, takeSnapshot(st)],
       future: [],
     }));
   };
@@ -1218,10 +1491,13 @@ export default function VideoTrimmer({
         segments: prev.segments,
         removeAudio: prev.removeAudio,
         overlays: prev.overlays,
+        zoomSegments: prev.zoomSegments ?? [],
+        autoZoomEnabled: prev.autoZoomEnabled ?? false,
         past: st.past.slice(0, -1),
-        future: [{ segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }, ...st.future],
+        future: [takeSnapshot(st), ...st.future],
         selectedSegmentId: null,
         selectedOverlayId: null,
+        selectedZoomId: null,
       };
     });
   };
@@ -1235,10 +1511,13 @@ export default function VideoTrimmer({
         segments: next.segments,
         removeAudio: next.removeAudio,
         overlays: next.overlays,
-        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+        zoomSegments: next.zoomSegments ?? [],
+        autoZoomEnabled: next.autoZoomEnabled ?? false,
+        past: [...st.past, takeSnapshot(st)],
         future: st.future.slice(1),
         selectedSegmentId: null,
         selectedOverlayId: null,
+        selectedZoomId: null,
       };
     });
   };
@@ -1249,10 +1528,13 @@ export default function VideoTrimmer({
       segments: initialSegments(durationMs),
       removeAudio: false,
       overlays: [],
+      zoomSegments: [],
+      autoZoomEnabled: false,
       past: [],
       future: [],
       selectedSegmentId: null,
       selectedOverlayId: null,
+      selectedZoomId: null,
     });
     setPlayheadMs(0);
     seekTo(0);
@@ -1266,6 +1548,7 @@ export default function VideoTrimmer({
   const hasChanges =
     past.length > 0 ||
     overlays.length > 0 ||
+    zoomSegments.length > 0 ||
     removeAudio ||
     segments.length > 1 ||
     (segments[0] && (segments[0].srcStart > 0 || (durationMs > 0 && Math.abs(segments[0].srcEnd - durationMs) > 200)));
@@ -1286,9 +1569,15 @@ export default function VideoTrimmer({
       }
       return o;
     });
-    onStateChange?.({ hasChanges, keepRanges, removeAudio, overlays: preparedOverlays });
+    onStateChange?.({
+      hasChanges,
+      keepRanges,
+      removeAudio,
+      overlays: preparedOverlays,
+      zoomSegments,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasChanges, keepRanges, removeAudio, overlays]);
+  }, [hasChanges, keepRanges, removeAudio, overlays, zoomSegments]);
 
   const editStateRef = useRef(editState);
   editStateRef.current = editState;
@@ -1347,37 +1636,119 @@ export default function VideoTrimmer({
       {/* Video + thanh điều khiển phát NỔI đè lên đáy video (kiểu YouTube/
           QuickTime/CapCut) thay vì 1 hàng riêng chiếm chỗ bên dưới — nhường
           tối đa chiều cao cho khung xem, chỉ hiện chrome khi cần nhìn thấy. */}
-      <div style={videoWrap} onMouseEnter={() => setWrapHover(true)} onMouseLeave={() => setWrapHover(false)}>
-        <video
-          ref={videoRef}
-          key={src}
-          crossOrigin="anonymous"
-          preload="auto"
-          src={src}
-          style={videoStyle}
-          onClick={togglePlay}
-          onLoadedMetadata={() => {
-            if (savedSession?.playheadMs && savedSession.playheadMs > 0) {
-              seekTo(savedSession.playheadMs);
-            }
+      <div
+        ref={videoWrapRef}
+        style={videoWrap}
+        onMouseEnter={() => setWrapHover(true)}
+        onMouseLeave={() => setWrapHover(false)}
+      >
+        <div
+          ref={cameraWrapRef}
+          style={{
+            position: "relative",
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            transform: cameraTransform.transform,
+            transformOrigin: "center center",
+            willChange: "transform",
+            transition: "none",
           }}
-        />
+        >
+          <video
+            ref={videoRef}
+            key={src}
+            crossOrigin="anonymous"
+            preload="auto"
+            src={src}
+            style={videoStyle}
+            onClick={togglePlay}
+            onLoadedMetadata={() => {
+              if (savedSession?.playheadMs && savedSession.playheadMs > 0) {
+                seekTo(savedSession.playheadMs);
+              }
+            }}
+          />
 
-        <VideoCanvasOverlay
-          videoRef={videoRef}
-          playheadMs={playheadMs}
-          durationMs={total}
-          tool={overlayTool}
-          onToolChange={setOverlayTool}
-          overlays={overlays}
-          selectedId={selectedOverlayId}
-          onSelect={(id) => setEditState((st) => ({ ...st, selectedOverlayId: id }))}
-          onChangeOverlay={handleChangeOverlay}
-          onCommitSnapshot={handleCommitOverlaySnapshot}
-          onAddOverlay={handleAddOverlay}
-          onDeleteOverlay={handleDeleteOverlay}
-          isPlaying={isPlaying}
-        />
+          <VideoCanvasOverlay
+            videoRef={videoRef}
+            playheadMs={playheadMs}
+            durationMs={total}
+            tool={overlayTool}
+            onToolChange={setOverlayTool}
+            overlays={overlays}
+            selectedId={selectedOverlayId}
+            onSelect={(id) => setEditState((st) => ({ ...st, selectedOverlayId: id, selectedZoomId: null }))}
+            onChangeOverlay={handleChangeOverlay}
+            onCommitSnapshot={handleCommitOverlaySnapshot}
+            onAddOverlay={handleAddOverlay}
+            onDeleteOverlay={handleDeleteOverlay}
+            isPlaying={isPlaying}
+          />
+
+          {/* Điểm neo tâm phóng to (Focus Pin) khi đang chọn 1 mốc Zoom */}
+          {selectedZoom && (
+            <div
+              style={{
+                position: "absolute",
+                left: `${selectedZoom.focusX * 100}%`,
+                top: `${selectedZoom.focusY * 100}%`,
+                transform: "translate(-50%, -50%)",
+                zIndex: 15,
+                pointerEvents: "auto",
+                cursor: isDraggingFocusPin ? "grabbing" : "grab",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                userSelect: "none",
+              }}
+              onPointerDown={handleFocusPinDragStart}
+              title="Kéo để dời tâm phóng to theo ý muốn"
+            >
+              <div
+                style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: "50%",
+                  border: "2.5px solid #38bdf8",
+                  background: "rgba(56, 189, 248, 0.25)",
+                  boxShadow: "0 0 14px rgba(56, 189, 248, 0.75)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <div
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: "50%",
+                    background: "#38bdf8",
+                    boxShadow: "0 0 6px #fff",
+                  }}
+                />
+              </div>
+              <div
+                style={{
+                  marginTop: 4,
+                  padding: "2px 7px",
+                  borderRadius: 4,
+                  background: "rgba(15, 23, 42, 0.9)",
+                  border: "1px solid rgba(56, 189, 248, 0.5)",
+                  color: "#38bdf8",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  whiteSpace: "nowrap",
+                  pointerEvents: "none",
+                }}
+              >
+                Tâm Zoom {selectedZoom.scale.toFixed(1)}x
+              </div>
+            </div>
+          )}
+        </div>
 
         <div style={playbackOverlay}>
           {/* Cột trái RỖNG — chỉ để `overlayCenterGroup` (cột giữa, "auto")
@@ -1516,6 +1887,32 @@ export default function VideoTrimmer({
         </button>
         <div style={toolDivider} />
 
+        {/* Tự động Zoom Focus theo thao tác chuột */}
+        <button
+          style={{
+            ...iconToolBtn,
+            ...(autoZoomEnabled || zoomSegments.length > 0 ? iconToolBtnActive : null),
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            padding: "0 8px",
+            width: "auto",
+          }}
+          onClick={handleToggleAutoZoom}
+          title={autoZoomEnabled || zoomSegments.length > 0 ? "Tắt Zoom Focus chuột" : "Tự động Zoom Focus theo thao tác chuột"}
+        >
+          <ZoomFocusIcon />
+          <span style={{ fontSize: 12, fontWeight: 500 }}>Focus</span>
+        </button>
+        <button
+          style={iconToolBtn}
+          onClick={() => handleAddZoomAtPlayhead()}
+          title="Thêm vùng Zoom Focus tại thời điểm hiện tại"
+        >
+          <PlusZoomIcon />
+        </button>
+        <div style={toolDivider} />
+
         {/* Tách nhạc nền: xoá HẲN track âm thanh khỏi file khi Áp dụng cắt —
             chỉ 1 click để bật/tắt, gộp chung lịch sử undo với các thao tác
             cắt đoạn (xem `doToggleRemoveAudio`) nên Ctrl+Z hoàn tác đúng. */}
@@ -1597,12 +1994,29 @@ export default function VideoTrimmer({
             totalMs={total}
             playheadMs={playheadMs}
             selectedId={selectedOverlayId}
-            onSelect={(id) => setEditState((st) => ({ ...st, selectedOverlayId: id }))}
+            onSelect={(id) => setEditState((st) => ({ ...st, selectedOverlayId: id, selectedZoomId: null }))}
             onChangeOverlay={handleChangeOverlay}
             onCommitSnapshot={handleCommitOverlaySnapshot}
             onSeek={(ms) => seekTo(ms)}
             snapPoints={segmentBoundariesMs(segments)}
           />
+
+          {/* Track hiệu ứng Zoom Focus theo chuột */}
+          {(zoomSegments.length > 0 || autoZoomEnabled) && (
+            <ZoomTimelineTrack
+              zoomSegments={zoomSegments}
+              totalMs={total}
+              playheadMs={playheadMs}
+              selectedId={selectedZoomId}
+              onSelect={(id) => setEditState((st) => ({ ...st, selectedZoomId: id, selectedOverlayId: null }))}
+              onChangeZoomSegment={handleChangeZoomSegment}
+              onDeleteZoomSegment={handleDeleteZoomSegment}
+              onCommitSnapshot={handleCommitZoomSnapshot}
+              onSeek={(ms) => seekTo(ms)}
+              snapPoints={segmentBoundariesMs(segments)}
+              onAddZoomSegment={(ms) => handleAddZoomAtPlayhead(ms)}
+            />
+          )}
 
           {/* Thước thời gian — mốc giờ:phút dọc timeline, mật độ tự đổi theo
               zoom (xem `timeTicks`). Thay cho dòng thời lượng cũ ở metaRow. */}
@@ -2438,3 +2852,24 @@ const saveAsMenuItem: React.CSSProperties = {
   cursor: "pointer",
   textAlign: "left",
 };
+
+function ZoomFocusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="7" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      <circle cx="11" cy="11" r="2.5" fill="currentColor" opacity="0.75" />
+    </svg>
+  );
+}
+
+function PlusZoomIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="7" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      <line x1="11" y1="8" x2="11" y2="14" />
+      <line x1="8" y1="11" x2="14" y2="11" />
+    </svg>
+  );
+}

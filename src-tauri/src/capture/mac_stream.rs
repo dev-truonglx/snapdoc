@@ -122,10 +122,9 @@ pub struct StreamOutputIvars {
     /// `start()`) — callback nhận `SCStreamOutputType::Audio` sẽ gửi thẳng
     /// vào đây (audio không cần "nhịp lại" như video — gói tới đều theo thời
     /// gian thực, không rơi vào tình huống "màn hình đứng yên → ít gói hơn"
-    /// như video). `None` thì callback bỏ qua hẳn sample buffer audio (SCK
-    /// không gửi loại này nếu config không bật `capturesAudio`, nhưng vẫn
-    /// kiểm tra cho chắc).
-    audio_tx: Option<mpsc::SyncSender<Vec<u8>>>,
+    /// như video). Bọc trong `Arc<Mutex<Option<...>>>` để có thể chủ động đóng
+    /// sender ngay khi dừng quay, tránh deadlock writer thread.
+    audio_tx: Arc<Mutex<Option<mpsc::SyncSender<Vec<u8>>>>>,
     /// Đếm số frame đã DROP vì consumer (audio) hoặc `spawn_ticker` (video)
     /// chậm hơn tốc độ quay — log khi stop.
     dropped: Arc<AtomicBool>,
@@ -166,7 +165,8 @@ define_class!(
                     }
                 }
                 SCStreamOutputType::Audio => {
-                    let Some(audio_tx) = self.ivars().audio_tx.as_ref() else { return };
+                    let tx_guard = self.ivars().audio_tx.lock().unwrap_or_else(|p| p.into_inner());
+                    let Some(audio_tx) = tx_guard.as_ref() else { return };
                     if let Some(frame) = unsafe { sample_buffer_to_audio(sample_buffer) } {
                         if audio_tx.try_send(frame).is_err() {
                             self.ivars().dropped.store(true, Ordering::Relaxed);
@@ -197,7 +197,7 @@ define_class!(
 impl StreamOutputHandler {
     fn new(
         latest: Arc<Mutex<Option<Arc<Frame>>>>,
-        audio_tx: Option<mpsc::SyncSender<Vec<u8>>>,
+        audio_tx: Arc<Mutex<Option<mpsc::SyncSender<Vec<u8>>>>>,
         dropped: Arc<AtomicBool>,
         stopped_externally: Arc<AtomicBool>,
     ) -> Retained<Self> {
@@ -558,6 +558,7 @@ pub struct RecordingHandle {
     /// nhất để writer thread bên `record/mod.rs` thấy EOF mà kết thúc.
     ticker_stop: Arc<AtomicBool>,
     ticker_thread: Option<JoinHandle<()>>,
+    audio_tx: Arc<Mutex<Option<mpsc::SyncSender<Vec<u8>>>>>,
     dropped: Arc<AtomicBool>,
     /// Cờ dùng chung với `StreamOutputIvars` (xem giải thích ở đó) — báo SCK
     /// đã tự dừng ngoài ý muốn của ta.
@@ -576,6 +577,14 @@ pub struct RecordingHandle {
 unsafe impl Send for RecordingHandle {}
 
 impl RecordingHandle {
+    /// Đóng sender audio hệ thống NGAY LẬP TỨC để luồng ghi PCM nhận EOF/timeout
+    /// mà không cần đợi teardown toàn bộ SCStream.
+    pub fn close_audio_sender(&self) {
+        if let Ok(mut g) = self.audio_tx.lock() {
+            g.take();
+        }
+    }
+
     /// SCK đã tự dừng ngoài ý muốn (vd người dùng bấm "Stop" trên icon
     /// "Screen Sharing" của hệ thống macOS) hay chưa — `record::mod` poll cờ
     /// này để tự dọn dẹp phiên quay thay vì chờ mãi frame không bao giờ tới.
@@ -595,7 +604,12 @@ impl RecordingHandle {
         // Đánh dấu NGAY từ đầu — kể cả khi các bước dưới lỗi/timeout, Drop
         // cũng không được lặp lại việc dừng (yêu cầu dừng đã được gửi đi).
         self.stopped = true;
-        // Dừng ticker TRƯỚC (đóng `frame_tx` nó đang giữ, kết thúc writer
+
+        // 1. Đóng sender audio hệ thống ngay lập tức để luồng ghi PCM (spawn_pcm_file_writer)
+        // thoát vòng lặp và kết thúc ghi file mà không bị deadlock.
+        self.close_audio_sender();
+
+        // 2. Dừng ticker TRƯỚC (đóng `frame_tx` nó đang giữ, kết thúc writer
         // thread bên `record/mod.rs`) — cùng thứ tự với
         // `windows_stream.rs::RecordingHandle::stop`. Phải làm bước này ở CẢ
         // 2 nhánh dưới đây (kể cả nhánh SCK đã tự dừng), nếu không ticker
@@ -640,6 +654,7 @@ impl RecordingHandle {
 
 impl Drop for RecordingHandle {
     fn drop(&mut self) {
+        self.close_audio_sender();
         if self.stopped {
             return;
         }
@@ -805,11 +820,12 @@ pub fn start(
     } else {
         (None, None)
     };
+    let audio_tx = Arc::new(Mutex::new(audio_tx));
     let dropped = Arc::new(AtomicBool::new(false));
     let stopped_externally = Arc::new(AtomicBool::new(false));
     let latest: Arc<Mutex<Option<Arc<Frame>>>> = Arc::new(Mutex::new(None));
     let handler_obj =
-        StreamOutputHandler::new(latest.clone(), audio_tx, dropped.clone(), stopped_externally.clone());
+        StreamOutputHandler::new(latest.clone(), audio_tx.clone(), dropped.clone(), stopped_externally.clone());
 
     let delegate_proto = ProtocolObject::from_ref(&*handler_obj);
     let stream = unsafe {
@@ -874,6 +890,7 @@ pub fn start(
         RecordingHandle {
             stream,
             _handler: handler_obj,
+            audio_tx,
             stopped: false,
             ticker_stop,
             ticker_thread: Some(ticker_thread),

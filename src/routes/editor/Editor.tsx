@@ -42,11 +42,14 @@ interface VideoDoc {
   thumbUrl?: string;
 }
 
+import type { ZoomSegment } from "../../features/video-trim/types";
+
 const EMPTY_TRIM_STATE = {
   hasChanges: false,
   keepRanges: [] as [number, number][],
   removeAudio: false,
   overlays: [] as VideoOverlayItem[],
+  zoomSegments: [] as ZoomSegment[],
 };
 
 /** "Dấu vân tay" của trạng thái cắt video — dùng để so với lần lưu gần nhất.
@@ -56,7 +59,7 @@ const EMPTY_TRIM_STATE = {
  * bản gốc không hề đổi nên `hasChanges` vẫn `true` → user bị nhắc về đúng
  * việc vừa export xong. (Sau "Lưu đè" thì đã đúng sẵn vì `doSaveVideo` reset
  * `videoTrimState` và bump `videoVersion` để remount trimmer.) */
-const trimSig = (s: typeof EMPTY_TRIM_STATE) => JSON.stringify([s.keepRanges, s.removeAudio, s.overlays]);
+const trimSig = (s: typeof EMPTY_TRIM_STATE) => JSON.stringify([s.keepRanges, s.removeAudio, s.overlays, s.zoomSegments]);
 
 export default function Editor() {
   const { t } = useTranslation();
@@ -436,6 +439,7 @@ export default function Editor() {
         videoTrimState.keepRanges,
         videoTrimState.removeAudio,
         videoTrimState.overlays,
+        videoTrimState.zoomSegments,
       );
       dropVideoSession(`history:${videoDoc.historyId}`);
       setVideoDoc({
@@ -483,6 +487,7 @@ export default function Editor() {
         videoTrimState.removeAudio,
         outputPath,
         videoTrimState.overlays,
+        videoTrimState.zoomSegments,
       );
       if (outputPath) {
         const settings = await ipc.getSettings().catch(() => null);
