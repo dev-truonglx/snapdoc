@@ -350,10 +350,16 @@ pub fn show_recording_tray(app: &AppHandle) {
 
 /// Cập nhật đồng hồ đếm cạnh icon "đang quay" — gọi mỗi giây từ ticker trong
 /// `record::start_recording`. No-op nếu icon chưa/không còn hiện.
+/// Trên macOS cập nhật text title cạnh icon menu bar.
+/// Trên Windows cập nhật tooltip khi hover chuột vào tray icon.
 pub fn update_recording_time(elapsed_ms: u64) {
     if let Ok(guard) = RECORDING_TRAY.lock() {
         if let Some(tray) = guard.as_ref() {
-            let _ = tray.set_title(Some(format_elapsed(elapsed_ms)));
+            let elapsed = format_elapsed(elapsed_ms);
+            #[cfg(target_os = "macos")]
+            let _ = tray.set_title(Some(elapsed));
+            #[cfg(not(target_os = "macos"))]
+            let _ = tray.set_tooltip(Some(format!("SnapDoc — {elapsed}")));
         }
     }
 }
