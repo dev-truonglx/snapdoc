@@ -657,10 +657,10 @@ fn trim_history_video_sync(
         )?;
     }
 
-    // Sao chép file telemetry chuột sang video mới (nếu có)
+    // Không sao chép telemetry chuột sang video mới nếu đã burn zoom hoặc đã tắt focus
     let orig_telem = crate::record::mouse_click::telemetry_path_for_video(asset_path);
     let new_telem = crate::record::mouse_click::telemetry_path_for_video(&new_path);
-    if orig_telem.exists() && !new_telem.exists() {
+    if !has_zoom && orig_telem.exists() && !new_telem.exists() && zoom_segments.is_none() {
         let _ = std::fs::copy(&orig_telem, &new_telem);
     }
 
@@ -744,9 +744,20 @@ fn overwrite_history_video_sync(
         s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
     };
 
+    // Đường dẫn file telemetry chuột (.mouse.json) nếu có
+    let telem_path = crate::record::mouse_click::telemetry_path_for_video(asset_path);
+    let telem_existed = telem_path.exists();
+
     if is_untrimmed {
+        // Nếu file telemetry chuột (.mouse.json) tồn tại nhưng bản lưu đè không dùng zoom
+        // (người dùng đã tắt focus chuột), xóa file telemetry để loại bỏ focus triệt để khỏi video.
+        if telem_existed {
+            let _ = std::fs::remove_file(&telem_path);
+        }
+
         if !remove_audio {
-            // Không có thay đổi gì so với gốc, trả về luôn không cần ghi đĩa lại
+            // Không có thay đổi gì về audio hoặc nội dung video (chỉ tắt focus telemetry hoặc không đổi gì),
+            // trả về luôn không cần ghi đĩa lại file MP4
             use tauri::Emitter;
             let _ = app.emit("trim-progress", 1.0);
             return Ok(rec);
@@ -775,6 +786,12 @@ fn overwrite_history_video_sync(
             },
         )?;
         std::fs::rename(&tmp_output, asset_path).map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
+
+        // Nếu video đã được encode (nếu có zoom thì zoom đã được burn trực tiếp vào pixel từng frame),
+        // xóa file telemetry gốc để tránh bị áp dụng zoom 2 lần khi mở lại video đã lưu.
+        if telem_existed {
+            let _ = std::fs::remove_file(&telem_path);
+        }
     }
 
     let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();

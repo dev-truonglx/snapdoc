@@ -473,16 +473,16 @@ mod windows {
             let mouse_hook = *(l_param as *const MSLLHOOKSTRUCT);
             let (tx, ty, tw, th, scale) = TARGET_BOUNDS;
 
-            let global_x = mouse_hook.pt.x as f64 / scale;
-            let global_y = mouse_hook.pt.y as f64 / scale;
+            let local_phys_x = mouse_hook.pt.x as f64 - tx;
+            let local_phys_y = mouse_hook.pt.y as f64 - ty;
 
-            let local_x = global_x - tx;
-            let local_y = global_y - ty;
-
-            if local_x >= 0.0 && local_x <= tw && local_y >= 0.0 && local_y <= th {
+            if local_phys_x >= 0.0 && local_phys_x <= tw && local_phys_y >= 0.0 && local_phys_y <= th {
                 let now_ms = RECORD_START_INSTANT
                     .map(|i| i.elapsed().as_millis() as u64)
                     .unwrap_or(0);
+
+                let local_css_x = local_phys_x / scale;
+                let local_css_y = local_phys_y / scale;
 
                 if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN {
                     let button = match msg {
@@ -505,8 +505,8 @@ mod windows {
                     if let Ok(guard) = APP_HANDLE_FOR_HOOK.lock() {
                         if let Some(app) = guard.as_ref() {
                             let payload = MouseClickPayload {
-                                x: local_x,
-                                y: local_y,
+                                x: local_css_x,
+                                y: local_css_y,
                                 button: button.to_string(),
                                 count,
                             };
@@ -519,8 +519,8 @@ mod windows {
                             if let Ok(mut ev) = ev_arc.lock() {
                                 ev.push(MouseTelemetryItem {
                                     t: now_ms,
-                                    x: local_x,
-                                    y: local_y,
+                                    x: local_phys_x,
+                                    y: local_phys_y,
                                     event_type: "click".to_string(),
                                     button: Some(button.to_string()),
                                     count: Some(count),
@@ -529,15 +529,15 @@ mod windows {
                         }
                     }
 
-                    LAST_MOVE_POS = (local_x, local_y);
+                    LAST_MOVE_POS = (local_phys_x, local_phys_y);
                     LAST_MOVE_MS = now_ms;
                 } else if msg == WM_MOUSEMOVE {
                     let dt = now_ms.saturating_sub(LAST_MOVE_MS);
                     if dt >= 16 {
-                        let dx = local_x - LAST_MOVE_POS.0;
-                        let dy = local_y - LAST_MOVE_POS.1;
+                        let dx = local_phys_x - LAST_MOVE_POS.0;
+                        let dy = local_phys_y - LAST_MOVE_POS.1;
                         if dx * dx + dy * dy >= 4.0 {
-                            LAST_MOVE_POS = (local_x, local_y);
+                            LAST_MOVE_POS = (local_phys_x, local_phys_y);
                             LAST_MOVE_MS = now_ms;
 
                             if let Ok(g) = TELEMETRY_EVENTS.lock() {
@@ -545,8 +545,8 @@ mod windows {
                                     if let Ok(mut ev) = ev_arc.lock() {
                                         ev.push(MouseTelemetryItem {
                                             t: now_ms,
-                                            x: local_x,
-                                            y: local_y,
+                                            x: local_phys_x,
+                                            y: local_phys_y,
                                             event_type: "move".to_string(),
                                             button: None,
                                             count: None,

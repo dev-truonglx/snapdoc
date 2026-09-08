@@ -714,29 +714,8 @@ fn record_keystroke_rect(target: &crate::capture::mac_stream::RecordTarget) -> O
 
 #[cfg(target_os = "windows")]
 fn record_border_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
-    use crate::capture::windows_stream::RecordTarget;
-    use xcap::Monitor;
-    match target {
-        RecordTarget::Display(display_id) => {
-            let m = Monitor::all()
-                .ok()?
-                .into_iter()
-                .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
-            let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
-            Some((
-                m.x().ok()? as f64 / scale,
-                m.y().ok()? as f64 / scale,
-                m.width().ok()? as f64 / scale,
-                m.height().ok()? as f64 / scale,
-            ))
-        }
-        RecordTarget::Window(window_id) => {
-            let list = crate::capture::window::list(0.0, 0.0, 1.0).ok()?;
-            let w = list.into_iter().find(|w| w.id == *window_id)?;
-            Some((w.x, w.y, w.width, w.height))
-        }
-        RecordTarget::Region { .. } => None,
-    }
+    let (x, y, w, h, _) = record_target_rect(target)?;
+    Some((x, y, w, h))
 }
 
 #[cfg(target_os = "windows")]
@@ -751,17 +730,22 @@ fn record_target_rect(target: &crate::capture::windows_stream::RecordTarget) -> 
                 .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
             let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
             Some((
-                m.x().ok()? as f64 / scale,
-                m.y().ok()? as f64 / scale,
-                m.width().ok()? as f64 / scale,
-                m.height().ok()? as f64 / scale,
+                m.x().ok()? as f64,
+                m.y().ok()? as f64,
+                m.width().ok()? as f64,
+                m.height().ok()? as f64,
                 scale,
             ))
         }
         RecordTarget::Window(window_id) => {
             let list = crate::capture::window::list(0.0, 0.0, 1.0).ok()?;
             let w = list.into_iter().find(|w| w.id == *window_id)?;
-            Some((w.x, w.y, w.width, w.height, 1.0))
+            let scale = crate::capture::monitor::at_point(w.x as i32, w.y as i32)
+                .ok()
+                .and_then(|m| m.scale_factor().ok())
+                .unwrap_or(1.0)
+                .max(1.0) as f64;
+            Some((w.x, w.y, w.width, w.height, scale))
         }
         RecordTarget::Region { display_id, x, y, w, h } => {
             let monitors = Monitor::all().ok()?;
@@ -769,18 +753,18 @@ fn record_target_rect(target: &crate::capture::windows_stream::RecordTarget) -> 
                 .into_iter()
                 .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
             let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
-            Some((m.x().ok()? as f64 / scale + *x, m.y().ok()? as f64 / scale + *y, *w, *h, scale))
+            Some((m.x().ok()? as f64 + *x * scale, m.y().ok()? as f64 + *y * scale, *w * scale, *h * scale, scale))
         }
     }
 }
 
 #[cfg(target_os = "windows")]
 fn record_keystroke_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
-    let (rx, ry, rw, rh, _) = record_target_rect(target)?;
-    let kw = 780.0_f64.min(rw - 20.0).max(220.0);
-    let kh = 130.0;
+    let (rx, ry, rw, rh, scale) = record_target_rect(target)?;
+    let kw = (780.0 * scale).min(rw - (20.0 * scale)).max(220.0 * scale);
+    let kh = 130.0 * scale;
     let kx = rx + (rw - kw) / 2.0;
-    let ky = (ry + rh - kh - 44.0).max(ry);
+    let ky = (ry + rh - kh - (44.0 * scale)).max(ry);
     Some((kx, ky, kw, kh))
 }
 

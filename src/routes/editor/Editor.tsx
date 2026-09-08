@@ -72,6 +72,7 @@ export default function Editor() {
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showFlattenConfirm, setShowFlattenConfirm] = useState(false);
+  const [showOverwriteConfirm, setShowOverwriteConfirm] = useState(false);
   const [stitchImage, setStitchImage] = useState<string | null>(null);
   // Video đang xem/cắt trong Editor (song song với `doc` — ảnh — trong store
   // `useEditor`; chỉ 1 trong 2 được render tại 1 thời điểm, xem JSX bên dưới).
@@ -428,12 +429,16 @@ export default function Editor() {
   };
 
   // "Lưu đè bản gốc" — ghi đè vĩnh viễn asset/thumbnail của ĐÚNG record này
-  // (không tạo record mới). Không có gì để lưu đè nếu chưa cắt gì. KHÔNG đóng
-  // Editor sau khi lưu (khác trước đây) — nạp lại đúng bản đã cắt (thời
-  // lượng/nội dung mới) để user xem kết quả và có thể tiếp tục chỉnh sửa
-  // ngay, không phải mở lại từ Library.
+  // (không tạo record mới). Không có gì để lưu đè nếu chưa có thay đổi nào.
+  // Nếu có thay đổi, hiển thị popup xác nhận để người dùng đồng ý trước khi ghi đè.
   const doSaveVideo = async () => {
     if (!videoDoc || !videoTrimState.hasChanges) return;
+    setShowOverwriteConfirm(true);
+  };
+
+  const confirmSaveVideo = async () => {
+    if (!videoDoc || !videoTrimState.hasChanges) return;
+    setShowOverwriteConfirm(false);
     setBusy(true);
     try {
       const updated = await ipc.overwriteHistoryVideo(
@@ -445,6 +450,9 @@ export default function Editor() {
         videoTrimState.crop,
       );
       dropVideoSession(`history:${videoDoc.historyId}`);
+      if (videoDoc.filePath) {
+        dropVideoSession(`file:${videoDoc.filePath}`);
+      }
       setVideoDoc({
         historyId: updated.id,
         filePath: updated.assetPath,
@@ -1014,6 +1022,12 @@ export default function Editor() {
           onCancel={() => setShowFlattenConfirm(false)}
         />
       )}
+      {showOverwriteConfirm && (
+        <OverwriteConfirmDialog
+          onConfirm={confirmSaveVideo}
+          onCancel={() => setShowOverwriteConfirm(false)}
+        />
+      )}
       {stitchImage && (
         <StitchDialog
           initialImage={stitchImage}
@@ -1021,6 +1035,74 @@ export default function Editor() {
           onCancel={() => setStitchImage(null)}
         />
       )}
+    </div>
+  );
+}
+
+/* ── Overwrite Video Confirm Dialog ── */
+
+function OverwriteConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
+  const { t } = useTranslation();
+  // Đóng khi nhấn Escape, xác nhận khi nhấn Enter
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        onConfirm();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onConfirm, onCancel]);
+
+  return (
+    <div style={overlayStyle} onClick={onCancel}>
+      <div style={dialogStyle} onClick={(e) => e.stopPropagation()}>
+        {/* Icon + tiêu đề */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <span style={{ fontSize: 22 }}>⚠️</span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: "#fca5a5" }}>
+            {t("editorMain.overwriteConfirmTitle")}
+          </span>
+        </div>
+
+        {/* Mô tả */}
+        <p style={descStyle}>
+          <Trans
+            i18nKey="editorMain.overwriteConfirmDesc"
+            components={{ 1: <strong style={{ color: "#f87171" }} /> }}
+          />
+        </p>
+
+        <ul style={listStyle}>
+          <li>
+            <Trans
+              i18nKey="editorMain.overwriteConfirmItem1"
+              components={{ 1: <strong /> }}
+            />
+          </li>
+          <li>
+            <Trans
+              i18nKey="editorMain.overwriteConfirmItem2"
+              components={{ 1: <strong style={{ color: "#fca5a5" }} /> }}
+            />
+          </li>
+        </ul>
+
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 20 }}>
+          <button style={cancelBtnStyle} onClick={onCancel}>
+            {t("editorMain.overwriteCancel")}
+          </button>
+          <button style={confirmBtnStyle} onClick={onConfirm} autoFocus>
+            {t("editorMain.overwriteConfirm")}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

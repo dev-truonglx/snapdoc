@@ -146,6 +146,10 @@ const FILMSTRIP_BAND_H = 44;
  * 72/64 trước, chỉ 4px mỗi bên) khiến phần playhead tràn ra gần như không
  * nhìn thấy được. */
 const TRACK_H = 60;
+/** Chiều cao track chứa các khung vẽ, vùng làm mờ, chữ, mũi tên */
+const OVERLAY_TRACK_H = 24;
+/** Chiều cao track thu phóng / zoom focus theo chuột */
+const ZOOM_TRACK_H = 24;
 /** Khoảng cách nhỏ chèn giữa 2 đoạn giữ lại liền nhau (mỗi bên inset
  * `SEGMENT_GAP_PX / 2`) — để lộ nền track ở giữa, giúp ranh giới điểm cắt rõ
  * ràng hơn là chỉ dựa vào `borderRight` khi 2 khối chạm sát nhau. */
@@ -780,12 +784,16 @@ export default function VideoTrimmer({
   // pattern `zoomRef` phía trên. Q/W không có modifier (giống quy ước hotkey
   // dựng phim) nên chỉ nhận khi KHÔNG bấm cùng Ctrl/Cmd/Shift/Alt — tránh đè
   // lên tổ hợp hệ thống (ví dụ Cmd+Q thoát app).
+  const canSaveRef = useRef(false);
   const onKeyDownRef = useRef<(e: KeyboardEvent) => void>(() => {});
   onKeyDownRef.current = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && !e.shiftKey && e.key.toLowerCase() === "z") {
+      if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        if (canSaveRef.current) onSave();
+      } else if (mod && !e.shiftKey && e.key.toLowerCase() === "z") {
         e.preventDefault();
         undo();
       } else if (mod && (e.key.toLowerCase() === "y" || (e.shiftKey && e.key.toLowerCase() === "z"))) {
@@ -1634,6 +1642,7 @@ export default function VideoTrimmer({
   // "Lưu đè" cần CÓ thay đổi để ghi đè (không có gì để lưu nếu chưa cắt hoặc chưa vẽ overlay) VÀ
   // đoạn giữ lại còn đủ dài (không cho ghi đè thành video gần như rỗng).
   const canSave = hasChanges && total >= MIN_SEG_MS && !busy;
+  canSaveRef.current = canSave;
 
   // Báo cho cha biết trạng thái chỉnh sửa — cha (Editor.tsx) dùng để quyết
   // định tham số truyền vào `onSave`/`onSaveAs`; vô hại nếu không ai lắng
@@ -1664,19 +1673,19 @@ export default function VideoTrimmer({
   const playheadMsRef = useRef(playheadMs);
   playheadMsRef.current = playheadMs;
 
-  // Tự động lưu phiên vào RAM & localStorage khi có thay đổi
+  // Tự động lưu phiên vào RAM & localStorage khi có thay đổi (chỉ khi không bận lưu đè/lưu mới)
   useEffect(() => {
-    if (!sessionKey) return;
+    if (!sessionKey || busy) return;
     saveVideoSession(sessionKey, {
       ...editState,
       playheadMs,
     }, durationMs);
-  }, [sessionKey, editState, playheadMs, durationMs]);
+  }, [sessionKey, editState, playheadMs, durationMs, busy]);
 
   // Luôn chốt lưu phiên tại thời điểm unmount (khi mở ảnh khác hoặc đổi video) hoặc trước khi đóng tab/app
   useEffect(() => {
     const flush = () => {
-      if (sessionKey) {
+      if (sessionKey && !busy) {
         saveVideoSession(sessionKey, {
           ...editStateRef.current,
           playheadMs: playheadMsRef.current,
@@ -1688,7 +1697,7 @@ export default function VideoTrimmer({
       window.removeEventListener("beforeunload", flush);
       flush();
     };
-  }, [sessionKey, durationMs]);
+  }, [sessionKey, durationMs, busy]);
 
   // Khôi phục mốc tua nếu phiên trước đó đang dừng ở một vị trí cụ thể
   useEffect(() => {
@@ -2163,7 +2172,16 @@ export default function VideoTrimmer({
 
       <div
         ref={scrollRef}
-        style={{ ...trackScroll, overflowX: zoom > 1 ? "auto" : "hidden" }}
+        style={{
+          ...trackScroll,
+          height: "auto",
+          minHeight:
+            (overlays.length > 0 ? OVERLAY_TRACK_H : 0) +
+            (zoomSegments.length > 0 || autoZoomEnabled ? ZOOM_TRACK_H : 0) +
+            RULER_H +
+            TRACK_H,
+          overflowX: zoom > 1 ? "auto" : "hidden",
+        }}
         onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
       >
         {/* Bọc chung ruler + track theo đúng 1 chiều rộng (zoom) — cùng cuộn
@@ -2811,17 +2829,11 @@ const hoverPreviewTime: React.CSSProperties = {
   borderRadius: 6,
 };
 
-/** Container cuộn ngang chứa `track` — `track` giãn rộng theo `zoom` (xem
- * JSX, `width: zoom*100%`), container này clip + cho cuộn phần bị tràn. */
+/** Container cuộn ngang chứa các track — co giãn động theo tổng chiều cao
+ * của các track đang hoạt động (ruler, video track, overlay track, zoom track)
+ * để luôn hiển thị trọn vẹn 100% nội dung mà không bị che khuất hay đè mất. */
 const trackScroll: React.CSSProperties = {
   position: "relative",
-  // Cao CỐ ĐỊNH bằng ruler + track (RULER_H + TRACK_H) — không để trình
-  // duyệt tự cộng thêm chiều cao cho thanh cuộn ngang lúc nó xuất hiện
-  // (Windows/WebView2 dùng scrollbar "classic" chiếm chỗ layout, khác overlay
-  // scrollbar của macOS). Thiếu height cố định, mỗi lần zoom làm thanh cuộn
-  // hiện/ẩn sẽ làm khối này co giãn vài px, đẩy khung video phía trên theo —
-  // đúng hiện tượng "giao diện lệch lên trên" khi zoom out.
-  height: RULER_H + TRACK_H,
   overflowX: "auto",
   overflowY: "hidden",
   borderRadius: 8,

@@ -285,10 +285,13 @@ export default function VideoCanvasOverlay({
   const onPointerDown = (e: React.PointerEvent) => {
     if (!isDrawingMode || e.button !== 0 || !videoRect.width || !videoRect.height) return;
     const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
+    if (!rect || rect.width <= 0 || rect.height <= 0) return;
 
-    const x = clamp(e.clientX - rect.left, 0, videoRect.width);
-    const y = clamp(e.clientY - rect.top, 0, videoRect.height);
+    // Chuẩn hoá toạ độ tương đối (0..1) bất biến theo tỉ lệ zoom / cameraTransform
+    const relX = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+    const relY = clamp((e.clientY - rect.top) / rect.height, 0, 1);
+    const x = relX * videoRect.width;
+    const y = relY * videoRect.height;
 
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     setDrawing({ startX: x, startY: y, currentX: x, currentY: y });
@@ -299,18 +302,24 @@ export default function VideoCanvasOverlay({
   const onPointerMove = (e: React.PointerEvent) => {
     if (!containerRef.current || !videoRect.width || !videoRect.height) return;
     const rect = containerRef.current.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return;
 
     if (drawing) {
-      const x = clamp(e.clientX - rect.left, 0, videoRect.width);
-      const y = clamp(e.clientY - rect.top, 0, videoRect.height);
+      // Chuẩn hoá toạ độ tương đối (0..1) bất biến theo tỉ lệ zoom / cameraTransform
+      const relX = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+      const relY = clamp((e.clientY - rect.top) / rect.height, 0, 1);
+      const x = relX * videoRect.width;
+      const y = relY * videoRect.height;
       setDrawing((prev) => (prev ? { ...prev, currentX: x, currentY: y } : null));
       return;
     }
 
     if (transforming) {
       transformChangedRef.current = true;
-      const dx = (e.clientX - transforming.startX) / videoRect.width;
-      const dy = (e.clientY - transforming.startY) / videoRect.height;
+      // Chia theo rect.width / rect.height thực tế trên màn hình (đã qua zoom scale)
+      // để độ dời di chuyển chuột khớp 1:1 tuyệt đối với con trỏ mà không bị giật/bay nhanh
+      const dx = (e.clientX - transforming.startX) / rect.width;
+      const dy = (e.clientY - transforming.startY) / rect.height;
       const init = transforming.initialRel;
       const current = overlays.find((o) => o.id === transforming.id);
       if (!current) return;
@@ -590,10 +599,10 @@ export default function VideoCanvasOverlay({
         zIndex: 5,
       }}
       onPointerDown={(e) => {
-        if (e.target === containerRef.current) {
-          if (isDrawingMode) {
-            onPointerDown(e);
-          } else if (selectedId) {
+        if (isDrawingMode) {
+          onPointerDown(e);
+        } else if (e.target === containerRef.current) {
+          if (selectedId) {
             e.stopPropagation();
             onSelect(null);
           }

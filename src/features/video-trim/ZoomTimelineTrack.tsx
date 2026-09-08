@@ -306,6 +306,8 @@ export default function ZoomTimelineTrack({
 const trackContainerStyle: React.CSSProperties = {
   position: "relative",
   height: 24,
+  boxSizing: "border-box",
+  flexShrink: 0,
   background: "rgba(24, 24, 27, 0.75)",
   borderTop: "1px solid rgba(255, 255, 255, 0.06)",
   borderBottom: "1px solid rgba(255, 255, 255, 0.06)",
@@ -391,7 +393,7 @@ const itemTextStyle: React.CSSProperties = {
 
 const popoverStyle: React.CSSProperties = {
   position: "absolute",
-  bottom: 28,
+  top: 28,
   transform: "translateX(-50%)",
   background: "rgba(24, 24, 27, 0.96)",
   border: "1px solid rgba(168, 85, 247, 0.5)",
@@ -400,7 +402,7 @@ const popoverStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 6,
-  zIndex: 10,
+  zIndex: 25,
   boxShadow: "0 4px 16px rgba(0, 0, 0, 0.6)",
 };
 
