@@ -486,7 +486,13 @@
     "arrowStartPoint": "Điểm gốc mũi tên",
     "arrowEndPoint": "Điểm ngọn mũi tên",
     "dragToMove": "Kéo để di chuyển",
-    "deleteOverlay": "Xoá hiệu ứng"
+    "deleteOverlay": "Xoá hiệu ứng",
+    "cropVideo": "Cắt khung hình (C)",
+    "cropActiveTitle": "Đã crop ({{width}}×{{height}}) — Bấm để chỉnh sửa (C)",
+    "cropRatio": "Tỉ lệ",
+    "cropFree": "Tự do",
+    "resetCrop": "Đặt lại toàn khung hình",
+    "applyCrop": "Áp dụng"
   },
   "gifExport": {
     "title": "Xuất ảnh GIF",

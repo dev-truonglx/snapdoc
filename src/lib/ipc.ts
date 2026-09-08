@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { VideoOverlayItem, ZoomSegment } from "../features/video-trim/types";
+import { type VideoOverlayItem, type VideoCrop, type ZoomSegment, sanitizeCrop } from "../features/video-trim/types";
+export type { VideoCrop, ZoomSegment };
 
 export interface MouseTelemetryItem {
   t: number;
@@ -432,6 +433,7 @@ export const ipc = {
     outputPath?: string,
     overlays?: VideoOverlayItem[],
     zoomSegments?: ZoomSegment[],
+    crop?: VideoCrop | null,
   ) =>
     invoke<HistoryItem>("trim_history_video", {
       id,
@@ -440,6 +442,7 @@ export const ipc = {
       outputPath: outputPath ?? null,
       overlays: sanitizeOverlays(overlays),
       zoomSegments: zoomSegments && zoomSegments.length > 0 ? zoomSegments : null,
+      crop: sanitizeCrop(crop),
     }),
   /** Cắt 1 video ĐÃ LƯU trong History, ghi ĐÈ TẠI CHỖ asset/thumbnail của
    * ĐÚNG item đó — lựa chọn "Lưu đè bản gốc" ở Editor. Vĩnh viễn, không giữ
@@ -450,6 +453,7 @@ export const ipc = {
     removeAudio: boolean,
     overlays?: VideoOverlayItem[],
     zoomSegments?: ZoomSegment[],
+    crop?: VideoCrop | null,
   ) =>
     invoke<HistoryItem>("overwrite_history_video", {
       id,
@@ -457,6 +461,7 @@ export const ipc = {
       removeAudio,
       overlays: sanitizeOverlays(overlays),
       zoomSegments: zoomSegments && zoomSegments.length > 0 ? zoomSegments : null,
+      crop: sanitizeCrop(crop),
     }),
   /** Đọc dữ liệu telemetry con trỏ chuột của video (.mouse.json) nếu có */
   getVideoMouseTelemetry: (filePath: string) =>

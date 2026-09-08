@@ -28,7 +28,7 @@ import {
   stampVideoName,
   dirnameOf,
 } from "../../features/output/useOutput";
-import { ipc, type Pending, type HistoryItem } from "../../lib/ipc";
+import { ipc, type Pending, type HistoryItem, type VideoCrop } from "../../lib/ipc";
 import { editorToolFromKey } from "../../lib/toolShortcuts";
 import StitchDialog from "../../features/annotation/compose/StitchDialog";
 import type { StitchResult } from "../../features/annotation/compose/stitch";
@@ -50,6 +50,7 @@ const EMPTY_TRIM_STATE = {
   removeAudio: false,
   overlays: [] as VideoOverlayItem[],
   zoomSegments: [] as ZoomSegment[],
+  crop: null as VideoCrop | null,
 };
 
 /** "Dấu vân tay" của trạng thái cắt video — dùng để so với lần lưu gần nhất.
@@ -59,7 +60,8 @@ const EMPTY_TRIM_STATE = {
  * bản gốc không hề đổi nên `hasChanges` vẫn `true` → user bị nhắc về đúng
  * việc vừa export xong. (Sau "Lưu đè" thì đã đúng sẵn vì `doSaveVideo` reset
  * `videoTrimState` và bump `videoVersion` để remount trimmer.) */
-const trimSig = (s: typeof EMPTY_TRIM_STATE) => JSON.stringify([s.keepRanges, s.removeAudio, s.overlays, s.zoomSegments]);
+const trimSig = (s: typeof EMPTY_TRIM_STATE) =>
+  JSON.stringify([s.keepRanges, s.removeAudio, s.overlays, s.zoomSegments, s.crop]);
 
 export default function Editor() {
   const { t } = useTranslation();
@@ -440,6 +442,7 @@ export default function Editor() {
         videoTrimState.removeAudio,
         videoTrimState.overlays,
         videoTrimState.zoomSegments,
+        videoTrimState.crop,
       );
       dropVideoSession(`history:${videoDoc.historyId}`);
       setVideoDoc({
@@ -488,6 +491,7 @@ export default function Editor() {
         outputPath,
         videoTrimState.overlays,
         videoTrimState.zoomSegments,
+        videoTrimState.crop,
       );
       if (outputPath) {
         const settings = await ipc.getSettings().catch(() => null);

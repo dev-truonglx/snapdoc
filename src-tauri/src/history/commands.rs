@@ -591,6 +591,7 @@ fn trim_history_video_sync(
     output_path: Option<&str>,
     overlays: Option<&[crate::record::encoder::VideoOverlay]>,
     zoom_segments: Option<&[crate::record::encoder::ZoomSegment]>,
+    crop: Option<crate::record::encoder::VideoCrop>,
 ) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type != "video" {
@@ -616,12 +617,13 @@ fn trim_history_video_sync(
     let orig_dur = rec.duration_ms.unwrap_or(0);
     let has_overlays = overlays.map(|o| !o.is_empty()).unwrap_or(false);
     let has_zoom = zoom_segments.map(|z| !z.is_empty()).unwrap_or(false);
-    let is_untrimmed = keep_ranges_ms.len() == 1 && {
+    let has_crop = crop.is_some();
+    let is_untrimmed = !has_crop && !has_zoom && !has_overlays && keep_ranges_ms.len() == 1 && {
         let (s, e) = keep_ranges_ms[0];
         s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
     };
 
-    if is_untrimmed && !has_overlays && !has_zoom {
+    if is_untrimmed {
         if !remove_audio {
             // Fast-path 1: Copy file trực tiếp (Save As không chỉnh sửa), 0.01s!
             std::fs::copy(asset_path, &new_path)
@@ -645,6 +647,7 @@ fn trim_history_video_sync(
             &new_path,
             remove_audio,
             overlays,
+            crop.as_ref(),
             zoom_segments,
             video_size,
             move |frac| {
@@ -680,6 +683,8 @@ fn trim_history_video_sync(
     // thứ tự mới nhất trong list là đủ phân biệt.
     let new_title = rec.title.as_ref().map(|t| format!("{t} (đã cắt)"));
     let now = now_ms();
+    let final_w = crop.map(|c| (c.width / 2) * 2).unwrap_or(rec.width);
+    let final_h = crop.map(|c| (c.height / 2) * 2).unwrap_or(rec.height);
 
     let st = state(app)?;
     {
@@ -692,8 +697,8 @@ fn trim_history_video_sync(
                 now,
                 now,
                 rec.capture_mode,
-                rec.width,
-                rec.height,
+                final_w,
+                final_h,
                 rec.scale_factor,
                 new_duration_ms,
                 asset_path_str,
@@ -722,6 +727,7 @@ fn overwrite_history_video_sync(
     remove_audio: bool,
     overlays: Option<&[crate::record::encoder::VideoOverlay]>,
     zoom_segments: Option<&[crate::record::encoder::ZoomSegment]>,
+    crop: Option<crate::record::encoder::VideoCrop>,
 ) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
     if rec.media_type != "video" {
@@ -732,12 +738,13 @@ fn overwrite_history_video_sync(
     let orig_dur = rec.duration_ms.unwrap_or(0);
     let has_overlays = overlays.map(|o| !o.is_empty()).unwrap_or(false);
     let has_zoom = zoom_segments.map(|z| !z.is_empty()).unwrap_or(false);
-    let is_untrimmed = keep_ranges_ms.len() == 1 && {
+    let has_crop = crop.is_some();
+    let is_untrimmed = !has_crop && !has_zoom && !has_overlays && keep_ranges_ms.len() == 1 && {
         let (s, e) = keep_ranges_ms[0];
         s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
     };
 
-    if is_untrimmed && !has_overlays && !has_zoom {
+    if is_untrimmed {
         if !remove_audio {
             // Không có thay đổi gì so với gốc, trả về luôn không cần ghi đĩa lại
             use tauri::Emitter;
@@ -759,6 +766,7 @@ fn overwrite_history_video_sync(
             &tmp_output,
             remove_audio,
             overlays,
+            crop.as_ref(),
             zoom_segments,
             video_size,
             move |frac| {
@@ -775,12 +783,15 @@ fn overwrite_history_video_sync(
         eprintln!("[SnapDoc][history] Sinh lại thumbnail sau khi ghi đè thất bại: {e}");
     }
 
+    let final_w = crop.map(|c| (c.width / 2) * 2).unwrap_or(rec.width);
+    let final_h = crop.map(|c| (c.height / 2) * 2).unwrap_or(rec.height);
+
     let st = state(app)?;
     {
         let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
         conn.execute(
-            "UPDATE history SET updated_at = ?1, duration_ms = ?2, file_size = ?3, is_edited = 1 WHERE id = ?4",
-            rusqlite::params![now_ms(), new_duration_ms, file_size, id],
+            "UPDATE history SET updated_at = ?1, duration_ms = ?2, file_size = ?3, width = ?4, height = ?5, is_edited = 1 WHERE id = ?6",
+            rusqlite::params![now_ms(), new_duration_ms, file_size, final_w, final_h, id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -999,6 +1010,7 @@ pub async fn trim_history_video(
     output_path: Option<String>,
     overlays: Option<Vec<crate::record::encoder::VideoOverlay>>,
     zoom_segments: Option<Vec<crate::record::encoder::ZoomSegment>>,
+    crop: Option<crate::record::encoder::VideoCrop>,
 ) -> Result<HistoryRecord, String> {
     let int_ranges: Vec<(i64, i64)> = ranges
         .into_iter()
@@ -1014,6 +1026,7 @@ pub async fn trim_history_video(
             output_path.as_deref(),
             overlays.as_deref(),
             zoom_segments.as_deref(),
+            crop,
         )
     })
     .await
@@ -1032,6 +1045,7 @@ pub async fn overwrite_history_video(
     remove_audio: bool,
     overlays: Option<Vec<crate::record::encoder::VideoOverlay>>,
     zoom_segments: Option<Vec<crate::record::encoder::ZoomSegment>>,
+    crop: Option<crate::record::encoder::VideoCrop>,
 ) -> Result<HistoryRecord, String> {
     let int_ranges: Vec<(i64, i64)> = ranges
         .into_iter()
@@ -1045,6 +1059,7 @@ pub async fn overwrite_history_video(
             remove_audio,
             overlays.as_deref(),
             zoom_segments.as_deref(),
+            crop,
         )
     })
     .await
