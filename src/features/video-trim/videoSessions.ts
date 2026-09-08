@@ -1,16 +1,18 @@
 import type { Segment } from "./segments";
-import type { VideoOverlayItem } from "./types";
+import type { VideoOverlayItem, VideoCrop } from "./types";
 
 export interface VideoSessionSnapshot {
   segments: Segment[];
   removeAudio: boolean;
   overlays: VideoOverlayItem[];
+  crop?: VideoCrop | null;
 }
 
 export interface VideoSessionState {
   segments: Segment[];
   removeAudio: boolean;
   overlays: VideoOverlayItem[];
+  crop?: VideoCrop | null;
   past: VideoSessionSnapshot[];
   future: VideoSessionSnapshot[];
   selectedSegmentId: string | null;

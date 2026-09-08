@@ -20,8 +20,9 @@ import {
   trimTail,
   computeKeepRanges,
 } from "./segments";
-import { type VideoOverlayItem, renderOverlayToDataUrl, drawOverlaysOnCanvas } from "./types";
+import { type VideoOverlayItem, type VideoCrop, renderOverlayToDataUrl, drawOverlaysOnCanvas } from "./types";
 import VideoCanvasOverlay, { type VideoOverlayTool } from "./VideoCanvasOverlay";
+import VideoCropOverlay from "./VideoCropOverlay";
 import OverlayTimelineTrack from "./OverlayTimelineTrack";
 import { getVideoSession, saveVideoSession, dropVideoSession } from "./videoSessions";
 
@@ -56,6 +57,7 @@ export interface VideoTrimmerProps {
     keepRanges: [number, number][];
     removeAudio: boolean;
     overlays: VideoOverlayItem[];
+    crop: VideoCrop | null;
   }) => void;
   /** "open-editor" (mặc định): sau khi chụp frame, ingest xong rồi mở/focus
    * cửa sổ Editor riêng — dùng khi VideoTrimmer đang chạy trong 1 cửa sổ KHÁC
@@ -234,11 +236,13 @@ export default function VideoTrimmer({
     segments: Segment[];
     removeAudio: boolean;
     overlays: VideoOverlayItem[];
+    crop?: VideoCrop | null;
   }
   interface EditState {
     segments: Segment[];
     removeAudio: boolean;
     overlays: VideoOverlayItem[];
+    crop: VideoCrop | null;
     past: HistorySnapshot[];
     future: HistorySnapshot[];
     selectedSegmentId: string | null;
@@ -261,6 +265,7 @@ export default function VideoTrimmer({
         segments: savedSession.segments,
         removeAudio: savedSession.removeAudio,
         overlays: savedSession.overlays,
+        crop: savedSession.crop ?? null,
         past: savedSession.past,
         future: savedSession.future,
         selectedSegmentId: savedSession.selectedSegmentId,
@@ -271,6 +276,7 @@ export default function VideoTrimmer({
       segments: initialSegments(durationMs),
       removeAudio: false,
       overlays: [],
+      crop: null,
       past: [],
       future: [],
       selectedSegmentId: null,
@@ -278,7 +284,53 @@ export default function VideoTrimmer({
     };
   };
   const [editState, setEditState] = useState<EditState>(makeInitialEditState);
-  const { segments, removeAudio, overlays, past, future, selectedSegmentId, selectedOverlayId } = editState;
+  const { segments, removeAudio, overlays, crop, past, future, selectedSegmentId, selectedOverlayId } = editState;
+  const [isCropMode, setIsCropMode] = useState(false);
+  const [videoNaturalSize, setVideoNaturalSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  const videoWrapRef = useRef<HTMLDivElement>(null);
+  const [wrapSize, setWrapSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+
+  useEffect(() => {
+    const el = videoWrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) {
+        const w = Math.round(entry.contentRect.width);
+        const h = Math.round(entry.contentRect.height);
+        if (w > 0 && h > 0) {
+          setWrapSize({ w, h });
+        }
+      }
+    });
+    ro.observe(el);
+    if (el.clientWidth > 0 && el.clientHeight > 0) {
+      setWrapSize({ w: el.clientWidth, h: el.clientHeight });
+    }
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const checkDim = () => {
+      const vw = v.videoWidth || 0;
+      const vh = v.videoHeight || 0;
+      if (vw > 0 && vh > 0) {
+        setVideoNaturalSize((prev) => (prev.w === vw && prev.h === vh ? prev : { w: vw, h: vh }));
+      }
+    };
+    checkDim();
+    v.addEventListener("loadedmetadata", checkDim);
+    return () => v.removeEventListener("loadedmetadata", checkDim);
+  }, [src]);
+
+  const makeSnapshot = (st: EditState): HistorySnapshot => ({
+    segments: st.segments,
+    removeAudio: st.removeAudio,
+    overlays: st.overlays,
+    crop: st.crop,
+  });
   const [overlayTool, setOverlayTool] = useState<VideoOverlayTool>("select");
   const [gifModalOpen, setGifModalOpen] = useState(false);
   const selectedSegment = useMemo(
@@ -590,9 +642,16 @@ export default function VideoTrimmer({
       } else if (!mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "a") {
         e.preventDefault();
         setOverlayTool((cur) => (cur === "arrow" ? "select" : "arrow"));
+      } else if (!mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        setIsCropMode((v) => !v);
       } else if (e.key === "Escape") {
-        setOverlayTool("select");
-        setEditState((st) => ({ ...st, selectedOverlayId: null }));
+        if (isCropMode) {
+          setIsCropMode(false);
+        } else {
+          setOverlayTool("select");
+          setEditState((st) => ({ ...st, selectedOverlayId: null }));
+        }
       } else if (!mod && !e.shiftKey && !e.altKey && e.code === "Space") {
         // preventDefault: chặn hành vi mặc định (cuộn trang / bấm lại nút
         // đang focus bằng bàn phím) khi Space dùng để play/pause thay vào đó.
@@ -916,16 +975,23 @@ export default function VideoTrimmer({
       const h = v.videoHeight;
       if (!w || !h) return;
 
+      const targetW = crop ? crop.width : w;
+      const targetH = crop ? crop.height : h;
+
       let dataUrl: string | null = null;
       try {
         const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
+        canvas.width = targetW;
+        canvas.height = targetH;
         const ctx = canvas.getContext("2d");
         if (ctx) {
-          ctx.drawImage(v, 0, 0, w, h);
+          if (crop) {
+            ctx.drawImage(v, crop.x, crop.y, crop.width, crop.height, 0, 0, targetW, targetH);
+          } else {
+            ctx.drawImage(v, 0, 0, w, h);
+          }
           // Vẽ tất cả text, khung, che mờ, mũi tên đang hiển thị lên khung hình
-          drawOverlaysOnCanvas(ctx, canvas, overlays, playheadMs, selectedOverlayId, w, h);
+          drawOverlaysOnCanvas(ctx, canvas, overlays, playheadMs, selectedOverlayId, targetW, targetH);
           dataUrl = canvas.toDataURL("image/png");
         }
       } catch (err) {
@@ -939,8 +1005,8 @@ export default function VideoTrimmer({
         const frames = await ipc.generateVideoFrames(filePath, [curMs], w);
         if (frames && frames[0]) {
           const fallbackCanvas = document.createElement("canvas");
-          fallbackCanvas.width = w;
-          fallbackCanvas.height = h;
+          fallbackCanvas.width = targetW;
+          fallbackCanvas.height = targetH;
           const fallbackCtx = fallbackCanvas.getContext("2d");
           if (fallbackCtx) {
             const img = new Image();
@@ -949,8 +1015,12 @@ export default function VideoTrimmer({
               img.onerror = () => reject();
               img.src = frames[0]!;
             });
-            fallbackCtx.drawImage(img, 0, 0, w, h);
-            drawOverlaysOnCanvas(fallbackCtx, fallbackCanvas, overlays, playheadMs, selectedOverlayId, w, h);
+            if (crop) {
+              fallbackCtx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, targetW, targetH);
+            } else {
+              fallbackCtx.drawImage(img, 0, 0, w, h);
+            }
+            drawOverlaysOnCanvas(fallbackCtx, fallbackCanvas, overlays, playheadMs, selectedOverlayId, targetW, targetH);
             dataUrl = fallbackCanvas.toDataURL("image/png");
           }
         }
@@ -1122,7 +1192,7 @@ export default function VideoTrimmer({
       return {
         ...st,
         segments: next,
-        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+        past: [...st.past, makeSnapshot(st)],
         future: [],
         selectedSegmentId: selectAfter ? selectAfter(next) : null,
       };
@@ -1152,7 +1222,7 @@ export default function VideoTrimmer({
       return {
         ...st,
         segments: next,
-        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+        past: [...st.past, makeSnapshot(st)],
         future: [],
         selectedSegmentId: null,
       };
@@ -1169,7 +1239,7 @@ export default function VideoTrimmer({
     setEditState((st) => ({
       ...st,
       removeAudio: !st.removeAudio,
-      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      past: [...st.past, makeSnapshot(st)],
       future: [],
     }));
   };
@@ -1178,7 +1248,7 @@ export default function VideoTrimmer({
     setEditState((st) => ({
       ...st,
       overlays: [...st.overlays, item],
-      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      past: [...st.past, makeSnapshot(st)],
       future: [],
       selectedOverlayId: item.id,
     }));
@@ -1195,7 +1265,7 @@ export default function VideoTrimmer({
     setEditState((st) => ({
       ...st,
       overlays: st.overlays.filter((o) => o.id !== id),
-      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      past: [...st.past, makeSnapshot(st)],
       future: [],
       selectedOverlayId: null,
     }));
@@ -1204,7 +1274,7 @@ export default function VideoTrimmer({
   const handleCommitOverlaySnapshot = () => {
     setEditState((st) => ({
       ...st,
-      past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+      past: [...st.past, makeSnapshot(st)],
       future: [],
     }));
   };
@@ -1218,8 +1288,9 @@ export default function VideoTrimmer({
         segments: prev.segments,
         removeAudio: prev.removeAudio,
         overlays: prev.overlays,
+        crop: prev.crop ?? null,
         past: st.past.slice(0, -1),
-        future: [{ segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }, ...st.future],
+        future: [makeSnapshot(st), ...st.future],
         selectedSegmentId: null,
         selectedOverlayId: null,
       };
@@ -1235,7 +1306,8 @@ export default function VideoTrimmer({
         segments: next.segments,
         removeAudio: next.removeAudio,
         overlays: next.overlays,
-        past: [...st.past, { segments: st.segments, removeAudio: st.removeAudio, overlays: st.overlays }],
+        crop: next.crop ?? null,
+        past: [...st.past, makeSnapshot(st)],
         future: st.future.slice(1),
         selectedSegmentId: null,
         selectedOverlayId: null,
@@ -1249,11 +1321,13 @@ export default function VideoTrimmer({
       segments: initialSegments(durationMs),
       removeAudio: false,
       overlays: [],
+      crop: null,
       past: [],
       future: [],
       selectedSegmentId: null,
       selectedOverlayId: null,
     });
+    setIsCropMode(false);
     setPlayheadMs(0);
     seekTo(0);
   };
@@ -1266,6 +1340,7 @@ export default function VideoTrimmer({
   const hasChanges =
     past.length > 0 ||
     overlays.length > 0 ||
+    editState.crop != null ||
     removeAudio ||
     segments.length > 1 ||
     (segments[0] && (segments[0].srcStart > 0 || (durationMs > 0 && Math.abs(segments[0].srcEnd - durationMs) > 200)));
@@ -1279,16 +1354,16 @@ export default function VideoTrimmer({
   useEffect(() => {
     const preparedOverlays = overlays.map((o) => {
       if (o.type === "text" || o.type === "arrow") {
-        const vw = videoRef.current?.videoWidth || 1920;
-        const vh = videoRef.current?.videoHeight || 1080;
+        const vw = editState.crop?.width || videoRef.current?.videoWidth || 1920;
+        const vh = editState.crop?.height || videoRef.current?.videoHeight || 1080;
         const dataUrl = renderOverlayToDataUrl(o, vw, vh);
         return dataUrl ? { ...o, imageData: dataUrl } : o;
       }
       return o;
     });
-    onStateChange?.({ hasChanges, keepRanges, removeAudio, overlays: preparedOverlays });
+    onStateChange?.({ hasChanges, keepRanges, removeAudio, overlays: preparedOverlays, crop: editState.crop });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasChanges, keepRanges, removeAudio, overlays]);
+  }, [hasChanges, keepRanges, removeAudio, overlays, editState.crop]);
 
   const editStateRef = useRef(editState);
   editStateRef.current = editState;
@@ -1342,42 +1417,142 @@ export default function VideoTrimmer({
     return { seg, startMs, lenMs };
   });
 
+  const isCroppedPreview = Boolean(crop && !isCropMode && videoNaturalSize.w > 0 && videoNaturalSize.h > 0);
+
+  let stageW: number | string = "100%";
+  let stageH: number | string = "100%";
+  if (isCroppedPreview && crop) {
+    const curWrapW = wrapSize.w || videoWrapRef.current?.clientWidth || 0;
+    const curWrapH = wrapSize.h || videoWrapRef.current?.clientHeight || 0;
+    if (curWrapW > 0 && curWrapH > 0) {
+      const cropRatio = crop.width / crop.height;
+      const containerRatio = curWrapW / curWrapH;
+      if (containerRatio > cropRatio) {
+        const h = curWrapH;
+        const w = Math.round(h * cropRatio);
+        stageW = w;
+        stageH = h;
+      } else {
+        const w = curWrapW;
+        const h = Math.round(w / cropRatio);
+        stageW = w;
+        stageH = h;
+      }
+    }
+  }
+
+  const stageStyle: React.CSSProperties = isCroppedPreview
+    ? {
+        position: "relative",
+        width: stageW,
+        height: stageH,
+        maxWidth: "100%",
+        maxHeight: "100%",
+        overflow: "hidden",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+      }
+    : {
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      };
+
+  const computedVideoStyle: React.CSSProperties = isCroppedPreview && crop
+    ? {
+        position: "absolute",
+        width: `${(videoNaturalSize.w / crop.width) * 100}%`,
+        height: `${(videoNaturalSize.h / crop.height) * 100}%`,
+        left: `${-(crop.x / crop.width) * 100}%`,
+        top: `${-(crop.y / crop.height) * 100}%`,
+        cursor: "pointer",
+        maxWidth: "none",
+        maxHeight: "none",
+      }
+    : videoStyle;
+
   return (
     <div ref={wrapRef} style={{ ...wrap, ...(isFullscreen ? fullscreenWrap : null) }}>
       {/* Video + thanh điều khiển phát NỔI đè lên đáy video (kiểu YouTube/
           QuickTime/CapCut) thay vì 1 hàng riêng chiếm chỗ bên dưới — nhường
           tối đa chiều cao cho khung xem, chỉ hiện chrome khi cần nhìn thấy. */}
-      <div style={videoWrap} onMouseEnter={() => setWrapHover(true)} onMouseLeave={() => setWrapHover(false)}>
-        <video
-          ref={videoRef}
-          key={src}
-          crossOrigin="anonymous"
-          preload="auto"
-          src={src}
-          style={videoStyle}
-          onClick={togglePlay}
-          onLoadedMetadata={() => {
-            if (savedSession?.playheadMs && savedSession.playheadMs > 0) {
-              seekTo(savedSession.playheadMs);
-            }
-          }}
-        />
+      <div
+        ref={videoWrapRef}
+        style={videoWrap}
+        onMouseEnter={() => setWrapHover(true)}
+        onMouseLeave={() => setWrapHover(false)}
+      >
+        <div style={stageStyle}>
+          <video
+            ref={videoRef}
+            key={src}
+            crossOrigin="anonymous"
+            preload="auto"
+            src={src}
+            style={computedVideoStyle}
+            onClick={togglePlay}
+            onLoadedMetadata={() => {
+              const vw = videoRef.current?.videoWidth || 0;
+              const vh = videoRef.current?.videoHeight || 0;
+              if (vw > 0 && vh > 0) setVideoNaturalSize({ w: vw, h: vh });
+              if (savedSession?.playheadMs && savedSession.playheadMs > 0) {
+                seekTo(savedSession.playheadMs);
+              }
+            }}
+          />
 
-        <VideoCanvasOverlay
-          videoRef={videoRef}
-          playheadMs={playheadMs}
-          durationMs={total}
-          tool={overlayTool}
-          onToolChange={setOverlayTool}
-          overlays={overlays}
-          selectedId={selectedOverlayId}
-          onSelect={(id) => setEditState((st) => ({ ...st, selectedOverlayId: id }))}
-          onChangeOverlay={handleChangeOverlay}
-          onCommitSnapshot={handleCommitOverlaySnapshot}
-          onAddOverlay={handleAddOverlay}
-          onDeleteOverlay={handleDeleteOverlay}
-          isPlaying={isPlaying}
-        />
+          {!isCropMode && (
+            <VideoCanvasOverlay
+              videoRef={videoRef}
+              playheadMs={playheadMs}
+              durationMs={total}
+              tool={overlayTool}
+              onToolChange={setOverlayTool}
+              overlays={overlays}
+              selectedId={selectedOverlayId}
+              onSelect={(id) => setEditState((st) => ({ ...st, selectedOverlayId: id }))}
+              onChangeOverlay={handleChangeOverlay}
+              onCommitSnapshot={handleCommitOverlaySnapshot}
+              onAddOverlay={handleAddOverlay}
+              onDeleteOverlay={handleDeleteOverlay}
+              isPlaying={isPlaying}
+              crop={isCroppedPreview ? crop : null}
+            />
+          )}
+        </div>
+
+        {isCropMode && (
+          <VideoCropOverlay
+            videoRef={videoRef}
+            initialCrop={crop}
+            onApply={(newCrop) => {
+              setEditState((st) => ({
+                ...st,
+                crop: newCrop,
+                past: [...st.past, makeSnapshot(st)],
+                future: [],
+              }));
+              setIsCropMode(false);
+            }}
+            onReset={() => {
+              setEditState((st) => ({
+                ...st,
+                crop: null,
+                past: [...st.past, makeSnapshot(st)],
+                future: [],
+              }));
+              setIsCropMode(false);
+            }}
+            onCancel={() => {
+              setIsCropMode(false);
+            }}
+          />
+        )}
 
         <div style={playbackOverlay}>
           {/* Cột trái RỖNG — chỉ để `overlayCenterGroup` (cột giữa, "auto")
@@ -1513,6 +1688,13 @@ export default function VideoTrimmer({
           title={t("videoTrimmer.drawArrow", "Mũi tên (A)")}
         >
           <ArrowIcon />
+        </button>
+        <button
+          style={{ ...iconToolBtn, ...(isCropMode || crop ? iconToolBtnActive : null) }}
+          onClick={() => setIsCropMode((v) => !v)}
+          title={crop ? t("videoTrimmer.cropActiveTitle", `Đã crop (${crop.width}×${crop.height}) — Bấm để chỉnh sửa (C)`) : t("videoTrimmer.cropVideo", "Cắt khung hình (C)")}
+        >
+          <CropIcon />
         </button>
         <div style={toolDivider} />
 
@@ -1824,6 +2006,15 @@ function ArrowIcon() {
     <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
       <line x1="5" y1="19" x2="19" y2="5" />
       <polyline points="10 5 19 5 19 14" />
+    </svg>
+  );
+}
+
+function CropIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+      <path d="M18 22V8a2 2 0 0 0-2-2H2" />
     </svg>
   );
 }

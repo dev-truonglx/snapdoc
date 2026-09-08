@@ -486,7 +486,13 @@
     "arrowStartPoint": "Arrow start point",
     "arrowEndPoint": "Arrow end point",
     "dragToMove": "Drag to move",
-    "deleteOverlay": "Delete overlay"
+    "deleteOverlay": "Delete overlay",
+    "cropVideo": "Crop Video (C)",
+    "cropActiveTitle": "Cropped ({{width}}×{{height}}) — Click to edit (C)",
+    "cropRatio": "Ratio",
+    "cropFree": "Free",
+    "resetCrop": "Reset to full frame",
+    "applyCrop": "Apply"
   },
   "gifExport": {
     "title": "Export Animated GIF",

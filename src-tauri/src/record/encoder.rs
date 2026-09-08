@@ -508,16 +508,44 @@ pub struct VideoOverlay {
     pub arrow_end_y: Option<f64>,
 }
 
+/// Toạ độ và kích thước vùng crop không gian (X, Y, W, H tính theo pixel thực tế của video).
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoCrop {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub fn build_overlay_filter_graph(
     overlays: &[VideoOverlay],
     image_overlays: &[&VideoOverlay],
+    crop: Option<&VideoCrop>,
 ) -> Option<String> {
     let valid: Vec<&VideoOverlay> = overlays
         .iter()
         .filter(|o| o.rel_w > 0.001 && o.rel_h > 0.001 && o.end_time_ms > o.start_time_ms)
         .collect();
+
+    let crop_filter = crop.map(|c| {
+        let cw = (c.width / 2) * 2;
+        let ch = (c.height / 2) * 2;
+        format!("crop={cw}:{ch}:{}:{}", c.x, c.y)
+    });
+
     if valid.is_empty() && image_overlays.is_empty() {
-        return None;
+        return crop_filter.map(|cf| format!("[0:v]{cf}[outv]"));
+    }
+
+    let mut fg = String::new();
+    let base_input: String;
+
+    if let Some(cf) = crop_filter {
+        fg.push_str(&format!("[0:v]{cf}[v_cropped];"));
+        base_input = "v_cropped".to_string();
+    } else {
+        base_input = "0:v".to_string();
     }
 
     let mut soft_blurs = Vec::new();
@@ -531,12 +559,15 @@ pub fn build_overlay_filter_graph(
         }
     }
 
-    let mut fg = String::new();
     let last_blur_label: String;
 
     if !soft_blurs.is_empty() {
         let n = soft_blurs.len();
-        fg.push_str(&format!("[0:v]split={}[base]", n + 1));
+        if base_input == "0:v" {
+            fg.push_str(&format!("[0:v]split={}[base]", n + 1));
+        } else {
+            fg.push_str(&format!("[{base_input}]split={}[base]", n + 1));
+        }
         for i in 0..n {
             fg.push_str(&format!("[c{i}]"));
         }
@@ -566,7 +597,7 @@ pub fn build_overlay_filter_graph(
         }
         last_blur_label = prev;
     } else {
-        last_blur_label = "0:v".to_string();
+        last_blur_label = base_input;
     }
 
     let mut prev = last_blur_label;
@@ -675,6 +706,7 @@ pub fn trim(
     output_path: &Path,
     remove_audio: bool,
     overlays: Option<&[VideoOverlay]>,
+    crop: Option<&VideoCrop>,
     mut on_progress: impl FnMut(f64),
 ) -> Result<(), String> {
     if keep_ranges_ms.is_empty() {
@@ -711,7 +743,7 @@ pub fn trim(
         }
 
         let img_refs: Vec<&VideoOverlay> = image_overlays.iter().map(|(_, o)| *o).collect();
-        let filter_graph = overlays.and_then(|ovls| build_overlay_filter_graph(ovls, &img_refs));
+        let filter_graph = build_overlay_filter_graph(overlays.unwrap_or(&[]), &img_refs, crop);
 
         // TỐI ƯU HOÁ: Nếu chỉ có 1 đoạn giữ lại (chiếm đa số các tác vụ cắt hoặc thêm overlay),
         // chạy Single-Pass: cắt thời lượng + áp dụng filter graph + encode trong 1 lệnh duy nhất!
@@ -1212,7 +1244,7 @@ mod tests {
         let mut last_progress: f64 = 0.0;
         // `remove_audio = false`: video test không có audio track, và test này
         // kiểm cú pháp ffmpeg của đường cắt, không kiểm nhánh bỏ audio.
-        trim(&src, &[(0, 1_500), (3_500, 5_000)], &out, false, |p| last_progress = p)
+        trim(&src, &[(0, 1_500), (3_500, 5_000)], &out, false, None, None, |p| last_progress = p)
             .expect("trim() thất bại — kiểm tra cú pháp ffmpeg");
         assert!((last_progress - 1.0).abs() < 1e-9, "progress cuối phải là 1.0, thấy {last_progress}");
 
