@@ -2631,13 +2631,16 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         bring_to_front(app, &win);
 
         // Trên Windows, show() là async (WM_SHOWWINDOW qua message pump).
-        // Emit refresh-capture sau một tick để đảm bảo webview visible và
-        // JS message pump đang chạy trước khi nhận event.
-        let win2 = win.clone();
+        // Emit refresh-capture định danh đích đến ("editor").
+        // Phát ngay nhịp đầu cho fast-path, và thêm 1 nhịp sau 150ms phòng khi WebView2 đang tỉnh giấc từ sleep.
+        let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
+            let _ = app_handle.emit_to("editor", "refresh-capture", &());
             #[cfg(target_os = "windows")]
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let _ = win2.emit("refresh-capture", ());
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                let _ = app_handle.emit_to("editor", "refresh-capture", &());
+            }
         });
         return Ok(());
     }
@@ -2655,10 +2658,11 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         fill_monitor(app, &win);
         bring_to_front(app, &win);
 
-        let win2 = win.clone();
+        let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let _ = win2.emit("refresh-capture", ());
+            let _ = app_handle.emit_to("editor", "refresh-capture", &());
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let _ = app_handle.emit_to("editor", "refresh-capture", &());
         });
     }
     #[cfg(not(target_os = "windows"))]
@@ -2675,9 +2679,9 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         fill_monitor(app, &win);
         bring_to_front(app, &win);
 
-        let win2 = win.clone();
+        let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = win2.emit("refresh-capture", ());
+            let _ = app_handle.emit_to("editor", "refresh-capture", &());
         });
     }
     Ok(())

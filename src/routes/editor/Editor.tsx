@@ -18,6 +18,7 @@ import {
   initAutosave,
   parseDocPayload,
   suspendActive,
+  openLibraryImage,
 } from "../../features/annotation/sessions";
 import { uid, type ImageAnn } from "../../features/annotation/model";
 import {
@@ -86,6 +87,10 @@ export default function Editor() {
   // Signature của trạng thái cắt tại lần lưu gần nhất (`null` = chưa lưu lần
   // nào cho video đang mở). Xem `trimSig`.
   const [videoSavedSig, setVideoSavedSig] = useState<string | null>(null);
+  const videoDocRef = useRef(videoDoc);
+  videoDocRef.current = videoDoc;
+  const inFlightRef = useRef<Promise<void> | null>(null);
+  const pendingRerunRef = useRef(false);
 
   // Tiến độ lưu/mã hóa video (0.0 -> 1.0) từ backend qua event "trim-progress"
   const [saveProgress, setSaveProgress] = useState<number | null>(null);
@@ -363,47 +368,95 @@ export default function Editor() {
     // Video (mở từ Library, hoặc vừa quay xong — cả 2 đều đã ingest vào
     // History trước khi tới đây, xem `record::stop_recording_impl`) LUÔN
     // được kiểm tra TRƯỚC ảnh — chỉ 1 trong 2 loại pending chờ tại 1 thời điểm.
+    // Tuần tự hoá lấy pending bằng In-Flight Promise Lock để chống race condition
+    // giữa lần gọi mount useEffect và event refresh-capture (từ Rust open_editor sau 100ms),
+    // ngăn ngừa việc 2 lệnh IPC take_pending chạy song song và nuốt mất ảnh của nhau.
     const loadAnyPending = async () => {
-      let suspended = null;
-      try {
-        suspended = suspendActive();
-      } catch (e) {
-        console.error("[SnapDoc] Treo phiên sửa thất bại, vẫn nạp ảnh mới:", e);
+      if (inFlightRef.current) {
+        pendingRerunRef.current = true;
+        return inFlightRef.current;
       }
-      void suspended; // không dùng nữa, giữ lại để suspendActive vẫn chạy
-      const token = beginSwitch();
 
-      const pv = await ipc.takePendingVideo();
-      if (!isCurrentSwitch(token)) return;
-      if (pv) {
-        setVideoDoc({
-          historyId: pv.historyId,
-          filePath: pv.path,
-          src: convertFileSrc(pv.path),
-          durationMs: pv.durationMs,
-          thumbUrl: pv.thumbPath ? convertFileSrc(pv.thumbPath) : undefined,
+      const run = async () => {
+        let suspended = null;
+        try {
+          suspended = suspendActive();
+        } catch (e) {
+          console.error("[SnapDoc] Treo phiên sửa thất bại, vẫn nạp ảnh mới:", e);
+        }
+        void suspended; // không dùng nữa, giữ lại để suspendActive vẫn chạy
+        const token = beginSwitch();
+
+        const pv = await ipc.takePendingVideo();
+        if (pv) {
+          setVideoDoc({
+            historyId: pv.historyId,
+            filePath: pv.path,
+            src: convertFileSrc(pv.path),
+            durationMs: pv.durationMs,
+            thumbUrl: pv.thumbPath ? convertFileSrc(pv.thumbPath) : undefined,
+          });
+          setVideoTrimState(EMPTY_TRIM_STATE);
+          setVideoSavedSig(null);
+          noteActiveKey(null);
+          return;
+        }
+
+        const p = await ipc.takePending();
+        if (p) {
+          setVideoDoc(null);
+          loadPending(p);
+        } else {
+          // Fallback: Nếu không có pending capture nào VÀ Editor đang trống (chưa có ảnh/video nào mở):
+          // Tự động nạp item gần nhất từ History Library để tránh màn hình trống "No document is currently open"
+          const currentDoc = useEditor.getState().doc;
+          if (!currentDoc && !videoDocRef.current) {
+            try {
+              const hist = await ipc.listHistory({ limit: 1, offset: 0, trashOnly: false });
+              const latest = hist.items?.[0];
+              if (latest && isCurrentSwitch(token) && !useEditor.getState().doc && !videoDocRef.current) {
+                if (latest.mediaType === "video") {
+                  setVideoDoc({
+                    historyId: latest.id,
+                    filePath: latest.assetPath,
+                    src: convertFileSrc(latest.assetPath),
+                    durationMs: latest.durationMs ?? 0,
+                    thumbUrl: latest.thumbPath ? convertFileSrc(latest.thumbPath) : undefined,
+                  });
+                  setVideoTrimState(EMPTY_TRIM_STATE);
+                  setVideoSavedSig(null);
+                  noteActiveKey(null);
+                } else {
+                  await openLibraryImage(latest.id);
+                }
+              }
+            } catch (e) {
+              console.warn("[SnapDoc] Fallback nạp ảnh gần nhất từ History thất bại:", e);
+            }
+          }
+        }
+
+        // Focus vào window để đảm bảo WebView2 DOM sẵn sàng nhận phím tắt công cụ
+        // ngay lập tức trên Windows mà không cần người dùng click chuột trước.
+        requestAnimationFrame(() => {
+          window.focus();
         });
-        setVideoTrimState(EMPTY_TRIM_STATE);
-        setVideoSavedSig(null);
-        noteActiveKey(null);
-        return;
-      }
-      const p = await ipc.takePending();
-      if (!isCurrentSwitch(token)) return;
-      if (p) setVideoDoc(null);
-      loadPending(p);
+        setTimeout(() => {
+          window.focus();
+        }, 50);
+      };
 
-      // Focus vào window để đảm bảo WebView2 DOM sẵn sàng nhận phím tắt công cụ
-      // ngay lập tức trên Windows mà không cần người dùng click chuột trước.
-      requestAnimationFrame(() => {
-        window.focus();
+      inFlightRef.current = run().finally(() => {
+        inFlightRef.current = null;
+        if (pendingRerunRef.current) {
+          pendingRerunRef.current = false;
+          void loadAnyPending();
+        }
       });
-      setTimeout(() => {
-        window.focus();
-      }, 50);
+      return inFlightRef.current;
     };
 
-    loadAnyPending();
+    void loadAnyPending();
     requestAnimationFrame(() => {
       window.focus();
     });
@@ -411,11 +464,22 @@ export default function Editor() {
     // cửa sổ `editor` được ghi nháp, xem `initAutosave`.
     const stopAutosave = initAutosave();
     const un = listen("refresh-capture", () => {
-      loadAnyPending();
+      void loadAnyPending();
       setTimeout(() => {
         window.focus();
       }, 100);
     });
+
+    // Khi cửa sổ Editor nhận focus, nếu chưa có ảnh nào đang hiển thị thì tự động kiểm tra lại pending
+    // (phòng trường hợp event refresh-capture bị drop do WebView2 ngủ đông trên Windows).
+    const onFocus = () => {
+      if (!useEditor.getState().doc && !videoDocRef.current) {
+        void loadAnyPending();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    const unFocus = listen("tauri://focus", onFocus);
+
     // Windows "Open with" / double-click: Rust emit event này với data URL đầy đủ,
     // không cần round-trip IPC takePending (timing an toàn hơn).
     const unOpenFile = listen<string>("open-file", (e) => {
@@ -424,8 +488,10 @@ export default function Editor() {
       loadFromUrl(e.payload);
     });
     return () => {
+      window.removeEventListener("focus", onFocus);
       stopAutosave();
       un.then((f) => f());
+      unFocus.then((f) => f());
       unOpenFile.then((f) => f());
     };
   }, []);
