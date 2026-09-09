@@ -548,7 +548,8 @@
     "paused": "Đang tạm dừng",
     "pause": "Tạm dừng",
     "resume": "Tiếp tục",
-    "stop": "Dừng quay"
+    "stop": "Dừng quay",
+    "dragToMove": "Kéo để di chuyển"
   },
   "historyView": {
     "noCaptures": "Chưa có capture nào trong khoảng lọc này.",

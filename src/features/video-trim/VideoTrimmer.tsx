@@ -28,6 +28,7 @@ import {
   drawOverlaysOnCanvas,
   makeZoomSegmentUid,
   MIN_ZOOM_DURATION_MS,
+  ZOOM_SCALE_OPTIONS,
 } from "./types";
 import VideoCanvasOverlay, { type VideoOverlayTool } from "./VideoCanvasOverlay";
 import VideoCropOverlay from "./VideoCropOverlay";
@@ -428,30 +429,82 @@ export default function VideoTrimmer({
     return () => v.removeEventListener("loadedmetadata", checkDim);
   }, [src]);
 
-  // Kéo dời tâm phóng to (Focus Pin) trực tiếp trên khung xem video
+  // Kéo dời tâm phóng to (Focus Pin) trực tiếp trên khung xem video — giới hạn an toàn 100% trong khung video
   const handleFocusPinDragStart = (e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
     const videoEl = videoRef.current;
-    if (!videoEl || !selectedZoom) return;
+    const cameraWrap = cameraWrapRef.current;
+    if (!videoEl || !cameraWrap || !selectedZoom) return;
+
+    const targetEl = e.currentTarget as HTMLElement;
+    try {
+      targetEl.setPointerCapture(e.pointerId);
+    } catch {}
 
     setIsDraggingFocusPin(true);
-    const rect = videoEl.getBoundingClientRect();
+
+    const wrapRect = cameraWrap.getBoundingClientRect();
+    const cw = videoEl.clientWidth || wrapRect.width;
+    const ch = videoEl.clientHeight || wrapRect.height;
+    const vw = videoNaturalSize.w || cw;
+    const vh = videoNaturalSize.h || ch;
+
+    // Tính toán kích thước thực tế của nội dung video (trừ phần viền đen letterbox)
+    const containerRatio = cw / ch;
+    const videoRatio = vw / vh;
+    let vidW = cw;
+    let vidH = ch;
+    if (containerRatio > videoRatio) {
+      vidW = ch * videoRatio;
+    } else {
+      vidH = cw / videoRatio;
+    }
+
+    // Lề an toàn tối thiểu 36px (bán kính reticle là 18px -> mép vòng tròn cách mép video ít nhất 18px)
+    const safeMarginPx = 36;
+    const minMarginX = Math.max(0.05, safeMarginPx / vidW);
+    const maxMarginX = 1 - minMarginX;
+    const minMarginY = Math.max(0.05, safeMarginPx / vidH);
+    const maxMarginY = 1 - minMarginY;
+
+    const startClientX = e.clientX;
+    const startClientY = e.clientY;
+    const startFocusX = selectedZoom.focusX;
+    const startFocusY = selectedZoom.focusY;
+
+    // Xác định tỉ lệ phóng to thực tế của camera tại thời điểm hiện tại
+    const cam = interpolateCamera(zoomSegments, playheadMs);
+    const effectiveScale = cam.scale > 1.05 ? cam.scale : (selectedZoom.scale || 1.5);
+
+    // Tỉ lệ scale thực tế: 1 đơn vị focusX tương ứng với (vidW * effectiveScale) pixels trên màn hình
+    const pxPerUnitX = Math.max(10, vidW * effectiveScale);
+    const pxPerUnitY = Math.max(10, vidH * effectiveScale);
+
     const onMove = (ev: PointerEvent) => {
-      const rx = clamp((ev.clientX - rect.left) / rect.width, 0.05, 0.95);
-      const ry = clamp((ev.clientY - rect.top) / rect.height, 0.05, 0.95);
+      const dx = ev.clientX - startClientX;
+      const dy = ev.clientY - startClientY;
+
+      const newFocusX = clamp(startFocusX + dx / pxPerUnitX, minMarginX, maxMarginX);
+      const newFocusY = clamp(startFocusY + dy / pxPerUnitY, minMarginY, maxMarginY);
+
       handleChangeZoomSegment({
         ...selectedZoom,
-        focusX: Math.round(rx * 1000) / 1000,
-        focusY: Math.round(ry * 1000) / 1000,
+        focusX: Math.round(newFocusX * 1000) / 1000,
+        focusY: Math.round(newFocusY * 1000) / 1000,
       });
     };
-    const onUp = () => {
+
+    const onUp = (ev: PointerEvent) => {
+      try {
+        targetEl.releasePointerCapture(ev.pointerId);
+      } catch {}
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       setIsDraggingFocusPin(false);
       handleCommitZoomSnapshot();
     };
+
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
@@ -1845,66 +1898,248 @@ export default function VideoTrimmer({
               />
             )}
 
-            {/* Điểm neo tâm phóng to (Focus Pin) khi đang chọn 1 mốc Zoom */}
-            {!isCropMode && selectedZoom && (
-              <div
-                style={{
-                  position: "absolute",
-                  left: `${selectedZoom.focusX * 100}%`,
-                  top: `${selectedZoom.focusY * 100}%`,
-                  transform: "translate(-50%, -50%)",
-                  zIndex: 15,
-                  pointerEvents: "auto",
-                  cursor: isDraggingFocusPin ? "grabbing" : "grab",
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  userSelect: "none",
-                }}
-                onPointerDown={handleFocusPinDragStart}
-                title="Kéo để dời tâm phóng to theo ý muốn"
-              >
+            {/* Điểm neo tâm phóng to (Focus Pin) + Bảng điều khiển Zoom trực quan khi đang chọn 1 mốc Zoom */}
+            {!isCropMode && selectedZoom && (() => {
+              const videoEl = videoRef.current;
+              const cw = videoEl?.clientWidth || 1;
+              const ch = videoEl?.clientHeight || 1;
+              const vw = videoNaturalSize.w || cw;
+              const vh = videoNaturalSize.h || ch;
+              const containerRatio = cw / ch;
+              const videoRatio = vw / vh;
+              let vidW = cw;
+              let vidH = ch;
+              let vidL = 0;
+              let vidT = 0;
+              if (containerRatio > videoRatio) {
+                vidW = ch * videoRatio;
+                vidL = (cw - vidW) / 2;
+              } else {
+                vidH = cw / videoRatio;
+                vidT = (ch - vidH) / 2;
+              }
+
+              // Giới hạn an toàn cố định (lề tối thiểu 36px) để tâm ngắm tròn 36px không bao giờ chạm mép hoặc nhảy ra ngoài
+              const safeMarginPx = 36;
+              const minMarginX = Math.max(0.05, safeMarginPx / vidW);
+              const maxMarginX = 1 - minMarginX;
+              const minMarginY = Math.max(0.05, safeMarginPx / vidH);
+              const maxMarginY = 1 - minMarginY;
+
+              const clampedFocusX = clamp(selectedZoom.focusX, minMarginX, maxMarginX);
+              const clampedFocusY = clamp(selectedZoom.focusY, minMarginY, maxMarginY);
+
+              // Toạ độ thực tế của tâm zoom theo % của cameraWrapRef (chính xác bên trong khung hình video, không lệch vào letterbox)
+              const pinLeftPct = ((vidL + clampedFocusX * vidW) / cw) * 100;
+              const pinTopPct = ((vidT + clampedFocusY * vidH) / ch) * 100;
+
+              const isNearBottom = clampedFocusY > 0.62;
+
+              return (
                 <div
                   style={{
-                    width: 34,
-                    height: 34,
-                    borderRadius: "50%",
-                    border: "2.5px solid #38bdf8",
-                    background: "rgba(56, 189, 248, 0.25)",
-                    boxShadow: "0 0 14px rgba(56, 189, 248, 0.75)",
+                    position: "absolute",
+                    left: `${pinLeftPct}%`,
+                    top: `${pinTopPct}%`,
+                    transform: "translate(-50%, -50%)",
+                    width: 36,
+                    height: 36,
+                    zIndex: 20,
+                    pointerEvents: "auto",
+                    userSelect: "none",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
                   }}
                 >
+                  {/* Icon tâm zoom (Reticle Pin) — Cố định 100% tại tâm (pinLeftPct, pinTopPct), KHÔNG BAO GIỜ bị xê dịch bởi toolbar */}
                   <div
                     style={{
-                      width: 7,
-                      height: 7,
+                      width: 36,
+                      height: 36,
                       borderRadius: "50%",
-                      background: "#38bdf8",
-                      boxShadow: "0 0 6px #fff",
+                      border: "2.5px solid #38bdf8",
+                      background: "rgba(56, 189, 248, 0.25)",
+                      boxShadow:
+                        "0 0 16px rgba(56, 189, 248, 0.8), inset 0 0 8px rgba(56, 189, 248, 0.3)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      cursor: isDraggingFocusPin ? "grabbing" : "grab",
+                      position: "relative",
+                      flexShrink: 0,
                     }}
-                  />
+                    onPointerDown={handleFocusPinDragStart}
+                    title="Bấm & kéo để dời tâm thu phóng theo ý muốn"
+                  >
+                    {/* Crosshair lines */}
+                    <div
+                      style={{
+                        position: "absolute",
+                        width: 12,
+                        height: 2,
+                        background: "#38bdf8",
+                        boxShadow: "0 0 4px #ffffff",
+                      }}
+                    />
+                    <div
+                      style={{
+                        position: "absolute",
+                        height: 12,
+                        width: 2,
+                        background: "#38bdf8",
+                        boxShadow: "0 0 4px #ffffff",
+                      }}
+                    />
+                    {/* Center dot */}
+                    <div
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        background: "#ffffff",
+                        boxShadow: "0 0 6px #38bdf8",
+                        zIndex: 1,
+                      }}
+                    />
+                  </div>
+
+                  {/* Phần nổi phụ trợ (Badge toạ độ khi kéo HOẶC Toolbar cài đặt khi thả) — Neo độc lập bên ngoài, KHÔNG BAO GIỜ làm xê dịch tâm zoom */}
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: "50%",
+                      transform:
+                        clampedFocusX < 0.25
+                          ? "translateX(-8px)"
+                          : clampedFocusX > 0.75
+                          ? "translateX(calc(-100% + 8px))"
+                          : "translateX(-50%)",
+                      ...(isNearBottom
+                        ? { bottom: "100%", marginBottom: 8 }
+                        : { top: "100%", marginTop: 8 }),
+                      pointerEvents: isDraggingFocusPin ? "none" : "auto",
+                      zIndex: 25,
+                    }}
+                  >
+                    {isDraggingFocusPin ? (
+                      <div
+                        style={{
+                          padding: "3px 8px",
+                          borderRadius: 5,
+                          background: "rgba(15, 23, 42, 0.94)",
+                          border: "1px solid rgba(56, 189, 248, 0.7)",
+                          color: "#38bdf8",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          whiteSpace: "nowrap",
+                          boxShadow: "0 4px 14px rgba(0, 0, 0, 0.6)",
+                        }}
+                      >
+                        🎯 X: {Math.round(clampedFocusX * 100)}% • Y: {Math.round(clampedFocusY * 100)}% ({selectedZoom.scale}x)
+                      </div>
+                    ) : (
+                      <div
+                        style={{
+                          padding: "5px 9px",
+                          borderRadius: 8,
+                          background: "rgba(18, 18, 24, 0.94)",
+                          backdropFilter: "blur(14px)",
+                          WebkitBackdropFilter: "blur(14px)",
+                          border: "1px solid rgba(56, 189, 248, 0.45)",
+                          boxShadow:
+                            "0 8px 24px rgba(0, 0, 0, 0.7), 0 0 12px rgba(56, 189, 248, 0.2)",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          whiteSpace: "nowrap",
+                          cursor: "default",
+                        }}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {/* Tiêu đề */}
+                        <span
+                          style={{
+                            fontSize: 11,
+                            fontWeight: 700,
+                            color: "#38bdf8",
+                            letterSpacing: 0.3,
+                          }}
+                        >
+                          Tâm Zoom:
+                        </span>
+
+                        {/* Nút chọn mức Zoom Scale */}
+                        <div style={{ display: "flex", gap: 3 }}>
+                          {ZOOM_SCALE_OPTIONS.map((sc) => {
+                            const isActive = Math.abs(selectedZoom.scale - sc) < 0.05;
+                            return (
+                              <button
+                                key={sc}
+                                type="button"
+                                style={{
+                                  background: isActive
+                                    ? "linear-gradient(135deg, #0284c7 0%, #0369a1 100%)"
+                                    : "rgba(255, 255, 255, 0.08)",
+                                  border: isActive
+                                    ? "1px solid #38bdf8"
+                                    : "1px solid rgba(255, 255, 255, 0.15)",
+                                  borderRadius: 4,
+                                  color: isActive ? "#ffffff" : "#cbd5e1",
+                                  fontSize: 11,
+                                  fontWeight: isActive ? 700 : 500,
+                                  padding: "2px 7px",
+                                  cursor: "pointer",
+                                  transition: "all 0.12s ease",
+                                }}
+                                onClick={() => {
+                                  handleChangeZoomSegment({ ...selectedZoom, scale: sc });
+                                  handleCommitZoomSnapshot();
+                                }}
+                              >
+                                {sc}x
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        <div
+                          style={{
+                            width: 1,
+                            height: 16,
+                            background: "rgba(255, 255, 255, 0.18)",
+                            margin: "0 2px",
+                          }}
+                        />
+
+                        {/* Nút Xoá mốc zoom */}
+                        <button
+                          type="button"
+                          style={{
+                            background: "rgba(239, 68, 68, 0.2)",
+                            border: "1px solid rgba(239, 68, 68, 0.5)",
+                            borderRadius: 4,
+                            color: "#fca5a5",
+                            fontSize: 11,
+                            padding: "2px 7px",
+                            cursor: "pointer",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 2,
+                            transition: "all 0.12s ease",
+                          }}
+                          title="Xóa mốc zoom này (Delete / Backspace)"
+                          onClick={() => handleDeleteZoomSegment(selectedZoom.id)}
+                        >
+                          🗑
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div
-                  style={{
-                    marginTop: 4,
-                    padding: "2px 7px",
-                    borderRadius: 4,
-                    background: "rgba(15, 23, 42, 0.9)",
-                    border: "1px solid rgba(56, 189, 248, 0.5)",
-                    color: "#38bdf8",
-                    fontSize: 10,
-                    fontWeight: 600,
-                    whiteSpace: "nowrap",
-                    pointerEvents: "none",
-                  }}
-                >
-                  Tâm Zoom {selectedZoom.scale.toFixed(1)}x
-                </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         </div>
 

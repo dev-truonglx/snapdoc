@@ -72,7 +72,13 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "restart_update" => app.restart(),
+            "restart_update" => {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    crate::record::finalize_on_exit(&app);
+                    app.restart();
+                });
+            }
             
             "full"   => dispatch(app, "full"),
             "region" => dispatch(app, "region"),
@@ -93,13 +99,22 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
                 std::thread::spawn(move || flow::start_quick(&app));
             }
             "bar" => {
-                let _ = windows::open_capture_bar(app);
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let _ = windows::open_capture_bar(&app);
+                });
             }
             "settings" => {
-                let _ = windows::open_settings(app);
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let _ = windows::open_settings(&app);
+                });
             }
             "history" => {
-                let _ = windows::open_history(app);
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let _ = windows::open_history(&app);
+                });
             }
             "editor" => {
                 let app = app.clone();

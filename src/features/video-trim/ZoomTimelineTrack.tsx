@@ -2,7 +2,6 @@ import React, { useRef, useState } from "react";
 import {
   type ZoomSegment,
   MIN_ZOOM_DURATION_MS,
-  ZOOM_SCALE_OPTIONS,
   clamp,
 } from "./types";
 import { FOCUS_ZONE_PRESETS, detectFocusZone } from "./mouseFocusEngine";
@@ -14,7 +13,7 @@ interface ZoomTimelineTrackProps {
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onChangeZoomSegment: (item: ZoomSegment) => void;
-  onDeleteZoomSegment: (id: string) => void;
+  onDeleteZoomSegment?: (id: string) => void;
   onCommitSnapshot?: () => void;
   onSeek?: (ms: number) => void;
   snapPoints?: number[];
@@ -30,7 +29,7 @@ export default function ZoomTimelineTrack({
   selectedId,
   onSelect,
   onChangeZoomSegment,
-  onDeleteZoomSegment,
+  onDeleteZoomSegment: _onDeleteZoomSegment,
   onCommitSnapshot,
   onSeek,
   snapPoints = [],
@@ -143,8 +142,6 @@ export default function ZoomTimelineTrack({
     }
   };
 
-  const selectedItem = zoomSegments.find((z) => z.id === selectedId);
-
   return (
     <div
       ref={trackRef}
@@ -211,94 +208,6 @@ export default function ZoomTimelineTrack({
           </div>
         );
       })}
-
-      {/* Popover cấu hình cho zoom segment đang chọn */}
-      {selectedItem && (() => {
-        const currentZone =
-          selectedItem.zone ||
-          detectFocusZone(selectedItem.focusX, selectedItem.focusY);
-        return (
-          <div
-            style={{
-              ...popoverStyle,
-              left: `${clamp(pct((selectedItem.startTimeMs + selectedItem.endTimeMs) / 2), 20, 80)}%`,
-            }}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            {/* Mức zoom */}
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#e2e8f0" }}>
-              Zoom:
-            </span>
-            <div style={{ display: "flex", gap: 3 }}>
-              {ZOOM_SCALE_OPTIONS.map((sc) => {
-                const isActive = Math.abs(selectedItem.scale - sc) < 0.05;
-                return (
-                  <button
-                    key={sc}
-                    type="button"
-                    style={{
-                      ...scaleBtnStyle,
-                      ...(isActive ? scaleBtnActiveStyle : null),
-                    }}
-                    onClick={() => {
-                      onChangeZoomSegment({ ...selectedItem, scale: sc });
-                      onCommitSnapshot?.();
-                    }}
-                  >
-                    {sc}x
-                  </button>
-                );
-              })}
-            </div>
-
-            <div style={popoverSeparatorStyle} />
-
-            {/* Vị trí zoom thông minh */}
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#e2e8f0" }}>
-              Vị trí:
-            </span>
-            <div style={{ display: "flex", gap: 3 }}>
-              {FOCUS_ZONE_PRESETS.map((preset) => {
-                const isZoneActive = currentZone === preset.zone;
-                return (
-                  <button
-                    key={preset.zone}
-                    type="button"
-                    style={{
-                      ...scaleBtnStyle,
-                      ...(isZoneActive ? zoneBtnActiveStyle : null),
-                    }}
-                    title={`Chuyển vị trí zoom về: ${preset.label}`}
-                    onClick={() => {
-                      onChangeZoomSegment({
-                        ...selectedItem,
-                        focusX: preset.focusX,
-                        focusY: preset.focusY,
-                        zone: preset.zone,
-                      });
-                      onCommitSnapshot?.();
-                    }}
-                  >
-                    {preset.icon} {preset.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            <button
-              type="button"
-              style={deleteBtnStyle}
-              title="Xóa mốc zoom này"
-              onClick={() => {
-                onDeleteZoomSegment(selectedItem.id);
-                onCommitSnapshot?.();
-              }}
-            >
-              🗑
-            </button>
-          </div>
-        );
-      })()}
     </div>
   );
 }
@@ -389,61 +298,4 @@ const itemTextStyle: React.CSSProperties = {
   fontWeight: 700,
   color: "#ffffff",
   textShadow: "0 1px 2px rgba(0, 0, 0, 0.6)",
-};
-
-const popoverStyle: React.CSSProperties = {
-  position: "absolute",
-  top: 28,
-  transform: "translateX(-50%)",
-  background: "rgba(24, 24, 27, 0.96)",
-  border: "1px solid rgba(168, 85, 247, 0.5)",
-  borderRadius: 6,
-  padding: "4px 8px",
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  zIndex: 25,
-  boxShadow: "0 4px 16px rgba(0, 0, 0, 0.6)",
-};
-
-const scaleBtnStyle: React.CSSProperties = {
-  background: "rgba(255, 255, 255, 0.08)",
-  border: "1px solid rgba(255, 255, 255, 0.15)",
-  borderRadius: 3,
-  color: "#e2e8f0",
-  fontSize: 11,
-  fontWeight: 600,
-  padding: "2px 6px",
-  cursor: "pointer",
-};
-
-const scaleBtnActiveStyle: React.CSSProperties = {
-  background: "#9333ea",
-  borderColor: "#c084fc",
-  color: "#ffffff",
-};
-
-const deleteBtnStyle: React.CSSProperties = {
-  background: "rgba(239, 68, 68, 0.15)",
-  border: "1px solid rgba(239, 68, 68, 0.4)",
-  borderRadius: 3,
-  color: "#fca5a5",
-  fontSize: 11,
-  padding: "2px 6px",
-  cursor: "pointer",
-  marginLeft: 4,
-};
-
-const popoverSeparatorStyle: React.CSSProperties = {
-  width: 1,
-  height: 16,
-  background: "rgba(255, 255, 255, 0.15)",
-  margin: "0 4px",
-};
-
-const zoneBtnActiveStyle: React.CSSProperties = {
-  background: "linear-gradient(135deg, #0284c7 0%, #0369a1 100%)",
-  borderColor: "#38bdf8",
-  color: "#ffffff",
-  fontWeight: 700,
 };

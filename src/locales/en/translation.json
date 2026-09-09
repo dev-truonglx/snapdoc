@@ -548,7 +548,8 @@
     "paused": "Paused",
     "pause": "Pause",
     "resume": "Resume",
-    "stop": "Stop recording"
+    "stop": "Stop recording",
+    "dragToMove": "Drag to move"
   },
   "historyView": {
     "noCaptures": "No captures in this range.",
