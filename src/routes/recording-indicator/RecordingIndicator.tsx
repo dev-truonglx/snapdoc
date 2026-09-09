@@ -23,9 +23,10 @@ interface RecordingTick {
  * nghe event `recording-tick` (do `record::spawn_tray_ticker` bắn mỗi giây)
  * thay vì tự poll `recording_status` riêng 1 vòng lặp khác.
  *
- * Layout: [⏸/▶ Pause] [divider] [● 00:00] [divider] [■ Stop]
+ * Layout: [⠿ Grip] [⏸/▶ Pause] [divider] [● 00:00] [divider] [■ Stop] [spacer]
  * Nút Pause và Stop được tách biệt nhau bằng divider + khoảng trống để tránh
- * bấm nhầm khi quay full màn hình trên Windows. */
+ * bấm nhầm khi quay full màn hình trên Windows. Có thể kéo thả (drag) để di
+ * chuyển popup ra vị trí khác tránh che khuất nội dung cần thao tác. */
 export default function RecordingIndicator() {
   const { t } = useTranslation();
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -83,16 +84,39 @@ export default function RecordingIndicator() {
   const stop = () => {
     if (stopping) return;
     setStopping(true);
-    ipc.stopRecording().catch((e) => {
-      alert(String(e));
-      setStopping(false);
-    });
+    ipc.stopRecording()
+      .catch((e) => {
+        alert(String(e));
+        setStopping(false);
+      });
   };
 
   const timeLabel = paused ? t("recordingIndicator.paused") : fmt(elapsedMs);
 
   return (
-    <div style={wrap}>
+    <div
+      style={wrap}
+      data-tauri-drag-region
+      onDragStart={(e) => e.preventDefault()}
+      className="sd-rec-wrap"
+    >
+      {/* Grip handle kéo thả bên trái — hit-area rộng rãi 22px */}
+      <div
+        data-tauri-drag-region
+        style={gripHandle}
+        title={t("recordingIndicator.dragToMove")}
+        className="sd-rec-grip"
+      >
+        <svg width="8" height="14" viewBox="0 0 8 14" fill="none" style={{ display: "block", pointerEvents: "none" }}>
+          <circle cx="2" cy="2" r="1.3" fill="rgba(255,255,255,0.4)" />
+          <circle cx="6" cy="2" r="1.3" fill="rgba(255,255,255,0.4)" />
+          <circle cx="2" cy="7" r="1.3" fill="rgba(255,255,255,0.4)" />
+          <circle cx="6" cy="7" r="1.3" fill="rgba(255,255,255,0.4)" />
+          <circle cx="2" cy="12" r="1.3" fill="rgba(255,255,255,0.4)" />
+          <circle cx="6" cy="12" r="1.3" fill="rgba(255,255,255,0.4)" />
+        </svg>
+      </div>
+
       {/* Nút Tạm dừng / Tiếp tục — tách biệt hoàn toàn với nút Stop */}
       <button
         style={{
@@ -109,17 +133,22 @@ export default function RecordingIndicator() {
       </button>
 
       {/* Divider ngăn cách Pause với phần giữa */}
-      <span style={divider} />
+      <span style={divider} data-tauri-drag-region />
 
-      {/* Chấm đỏ nhấp nháy + đồng hồ — phần giữa chỉ hiển thị, không bấm được */}
-      <span style={centerGroup}>
-        {!paused && <span style={dot} />}
-        {paused && <span style={pausedDot} />}
-        <span style={time}>{timeLabel}</span>
+      {/* Chấm đỏ nhấp nháy + đồng hồ — có thể kéo thả để di chuyển */}
+      <span
+        style={centerGroup}
+        data-tauri-drag-region
+        title={t("recordingIndicator.dragToMove")}
+        className="sd-rec-center"
+      >
+        {!paused && <span style={{ ...dot, pointerEvents: "none" }} />}
+        {paused && <span style={{ ...pausedDot, pointerEvents: "none" }} />}
+        <span style={{ ...time, pointerEvents: "none" }}>{timeLabel}</span>
       </span>
 
       {/* Divider ngăn cách phần giữa với nút Stop */}
-      <span style={divider} />
+      <span style={divider} data-tauri-drag-region />
 
       {/* Nút Dừng quay — tách biệt hoàn toàn với nút Pause */}
       <button
@@ -134,13 +163,39 @@ export default function RecordingIndicator() {
         {stopping ? "…" : "■"}
       </button>
 
+      {/* Spacer cân bằng bên phải đối ứng với gripHandle */}
+      <div style={gripSpacer} data-tauri-drag-region />
+
       <style>{`
         @keyframes sd-rec-dot-pulse {
           0%   { box-shadow: 0 0 0 0 rgba(239,68,68,0.55); }
           70%  { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
           100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
         }
-        button { cursor: pointer; border: none; }
+        .sd-rec-wrap,
+        .sd-rec-grip,
+        .sd-rec-center,
+        [data-tauri-drag-region] {
+          -webkit-app-region: drag;
+          app-region: drag;
+          user-select: none;
+          -webkit-user-select: none;
+        }
+        .sd-rec-wrap:active,
+        .sd-rec-grip:active,
+        .sd-rec-center:active {
+          cursor: grabbing;
+        }
+        .sd-rec-grip:hover svg circle {
+          fill: rgba(255,255,255,0.75);
+        }
+        button,
+        button * {
+          -webkit-app-region: no-drag;
+          app-region: no-drag;
+          cursor: pointer;
+          border: none;
+        }
         button:disabled { cursor: not-allowed; }
       `}</style>
     </div>
@@ -159,7 +214,28 @@ const wrap: React.CSSProperties = {
   border: "1px solid rgba(255,255,255,0.12)",
   borderRadius: 22,
   userSelect: "none",
+  WebkitUserSelect: "none",
   padding: "0 6px",
+  cursor: "grab",
+};
+
+/** Grip handle 6 chấm bên trái báo hiệu thanh có thể kéo thả — rộng 22px để dễ click trúng */
+const gripHandle: React.CSSProperties = {
+  width: 22,
+  height: 30,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "grab",
+  flexShrink: 0,
+};
+
+/** Spacer bên phải để đảm bảo centerGroup nằm chính giữa thanh */
+const gripSpacer: React.CSSProperties = {
+  width: 22,
+  height: 30,
+  flexShrink: 0,
+  pointerEvents: "none",
 };
 
 /** Nút Pause/Resume — hình tròn nhỏ, màu xanh khi đang paused */
@@ -189,6 +265,7 @@ const centerGroup: React.CSSProperties = {
   alignItems: "center",
   gap: 5,
   padding: "0 4px",
+  cursor: "grab",
 };
 
 const dot: React.CSSProperties = {
@@ -214,6 +291,8 @@ const time: React.CSSProperties = {
   fontWeight: 600,
   fontVariantNumeric: "tabular-nums",
   whiteSpace: "nowrap",
+  userSelect: "none",
+  WebkitUserSelect: "none",
 };
 
 /** Nút Stop — hình vuông đỏ, tách biệt hoàn toàn với nút Pause */

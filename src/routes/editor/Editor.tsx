@@ -18,6 +18,7 @@ import {
   initAutosave,
   parseDocPayload,
   suspendActive,
+  openLibraryImage,
 } from "../../features/annotation/sessions";
 import { uid, type ImageAnn } from "../../features/annotation/model";
 import {
@@ -42,11 +43,14 @@ interface VideoDoc {
   thumbUrl?: string;
 }
 
+import type { ZoomSegment } from "../../features/video-trim/types";
+
 const EMPTY_TRIM_STATE = {
   hasChanges: false,
   keepRanges: [] as [number, number][],
   removeAudio: false,
   overlays: [] as VideoOverlayItem[],
+  zoomSegments: [] as ZoomSegment[],
   crop: null as VideoCrop | null,
 };
 
@@ -57,7 +61,8 @@ const EMPTY_TRIM_STATE = {
  * bản gốc không hề đổi nên `hasChanges` vẫn `true` → user bị nhắc về đúng
  * việc vừa export xong. (Sau "Lưu đè" thì đã đúng sẵn vì `doSaveVideo` reset
  * `videoTrimState` và bump `videoVersion` để remount trimmer.) */
-const trimSig = (s: typeof EMPTY_TRIM_STATE) => JSON.stringify([s.keepRanges, s.removeAudio, s.overlays, s.crop]);
+const trimSig = (s: typeof EMPTY_TRIM_STATE) =>
+  JSON.stringify([s.keepRanges, s.removeAudio, s.overlays, s.zoomSegments, s.crop]);
 
 export default function Editor() {
   const { t } = useTranslation();
@@ -68,6 +73,7 @@ export default function Editor() {
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showFlattenConfirm, setShowFlattenConfirm] = useState(false);
+  const [showOverwriteConfirm, setShowOverwriteConfirm] = useState(false);
   const [stitchImage, setStitchImage] = useState<string | null>(null);
   // Video đang xem/cắt trong Editor (song song với `doc` — ảnh — trong store
   // `useEditor`; chỉ 1 trong 2 được render tại 1 thời điểm, xem JSX bên dưới).
@@ -81,6 +87,24 @@ export default function Editor() {
   // Signature của trạng thái cắt tại lần lưu gần nhất (`null` = chưa lưu lần
   // nào cho video đang mở). Xem `trimSig`.
   const [videoSavedSig, setVideoSavedSig] = useState<string | null>(null);
+  const videoDocRef = useRef(videoDoc);
+  videoDocRef.current = videoDoc;
+  const inFlightRef = useRef<Promise<void> | null>(null);
+  const pendingRerunRef = useRef(false);
+
+  // Tiến độ lưu/mã hóa video (0.0 -> 1.0) từ backend qua event "trim-progress"
+  const [saveProgress, setSaveProgress] = useState<number | null>(null);
+  const [saveProgressTitle, setSaveProgressTitle] = useState<string>("");
+
+  useEffect(() => {
+    const un = listen<number>("trim-progress", (event) => {
+      const frac = typeof event.payload === "number" ? event.payload : 0;
+      setSaveProgress(Math.min(1, Math.max(0, frac)));
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
 
   const insertImageAnnotation = (
     dataUrl: string,
@@ -344,47 +368,95 @@ export default function Editor() {
     // Video (mở từ Library, hoặc vừa quay xong — cả 2 đều đã ingest vào
     // History trước khi tới đây, xem `record::stop_recording_impl`) LUÔN
     // được kiểm tra TRƯỚC ảnh — chỉ 1 trong 2 loại pending chờ tại 1 thời điểm.
+    // Tuần tự hoá lấy pending bằng In-Flight Promise Lock để chống race condition
+    // giữa lần gọi mount useEffect và event refresh-capture (từ Rust open_editor sau 100ms),
+    // ngăn ngừa việc 2 lệnh IPC take_pending chạy song song và nuốt mất ảnh của nhau.
     const loadAnyPending = async () => {
-      let suspended = null;
-      try {
-        suspended = suspendActive();
-      } catch (e) {
-        console.error("[SnapDoc] Treo phiên sửa thất bại, vẫn nạp ảnh mới:", e);
+      if (inFlightRef.current) {
+        pendingRerunRef.current = true;
+        return inFlightRef.current;
       }
-      void suspended; // không dùng nữa, giữ lại để suspendActive vẫn chạy
-      const token = beginSwitch();
 
-      const pv = await ipc.takePendingVideo();
-      if (!isCurrentSwitch(token)) return;
-      if (pv) {
-        setVideoDoc({
-          historyId: pv.historyId,
-          filePath: pv.path,
-          src: convertFileSrc(pv.path),
-          durationMs: pv.durationMs,
-          thumbUrl: pv.thumbPath ? convertFileSrc(pv.thumbPath) : undefined,
+      const run = async () => {
+        let suspended = null;
+        try {
+          suspended = suspendActive();
+        } catch (e) {
+          console.error("[SnapDoc] Treo phiên sửa thất bại, vẫn nạp ảnh mới:", e);
+        }
+        void suspended; // không dùng nữa, giữ lại để suspendActive vẫn chạy
+        const token = beginSwitch();
+
+        const pv = await ipc.takePendingVideo();
+        if (pv) {
+          setVideoDoc({
+            historyId: pv.historyId,
+            filePath: pv.path,
+            src: convertFileSrc(pv.path),
+            durationMs: pv.durationMs,
+            thumbUrl: pv.thumbPath ? convertFileSrc(pv.thumbPath) : undefined,
+          });
+          setVideoTrimState(EMPTY_TRIM_STATE);
+          setVideoSavedSig(null);
+          noteActiveKey(null);
+          return;
+        }
+
+        const p = await ipc.takePending();
+        if (p) {
+          setVideoDoc(null);
+          loadPending(p);
+        } else {
+          // Fallback: Nếu không có pending capture nào VÀ Editor đang trống (chưa có ảnh/video nào mở):
+          // Tự động nạp item gần nhất từ History Library để tránh màn hình trống "No document is currently open"
+          const currentDoc = useEditor.getState().doc;
+          if (!currentDoc && !videoDocRef.current) {
+            try {
+              const hist = await ipc.listHistory({ limit: 1, offset: 0, trashOnly: false });
+              const latest = hist.items?.[0];
+              if (latest && isCurrentSwitch(token) && !useEditor.getState().doc && !videoDocRef.current) {
+                if (latest.mediaType === "video") {
+                  setVideoDoc({
+                    historyId: latest.id,
+                    filePath: latest.assetPath,
+                    src: convertFileSrc(latest.assetPath),
+                    durationMs: latest.durationMs ?? 0,
+                    thumbUrl: latest.thumbPath ? convertFileSrc(latest.thumbPath) : undefined,
+                  });
+                  setVideoTrimState(EMPTY_TRIM_STATE);
+                  setVideoSavedSig(null);
+                  noteActiveKey(null);
+                } else {
+                  await openLibraryImage(latest.id);
+                }
+              }
+            } catch (e) {
+              console.warn("[SnapDoc] Fallback nạp ảnh gần nhất từ History thất bại:", e);
+            }
+          }
+        }
+
+        // Focus vào window để đảm bảo WebView2 DOM sẵn sàng nhận phím tắt công cụ
+        // ngay lập tức trên Windows mà không cần người dùng click chuột trước.
+        requestAnimationFrame(() => {
+          window.focus();
         });
-        setVideoTrimState(EMPTY_TRIM_STATE);
-        setVideoSavedSig(null);
-        noteActiveKey(null);
-        return;
-      }
-      const p = await ipc.takePending();
-      if (!isCurrentSwitch(token)) return;
-      if (p) setVideoDoc(null);
-      loadPending(p);
+        setTimeout(() => {
+          window.focus();
+        }, 50);
+      };
 
-      // Focus vào window để đảm bảo WebView2 DOM sẵn sàng nhận phím tắt công cụ
-      // ngay lập tức trên Windows mà không cần người dùng click chuột trước.
-      requestAnimationFrame(() => {
-        window.focus();
+      inFlightRef.current = run().finally(() => {
+        inFlightRef.current = null;
+        if (pendingRerunRef.current) {
+          pendingRerunRef.current = false;
+          void loadAnyPending();
+        }
       });
-      setTimeout(() => {
-        window.focus();
-      }, 50);
+      return inFlightRef.current;
     };
 
-    loadAnyPending();
+    void loadAnyPending();
     requestAnimationFrame(() => {
       window.focus();
     });
@@ -392,11 +464,22 @@ export default function Editor() {
     // cửa sổ `editor` được ghi nháp, xem `initAutosave`.
     const stopAutosave = initAutosave();
     const un = listen("refresh-capture", () => {
-      loadAnyPending();
+      void loadAnyPending();
       setTimeout(() => {
         window.focus();
       }, 100);
     });
+
+    // Khi cửa sổ Editor nhận focus, nếu chưa có ảnh nào đang hiển thị thì tự động kiểm tra lại pending
+    // (phòng trường hợp event refresh-capture bị drop do WebView2 ngủ đông trên Windows).
+    const onFocus = () => {
+      if (!useEditor.getState().doc && !videoDocRef.current) {
+        void loadAnyPending();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    const unFocus = listen("tauri://focus", onFocus);
+
     // Windows "Open with" / double-click: Rust emit event này với data URL đầy đủ,
     // không cần round-trip IPC takePending (timing an toàn hơn).
     const unOpenFile = listen<string>("open-file", (e) => {
@@ -405,8 +488,10 @@ export default function Editor() {
       loadFromUrl(e.payload);
     });
     return () => {
+      window.removeEventListener("focus", onFocus);
       stopAutosave();
       un.then((f) => f());
+      unFocus.then((f) => f());
       unOpenFile.then((f) => f());
     };
   }, []);
@@ -424,12 +509,18 @@ export default function Editor() {
   };
 
   // "Lưu đè bản gốc" — ghi đè vĩnh viễn asset/thumbnail của ĐÚNG record này
-  // (không tạo record mới). Không có gì để lưu đè nếu chưa cắt gì. KHÔNG đóng
-  // Editor sau khi lưu (khác trước đây) — nạp lại đúng bản đã cắt (thời
-  // lượng/nội dung mới) để user xem kết quả và có thể tiếp tục chỉnh sửa
-  // ngay, không phải mở lại từ Library.
+  // (không tạo record mới). Không có gì để lưu đè nếu chưa có thay đổi nào.
+  // Nếu có thay đổi, hiển thị popup xác nhận để người dùng đồng ý trước khi ghi đè.
   const doSaveVideo = async () => {
     if (!videoDoc || !videoTrimState.hasChanges) return;
+    setShowOverwriteConfirm(true);
+  };
+
+  const confirmSaveVideo = async () => {
+    if (!videoDoc || !videoTrimState.hasChanges) return;
+    setShowOverwriteConfirm(false);
+    setSaveProgressTitle(t("editorMain.savingVideoOverwrite", "Đang lưu đè video..."));
+    setSaveProgress(0);
     setBusy(true);
     try {
       const updated = await ipc.overwriteHistoryVideo(
@@ -437,9 +528,13 @@ export default function Editor() {
         videoTrimState.keepRanges,
         videoTrimState.removeAudio,
         videoTrimState.overlays,
+        videoTrimState.zoomSegments,
         videoTrimState.crop,
       );
       dropVideoSession(`history:${videoDoc.historyId}`);
+      if (videoDoc.filePath) {
+        dropVideoSession(`file:${videoDoc.filePath}`);
+      }
       setVideoDoc({
         historyId: updated.id,
         filePath: updated.assetPath,
@@ -453,7 +548,11 @@ export default function Editor() {
     } catch (e) {
       flash(String(e));
     } finally {
-      setBusy(false);
+      setSaveProgress(1.0);
+      setTimeout(() => {
+        setBusy(false);
+        setSaveProgress(null);
+      }, 350);
     }
   };
 
@@ -477,6 +576,8 @@ export default function Editor() {
       }
       outputPath = path;
     }
+    setSaveProgressTitle(t("editorMain.savingVideoNew", "Đang xuất video mới..."));
+    setSaveProgress(0);
     setBusy(true);
     try {
       await ipc.trimHistoryVideo(
@@ -485,6 +586,7 @@ export default function Editor() {
         videoTrimState.removeAudio,
         outputPath,
         videoTrimState.overlays,
+        videoTrimState.zoomSegments,
         videoTrimState.crop,
       );
       if (outputPath) {
@@ -499,7 +601,11 @@ export default function Editor() {
     } catch (e) {
       flash(String(e));
     } finally {
-      setBusy(false);
+      setSaveProgress(1.0);
+      setTimeout(() => {
+        setBusy(false);
+        setSaveProgress(null);
+      }, 350);
     }
   };
 
@@ -962,6 +1068,7 @@ export default function Editor() {
             durationMs={videoDoc.durationMs}
             initialThumbUrl={videoDoc.thumbUrl}
             busy={busy}
+            saveProgress={saveProgress}
             onSave={doSaveVideo}
             onSaveAs={doSaveAsVideo}
             onStateChange={setVideoTrimState}
@@ -1008,6 +1115,18 @@ export default function Editor() {
           onCancel={() => setShowFlattenConfirm(false)}
         />
       )}
+      {showOverwriteConfirm && (
+        <OverwriteConfirmDialog
+          onConfirm={confirmSaveVideo}
+          onCancel={() => setShowOverwriteConfirm(false)}
+        />
+      )}
+      {saveProgress !== null && (
+        <VideoSaveProgressDialog
+          title={saveProgressTitle}
+          progress={saveProgress}
+        />
+      )}
       {stitchImage && (
         <StitchDialog
           initialImage={stitchImage}
@@ -1015,6 +1134,74 @@ export default function Editor() {
           onCancel={() => setStitchImage(null)}
         />
       )}
+    </div>
+  );
+}
+
+/* ── Overwrite Video Confirm Dialog ── */
+
+function OverwriteConfirmDialog({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
+  const { t } = useTranslation();
+  // Đóng khi nhấn Escape, xác nhận khi nhấn Enter
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        onConfirm();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onConfirm, onCancel]);
+
+  return (
+    <div style={overlayStyle} onClick={onCancel}>
+      <div style={dialogStyle} onClick={(e) => e.stopPropagation()}>
+        {/* Icon + tiêu đề */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <span style={{ fontSize: 22 }}>⚠️</span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: "#fca5a5" }}>
+            {t("editorMain.overwriteConfirmTitle")}
+          </span>
+        </div>
+
+        {/* Mô tả */}
+        <p style={descStyle}>
+          <Trans
+            i18nKey="editorMain.overwriteConfirmDesc"
+            components={{ 1: <strong style={{ color: "#f87171" }} /> }}
+          />
+        </p>
+
+        <ul style={listStyle}>
+          <li>
+            <Trans
+              i18nKey="editorMain.overwriteConfirmItem1"
+              components={{ 1: <strong /> }}
+            />
+          </li>
+          <li>
+            <Trans
+              i18nKey="editorMain.overwriteConfirmItem2"
+              components={{ 1: <strong style={{ color: "#fca5a5" }} /> }}
+            />
+          </li>
+        </ul>
+
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 20 }}>
+          <button style={cancelBtnStyle} onClick={onCancel}>
+            {t("editorMain.overwriteCancel")}
+          </button>
+          <button style={confirmBtnStyle} onClick={onConfirm} autoFocus>
+            {t("editorMain.overwriteConfirm")}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1134,3 +1321,105 @@ const toastStyle: React.CSSProperties = {
   borderRadius: 8,
   fontSize: 13,
 };
+
+/* ── Video Save Progress Dialog ── */
+
+function VideoSaveProgressDialog({
+  title,
+  progress,
+}: {
+  title: string;
+  progress: number;
+}) {
+  const { t } = useTranslation();
+  const percent = Math.min(100, Math.max(0, Math.round(progress * 100)));
+  const isFinalizing = percent >= 100;
+
+  return (
+    <div style={overlayStyle} onClick={(e) => e.stopPropagation()}>
+      <div
+        style={{
+          ...dialogStyle,
+          width: 420,
+          background: "linear-gradient(145deg, rgba(30, 32, 40, 0.96), rgba(18, 20, 26, 0.98))",
+          border: "1px solid rgba(255, 255, 255, 0.12)",
+          boxShadow: "0 25px 60px -15px rgba(0, 0, 0, 0.7), 0 0 30px rgba(59, 130, 246, 0.15)",
+          backdropFilter: "blur(12px)",
+          padding: "24px 26px",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header: Icon + Title */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+          <div
+            style={{
+              width: 38,
+              height: 38,
+              borderRadius: 10,
+              background: isFinalizing ? "rgba(16, 185, 129, 0.15)" : "rgba(59, 130, 246, 0.15)",
+              border: isFinalizing ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid rgba(59, 130, 246, 0.3)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 18,
+              flexShrink: 0,
+            }}
+          >
+            {isFinalizing ? "✨" : "🎬"}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: "#f1f5f9" }}>
+              {title}
+            </div>
+            <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>
+              {isFinalizing
+                ? t("editorMain.savingVideoFinalizing", "Đang hoàn tất lưu file...")
+                : t("editorMain.savingVideoDesc", "Đang xử lý khung hình và mã hóa video...")}
+            </div>
+          </div>
+          <div
+            style={{
+              fontSize: 16,
+              fontWeight: 700,
+              fontVariantNumeric: "tabular-nums",
+              color: isFinalizing ? "#34d399" : "#60a5fa",
+              marginLeft: 8,
+            }}
+          >
+            {percent}%
+          </div>
+        </div>
+
+        {/* Progress Bar Container */}
+        <div
+          style={{
+            width: "100%",
+            height: 8,
+            background: "rgba(255, 255, 255, 0.08)",
+            borderRadius: 4,
+            overflow: "hidden",
+            position: "relative",
+            boxShadow: "inset 0 1px 2px rgba(0,0,0,0.3)",
+            marginTop: 16,
+            marginBottom: 4,
+          }}
+        >
+          <div
+            style={{
+              height: "100%",
+              width: `${percent}%`,
+              background: isFinalizing
+                ? "linear-gradient(90deg, #10b981, #34d399)"
+                : "linear-gradient(90deg, #3b82f6, #06b6d4, #60a5fa)",
+              borderRadius: 4,
+              transition: "width 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+              boxShadow: isFinalizing
+                ? "0 0 10px rgba(16, 185, 129, 0.5)"
+                : "0 0 10px rgba(59, 130, 246, 0.5)",
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}

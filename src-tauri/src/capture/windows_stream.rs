@@ -263,6 +263,22 @@ fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
         return Ok(wgc_monitors.remove(0));
     }
 
+    // 1. Ưu tiên đối chiếu trực tiếp qua handle HMONITOR của WgcMonitor
+    if let Some(pos) = wgc_monitors
+        .iter()
+        .position(|m| (m.as_raw_hmonitor() as usize as u32) == display_id)
+    {
+        return Ok(wgc_monitors.remove(pos));
+    }
+
+    // 2. Thử dựng WgcMonitor trực tiếp từ HMONITOR nếu handle hợp lệ
+    let raw_hmon = display_id as i32 as isize as *mut std::ffi::c_void;
+    let direct = WgcMonitor::from_raw_hmonitor(raw_hmon);
+    if direct.device_name().is_ok() {
+        return Ok(direct);
+    }
+
+    // 3. Fallback: đối chiếu qua xcap::Monitor (theo index hoặc kích thước)
     let xcap_monitors = xcap::Monitor::all().map_err(|e| format!("Không liệt kê được màn hình: {e}"))?;
     let target = xcap_monitors
         .iter()

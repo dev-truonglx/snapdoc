@@ -590,6 +590,7 @@ fn trim_history_video_sync(
     remove_audio: bool,
     output_path: Option<&str>,
     overlays: Option<&[crate::record::encoder::VideoOverlay]>,
+    zoom_segments: Option<&[crate::record::encoder::ZoomSegment]>,
     crop: Option<crate::record::encoder::VideoCrop>,
 ) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
@@ -615,13 +616,14 @@ fn trim_history_video_sync(
     };
     let orig_dur = rec.duration_ms.unwrap_or(0);
     let has_overlays = overlays.map(|o| !o.is_empty()).unwrap_or(false);
+    let has_zoom = zoom_segments.map(|z| !z.is_empty()).unwrap_or(false);
     let has_crop = crop.is_some();
-    let is_untrimmed = !has_crop && keep_ranges_ms.len() == 1 && {
+    let is_untrimmed = !has_crop && !has_zoom && !has_overlays && keep_ranges_ms.len() == 1 && {
         let (s, e) = keep_ranges_ms[0];
         s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
     };
 
-    if is_untrimmed && !has_overlays {
+    if is_untrimmed {
         if !remove_audio {
             // Fast-path 1: Copy file trực tiếp (Save As không chỉnh sửa), 0.01s!
             std::fs::copy(asset_path, &new_path)
@@ -638,10 +640,28 @@ fn trim_history_video_sync(
         // Báo tiến độ % cho Editor (chế độ video) qua event toàn app — xem
         // doc-comment `encoder::trim` + listener ở `Editor.tsx`.
         let progress_app = app.clone();
-        crate::record::encoder::trim(asset_path, keep_ranges_ms, &new_path, remove_audio, overlays, crop.as_ref(), move |frac| {
-            use tauri::Emitter;
-            let _ = progress_app.emit("trim-progress", frac);
-        })?;
+        let video_size = Some((rec.width as u32, rec.height as u32));
+        crate::record::encoder::trim(
+            asset_path,
+            keep_ranges_ms,
+            &new_path,
+            remove_audio,
+            overlays,
+            crop.as_ref(),
+            zoom_segments,
+            video_size,
+            move |frac| {
+                use tauri::Emitter;
+                let _ = progress_app.emit("trim-progress", frac);
+            },
+        )?;
+    }
+
+    // Không sao chép telemetry chuột sang video mới nếu đã burn zoom hoặc đã tắt focus
+    let orig_telem = crate::record::mouse_click::telemetry_path_for_video(asset_path);
+    let new_telem = crate::record::mouse_click::telemetry_path_for_video(&new_path);
+    if !has_zoom && orig_telem.exists() && !new_telem.exists() && zoom_segments.is_none() {
+        let _ = std::fs::copy(&orig_telem, &new_telem);
     }
 
     let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
@@ -706,6 +726,7 @@ fn overwrite_history_video_sync(
     keep_ranges_ms: &[(i64, i64)],
     remove_audio: bool,
     overlays: Option<&[crate::record::encoder::VideoOverlay]>,
+    zoom_segments: Option<&[crate::record::encoder::ZoomSegment]>,
     crop: Option<crate::record::encoder::VideoCrop>,
 ) -> Result<HistoryRecord, String> {
     let rec = get_history_item_sync(app, id)?;
@@ -716,15 +737,27 @@ fn overwrite_history_video_sync(
     let tmp_output = asset_path.with_extension("trimtmp.mp4");
     let orig_dur = rec.duration_ms.unwrap_or(0);
     let has_overlays = overlays.map(|o| !o.is_empty()).unwrap_or(false);
+    let has_zoom = zoom_segments.map(|z| !z.is_empty()).unwrap_or(false);
     let has_crop = crop.is_some();
-    let is_untrimmed = !has_crop && keep_ranges_ms.len() == 1 && {
+    let is_untrimmed = !has_crop && !has_zoom && !has_overlays && keep_ranges_ms.len() == 1 && {
         let (s, e) = keep_ranges_ms[0];
         s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
     };
 
-    if is_untrimmed && !has_overlays {
+    // Đường dẫn file telemetry chuột (.mouse.json) nếu có
+    let telem_path = crate::record::mouse_click::telemetry_path_for_video(asset_path);
+    let telem_existed = telem_path.exists();
+
+    if is_untrimmed {
+        // Nếu file telemetry chuột (.mouse.json) tồn tại nhưng bản lưu đè không dùng zoom
+        // (người dùng đã tắt focus chuột), xóa file telemetry để loại bỏ focus triệt để khỏi video.
+        if telem_existed {
+            let _ = std::fs::remove_file(&telem_path);
+        }
+
         if !remove_audio {
-            // Không có thay đổi gì so với gốc, trả về luôn không cần ghi đĩa lại
+            // Không có thay đổi gì về audio hoặc nội dung video (chỉ tắt focus telemetry hoặc không đổi gì),
+            // trả về luôn không cần ghi đĩa lại file MP4
             use tauri::Emitter;
             let _ = app.emit("trim-progress", 1.0);
             return Ok(rec);
@@ -737,11 +770,28 @@ fn overwrite_history_video_sync(
         }
     } else {
         let progress_app = app.clone();
-        crate::record::encoder::trim(asset_path, keep_ranges_ms, &tmp_output, remove_audio, overlays, crop.as_ref(), move |frac| {
-            use tauri::Emitter;
-            let _ = progress_app.emit("trim-progress", frac);
-        })?;
+        let video_size = Some((rec.width as u32, rec.height as u32));
+        crate::record::encoder::trim(
+            asset_path,
+            keep_ranges_ms,
+            &tmp_output,
+            remove_audio,
+            overlays,
+            crop.as_ref(),
+            zoom_segments,
+            video_size,
+            move |frac| {
+                use tauri::Emitter;
+                let _ = progress_app.emit("trim-progress", frac);
+            },
+        )?;
         std::fs::rename(&tmp_output, asset_path).map_err(|e| format!("Không ghi đè được file đã cắt: {e}"))?;
+
+        // Nếu video đã được encode (nếu có zoom thì zoom đã được burn trực tiếp vào pixel từng frame),
+        // xóa file telemetry gốc để tránh bị áp dụng zoom 2 lần khi mở lại video đã lưu.
+        if telem_existed {
+            let _ = std::fs::remove_file(&telem_path);
+        }
     }
 
     let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
@@ -976,6 +1026,7 @@ pub async fn trim_history_video(
     remove_audio: bool,
     output_path: Option<String>,
     overlays: Option<Vec<crate::record::encoder::VideoOverlay>>,
+    zoom_segments: Option<Vec<crate::record::encoder::ZoomSegment>>,
     crop: Option<crate::record::encoder::VideoCrop>,
 ) -> Result<HistoryRecord, String> {
     let int_ranges: Vec<(i64, i64)> = ranges
@@ -991,6 +1042,7 @@ pub async fn trim_history_video(
             remove_audio,
             output_path.as_deref(),
             overlays.as_deref(),
+            zoom_segments.as_deref(),
             crop,
         )
     })
@@ -1009,6 +1061,7 @@ pub async fn overwrite_history_video(
     ranges: Vec<(f64, f64)>,
     remove_audio: bool,
     overlays: Option<Vec<crate::record::encoder::VideoOverlay>>,
+    zoom_segments: Option<Vec<crate::record::encoder::ZoomSegment>>,
     crop: Option<crate::record::encoder::VideoCrop>,
 ) -> Result<HistoryRecord, String> {
     let int_ranges: Vec<(i64, i64)> = ranges
@@ -1016,7 +1069,15 @@ pub async fn overwrite_history_video(
         .map(|(s, e)| (s.round() as i64, e.round() as i64))
         .collect();
     tauri::async_runtime::spawn_blocking(move || {
-        overwrite_history_video_sync(&app, &id, &int_ranges, remove_audio, overlays.as_deref(), crop)
+        overwrite_history_video_sync(
+            &app,
+            &id,
+            &int_ranges,
+            remove_audio,
+            overlays.as_deref(),
+            zoom_segments.as_deref(),
+            crop,
+        )
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))?

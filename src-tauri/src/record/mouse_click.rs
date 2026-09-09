@@ -1,6 +1,8 @@
-//! Module lắng nghe sự kiện click chuột toàn cục (Global Mouse Click Listener)
-//! trong lúc quay màn hình để hiển thị hiệu ứng vòng tròn / sóng lan toả (ripple)
-//! tại vị trí con trỏ chuột lên overlay và video.
+//! Module lắng nghe sự kiện click và di chuyển chuột toàn cục (Global Mouse Tracker)
+//! trong lúc quay màn hình:
+//! 1. Hiển thị hiệu ứng sóng lan toả (ripple) trên overlay thời gian thực (`record-mouse-click`).
+//! 2. Thu thập luồng dữ liệu sự kiện chuột (Mouse Telemetry: tọa độ, click, drag)
+//!    để làm tính năng Auto Focus & Zoom thông minh trong khâu hậu kỳ (VideoTrimmer).
 //!
 //! macOS: `CGEventTapCreate` (ListenOnly) trên một CFRunLoop thread độc lập.
 //! Windows: `SetWindowsHookExW` (WH_MOUSE_LL) trên một Win32 message loop thread.
@@ -8,12 +10,43 @@
 
 #![allow(dead_code)]
 
-#[derive(Clone, Debug, serde::Serialize)]
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MouseClickPayload {
     pub x: f64,
     pub y: f64,
     pub button: String,
     pub count: u32,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MouseTelemetryItem {
+    pub t: u64, // ms relative to recording start
+    pub x: f64, // pixel position relative to recorded area
+    pub y: f64,
+    #[serde(rename = "type")]
+    pub event_type: String, // "click" | "move" | "drag"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub button: Option<String>, // "left" | "right" | "middle"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MouseTelemetryFile {
+    pub version: u32,
+    pub video_width: u32,
+    pub video_height: u32,
+    pub duration_ms: u64,
+    pub events: Vec<MouseTelemetryItem>,
+}
+
+pub fn telemetry_path_for_video(video_path: &Path) -> PathBuf {
+    video_path.with_extension("mouse.json")
 }
 
 #[cfg(target_os = "macos")]
@@ -29,8 +62,9 @@ pub use fallback::MouseClickListener;
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::MouseClickPayload;
+    use super::{MouseClickPayload, MouseTelemetryFile, MouseTelemetryItem};
     use std::ffi::c_void;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
@@ -47,12 +81,19 @@ mod macos {
         app: AppHandle,
         mach_port: *mut c_void,
         target_rect: (f64, f64, f64, f64), // (x, y, w, h)
+        started_at: std::time::Instant,
+        events: Arc<Mutex<Vec<MouseTelemetryItem>>>,
+        last_x: f64,
+        last_y: f64,
+        last_time_ms: u64,
     }
 
     pub struct MouseClickListener {
         run_loop: Arc<Mutex<Option<usize>>>,
         stopped: Arc<AtomicBool>,
         thread_handle: Option<JoinHandle<()>>,
+        events: Arc<Mutex<Vec<MouseTelemetryItem>>>,
+        pub target_rect: (f64, f64, f64, f64),
     }
 
     #[link(name = "CoreGraphics", kind = "framework")]
@@ -82,12 +123,21 @@ mod macos {
         fn CFRunLoopRemoveSource(rl: *mut c_void, source: *mut c_void, mode: *const c_void);
         fn CFRunLoopRun();
         fn CFRunLoopStop(rl: *mut c_void);
+        fn CFRunLoopWakeUp(rl: *mut c_void);
         fn CFRelease(cf: *const c_void);
     }
 
     const LEFT_MOUSE_DOWN: u32 = 1;
+    const LEFT_MOUSE_UP: u32 = 2;
     const RIGHT_MOUSE_DOWN: u32 = 3;
+    const RIGHT_MOUSE_UP: u32 = 4;
+    const MOUSE_MOVED: u32 = 5;
+    const LEFT_MOUSE_DRAGGED: u32 = 6;
+    const RIGHT_MOUSE_DRAGGED: u32 = 7;
     const OTHER_MOUSE_DOWN: u32 = 25;
+    const OTHER_MOUSE_UP: u32 = 26;
+    const OTHER_MOUSE_DRAGGED: u32 = 27;
+
     const TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFFFFFE;
     // kCGMouseEventClickState trong CoreGraphics là 1
     const MOUSE_CLICK_STATE_FIELD: u32 = 1;
@@ -102,7 +152,7 @@ mod macos {
             return event;
         }
 
-        let ctx = unsafe { &*(refcon as *const MouseTapContext) };
+        let ctx = unsafe { &mut *(refcon as *mut MouseTapContext) };
 
         if event_type == TAP_DISABLED_BY_TIMEOUT {
             if !ctx.mach_port.is_null() {
@@ -111,15 +161,17 @@ mod macos {
             return event;
         }
 
-        if event_type == LEFT_MOUSE_DOWN || event_type == RIGHT_MOUSE_DOWN || event_type == OTHER_MOUSE_DOWN {
-            let pt = unsafe { CGEventGetLocation(event) };
-            let (tx, ty, tw, th) = ctx.target_rect;
+        let pt = unsafe { CGEventGetLocation(event) };
+        let (tx, ty, tw, th) = ctx.target_rect;
 
-            let local_x = pt.x - tx;
-            let local_y = pt.y - ty;
+        let local_x = pt.x - tx;
+        let local_y = pt.y - ty;
 
-            // Kiểm tra click có nằm trong phạm vi vùng quay không
-            if local_x >= 0.0 && local_x <= tw && local_y >= 0.0 && local_y <= th {
+        // Kiểm tra toạ độ có nằm trong phạm vi vùng quay không
+        if local_x >= 0.0 && local_x <= tw && local_y >= 0.0 && local_y <= th {
+            let now_ms = ctx.started_at.elapsed().as_millis() as u64;
+
+            if event_type == LEFT_MOUSE_DOWN || event_type == RIGHT_MOUSE_DOWN || event_type == OTHER_MOUSE_DOWN {
                 let button = match event_type {
                     LEFT_MOUSE_DOWN => "left",
                     RIGHT_MOUSE_DOWN => "right",
@@ -135,8 +187,56 @@ mod macos {
                     button: button.to_string(),
                     count,
                 };
-
                 let _ = ctx.app.emit("record-mouse-click", payload);
+
+                if let Ok(mut g) = ctx.events.lock() {
+                    g.push(MouseTelemetryItem {
+                        t: now_ms,
+                        x: local_x,
+                        y: local_y,
+                        event_type: "click".to_string(),
+                        button: Some(button.to_string()),
+                        count: Some(count),
+                    });
+                }
+
+                ctx.last_x = local_x;
+                ctx.last_y = local_y;
+                ctx.last_time_ms = now_ms;
+            } else if event_type == MOUSE_MOVED || event_type == LEFT_MOUSE_DRAGGED || event_type == RIGHT_MOUSE_DRAGGED || event_type == OTHER_MOUSE_DRAGGED {
+                let is_drag = event_type != MOUSE_MOVED;
+                let dt = now_ms.saturating_sub(ctx.last_time_ms);
+                // Giới hạn tần số lấy mẫu tối đa ~60Hz (>= 16ms) và deadband 2px để tránh quá tải
+                if dt >= 16 {
+                    let dx = local_x - ctx.last_x;
+                    let dy = local_y - ctx.last_y;
+                    if dx * dx + dy * dy >= 4.0 || is_drag {
+                        ctx.last_x = local_x;
+                        ctx.last_y = local_y;
+                        ctx.last_time_ms = now_ms;
+
+                        let button = if is_drag {
+                            Some(if event_type == LEFT_MOUSE_DRAGGED {
+                                "left".to_string()
+                            } else {
+                                "right".to_string()
+                            })
+                        } else {
+                            None
+                        };
+
+                        if let Ok(mut g) = ctx.events.lock() {
+                            g.push(MouseTelemetryItem {
+                                t: now_ms,
+                                x: local_x,
+                                y: local_y,
+                                event_type: if is_drag { "drag".to_string() } else { "move".to_string() },
+                                button,
+                                count: None,
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -154,22 +254,34 @@ mod macos {
             let stopped = Arc::new(AtomicBool::new(false));
 
             let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+            let events = Arc::new(Mutex::new(Vec::new()));
 
             let rl_clone = run_loop.clone();
             let stopped_clone = stopped.clone();
+            let events_clone = events.clone();
 
             let thread_handle = thread::Builder::new()
                 .name("snapdoc-mouse-click-listener".to_string())
                 .spawn(move || unsafe {
-                    let mut context = Box::new(MouseTapContext {
+                    let context = Box::new(MouseTapContext {
                         app,
                         mach_port: std::ptr::null_mut(),
                         target_rect,
+                        started_at: std::time::Instant::now(),
+                        events: events_clone,
+                        last_x: -999.0,
+                        last_y: -999.0,
+                        last_time_ms: 0,
                     });
-                    let context_ptr: *mut MouseTapContext = &mut *context;
+                    let context_ptr = Box::into_raw(context);
 
-                    let events_mask: u64 =
-                        (1u64 << LEFT_MOUSE_DOWN) | (1u64 << RIGHT_MOUSE_DOWN) | (1u64 << OTHER_MOUSE_DOWN);
+                    let events_mask: u64 = (1u64 << LEFT_MOUSE_DOWN)
+                        | (1u64 << RIGHT_MOUSE_DOWN)
+                        | (1u64 << OTHER_MOUSE_DOWN)
+                        | (1u64 << MOUSE_MOVED)
+                        | (1u64 << LEFT_MOUSE_DRAGGED)
+                        | (1u64 << RIGHT_MOUSE_DRAGGED)
+                        | (1u64 << OTHER_MOUSE_DRAGGED);
 
                     let mach_port = CGEventTapCreate(
                         1, // kCGSessionEventTap
@@ -182,6 +294,7 @@ mod macos {
 
                     if mach_port.is_null() {
                         eprintln!("[SnapDoc][mouse_click] CGEventTapCreate trả về NULL — cần cấp quyền Accessibility!");
+                        let _ = Box::from_raw(context_ptr);
                         let _ = init_tx.send(Err(
                             "Không tạo được EventTap chuột — cần cấp quyền Accessibility (Trợ năng) cho SnapDoc trong Cài đặt hệ thống".to_string(),
                         ));
@@ -193,6 +306,7 @@ mod macos {
                     let source = CFMachPortCreateRunLoopSource(std::ptr::null(), mach_port, 0);
                     if source.is_null() {
                         CFRelease(mach_port);
+                        let _ = Box::from_raw(context_ptr);
                         let _ = init_tx.send(Err("Không tạo được RunLoopSource cho EventTap chuột".to_string()));
                         return;
                     }
@@ -202,11 +316,8 @@ mod macos {
                         *g = Some(cur_rl as usize);
                     }
 
-                    CFRunLoopAddSource(
-                        cur_rl,
-                        source,
-                        core_foundation_sys::runloop::kCFRunLoopCommonModes as *const c_void,
-                    );
+                    let mode = core_foundation_sys::runloop::kCFRunLoopDefaultMode as *const c_void;
+                    CFRunLoopAddSource(cur_rl, source, mode);
                     CGEventTapEnable(mach_port, true);
 
                     eprintln!("[SnapDoc][mouse_click] EventTap chuột đã bật thành công trên CFRunLoop!");
@@ -214,16 +325,13 @@ mod macos {
 
                     while !stopped_clone.load(Ordering::Relaxed) {
                         CFRunLoopRun();
-                        break;
                     }
 
-                    CFRunLoopRemoveSource(
-                        cur_rl,
-                        source,
-                        core_foundation_sys::runloop::kCFRunLoopCommonModes as *const c_void,
-                    );
+                    CGEventTapEnable(mach_port, false);
+                    CFRunLoopRemoveSource(cur_rl, source, mode);
                     CFRelease(source);
                     CFRelease(mach_port);
+                    let _ = Box::from_raw(context_ptr);
                     eprintln!("[SnapDoc][mouse_click] EventTap chuột đã giải phóng sạch sẽ.");
                 })
                 .map_err(|e| format!("Không khởi động được thread nghe click chuột: {e}"))?;
@@ -233,6 +341,8 @@ mod macos {
                     run_loop,
                     stopped,
                     thread_handle: Some(thread_handle),
+                    events,
+                    target_rect,
                 }),
                 Ok(Err(err)) => {
                     let _ = thread_handle.join();
@@ -246,17 +356,67 @@ mod macos {
         }
 
         pub fn stop(&mut self) {
-            self.stopped.store(true, Ordering::SeqCst);
+            if self.stopped.swap(true, Ordering::SeqCst) {
+                return;
+            }
             if let Ok(mut g) = self.run_loop.lock() {
                 if let Some(rl_usize) = g.take() {
                     unsafe {
                         CFRunLoopStop(rl_usize as *mut c_void);
+                        CFRunLoopWakeUp(rl_usize as *mut c_void);
                     }
                 }
             }
             if let Some(handle) = self.thread_handle.take() {
                 let _ = handle.join();
             }
+        }
+
+        pub fn save_telemetry(
+            &self,
+            video_path: &Path,
+            width: u32,
+            height: u32,
+            duration_ms: u64,
+        ) -> Result<PathBuf, String> {
+            let out_path = super::telemetry_path_for_video(video_path);
+            let events = self
+                .events
+                .lock()
+                .map_err(|_| "Telemetry lock poisoned".to_string())?
+                .clone();
+
+            // Chuẩn hoá toạ độ từ logical points (Retina display) sang kích thước pixel thực của video
+            let (_tx, _ty, tw, th) = self.target_rect;
+            let scale_x = if tw > 1.0 { (width as f64) / tw } else { 1.0 };
+            let scale_y = if th > 1.0 { (height as f64) / th } else { 1.0 };
+
+            let scaled_events: Vec<MouseTelemetryItem> = events
+                .into_iter()
+                .map(|mut ev| {
+                    ev.x = (ev.x * scale_x).round();
+                    ev.y = (ev.y * scale_y).round();
+                    ev
+                })
+                .collect();
+
+            let file = MouseTelemetryFile {
+                version: 1,
+                video_width: width,
+                video_height: height,
+                duration_ms,
+                events: scaled_events,
+            };
+            let json = serde_json::to_string(&file)
+                .map_err(|e| format!("Lỗi serialize mouse telemetry: {e}"))?;
+            std::fs::write(&out_path, json)
+                .map_err(|e| format!("Lỗi ghi file telemetry: {e}"))?;
+            eprintln!(
+                "[SnapDoc][mouse_tracker] Đã lưu telemetry ({} sự kiện) tại: {}",
+                file.events.len(),
+                out_path.display()
+            );
+            Ok(out_path)
         }
     }
 
@@ -271,7 +431,8 @@ mod macos {
 
 #[cfg(target_os = "windows")]
 mod windows {
-    use super::MouseClickPayload;
+    use super::{MouseClickPayload, MouseTelemetryFile, MouseTelemetryItem};
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
@@ -280,19 +441,26 @@ mod windows {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, PostThreadMessageW, SetWindowsHookExW,
         TranslateMessage, UnhookWindowsHookEx, HHOOK, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL,
-        WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_QUIT, WM_RBUTTONDOWN,
+        WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN,
     };
 
     static mut HOOK_HANDLE: HHOOK = std::ptr::null_mut();
     static APP_HANDLE_FOR_HOOK: Mutex<Option<AppHandle>> = Mutex::new(None);
+    static TELEMETRY_EVENTS: Mutex<Option<Arc<Mutex<Vec<MouseTelemetryItem>>>>> = Mutex::new(None);
     static mut TARGET_BOUNDS: (f64, f64, f64, f64, f64) = (0.0, 0.0, 0.0, 0.0, 1.0); // (x, y, w, h, scale)
     static mut LAST_CLICK_TIME: u32 = 0;
     static mut LAST_CLICK_POS: (i32, i32) = (0, 0);
+
+    static mut RECORD_START_INSTANT: Option<std::time::Instant> = None;
+    static mut LAST_MOVE_MS: u64 = 0;
+    static mut LAST_MOVE_POS: (f64, f64) = (-999.0, -999.0);
 
     pub struct MouseClickListener {
         thread_id: u32,
         stopped: Arc<AtomicBool>,
         thread_handle: Option<JoinHandle<()>>,
+        events: Arc<Mutex<Vec<MouseTelemetryItem>>>,
+        pub target_rect: (f64, f64, f64, f64),
     }
 
     unsafe extern "system" fn low_level_mouse_proc(
@@ -302,17 +470,21 @@ mod windows {
     ) -> LRESULT {
         if n_code >= 0 {
             let msg = w_param as u32;
-            if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN {
-                let mouse_hook = *(l_param as *const MSLLHOOKSTRUCT);
-                let (tx, ty, tw, th, scale) = TARGET_BOUNDS;
+            let mouse_hook = *(l_param as *const MSLLHOOKSTRUCT);
+            let (tx, ty, tw, th, scale) = TARGET_BOUNDS;
 
-                let global_x = mouse_hook.pt.x as f64 / scale;
-                let global_y = mouse_hook.pt.y as f64 / scale;
+            let local_phys_x = mouse_hook.pt.x as f64 - tx;
+            let local_phys_y = mouse_hook.pt.y as f64 - ty;
 
-                let local_x = global_x - tx;
-                let local_y = global_y - ty;
+            if local_phys_x >= 0.0 && local_phys_x <= tw && local_phys_y >= 0.0 && local_phys_y <= th {
+                let now_ms = RECORD_START_INSTANT
+                    .map(|i| i.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
 
-                if local_x >= 0.0 && local_x <= tw && local_y >= 0.0 && local_y <= th {
+                let local_css_x = local_phys_x / scale;
+                let local_css_y = local_phys_y / scale;
+
+                if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN {
                     let button = match msg {
                         WM_LBUTTONDOWN => "left",
                         WM_RBUTTONDOWN => "right",
@@ -333,12 +505,55 @@ mod windows {
                     if let Ok(guard) = APP_HANDLE_FOR_HOOK.lock() {
                         if let Some(app) = guard.as_ref() {
                             let payload = MouseClickPayload {
-                                x: local_x,
-                                y: local_y,
+                                x: local_css_x,
+                                y: local_css_y,
                                 button: button.to_string(),
                                 count,
                             };
                             let _ = app.emit("record-mouse-click", payload);
+                        }
+                    }
+
+                    if let Ok(g) = TELEMETRY_EVENTS.lock() {
+                        if let Some(ev_arc) = g.as_ref() {
+                            if let Ok(mut ev) = ev_arc.lock() {
+                                ev.push(MouseTelemetryItem {
+                                    t: now_ms,
+                                    x: local_phys_x,
+                                    y: local_phys_y,
+                                    event_type: "click".to_string(),
+                                    button: Some(button.to_string()),
+                                    count: Some(count),
+                                });
+                            }
+                        }
+                    }
+
+                    LAST_MOVE_POS = (local_phys_x, local_phys_y);
+                    LAST_MOVE_MS = now_ms;
+                } else if msg == WM_MOUSEMOVE {
+                    let dt = now_ms.saturating_sub(LAST_MOVE_MS);
+                    if dt >= 16 {
+                        let dx = local_phys_x - LAST_MOVE_POS.0;
+                        let dy = local_phys_y - LAST_MOVE_POS.1;
+                        if dx * dx + dy * dy >= 4.0 {
+                            LAST_MOVE_POS = (local_phys_x, local_phys_y);
+                            LAST_MOVE_MS = now_ms;
+
+                            if let Ok(g) = TELEMETRY_EVENTS.lock() {
+                                if let Some(ev_arc) = g.as_ref() {
+                                    if let Ok(mut ev) = ev_arc.lock() {
+                                        ev.push(MouseTelemetryItem {
+                                            t: now_ms,
+                                            x: local_phys_x,
+                                            y: local_phys_y,
+                                            event_type: "move".to_string(),
+                                            button: None,
+                                            count: None,
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -355,7 +570,12 @@ mod windows {
             scale: f64,
         ) -> Result<Self, String> {
             let (tx, rx) = std::sync::mpsc::channel::<Result<u32, String>>();
+            let events = Arc::new(Mutex::new(Vec::new()));
             let stopped = Arc::new(AtomicBool::new(false));
+
+            if let Ok(mut g) = TELEMETRY_EVENTS.lock() {
+                *g = Some(events.clone());
+            }
 
             let thread_handle = thread::Builder::new()
                 .name("snapdoc-win-mouse-click".to_string())
@@ -364,6 +584,9 @@ mod windows {
                         *g = Some(app);
                     }
                     TARGET_BOUNDS = (target_rect.0, target_rect.1, target_rect.2, target_rect.3, scale);
+                    RECORD_START_INSTANT = Some(std::time::Instant::now());
+                    LAST_MOVE_MS = 0;
+                    LAST_MOVE_POS = (-999.0, -999.0);
 
                     let hook = SetWindowsHookExW(
                         WH_MOUSE_LL,
@@ -373,7 +596,7 @@ mod windows {
                     );
 
                     if hook.is_null() {
-                        let _ = tx.send(Err("Không thiết lập được Windows Mouse Hook".to_string()));
+                        let _ = tx.send(Err("SetWindowsHookExW thất bại".to_string()));
                         return;
                     }
 
@@ -387,22 +610,26 @@ mod windows {
                         DispatchMessageW(&msg);
                     }
 
-                    UnhookWindowsHookEx(HOOK_HANDLE);
-                    HOOK_HANDLE = std::ptr::null_mut();
+                    if !HOOK_HANDLE.is_null() {
+                        UnhookWindowsHookEx(HOOK_HANDLE);
+                        HOOK_HANDLE = std::ptr::null_mut();
+                    }
                     if let Ok(mut g) = APP_HANDLE_FOR_HOOK.lock() {
                         *g = None;
                     }
                 })
-                .map_err(|e| format!("Không khởi động được thread nghe chuột: {e}"))?;
+                .map_err(|e| format!("Không khởi động được thread nghe click chuột (Win): {e}"))?;
 
             let thread_id = rx
                 .recv()
-                .map_err(|_| "Không nhận được phản hồi từ thread nghe chuột".to_string())??;
+                .map_err(|_| "Thread hook Win kết thúc bất thường".to_string())??;
 
             Ok(MouseClickListener {
                 thread_id,
                 stopped,
                 thread_handle: Some(thread_handle),
+                events,
+                target_rect,
             })
         }
 
@@ -410,12 +637,65 @@ mod windows {
             if self.stopped.swap(true, Ordering::SeqCst) {
                 return;
             }
-            unsafe {
-                PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0);
+            if self.thread_id != 0 {
+                unsafe {
+                    PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0);
+                }
+                self.thread_id = 0;
             }
             if let Some(handle) = self.thread_handle.take() {
                 let _ = handle.join();
             }
+            if let Ok(mut g) = TELEMETRY_EVENTS.lock() {
+                *g = None;
+            }
+        }
+
+        pub fn save_telemetry(
+            &self,
+            video_path: &Path,
+            width: u32,
+            height: u32,
+            duration_ms: u64,
+        ) -> Result<PathBuf, String> {
+            let out_path = super::telemetry_path_for_video(video_path);
+            let events = self
+                .events
+                .lock()
+                .map_err(|_| "Telemetry lock poisoned".to_string())?
+                .clone();
+
+            // Chuẩn hoá toạ độ từ logical points sang kích thước pixel thực của video
+            let (_tx, _ty, tw, th) = self.target_rect;
+            let scale_x = if tw > 1.0 { (width as f64) / tw } else { 1.0 };
+            let scale_y = if th > 1.0 { (height as f64) / th } else { 1.0 };
+
+            let scaled_events: Vec<MouseTelemetryItem> = events
+                .into_iter()
+                .map(|mut ev| {
+                    ev.x = (ev.x * scale_x).round();
+                    ev.y = (ev.y * scale_y).round();
+                    ev
+                })
+                .collect();
+
+            let file = MouseTelemetryFile {
+                version: 1,
+                video_width: width,
+                video_height: height,
+                duration_ms,
+                events: scaled_events,
+            };
+            let json = serde_json::to_string(&file)
+                .map_err(|e| format!("Lỗi serialize mouse telemetry: {e}"))?;
+            std::fs::write(&out_path, json)
+                .map_err(|e| format!("Lỗi ghi file telemetry: {e}"))?;
+            eprintln!(
+                "[SnapDoc][mouse_tracker] Đã lưu telemetry ({} sự kiện) tại: {}",
+                file.events.len(),
+                out_path.display()
+            );
+            Ok(out_path)
         }
     }
 
@@ -430,6 +710,7 @@ mod windows {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod fallback {
+    use std::path::{Path, PathBuf};
     use tauri::AppHandle;
 
     pub struct MouseClickListener;
@@ -440,5 +721,15 @@ mod fallback {
         }
 
         pub fn stop(&mut self) {}
+
+        pub fn save_telemetry(
+            &self,
+            _video_path: &Path,
+            _width: u32,
+            _height: u32,
+            _duration_ms: u64,
+        ) -> Result<PathBuf, String> {
+            Ok(PathBuf::new())
+        }
     }
 }

@@ -271,31 +271,35 @@ fn url(win: &str) -> WebviewUrl {
     WebviewUrl::App(format!("index.html?win={win}").into())
 }
 
-/// Khoảng cách (trái, trên, phải, dưới — theo LOGICAL) giữa kích thước MÀN
-/// HÌNH ĐẦY ĐỦ và WORK AREA (đã trừ taskbar/Dock/menu bar…) của màn hình chứa
-/// điểm `(cx, cy)` (physical px). Dùng `Monitor::work_area()` — API CROSS-
-/// PLATFORM tao/Tauri đã lộ sẵn (tao tự gọi đúng API từng OS: GetMonitorInfoW
-/// trên Windows, NSScreen.visibleFrame trên macOS…) — nên KHÔNG cần tự viết
-/// code Win32/Cocoa thủ công. `None` nếu không tìm được monitor tại điểm đó
-/// (rơi về kích thước màn hình đầy đủ như cũ, xem `cursor_or_primary_monitor_logical_rect`).
+/// Khoảng cách (trái, trên, phải, dưới) giữa kích thước MÀN HÌNH ĐẦY ĐỦ và WORK AREA (đã trừ taskbar/Dock/menu bar…)
+/// của màn hình chứa điểm `(cx, cy)` (physical px).
+/// - Trên macOS: trả về đơn vị LOGICAL/points (chia scale) cho đúng chuẩn points của macOS.
+/// - Trên Windows/Linux: trả về đơn vị PHYSICAL PIXELS (không chia scale) làm chuẩn Win32.
 fn work_area_insets(app: &AppHandle, cx: f64, cy: f64) -> Option<(f64, f64, f64, f64)> {
     let m = app.monitor_from_point(cx, cy).ok().flatten()?;
-    let scale = m.scale_factor().max(0.0001);
     let pos = m.position();
     let size = m.size();
     let wa = m.work_area();
-    let left = (wa.position.x - pos.x).max(0) as f64 / scale;
-    let top = (wa.position.y - pos.y).max(0) as f64 / scale;
-    let right = ((pos.x + size.width as i32) - (wa.position.x + wa.size.width as i32)).max(0) as f64 / scale;
-    let bottom = ((pos.y + size.height as i32) - (wa.position.y + wa.size.height as i32)).max(0) as f64 / scale;
-    Some((left, top, right, bottom))
+    #[cfg(target_os = "macos")]
+    {
+        let scale = m.scale_factor().max(0.0001);
+        let left = (wa.position.x - pos.x).max(0) as f64 / scale;
+        let top = (wa.position.y - pos.y).max(0) as f64 / scale;
+        let right = ((pos.x + size.width as i32) - (wa.position.x + wa.size.width as i32)).max(0) as f64 / scale;
+        let bottom = ((pos.y + size.height as i32) - (wa.position.y + wa.size.height as i32)).max(0) as f64 / scale;
+        Some((left, top, right, bottom))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let left = (wa.position.x - pos.x).max(0) as f64;
+        let top = (wa.position.y - pos.y).max(0) as f64;
+        let right = ((pos.x + size.width as i32) - (wa.position.x + wa.size.width as i32)).max(0) as f64;
+        let bottom = ((pos.y + size.height as i32) - (wa.position.y + wa.size.height as i32)).max(0) as f64;
+        Some((left, top, right, bottom))
+    }
 }
 
-/// Trừ insets (`work_area_insets`) vào rect màn hình đầy đủ `(m_x, m_y, m_w,
-/// m_h)` — dùng chung cho cả nhánh cursor lẫn nhánh fallback `primary_monitor`
-/// của `cursor_or_primary_monitor_logical_rect`. `(cx, cy)` (physical px) là
-/// điểm để tìm ĐÚNG monitor cần hỏi work area — không nhất thiết bằng
-/// `(m_x, m_y)` (đó là logical, đã lệch hệ đơn vị).
+/// Trừ insets (`work_area_insets`) vào rect màn hình đầy đủ `(m_x, m_y, m_w, m_h)`.
 fn shrink_to_work_area(app: &AppHandle, cx: f64, cy: f64, rect: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
     let (m_x, m_y, m_w, m_h) = rect;
     match work_area_insets(app, cx, cy) {
@@ -309,81 +313,137 @@ fn shrink_to_work_area(app: &AppHandle, cx: f64, cy: f64, rect: (f64, f64, f64, 
     }
 }
 
-/// Vùng (x, y, width, height) theo LOGICAL/points của WORK AREA (đã trừ
-/// taskbar/Dock/menu bar) màn hình đang chứa con trỏ chuột. Dùng để mở cửa sổ
-/// (capture bar, thumbnail, recording indicator, và cả Editor/History/
-/// Settings) đúng màn hình user đang nhìn vào lúc bấm mở, thay vì luôn mở ở
-/// màn hình chính — VÀ để full-màn-hình (Editor) không bị taskbar/Dock che.
-/// Chỉ cần `app` (không cần cửa sổ đã tồn tại) — fallback về
-/// `app.primary_monitor()` (hành vi cũ) nếu không đọc được con trỏ hoặc
-/// không xác định được màn hình chứa nó, nên dùng được cả TRƯỚC khi tạo cửa
-/// sổ (ví dụ để tính kích thước theo % màn hình đích).
+#[derive(Clone, Copy, Debug)]
+struct TargetMonitorBounds {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    scale: f64,
+}
+
+/// Vùng (x, y, width, height, scale) của WORK AREA (đã trừ taskbar/Dock/menu bar) màn hình đang chứa con trỏ chuột.
+/// Dùng để mở cửa sổ đúng màn hình user đang nhìn vào lúc bấm mở.
 ///
-/// LUÔN trả LOGICAL, KHÔNG physical — lý do (bug đã tái hiện thực tế): trên
-/// macOS, `win.set_position(Position::Physical(..))` (`tao`'s
-/// `set_outer_position`) quy đổi physical→logical bằng **scale hiện tại của
-/// cửa sổ TRƯỚC khi di chuyển**, không phải scale màn hình ĐÍCH. Nếu cửa sổ
-/// đang ở màn Retina (scale 2) và ta tính toạ độ physical theo màn đích scale
-/// 1 (FullHD), `tao` sẽ chia lại theo scale 2 (sai) khi áp dụng → lệch nửa
-/// khoảng cách thật (đúng hiện tượng "FullHD lệch phải, Retina thì đúng" đã
-/// gặp). Dùng `Position::Logical` bỏ HẲN bước quy đổi này — giá trị Logical
-/// chỉ được cast, không bị chia lại theo bất kỳ scale nào — an toàn tuyệt
-/// đối bất kể cửa sổ đang ở màn nào lúc gọi.
-fn cursor_or_primary_monitor_logical_rect(app: &AppHandle) -> Option<(f64, f64, f64, f64)> {
+/// - Trên macOS: LUÔN trả LOGICAL points (CGDisplayBounds/points) — an toàn trên macOS vì tao không nhân/chia lại.
+/// - Trên Windows/Linux: LUÔN trả PHYSICAL PIXELS làm chuẩn (Win32 virtual screen coordinates) — an toàn trên
+///   Windows vì SetWindowPos nhận toạ độ vật lý, tránh bug scale nhân lệch của tao khi truyền LogicalPosition giữa các màn hình khác DPI.
+fn cursor_or_primary_monitor_bounds(app: &AppHandle) -> Option<TargetMonitorBounds> {
     if let Some((cx, cy)) = read_cursor(app) {
         if let Ok(m) = crate::capture::monitor::at_point(cx as i32, cy as i32) {
-            // xcap trả x/y/width/height theo POINTS trên macOS (đã là logical,
-            // dùng thẳng) hoặc physical px trên Windows (chia scale để ra logical).
             #[cfg(target_os = "macos")]
-            let rect = (
-                m.x().unwrap_or(0) as f64,
-                m.y().unwrap_or(0) as f64,
-                m.width().unwrap_or(0) as f64,
-                m.height().unwrap_or(0) as f64,
-            );
-            #[cfg(not(target_os = "macos"))]
-            let rect = {
-                let scale = (m.scale_factor().unwrap_or(1.0).max(1.0)) as f64;
+            let (rect, scale) = {
+                let s = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
                 (
-                    m.x().unwrap_or(0) as f64 / scale,
-                    m.y().unwrap_or(0) as f64 / scale,
-                    m.width().unwrap_or(0) as f64 / scale,
-                    m.height().unwrap_or(0) as f64 / scale,
+                    (
+                        m.x().unwrap_or(0) as f64,
+                        m.y().unwrap_or(0) as f64,
+                        m.width().unwrap_or(0) as f64,
+                        m.height().unwrap_or(0) as f64,
+                    ),
+                    s,
                 )
             };
-            return Some(shrink_to_work_area(app, cx, cy, rect));
+            #[cfg(not(target_os = "macos"))]
+            let (rect, scale) = {
+                let s = (m.scale_factor().unwrap_or(1.0).max(1.0)) as f64;
+                (
+                    (
+                        m.x().unwrap_or(0) as f64,
+                        m.y().unwrap_or(0) as f64,
+                        m.width().unwrap_or(0) as f64,
+                        m.height().unwrap_or(0) as f64,
+                    ),
+                    s,
+                )
+            };
+            let (x, y, w, h) = shrink_to_work_area(app, cx, cy, rect);
+            return Some(TargetMonitorBounds { x, y, w, h, scale });
         }
     }
     let pm = app.primary_monitor().ok().flatten()?;
     let scale = pm.scale_factor() as f64;
+    #[cfg(target_os = "macos")]
     let rect = (
         pm.position().x as f64 / scale,
         pm.position().y as f64 / scale,
         pm.size().width as f64 / scale,
         pm.size().height as f64 / scale,
     );
-    Some(shrink_to_work_area(app, pm.position().x as f64, pm.position().y as f64, rect))
+    #[cfg(not(target_os = "macos"))]
+    let rect = (
+        pm.position().x as f64,
+        pm.position().y as f64,
+        pm.size().width as f64,
+        pm.size().height as f64,
+    );
+    let (x, y, w, h) = shrink_to_work_area(app, pm.position().x as f64, pm.position().y as f64, rect);
+    Some(TargetMonitorBounds { x, y, w, h, scale })
 }
 
-/// Kích thước NGOÀI cửa sổ hiện tại theo LOGICAL — dùng cùng
-/// `cursor_or_primary_monitor_logical_rect` để mọi phép tính vị trí ở CHUNG 1
-/// hệ logical (tránh đúng bug quy đổi scale sai giải thích ở đó). Scale dùng
-/// ở đây là scale HIỆN TẠI của cửa sổ (trước khi di chuyển) — chính xác cho
-/// mục đích này vì chỉ dùng để đổi `outer_size()` (physical) → logical, không
-/// liên quan gì đến scale của màn hình ĐÍCH.
-fn logical_outer_size(win: &tauri::WebviewWindow) -> Option<(f64, f64)> {
-    let size = win.outer_size().ok()?;
-    let scale = win.scale_factor().ok()?.max(0.0001);
-    Some((size.width as f64 / scale, size.height as f64 / scale))
+/// Kích thước cửa sổ phục vụ việc định vị:
+/// - macOS: trả về LOGICAL points (outer_size / scale).
+/// - Windows: trả về PHYSICAL pixels (outer_size).
+/// Nếu cửa sổ đang ẩn hoặc outer_size trả về <= 0, fallback về inner_size hoặc `fallback_logical` nhân theo scale.
+fn window_placement_size(
+    win: &tauri::WebviewWindow,
+    #[cfg_attr(target_os = "macos", allow(unused_variables))] target_scale: f64,
+    fallback_logical: (f64, f64),
+) -> (f64, f64) {
+    #[cfg(target_os = "macos")]
+    {
+        if let (Ok(size), Ok(scale)) = (win.outer_size(), win.scale_factor()) {
+            let s = scale.max(0.0001);
+            let w = size.width as f64 / s;
+            let h = size.height as f64 / s;
+            if w > 0.0 && h > 0.0 {
+                return (w, h);
+            }
+        }
+        if let (Ok(size), Ok(scale)) = (win.inner_size(), win.scale_factor()) {
+            let s = scale.max(0.0001);
+            let w = size.width as f64 / s;
+            let h = size.height as f64 / s;
+            if w > 0.0 && h > 0.0 {
+                return (w, h);
+            }
+        }
+        fallback_logical
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Ok(size) = win.outer_size() {
+            let w = size.width as f64;
+            let h = size.height as f64;
+            if w > 0.0 && h > 0.0 {
+                return (w, h);
+            }
+        }
+        if let Ok(size) = win.inner_size() {
+            let w = size.width as f64;
+            let h = size.height as f64;
+            if w > 0.0 && h > 0.0 {
+                return (w, h);
+            }
+        }
+        (fallback_logical.0 * target_scale, fallback_logical.1 * target_scale)
+    }
 }
 
 /// Đặt cửa sổ ở giữa-đáy màn hình đang chứa con trỏ chuột (cho capture bar).
 fn place_bottom_center(app: &AppHandle, win: &tauri::WebviewWindow) {
-    if let Some((m_x, m_y, m_w, m_h)) = cursor_or_primary_monitor_logical_rect(app) {
-        if let Some((win_w, win_h)) = logical_outer_size(win) {
-            let x = m_x + (m_w - win_w) / 2.0;
-            let y = m_y + m_h - win_h - 64.0;
+    if let Some(m) = cursor_or_primary_monitor_bounds(app) {
+        let (win_w, win_h) = window_placement_size(win, m.scale, (730.0, 80.0));
+        let x = m.x + (m.w - win_w) / 2.0;
+        #[cfg(target_os = "macos")]
+        {
+            let y = m.y + m.h - win_h - 64.0;
             let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let y = m.y + m.h - win_h - (64.0 * m.scale);
+            let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
         }
     }
 }
@@ -393,11 +453,17 @@ fn place_bottom_center(app: &AppHandle, win: &tauri::WebviewWindow) {
 /// `.center()` mặc định của Tauri (luôn là màn hình
 /// chính, bất kể con trỏ đang ở đâu). Cùng kỹ thuật `place_bottom_center`.
 fn place_center_on_monitor(app: &AppHandle, win: &tauri::WebviewWindow) {
-    if let Some((m_x, m_y, m_w, m_h)) = cursor_or_primary_monitor_logical_rect(app) {
-        if let Some((win_w, win_h)) = logical_outer_size(win) {
-            let x = m_x + (m_w - win_w) / 2.0;
-            let y = m_y + (m_h - win_h) / 2.0;
+    if let Some(m) = cursor_or_primary_monitor_bounds(app) {
+        let (win_w, win_h) = window_placement_size(win, m.scale, (800.0, 600.0));
+        let x = m.x + (m.w - win_w) / 2.0;
+        let y = m.y + (m.h - win_h) / 2.0;
+        #[cfg(target_os = "macos")]
+        {
             let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
         }
     }
 }
@@ -410,30 +476,48 @@ fn place_center_on_monitor(app: &AppHandle, win: &tauri::WebviewWindow) {
 /// dần. Set size/position trực tiếp không đi qua cơ chế zoom nên không có
 /// animation này.
 fn fill_monitor(app: &AppHandle, win: &tauri::WebviewWindow) {
-    if let Some((m_x, m_y, m_w, m_h)) = cursor_or_primary_monitor_logical_rect(app) {
-        let _ = win.set_position(tauri::LogicalPosition::new(m_x, m_y));
-        let _ = win.set_size(tauri::LogicalSize::new(m_w, m_h));
-        // Editor CÓ title bar/viền native (không `.decorations(false)` như hầu
-        // hết cửa sổ khác trong app) — `set_size` ở trên chỉnh INNER size
-        // (client area, giống `inner_size()` lúc build), nên OUTER size (kích
-        // thước thật hiển thị/chiếm chỗ trên màn hình) LỚN HƠN đúng bằng chiều
-        // cao title bar + viền. Kết quả: dù `m_h` đã là work area (trừ
-        // taskbar), outer bottom vẫn tràn xuống quá `m_h` một khoảng bằng
-        // title bar/viền đó, đè lên taskbar — đúng hiện tượng "vẫn bị che 1
-        // ít" sau khi đã trừ work area. Đo lệch outer-inner NGAY TRÊN cửa sổ
-        // (đã đứng đúng màn hình đích, đúng DPI đích) rồi trừ lại phần đó vào
-        // size mới nhất để outer bottom khớp đúng mép work area.
-        if let (Ok(outer), Ok(inner), Ok(scale)) =
-            (win.outer_size(), win.inner_size(), win.scale_factor())
+    if let Some(m) = cursor_or_primary_monitor_bounds(app) {
+        #[cfg(target_os = "macos")]
         {
-            let scale = scale.max(0.0001);
-            let extra_w = (outer.width as f64 - inner.width as f64) / scale;
-            let extra_h = (outer.height as f64 - inner.height as f64) / scale;
-            if extra_w > 0.0 || extra_h > 0.0 {
-                let _ = win.set_size(tauri::LogicalSize::new(
-                    (m_w - extra_w).max(1.0),
-                    (m_h - extra_h).max(1.0),
-                ));
+            let _ = win.set_position(tauri::LogicalPosition::new(m.x, m.y));
+            let _ = win.set_size(tauri::LogicalSize::new(m.w, m.h));
+            // Editor CÓ title bar/viền native (không `.decorations(false)` như hầu
+            // hết cửa sổ khác trong app) — `set_size` ở trên chỉnh INNER size
+            // (client area, giống `inner_size()` lúc build), nên OUTER size (kích
+            // thước thật hiển thị/chiếm chỗ trên màn hình) LỚN HƠN đúng bằng chiều
+            // cao title bar + viền. Kết quả: dù `m_h` đã là work area (trừ
+            // taskbar), outer bottom vẫn tràn xuống quá `m_h` một khoảng bằng
+            // title bar/viền đó, đè lên taskbar — đúng hiện tượng "vẫn bị che 1
+            // ít" sau khi đã trừ work area. Đo lệch outer-inner NGAY TRÊN cửa sổ
+            // (đã đứng đúng màn hình đích, đúng DPI đích) rồi trừ lại phần đó vào
+            // size mới nhất để outer bottom khớp đúng mép work area.
+            if let (Ok(outer), Ok(inner), Ok(scale)) =
+                (win.outer_size(), win.inner_size(), win.scale_factor())
+            {
+                let scale = scale.max(0.0001);
+                let extra_w = (outer.width as f64 - inner.width as f64) / scale;
+                let extra_h = (outer.height as f64 - inner.height as f64) / scale;
+                if extra_w > 0.0 || extra_h > 0.0 {
+                    let _ = win.set_size(tauri::LogicalSize::new(
+                        (m.w - extra_w).max(1.0),
+                        (m.h - extra_h).max(1.0),
+                    ));
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = win.set_position(tauri::PhysicalPosition::new(m.x.round() as i32, m.y.round() as i32));
+            let _ = win.set_size(tauri::PhysicalSize::new(m.w.round() as u32, m.h.round() as u32));
+            if let (Ok(outer), Ok(inner)) = (win.outer_size(), win.inner_size()) {
+                let extra_w = outer.width as f64 - inner.width as f64;
+                let extra_h = outer.height as f64 - inner.height as f64;
+                if extra_w > 0.0 || extra_h > 0.0 {
+                    let _ = win.set_size(tauri::PhysicalSize::new(
+                        (m.w - extra_w).max(1.0).round() as u32,
+                        (m.h - extra_h).max(1.0).round() as u32,
+                    ));
+                }
             }
         }
     }
@@ -712,39 +796,78 @@ pub fn open_capture_bar_popover(
         .get_webview_window("capture-bar")
         .ok_or("capture-bar không tồn tại")?;
 
-    let scale = bar_win.scale_factor().map_err(|e| e.to_string())?;
-    let bar_pos = bar_win.outer_position().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
-
     let popover_w = 220.0;
     let popover_h = 425.0;
 
-    // Căn mép phải của popover khớp với mép phải của nút Options trên thanh bar
-    let pop_x = (bar_pos.x + anchor_x + anchor_w - popover_w).max(bar_pos.x);
-    let pop_y = bar_pos.y - popover_h - 6.0;
+    #[cfg(target_os = "macos")]
+    {
+        let scale = bar_win.scale_factor().map_err(|e| e.to_string())?;
+        let bar_pos = bar_win.outer_position().map_err(|e| e.to_string())?.to_logical::<f64>(scale);
 
-    if let Some(w) = app.get_webview_window("capture-bar-popover") {
-        let _ = w.set_position(tauri::LogicalPosition::new(pop_x, pop_y));
-        let _ = w.show();
-        let _ = w.set_focus();
-    } else {
-        let win = WebviewWindowBuilder::new(app, "capture-bar-popover", url("capture-bar-popover"))
-            .title("SnapDoc Options")
-            .inner_size(popover_w, popover_h)
-            .resizable(false)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .shadow(false)
-            .position(pop_x, pop_y)
-            .build()
-            .map_err(|e| format!("Không tạo được capture bar popover: {e}"))?;
+        // Căn mép phải của popover khớp với mép phải của nút Options trên thanh bar
+        let pop_x = (bar_pos.x + anchor_x + anchor_w - popover_w).max(bar_pos.x);
+        let pop_y = bar_pos.y - popover_h - 6.0;
 
-        #[cfg(target_os = "windows")]
-        disable_overlay_transitions(&win);
+        if let Some(w) = app.get_webview_window("capture-bar-popover") {
+            let _ = w.set_position(tauri::LogicalPosition::new(pop_x, pop_y));
+            let _ = w.show();
+            let _ = w.set_focus();
+        } else {
+            let win = WebviewWindowBuilder::new(app, "capture-bar-popover", url("capture-bar-popover"))
+                .title("SnapDoc Options")
+                .inner_size(popover_w, popover_h)
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .shadow(false)
+                .position(pop_x, pop_y)
+                .build()
+                .map_err(|e| format!("Không tạo được capture bar popover: {e}"))?;
 
-        let _ = win.show();
-        let _ = win.set_focus();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let scale = bar_win.scale_factor().map_err(|e| e.to_string())?.max(0.0001);
+        let bar_pos = bar_win.outer_position().map_err(|e| e.to_string())?;
+
+        let popover_w_px = (popover_w * scale).round() as i32;
+        let popover_h_px = (popover_h * scale).round() as i32;
+        let anchor_x_px = (anchor_x * scale).round() as i32;
+        let anchor_w_px = (anchor_w * scale).round() as i32;
+        let margin_6_px = (6.0 * scale).round() as i32;
+
+        let pop_x = (bar_pos.x + anchor_x_px + anchor_w_px - popover_w_px).max(bar_pos.x);
+        let pop_y = bar_pos.y - popover_h_px - margin_6_px;
+
+        if let Some(w) = app.get_webview_window("capture-bar-popover") {
+            let _ = w.set_position(tauri::PhysicalPosition::new(pop_x, pop_y));
+            let _ = w.show();
+            let _ = w.set_focus();
+        } else {
+            let win = WebviewWindowBuilder::new(app, "capture-bar-popover", url("capture-bar-popover"))
+                .title("SnapDoc Options")
+                .inner_size(popover_w, popover_h)
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .shadow(false)
+                .build()
+                .map_err(|e| format!("Không tạo được capture bar popover: {e}"))?;
+
+            #[cfg(target_os = "windows")]
+            disable_overlay_transitions(&win);
+
+            let _ = win.set_position(tauri::PhysicalPosition::new(pop_x, pop_y));
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
     }
 
     Ok(())
@@ -973,25 +1096,53 @@ pub fn close_stop_control(app: &AppHandle) {
 /// `record::stop_recording_impl` (`close_record_border`).
 pub fn open_record_border(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
     close_record_border(app);
-    let win = WebviewWindowBuilder::new(app, "record-border", url("record-border"))
-        .title("SnapDoc — Đang quay")
-        .position(x, y)
-        .inner_size(w, h)
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        // Không giành focus của cửa sổ đang key hiện tại — cùng lý do các
-        // cửa sổ nổi khác (`open_stop_control`, `open_recording_indicator`).
-        .focused(false)
-        .build()
-        .map_err(|e| format!("Không tạo được khung viền đang quay: {e}"))?;
-    let _ = win.set_ignore_cursor_events(true);
-    let _ = win.set_content_protected(true);
-    let _ = win.show();
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        let win = WebviewWindowBuilder::new(app, "record-border", url("record-border"))
+            .title("SnapDoc — Đang quay")
+            .position(x, y)
+            .inner_size(w, h)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            // Không giành focus của cửa sổ đang key hiện tại — cùng lý do các
+            // cửa sổ nổi khác (`open_stop_control`, `open_recording_indicator`).
+            .focused(false)
+            .build()
+            .map_err(|e| format!("Không tạo được khung viền đang quay: {e}"))?;
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.set_content_protected(true);
+        let _ = win.show();
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let win = WebviewWindowBuilder::new(app, "record-border", url("record-border"))
+            .title("SnapDoc — Đang quay")
+            .inner_size(w, h)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(false)
+            .build()
+            .map_err(|e| format!("Không tạo được khung viền đang quay: {e}"))?;
+
+        #[cfg(target_os = "windows")]
+        disable_overlay_transitions(&win);
+
+        let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
+        let _ = win.set_size(tauri::PhysicalSize::new(w.round() as u32, h.round() as u32));
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.set_content_protected(true);
+        let _ = win.show();
+        Ok(())
+    }
 }
 
 /// Đóng khung viền đang quay (nếu có) — an toàn khi gọi dù chưa từng mở.
@@ -1006,68 +1157,95 @@ pub fn close_record_border(app: &AppHandle) {
 /// và KHÔNG bật `set_content_protected(true)` để SCK/WGC tự động ghi nhận vào video.
 pub fn open_record_keystroke(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<Option<u32>, String> {
     close_record_keystroke(app);
-    let win = WebviewWindowBuilder::new(app, "record-keystroke", url("record-keystroke"))
-        .title("SnapDoc — Phím bấm")
-        .position(x, y)
-        .inner_size(w, h)
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .focused(false)
-        .build()
-        .map_err(|e| format!("Không tạo được overlay phím bấm: {e}"))?;
-    let _ = win.set_ignore_cursor_events(true);
-    let _ = win.set_content_protected(false);
-    let _ = win.show();
-
     #[cfg(target_os = "macos")]
-    let window_id: Option<u32> = {
-        use objc2::msg_send;
-        let (tx, rx) = std::sync::mpsc::channel::<Option<u32>>();
-        let win_main = win.clone();
-        let _ = app.run_on_main_thread(move || {
-            let mut wid = None;
-            if let Ok(ptr) = win_main.ns_window() {
-                let ptr = ptr as *mut objc2_app_kit::NSWindow;
-                if !ptr.is_null() {
-                    unsafe {
-                        let ns_win: &objc2_app_kit::NSWindow = &*ptr;
-                        // CanJoinAllSpaces=1 | Stationary=1<<4 | FullScreenAuxiliary=1<<8
-                        let behavior: usize = 1 | (1 << 4) | (1 << 8);
-                        let _: () = msg_send![ns_win, setCollectionBehavior: behavior];
-                        let no_animation: i64 = 2;
-                        let _: () = msg_send![ns_win, setAnimationBehavior: no_animation];
+    {
+        let win = WebviewWindowBuilder::new(app, "record-keystroke", url("record-keystroke"))
+            .title("SnapDoc — Phím bấm")
+            .position(x, y)
+            .inner_size(w, h)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(false)
+            .build()
+            .map_err(|e| format!("Không tạo được overlay phím bấm: {e}"))?;
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.set_content_protected(false);
+        let _ = win.show();
 
-                        // Đảm bảo chia sẻ cửa sổ (NSWindowSharingReadOnly = 1) để ScreenCaptureKit đọc được
-                        let sharing_type: usize = 1;
-                        let _: () = msg_send![ns_win, setSharingType: sharing_type];
+        let window_id: Option<u32> = {
+            use objc2::msg_send;
+            let (tx, rx) = std::sync::mpsc::channel::<Option<u32>>();
+            let win_main = win.clone();
+            let _ = app.run_on_main_thread(move || {
+                let mut wid = None;
+                if let Ok(ptr) = win_main.ns_window() {
+                    let ptr = ptr as *mut objc2_app_kit::NSWindow;
+                    if !ptr.is_null() {
+                        unsafe {
+                            let ns_win: &objc2_app_kit::NSWindow = &*ptr;
+                            // CanJoinAllSpaces=1 | Stationary=1<<4 | FullScreenAuxiliary=1<<8
+                            let behavior: usize = 1 | (1 << 4) | (1 << 8);
+                            let _: () = msg_send![ns_win, setCollectionBehavior: behavior];
+                            let no_animation: i64 = 2;
+                            let _: () = msg_send![ns_win, setAnimationBehavior: no_animation];
 
-                        // NSPopUpMenuWindowLevel = 101 để nổi trên các app nhưng không bị coi là screensaver layer
-                        let window_level: i64 = 101;
-                        let _: () = msg_send![ns_win, setLevel: window_level];
+                            // Đảm bảo chia sẻ cửa sổ (NSWindowSharingReadOnly = 1) để ScreenCaptureKit đọc được
+                            let sharing_type: usize = 1;
+                            let _: () = msg_send![ns_win, setSharingType: sharing_type];
 
-                        let _: () = msg_send![ns_win, orderFrontRegardless];
+                            // NSPopUpMenuWindowLevel = 101 để nổi trên các app nhưng không bị coi là screensaver layer
+                            let window_level: i64 = 101;
+                            let _: () = msg_send![ns_win, setLevel: window_level];
 
-                        let num: isize = msg_send![ns_win, windowNumber];
-                        if num > 0 {
-                            wid = Some(num as u32);
+                            let _: () = msg_send![ns_win, orderFrontRegardless];
+
+                            let num: isize = msg_send![ns_win, windowNumber];
+                            if num > 0 {
+                                wid = Some(num as u32);
+                            }
                         }
                     }
                 }
-            }
-            let _ = tx.send(wid);
-        });
-        rx.recv_timeout(std::time::Duration::from_millis(500)).unwrap_or(None)
-    };
+                let _ = tx.send(wid);
+            });
+            rx.recv_timeout(std::time::Duration::from_millis(500)).unwrap_or(None)
+        };
 
+        eprintln!("[SnapDoc][record] open_record_keystroke -> window_id = {:?}", window_id);
+        Ok(window_id)
+    }
     #[cfg(not(target_os = "macos"))]
-    let window_id: Option<u32> = None;
+    {
+        let win = WebviewWindowBuilder::new(app, "record-keystroke", url("record-keystroke"))
+            .title("SnapDoc — Phím bấm")
+            .inner_size(w, h)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(false)
+            .build()
+            .map_err(|e| format!("Không tạo được overlay phím bấm: {e}"))?;
 
-    eprintln!("[SnapDoc][record] open_record_keystroke -> window_id = {:?}", window_id);
-    Ok(window_id)
+        #[cfg(target_os = "windows")]
+        disable_overlay_transitions(&win);
+
+        let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
+        let _ = win.set_size(tauri::PhysicalSize::new(w.round() as u32, h.round() as u32));
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.set_content_protected(false);
+        let _ = win.show();
+
+        let window_id: Option<u32> = None;
+        eprintln!("[SnapDoc][record] open_record_keystroke -> window_id = {:?}", window_id);
+        Ok(window_id)
+    }
 }
 
 /// Đóng cửa sổ hiển thị phím bấm đang quay.
@@ -1082,65 +1260,92 @@ pub fn close_record_keystroke(app: &AppHandle) {
 /// không giành focus, và KHÔNG bật `set_content_protected(true)` để SCK/WGC tự động ghi nhận vào video.
 pub fn open_record_clicks(app: &AppHandle, x: f64, y: f64, w: f64, h: f64) -> Result<Option<u32>, String> {
     close_record_clicks(app);
-    let win = WebviewWindowBuilder::new(app, "record-clicks", url("record-clicks"))
-        .title("SnapDoc — Click chuột")
-        .position(x, y)
-        .inner_size(w, h)
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .focused(false)
-        .build()
-        .map_err(|e| format!("Không tạo được overlay click chuột: {e}"))?;
-    let _ = win.set_ignore_cursor_events(true);
-    let _ = win.set_content_protected(false);
-    let _ = win.show();
-
     #[cfg(target_os = "macos")]
-    let window_id: Option<u32> = {
-        use objc2::msg_send;
-        let (tx, rx) = std::sync::mpsc::channel::<Option<u32>>();
-        let win_main = win.clone();
-        let _ = app.run_on_main_thread(move || {
-            let mut wid = None;
-            if let Ok(ptr) = win_main.ns_window() {
-                let ptr = ptr as *mut objc2_app_kit::NSWindow;
-                if !ptr.is_null() {
-                    unsafe {
-                        let ns_win: &objc2_app_kit::NSWindow = &*ptr;
-                        let behavior: usize = 1 | (1 << 4) | (1 << 8);
-                        let _: () = msg_send![ns_win, setCollectionBehavior: behavior];
-                        let no_animation: i64 = 2;
-                        let _: () = msg_send![ns_win, setAnimationBehavior: no_animation];
+    {
+        let win = WebviewWindowBuilder::new(app, "record-clicks", url("record-clicks"))
+            .title("SnapDoc — Click chuột")
+            .position(x, y)
+            .inner_size(w, h)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(false)
+            .build()
+            .map_err(|e| format!("Không tạo được overlay click chuột: {e}"))?;
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.set_content_protected(false);
+        let _ = win.show();
 
-                        let sharing_type: usize = 1;
-                        let _: () = msg_send![ns_win, setSharingType: sharing_type];
+        let window_id: Option<u32> = {
+            use objc2::msg_send;
+            let (tx, rx) = std::sync::mpsc::channel::<Option<u32>>();
+            let win_main = win.clone();
+            let _ = app.run_on_main_thread(move || {
+                let mut wid = None;
+                if let Ok(ptr) = win_main.ns_window() {
+                    let ptr = ptr as *mut objc2_app_kit::NSWindow;
+                    if !ptr.is_null() {
+                        unsafe {
+                            let ns_win: &objc2_app_kit::NSWindow = &*ptr;
+                            let behavior: usize = 1 | (1 << 4) | (1 << 8);
+                            let _: () = msg_send![ns_win, setCollectionBehavior: behavior];
+                            let no_animation: i64 = 2;
+                            let _: () = msg_send![ns_win, setAnimationBehavior: no_animation];
 
-                        let window_level: i64 = 101;
-                        let _: () = msg_send![ns_win, setLevel: window_level];
+                            let sharing_type: usize = 1;
+                            let _: () = msg_send![ns_win, setSharingType: sharing_type];
 
-                        let _: () = msg_send![ns_win, orderFrontRegardless];
+                            let window_level: i64 = 101;
+                            let _: () = msg_send![ns_win, setLevel: window_level];
 
-                        let num: isize = msg_send![ns_win, windowNumber];
-                        if num > 0 {
-                            wid = Some(num as u32);
+                            let _: () = msg_send![ns_win, orderFrontRegardless];
+
+                            let num: isize = msg_send![ns_win, windowNumber];
+                            if num > 0 {
+                                wid = Some(num as u32);
+                            }
                         }
                     }
                 }
-            }
-            let _ = tx.send(wid);
-        });
-        rx.recv_timeout(std::time::Duration::from_millis(500)).unwrap_or(None)
-    };
+                let _ = tx.send(wid);
+            });
+            rx.recv_timeout(std::time::Duration::from_millis(500)).unwrap_or(None)
+        };
 
+        eprintln!("[SnapDoc][record] open_record_clicks -> window_id = {:?}", window_id);
+        Ok(window_id)
+    }
     #[cfg(not(target_os = "macos"))]
-    let window_id: Option<u32> = None;
+    {
+        let win = WebviewWindowBuilder::new(app, "record-clicks", url("record-clicks"))
+            .title("SnapDoc — Click chuột")
+            .inner_size(w, h)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(false)
+            .build()
+            .map_err(|e| format!("Không tạo được overlay click chuột: {e}"))?;
 
-    eprintln!("[SnapDoc][record] open_record_clicks -> window_id = {:?}", window_id);
-    Ok(window_id)
+        #[cfg(target_os = "windows")]
+        disable_overlay_transitions(&win);
+
+        let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
+        let _ = win.set_size(tauri::PhysicalSize::new(w.round() as u32, h.round() as u32));
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.set_content_protected(false);
+        let _ = win.show();
+
+        let window_id: Option<u32> = None;
+        eprintln!("[SnapDoc][record] open_record_clicks -> window_id = {:?}", window_id);
+        Ok(window_id)
+    }
 }
 
 /// Đóng cửa sổ hiển thị hiệu ứng click chuột đang quay.
@@ -1246,6 +1451,7 @@ pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
     place_top_center(app, &win);
     let _ = win.emit("recording-indicator-reset", ());
     let _ = win.show();
+    let _ = win.set_always_on_top(true);
     Ok(())
 }
 
@@ -1259,15 +1465,14 @@ pub fn close_recording_indicator(app: &AppHandle) {
 }
 
 /// Đặt cửa sổ ở giữa-đỉnh màn hình chính, cách mép trên 1 khoảng nhỏ (cho
-/// popup "đang quay") — cùng kỹ thuật `place_bottom_center` phía trên.
+/// popup "đang quay") — dùng toạ độ vật lý (Physical pixels) trên Windows.
 #[cfg(target_os = "windows")]
 fn place_top_center(app: &AppHandle, win: &tauri::WebviewWindow) {
-    if let Some((m_x, m_y, m_w, _m_h)) = cursor_or_primary_monitor_logical_rect(app) {
-        if let Some((win_w, _win_h)) = logical_outer_size(win) {
-            let x = m_x + (m_w - win_w) / 2.0;
-            let y = m_y + 16.0;
-            let _ = win.set_position(tauri::LogicalPosition::new(x, y));
-        }
+    if let Some(m) = cursor_or_primary_monitor_bounds(app) {
+        let (win_w, _win_h) = window_placement_size(win, m.scale, (240.0, 44.0));
+        let x = m.x + (m.w - win_w) / 2.0;
+        let y = m.y + (16.0 * m.scale);
+        let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
     }
 }
 
@@ -1319,14 +1524,72 @@ pub fn close_window_picker(app: &AppHandle) {
     }
 }
 
-/// Như `open_overlays`, kèm `record` (đang chọn phạm vi QUAY, không phải chụp
-/// ảnh — frontend `Overlay.tsx` dựa vào đây để hiện bước "chỉnh vùng + nút
-/// Bắt đầu" thay vì quay ngay khi thả chuột) và `preset` = vùng chọn lần quay
-/// gần nhất (`display_id`, x, y, w, h theo hệ đơn vị của `MonitorSnap`) để đề
-/// xuất lại — chỉ overlay đúng màn hình chứa `display_id` đó nhận preset qua
-/// query string (`px/py/pw/ph`, đã đổi sang CSS px cục bộ của màn đó); preset
-/// không khớp màn nào hiện tại (đổi cấu hình màn hình) hoặc vượt biên thì bị
-/// bỏ qua lặng lẽ, coi như chưa từng có.
+/// Tìm index màn hình khớp với preset vùng quay trước đó theo mức độ ưu tiên:
+/// 1. Khớp runtime ID (cùng phiên làm việc hoặc macOS CGDirectDisplayID).
+/// 2. Khớp theo tên thiết bị GDI bền vững (vd "\\.\DISPLAY1" trên Windows).
+/// 3. Khớp màn hình chính nếu trước đó ghi nhận ở màn hình chính.
+/// 4. Khớp fallback khi hệ thống chỉ có đúng 1 màn hình duy nhất.
+pub fn find_matching_monitor_index(
+    preset: &crate::flow::LastRecordRegion,
+    snaps: &[MonitorSnap],
+) -> Option<usize> {
+    if snaps.is_empty() {
+        return None;
+    }
+    // 1. Runtime ID
+    if let Some(idx) = snaps.iter().position(|s| s.id == preset.display_id) {
+        return Some(idx);
+    }
+    // 2. Persistent name
+    if let Some(ref name) = preset.display_name {
+        if !name.is_empty() {
+            if let Some(idx) = snaps.iter().position(|s| &s.name == name) {
+                return Some(idx);
+            }
+        }
+    }
+    // 3. Primary monitor
+    if preset.is_primary.unwrap_or(false) {
+        if let Some(idx) = snaps.iter().position(|s| s.is_primary) {
+            return Some(idx);
+        }
+    }
+    // 4. Fallback cho hệ thống 1 màn hình
+    if snaps.len() == 1 {
+        return Some(0);
+    }
+    None
+}
+
+/// Tính toạ độ CSS px và tự động clamp nếu độ phân giải/DPI scale thay đổi
+pub fn compute_preset_css_rect(
+    snap: &MonitorSnap,
+    preset: &crate::flow::LastRecordRegion,
+) -> Option<(f64, f64, f64, f64)> {
+    #[cfg(target_os = "windows")]
+    let scale_conv = snap.scale.max(0.0001);
+    #[cfg(not(target_os = "windows"))]
+    let scale_conv = 1.0_f64;
+
+    let snap_w_css = snap.w / scale_conv;
+    let snap_h_css = snap.h / scale_conv;
+
+    let cw = (preset.w / scale_conv).min(snap_w_css);
+    let ch = (preset.h / scale_conv).min(snap_h_css);
+    if cw < 20.0 || ch < 20.0 {
+        return None;
+    }
+
+    let mut cx = preset.x / scale_conv;
+    let mut cy = preset.y / scale_conv;
+
+    // Clamp để đảm bảo khung luôn nằm trọn vẹn trong màn hình
+    cx = cx.clamp(0.0, (snap_w_css - cw).max(0.0));
+    cy = cy.clamp(0.0, (snap_h_css - ch).max(0.0));
+
+    Some((cx, cy, cw, ch))
+}
+
 /// Query string cho 1 overlay ở monitor `snap` (idx `i`) — tách riêng khỏi
 /// `open_overlays_ex` để `prewarm_overlays`/`try_reuse_prewarmed_overlays`
 /// dùng chung, không lặp lại logic tính preset/scale.
@@ -1335,7 +1598,8 @@ fn build_overlay_query(
     i: usize,
     snap: &MonitorSnap,
     record: bool,
-    preset: Option<(u32, f64, f64, f64, f64)>,
+    preset: Option<&crate::flow::LastRecordRegion>,
+    matched_idx: Option<usize>,
     gen: u64,
 ) -> String {
     // scale: cần cho mode "quick" (Chụp nhanh) để canvas chú thích render
@@ -1346,17 +1610,9 @@ fn build_overlay_query(
     if record {
         query.push_str("&record=1");
     }
-    if let Some((preset_display, px, py, pw, ph)) = preset {
-        if preset_display == snap.id {
-            #[cfg(target_os = "windows")]
-            let scale_conv = snap.scale.max(0.0001);
-            #[cfg(not(target_os = "windows"))]
-            let scale_conv = 1.0_f64;
-            let (cx, cy, cw, ch) = (px / scale_conv, py / scale_conv, pw / scale_conv, ph / scale_conv);
-            let (snap_w_css, snap_h_css) = (snap.w / scale_conv, snap.h / scale_conv);
-            let fits = cw >= 1.0 && ch >= 1.0 && cx >= 0.0 && cy >= 0.0
-                && cx + cw <= snap_w_css + 0.5 && cy + ch <= snap_h_css + 0.5;
-            if fits {
+    if matched_idx == Some(i) {
+        if let Some(p) = preset {
+            if let Some((cx, cy, cw, ch)) = compute_preset_css_rect(snap, p) {
                 query.push_str(&format!("&px={cx}&py={cy}&pw={cw}&ph={ch}"));
             }
         }
@@ -1573,6 +1829,8 @@ pub fn prewarm_overlays(app: &AppHandle) {
         }
         let snap = MonitorSnap {
             id: m.id().unwrap_or(0),
+            name: m.name().unwrap_or_default(),
+            is_primary: m.is_primary().unwrap_or(false),
             x: m.x().unwrap_or(0) as f64,
             y: m.y().unwrap_or(0) as f64,
             w: m.width().unwrap_or(0) as f64,
@@ -1581,7 +1839,7 @@ pub fn prewarm_overlays(app: &AppHandle) {
         };
         // gen=0: cửa sổ pre-warm chưa thuộc phiên chụp thật nào — sẽ được
         // navigate() lại với gen thật trước khi dùng (xem `try_reuse_prewarmed_overlays`).
-        let query = build_overlay_query("region", i, &snap, false, None, 0);
+        let query = build_overlay_query("region", i, &snap, false, None, None, 0);
         let win = match build_overlay_window_with_retry(app, &label, &query) {
             Ok(w) => w,
             Err(e) => {
@@ -1629,9 +1887,10 @@ fn try_reuse_prewarmed_overlays(
     app: &AppHandle,
     mode: &str,
     record: bool,
-    preset: Option<(u32, f64, f64, f64, f64)>,
+    preset: Option<&crate::flow::LastRecordRegion>,
+    matched_idx: Option<usize>,
     snaps: &[MonitorSnap],
-    cursor_idx: usize,
+    focus_idx: usize,
     gen: u64,
 ) -> bool {
     let windows = app.webview_windows();
@@ -1659,21 +1918,25 @@ fn try_reuse_prewarmed_overlays(
 
     for (i, (snap, win)) in snaps.iter().zip(wins.iter()).enumerate() {
         position_overlay(app, win, snap);
-        let preset_json = preset.and_then(|(preset_display, px, py, pw, ph)| {
-            if preset_display == snap.id {
-                Some(serde_json::json!({
-                    "x": px, "y": py, "w": pw, "h": ph
-                }))
-            } else {
-                None
-            }
-        });
-        if let Err(e) = win.emit("overlay-session-start", serde_json::json!({
+        let preset_json = if matched_idx == Some(i) {
+            preset
+                .and_then(|p| compute_preset_css_rect(snap, p))
+                .map(|(cx, cy, cw, ch)| {
+                    serde_json::json!({
+                        "x": cx, "y": cy, "w": cw, "h": ch
+                    })
+                })
+        } else {
+            None
+        };
+        let payload = serde_json::json!({
+            "targetIdx": i,
             "mode": mode,
             "gen": gen,
             "record": record,
             "preset": preset_json,
-        })) {
+        });
+        if let Err(e) = app.emit_to(win.label(), "overlay-session-start", &payload) {
             eprintln!("[SnapDoc] Gửi session tới overlay-{i} thất bại: {e}");
             return false;
         }
@@ -1685,7 +1948,7 @@ fn try_reuse_prewarmed_overlays(
     wait_for_overlays_ready(app, gen, snaps.len());
     for (i, win) in wins.iter().enumerate() {
         reveal_overlay(app, win, &snaps[i]);
-        if i == cursor_idx {
+        if i == focus_idx {
             let _ = win.set_focus();
         }
     }
@@ -1710,7 +1973,7 @@ pub fn open_overlays_ex(
     app: &AppHandle,
     mode: &str,
     record: bool,
-    preset: Option<(u32, f64, f64, f64, f64)>,
+    preset: Option<crate::flow::LastRecordRegion>,
 ) -> Result<(), String> {
     // Chặn 2 lệnh mở overlay chạy CHỒNG NHAU (double-click nút chụp, hotkey
     // double-fire, ...) — nếu không, cả 2 luồng có thể cùng lúc chạy
@@ -1752,6 +2015,8 @@ pub fn open_overlays_ex(
         .iter()
         .map(|m| MonitorSnap {
             id: m.id().unwrap_or(0),
+            name: m.name().unwrap_or_default(),
+            is_primary: m.is_primary().unwrap_or(false),
             x: m.x().unwrap_or(0) as f64,
             y: m.y().unwrap_or(0) as f64,
             w: m.width().unwrap_or(0) as f64,
@@ -1759,6 +2024,27 @@ pub fn open_overlays_ex(
             scale: m.scale_factor().unwrap_or(1.0).max(1.0) as f64,
         })
         .collect();
+
+    // Kiểm tra xem cấu trúc màn hình (topology) có bị thay đổi (cắm/rút màn hình) so với pool prewarm trước đó không.
+    // Nếu topology thay đổi, TUYỆT ĐỐI không tái sử dụng cửa sổ cũ vì Windows đã dồn các cửa sổ về màn hình chính
+    // và làm lệch toạ độ native / DPI của WebView2.
+    let topology_changed = match app.state::<AppState>().overlay_monitors.lock() {
+        Ok(g) => {
+            if g.is_empty() || g.len() != snaps.len() {
+                true
+            } else {
+                g.iter().zip(snaps.iter()).any(|(old, new)| {
+                    old.id != new.id
+                        || (old.x - new.x).abs() > 0.5
+                        || (old.y - new.y).abs() > 0.5
+                        || (old.w - new.w).abs() > 0.5
+                        || (old.h - new.h).abs() > 0.5
+                        || (old.scale - new.scale).abs() > 0.01
+                })
+            }
+        }
+        Err(_) => true,
+    };
 
     if let Ok(mut g) = app.state::<AppState>().overlay_monitors.lock() {
         *g = snaps.clone();
@@ -1781,6 +2067,13 @@ pub fn open_overlays_ex(
         }
     };
 
+    // Khớp preset vùng quay cũ với màn hình tương ứng
+    let matched_preset_idx = preset
+        .as_ref()
+        .and_then(|p| find_matching_monitor_index(p, &snaps));
+    // Ưu tiên focus vào màn hình chứa khung preset nếu có
+    let focus_idx = matched_preset_idx.unwrap_or(cursor_idx);
+
     // Tính gen TRƯỚC khi mở overlay (không phải sau như trước): cần nhúng
     // vào query string ngay từ navigate()/build() đầu tiên để frontend echo
     // lại đúng giá trị khi báo "đã paint xong" (xem `wait_for_overlays_ready`).
@@ -1791,7 +2084,20 @@ pub fn open_overlays_ex(
         + 1;
 
     let t_reuse = std::time::Instant::now();
-    let reused = try_reuse_prewarmed_overlays(app, mode, record, preset, &snaps, cursor_idx, gen);
+    let reused = if topology_changed {
+        false
+    } else {
+        try_reuse_prewarmed_overlays(
+            app,
+            mode,
+            record,
+            preset.as_ref(),
+            matched_preset_idx,
+            &snaps,
+            focus_idx,
+            gen,
+        )
+    };
     eprintln!("[SnapDoc Timing] try_reuse_prewarmed_overlays: {:?}, reused={}", t_reuse.elapsed(), reused);
     if !reused {
         let t_build = std::time::Instant::now();
@@ -1799,7 +2105,15 @@ pub fn open_overlays_ex(
         let mut wins = Vec::with_capacity(snaps.len());
         for (i, snap) in snaps.iter().enumerate() {
             let label = format!("overlay-{i}");
-            let query = build_overlay_query(mode, i, snap, record, preset, gen);
+            let query = build_overlay_query(
+                mode,
+                i,
+                snap,
+                record,
+                preset.as_ref(),
+                matched_preset_idx,
+                gen,
+            );
             let win = build_overlay_window_with_retry(app, &label, &query)?;
 
             let record_self = crate::storage::settings::is_record_self(app);
@@ -1812,7 +2126,7 @@ pub fn open_overlays_ex(
         wait_for_overlays_ready(app, gen, snaps.len());
         for (i, win) in wins.iter().enumerate() {
             reveal_overlay(app, win, &snaps[i]);
-            if i == cursor_idx {
+            if i == focus_idx {
                 let _ = win.set_focus();
             }
         }
@@ -2317,13 +2631,16 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         bring_to_front(app, &win);
 
         // Trên Windows, show() là async (WM_SHOWWINDOW qua message pump).
-        // Emit refresh-capture sau một tick để đảm bảo webview visible và
-        // JS message pump đang chạy trước khi nhận event.
-        let win2 = win.clone();
+        // Emit refresh-capture định danh đích đến ("editor").
+        // Phát ngay nhịp đầu cho fast-path, và thêm 1 nhịp sau 150ms phòng khi WebView2 đang tỉnh giấc từ sleep.
+        let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
+            let _ = app_handle.emit_to("editor", "refresh-capture", &());
             #[cfg(target_os = "windows")]
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let _ = win2.emit("refresh-capture", ());
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                let _ = app_handle.emit_to("editor", "refresh-capture", &());
+            }
         });
         return Ok(());
     }
@@ -2341,10 +2658,11 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         fill_monitor(app, &win);
         bring_to_front(app, &win);
 
-        let win2 = win.clone();
+        let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let _ = win2.emit("refresh-capture", ());
+            let _ = app_handle.emit_to("editor", "refresh-capture", &());
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let _ = app_handle.emit_to("editor", "refresh-capture", &());
         });
     }
     #[cfg(not(target_os = "windows"))]
@@ -2361,9 +2679,9 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
         fill_monitor(app, &win);
         bring_to_front(app, &win);
 
-        let win2 = win.clone();
+        let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = win2.emit("refresh-capture", ());
+            let _ = app_handle.emit_to("editor", "refresh-capture", &());
         });
     }
     Ok(())
@@ -2713,12 +3031,21 @@ fn create_thumbnail_window(app: &AppHandle) -> Result<tauri::WebviewWindow, Stri
 }
 
 fn place_thumbnail(app: &AppHandle, win: &tauri::WebviewWindow) {
-    if let Some((m_x, m_y, m_w, m_h)) = cursor_or_primary_monitor_logical_rect(app) {
-        if let Some((win_w, win_h)) = logical_outer_size(win) {
+    if let Some(m) = cursor_or_primary_monitor_bounds(app) {
+        let (win_w, win_h) = window_placement_size(win, m.scale, (300.0, 210.0));
+        #[cfg(target_os = "macos")]
+        {
             let margin = 24.0;
-            let x = m_x + m_w - win_w - margin;
-            let y = m_y + m_h - win_h - margin;
+            let x = m.x + m.w - win_w - margin;
+            let y = m.y + m.h - win_h - margin;
             let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let margin = 24.0 * m.scale;
+            let x = m.x + m.w - win_w - margin;
+            let y = m.y + m.h - win_h - margin;
+            let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
         }
     }
 }

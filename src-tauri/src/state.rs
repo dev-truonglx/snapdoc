@@ -7,11 +7,14 @@ use std::sync::Mutex;
 /// Đây là hệ NHẤT QUÁN giữa các màn khác scale (khác với physical pixel của
 /// `Monitor::position()` = points × scale-riêng → không nhất quán).
 /// Toạ độ con trỏ đọc qua CGEvent cũng ở chính hệ points này.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct MonitorSnap {
-    /// CGDirectDisplayID — để khớp đúng NSScreen khi đặt frame overlay.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// CGDirectDisplayID trên macOS hoặc HMONITOR trên Windows (runtime handle).
     pub id: u32,
+    /// Tên thiết bị hiển thị bền vững (vd "\\\\.\\DISPLAY1" trên Windows, tên màn hình trên macOS/Linux).
+    pub name: String,
+    /// Cờ xác định có phải màn hình chính (Primary Display) hay không.
+    pub is_primary: bool,
     pub x: f64,
     pub y: f64,
     pub w: f64,

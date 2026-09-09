@@ -1,10 +1,12 @@
 import type { Segment } from "./segments";
-import type { VideoOverlayItem, VideoCrop } from "./types";
+import type { VideoOverlayItem, ZoomSegment, VideoCrop } from "./types";
 
 export interface VideoSessionSnapshot {
   segments: Segment[];
   removeAudio: boolean;
   overlays: VideoOverlayItem[];
+  zoomSegments?: ZoomSegment[];
+  autoZoomEnabled?: boolean;
   crop?: VideoCrop | null;
 }
 
@@ -12,11 +14,14 @@ export interface VideoSessionState {
   segments: Segment[];
   removeAudio: boolean;
   overlays: VideoOverlayItem[];
+  zoomSegments?: ZoomSegment[];
+  autoZoomEnabled?: boolean;
   crop?: VideoCrop | null;
   past: VideoSessionSnapshot[];
   future: VideoSessionSnapshot[];
   selectedSegmentId: string | null;
   selectedOverlayId: string | null;
+  selectedZoomId?: string | null;
   playheadMs?: number;
 }
 
@@ -68,6 +73,7 @@ export function getVideoSession(key: string, currentDurationMs: number): VideoSe
  * Kiểm tra xem phiên sửa video có thay đổi (so với video gốc ban đầu) hay không.
  */
 export function hasVideoSessionChanges(state: VideoSessionState, originalDurationMs?: number): boolean {
+  if (state.zoomSegments && state.zoomSegments.length > 0) return true;
   if (state.overlays && state.overlays.length > 0) return true;
   if (state.removeAudio) return true;
   if (state.past && state.past.length > 0) return true;

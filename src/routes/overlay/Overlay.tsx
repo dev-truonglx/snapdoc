@@ -36,6 +36,7 @@ interface Sel {
 }
 
 interface OverlaySession {
+  targetIdx?: number;
   mode: string;
   gen: number;
   record: boolean;
@@ -169,6 +170,9 @@ export default function Overlay() {
 
   useEffect(() => {
     const unlisten = listen<OverlaySession>("overlay-session-start", (e) => {
+      if (e.payload.targetIdx !== undefined && e.payload.targetIdx !== MY_IDX) {
+        return;
+      }
       setSession(e.payload);
     });
     return () => {
@@ -618,6 +622,8 @@ function RecordRegionSelect() {
   const { url: frozenUrl, ready: frozenReady } = useFrozenScreen();
   const [phase, setPhase] = useState<RecPhase>(preset ? "adjusting" : "selecting");
   const [sel, setSel] = useState<Sel | null>(preset);
+  const prevSelRef = useRef<Sel | null>(preset);
+  const prevPhaseRef = useRef<RecPhase>(preset ? "adjusting" : "selecting");
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   // true khi con trỏ đang ở nền trống (ngoài khung + ngoài thanh nút) lúc
@@ -675,6 +681,8 @@ function RecordRegionSelect() {
         const info = pressInfoRef.current;
         const onUI = !!info && performance.now() - info.t < 600 && !info.onBackdrop;
         if (isOverBoxOrBar(sel, winW, winH, x, y) || onUI) return; // đang kéo di chuyển/resize khung, hoặc bấm nút toolbar
+        prevSelRef.current = sel;
+        prevPhaseRef.current = phase;
       }
       startRef.current = [x, y];
       setSel({ x, y, w: 0, h: 0 });
@@ -688,12 +696,17 @@ function RecordRegionSelect() {
       const r = rectFrom(s[0], s[1], x, y);
       if (r.w >= REC_MIN_SEL && r.h >= REC_MIN_SEL) {
         setSel(r);
+        prevSelRef.current = r;
+        prevPhaseRef.current = "adjusting";
         setPhase("adjusting");
         getCurrentWindow().setFocus().catch(() => {});
+      } else if (prevSelRef.current) {
+        // Kéo quá nhỏ khi đang "adjusting" (vd: click nhầm ra ngoài nền) → khôi phục khung cũ
+        setSel(prevSelRef.current);
+        setPhase(prevPhaseRef.current);
       } else if (phase === "selecting") {
         setSel(null);
       }
-      // Kéo quá nhỏ khi đang "adjusting" (vd: click nhầm) → giữ nguyên khung cũ.
     },
   );
 
