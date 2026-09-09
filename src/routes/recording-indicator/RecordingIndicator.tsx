@@ -83,10 +83,11 @@ export default function RecordingIndicator() {
   const stop = () => {
     if (stopping) return;
     setStopping(true);
-    ipc.stopRecording().catch((e) => {
-      alert(String(e));
-      setStopping(false);
-    });
+    ipc.stopRecording()
+      .catch((e) => {
+        alert(String(e));
+        setStopping(false);
+      });
   };
 
   const timeLabel = paused ? t("recordingIndicator.paused") : fmt(elapsedMs);

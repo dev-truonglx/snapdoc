@@ -85,6 +85,7 @@ export interface VideoTrimmerProps {
   frameCaptureMode?: "open-editor" | "in-place";
   sourceHistoryId?: string;
   onFlash?: (msg: string) => void;
+  saveProgress?: number | null;
 }
 
 
@@ -218,6 +219,7 @@ export default function VideoTrimmer({
   durationMs,
   initialThumbUrl,
   busy,
+  saveProgress,
   onSave,
   onSaveAs,
   onStateChange,
@@ -2128,10 +2130,14 @@ export default function VideoTrimmer({
           <button
             style={saveOverwriteBtn}
             disabled={!canSave}
-            onClick={onSave}
+            onClick={() => onSave()}
             title={t("videoTrimmer.overwriteOriginal")}
           >
-            {busy ? t("videoTrimmer.saving") : t("videoTrimmer.overwrite")}
+            {busy
+              ? saveProgress != null
+                ? `${Math.round(saveProgress * 100)}%`
+                : t("videoTrimmer.saving")
+              : t("videoTrimmer.overwrite")}
           </button>
           {/* "Lưu thành video mới": split button — bấm chính auto lưu vào
               `saveDir` (tên mặc định `Recording_<timestamp>.mp4`, giống
@@ -2145,7 +2151,11 @@ export default function VideoTrimmer({
               onClick={() => onSaveAs()}
               title={t("videoTrimmer.saveAsNew")}
             >
-              {t("videoTrimmer.saveAsNewButton")}
+              {busy
+                ? saveProgress != null
+                  ? `${Math.round(saveProgress * 100)}%`
+                  : t("videoTrimmer.saving")
+                : t("videoTrimmer.saveAsNewButton")}
             </button>
             <button
               style={saveAsCaretBtn}
