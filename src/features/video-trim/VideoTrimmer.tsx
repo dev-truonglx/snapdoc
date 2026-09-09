@@ -6,7 +6,6 @@ import {
   type Segment,
   MIN_SEG_MS,
   initialSegments,
-  segmentPlayMs,
   totalTimelineMs,
   timelineMsToSource,
   sourceMsToTimeline,
@@ -119,11 +118,9 @@ const BOUNDARY_EPS_MS = 20;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 32;
 const ZOOM_STEP = 1.5;
-/** ~1 thumbnail mỗi 100px bề rộng khung nhìn — vừa đủ dày để trông như 1
- * filmstrip liên tục mà không cần quá nhiều lệnh ffmpeg mỗi lần fetch. */
-const THUMB_TARGET_PX = 100;
-const MIN_THUMBS_PER_SEG = 2;
-const MAX_THUMBS = 60;
+/** ~1 thumbnail mỗi 78px bề rộng khung nhìn — chuẩn tỉ lệ ~16:9 với FILMSTRIP_BAND_H (44px)
+ * tạo lưới đồng nhất (Uniform Grid) toàn dải timeline, không bị méo/nở frame. */
+const THUMB_TARGET_PX = 78;
 /** Đệm thêm 2 bên khung đang xem khi tính mốc cần fetch — đỡ giật/trắng khi
  * cuộn nhẹ (mốc đã fetch sẵn ngay ngoài rìa khung nhìn). */
 const VISIBLE_PADDING_RATIO = 0.25;
@@ -802,6 +799,22 @@ export default function VideoTrimmer({
   const [zoom, setZoom] = useState(1);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [containerWidth, setContainerWidth] = useState(0);
+
+  const total = useMemo(() => totalTimelineMs(effectiveSegments), [effectiveSegments]);
+
+  // Chiều rộng pixel thực tế của nội dung timeline:
+  // - Khi mới mở (total === durationMs) & zoom === 1: trackWidthPx = containerWidth (lấp vừa vặn 100% timeline).
+  // - Khi thêm/sửa Speed Zone (ví dụ speed 2x khiến total < durationMs): giữ nguyên thang đo thời gian (px/ms),
+  //   không cố kéo dãn đầy containerWidth. Video có thể ngắn hơn container (để lộ khoảng trống bên phải),
+  //   giúp toàn bộ mốc thời gian, frame ảnh, playhead và các vùng trước đó đứng yên cố định không bị dịch chuyển.
+  // - Khi người dùng zoom: trackWidthPx co dãn theo hệ số zoom.
+  const trackWidthPx = useMemo(() => {
+    if (containerWidth <= 0) return 0;
+    if (durationMs > 0 && total > 0) {
+      return Math.round((total / durationMs) * containerWidth * zoom);
+    }
+    return Math.round(containerWidth * zoom);
+  }, [containerWidth, total, durationMs, zoom]);
   const [frames, setFrames] = useState<Map<number, string>>(() => {
     if (initialThumbUrl) {
       return new Map([[0, initialThumbUrl]]);
@@ -1002,17 +1015,13 @@ export default function VideoTrimmer({
     };
   }, [effectiveSegments]);
 
-  // Tự động cuộn timeline theo playhead khi đang phát video (zoom > 1)
+  // Tự động cuộn timeline theo playhead khi đang phát video (khi timeline dài hơn khung nhìn)
   // để vạch phát luôn nằm trong khung nhìn (kiểu CapCut/Premiere).
   useEffect(() => {
-    if (!isPlaying || zoom <= 1 || containerWidth <= 0 || draggingRef.current) return;
+    if (!isPlaying || trackWidthPx <= containerWidth || containerWidth <= 0 || draggingRef.current) return;
     const el = scrollRef.current;
-    if (!el) return;
+    if (!el || total <= 0 || trackWidthPx <= 0) return;
 
-    const total = totalTimelineMs(effectiveSegments);
-    if (total <= 0) return;
-
-    const trackWidthPx = containerWidth * zoom;
     const playheadX = (playheadMs / total) * trackWidthPx;
     const currentScroll = el.scrollLeft;
 
@@ -1027,7 +1036,7 @@ export default function VideoTrimmer({
       el.scrollLeft = targetScroll;
       setScrollLeft(el.scrollLeft);
     }
-  }, [playheadMs, isPlaying, zoom, containerWidth, segments]);
+  }, [playheadMs, isPlaying, trackWidthPx, containerWidth, total]);
 
   // Phím tắt Undo/Redo/Xoá/Chia/Cắt đầu-cuối — handler ghi vào ref MỖI render
   // (luôn thấy `segments`/`past`/`future`/`selectedSegmentId` mới nhất, không
@@ -1132,16 +1141,15 @@ export default function VideoTrimmer({
     return () => ro.disconnect();
   }, []);
 
-  // Danh sách tile filmstrip cần hiển thị/fetch cho khung đang xem — tính
-  // theo timeline-ms (zoom/cuộn) rồi quy đổi phần giao với TỪNG segment sang
-  // source-ms qua `srcStart` (segment chưa từng bị chia cắt nội bộ nên map
-  // tuyến tính là đủ). CHỈ phụ thuộc zoom/cuộn/kích thước khung/segments —
-  // KHÔNG phụ thuộc `playheadMs` (đổi liên tục lúc phát) nên giữ nguyên tham
-  // chiếu giữa các lần render do phát video gây ra, tránh debounce fetch bên
-  // dưới không bao giờ "lắng" được.
+  // Danh sách tile filmstrip hiển thị theo Lưới Đồng Nhất (Uniform Grid) — Phương án 2:
+  // - Mỗi tile có bề rộng cố định đồng nhất (~78px, chuẩn tỉ lệ 16:9 với FILMSTRIP_BAND_H = 44px).
+  // - Toàn bộ timeline được chia đều thành các tile có cùng kích thước, tuyệt đối không bị
+  //   co kéo, phình to hay co giật khi đổi tốc độ hoặc cắt ghép.
+  // - Mỗi tile ở mốc timeline tlMs sẽ lấy khung hình nguồn (srcMs) tương ứng qua `timelineMsToSource`.
+  // - Nhờ đó các đoạn nhanh (speed > 1) sẽ lướt qua nhiều frame hơn trên ít tile hơn;
+  //   các đoạn chậm (speed < 1) sẽ dàn đều trên nhiều tile hơn;
+  //   và khung hình trên filmstrip luôn khớp 100% với Playhead & khung video preview.
   const visibleTiles = useMemo(() => {
-    const trackWidthPx = containerWidth * zoom;
-    const total = totalTimelineMs(effectiveSegments);
     if (containerWidth <= 0 || trackWidthPx <= 0 || total <= 0) {
       return [] as { key: string; srcMs: number; leftPct: number; widthPct: number }[];
     }
@@ -1151,44 +1159,38 @@ export default function VideoTrimmer({
     const winStart = clamp(visStart - pad, 0, total);
     const winEnd = clamp(visEnd + pad, 0, total);
 
+    const totalTiles = Math.max(1, Math.round(trackWidthPx / THUMB_TARGET_PX));
+    const tileWidthPct = 100 / totalTiles;
+
+    const winStartTile = Math.max(0, Math.floor((winStart / total) * totalTiles));
+    const winEndTile = Math.min(totalTiles - 1, Math.ceil((winEnd / total) * totalTiles));
+    if (winEndTile < winStartTile) {
+      return [] as { key: string; srcMs: number; leftPct: number; widthPct: number }[];
+    }
+
     const tiles: { key: string; srcMs: number; leftPct: number; widthPct: number }[] = [];
-    let acc = 0;
-    for (const seg of effectiveSegments) {
-      const segTlStart = acc;
-      const playLen = segmentPlayMs(seg);
-      acc += playLen;
-      const segTlEnd = acc;
-
-      const iStart = Math.max(segTlStart, winStart);
-      const iEnd = Math.min(segTlEnd, winEnd);
-      if (iEnd <= iStart) continue;
-
-      const iPx = ((iEnd - iStart) / total) * trackWidthPx;
-      const count = clamp(Math.ceil(iPx / THUMB_TARGET_PX), MIN_THUMBS_PER_SEG, MAX_THUMBS);
-      const speed = seg.speed != null && seg.speed > 0 ? seg.speed : 1.0;
-      for (let i = 0; i < count; i++) {
-        const tlMs = count === 1 ? iStart : iStart + ((iEnd - iStart) * i) / (count - 1);
-        const rightMs = i < count - 1 ? iStart + ((iEnd - iStart) * (i + 1)) / (count - 1) : iEnd;
-        const offsetPlay = tlMs - segTlStart;
-        const srcMs = clamp(seg.srcStart + Math.round(offsetPlay * speed), seg.srcStart, seg.srcEnd);
-        tiles.push({
-          key: `${seg.id}-${i}`,
-          srcMs: Math.round(srcMs / FRAME_ROUND_MS) * FRAME_ROUND_MS,
-          leftPct: (tlMs / total) * 100,
-          widthPct: Math.max(0, ((rightMs - tlMs) / total) * 100),
-        });
-      }
+    for (let k = winStartTile; k <= winEndTile; k++) {
+      const leftPct = k * tileWidthPct;
+      const widthPct = tileWidthPct;
+      // Lấy mốc timeline tại tâm của tile
+      const midTlMs = ((k + 0.5) / totalTiles) * total;
+      const pos = timelineMsToSource(effectiveSegments, midTlMs);
+      const srcMs = pos ? pos.srcMs : 0;
+      tiles.push({
+        key: `tile-${k}`,
+        srcMs: Math.round(srcMs / FRAME_ROUND_MS) * FRAME_ROUND_MS,
+        leftPct,
+        widthPct,
+      });
     }
     return tiles;
-  }, [effectiveSegments, containerWidth, zoom, scrollLeft]);
+  }, [effectiveSegments, containerWidth, trackWidthPx, total, scrollLeft]);
 
   // Mốc thời gian trên ruler — bước nhảy tự đổi theo zoom (xem
   // `NICE_TICK_INTERVALS_MS`/`MIN_TICK_PX`) để không bao giờ dày đặc/rối mắt
   // hay quá thưa. KHÔNG phụ thuộc `scrollLeft` (khác `visibleTiles`) — chỉ
   // ~vài chục mốc cho toàn timeline nên render hết luôn, không cần cửa sổ nhìn.
   const timeTicks = useMemo(() => {
-    const trackWidthPx = containerWidth * zoom;
-    const total = totalTimelineMs(effectiveSegments);
     if (trackWidthPx <= 0 || total <= 0) return [] as { ms: number; leftPct: number }[];
 
     let intervalMs = NICE_TICK_INTERVALS_MS[NICE_TICK_INTERVALS_MS.length - 1];
@@ -1203,7 +1205,7 @@ export default function VideoTrimmer({
       ticks.push({ ms: t, leftPct: (t / total) * 100 });
     }
     return ticks;
-  }, [effectiveSegments, containerWidth, zoom]);
+  }, [trackWidthPx, total]);
 
   const runFetch = (missing: number[]) => {
     if (fetchInFlightRef.current) {
@@ -1578,8 +1580,7 @@ export default function VideoTrimmer({
 
   const posToTimelineMs = (clientX: number): number => {
     const rect = trackRef.current?.getBoundingClientRect();
-    const total = totalTimelineMs(effectiveSegments);
-    if (!rect || rect.width === 0) return 0;
+    if (!rect || rect.width === 0 || total <= 0) return 0;
     const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
     return ratio * total;
   };
@@ -1587,11 +1588,9 @@ export default function VideoTrimmer({
   /** Hút `ms` vào ranh giới đoạn gần nhất (đầu/cuối timeline hoặc điểm nối 2
    * đoạn) nếu trong bán kính `SNAP_PX` — giúp kéo/chia trúng đúng ranh giới
    * đã có mà không cần zoom cực sâu để nhắm bằng tay. Bán kính tính theo px
-   * MÀN HÌNH nên quy đổi qua bề rộng track thực tế (`containerWidth * zoom`)
+   * MÀN HÌNH nên quy đổi qua bề rộng track thực tế (`trackWidthPx`)
    * để không đổi cảm giác bắt dính giữa các mức zoom khác nhau. */
   const snapTimelineMs = (ms: number): number => {
-    const trackWidthPx = containerWidth * zoom;
-    const total = totalTimelineMs(effectiveSegments);
     if (trackWidthPx <= 0 || total <= 0) return ms;
     const tolMs = (SNAP_PX / trackWidthPx) * total;
     let best = ms;
@@ -1919,7 +1918,6 @@ export default function VideoTrimmer({
     seekTo(0);
   };
 
-  const total = totalTimelineMs(effectiveSegments);
   // useMemo (không tính thẳng mỗi render như trước) — tham chiếu ổn định
   // giữa các lần render KHÔNG đổi `effectiveSegments` (phát video/hover-scrub/zoom đổi
   // liên tục) để effect báo `onStateChange` bên dưới không bắn dồn dập.
@@ -2691,15 +2689,14 @@ export default function VideoTrimmer({
             (speedRegions.length > 0 ? SPEED_TRACK_H : 0) +
             RULER_H +
             TRACK_H,
-          overflowX: zoom > 1 ? "auto" : "hidden",
+          overflowX: trackWidthPx > containerWidth ? "auto" : "hidden",
         }}
         onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
       >
-        {/* Bọc chung ruler + track theo đúng 1 chiều rộng (zoom) — cùng cuộn
-            với nhau vì là con trực tiếp của `trackScroll`, không cần đồng bộ
-            scrollLeft riêng cho ruler. position: "relative" để con trỏ (playhead)
-            tràn dọc toàn bộ chiều cao của tất cả các track. */}
-        <div style={{ width: `${zoom * 100}%`, position: "relative" }}>
+        {/* Bọc chung ruler + track theo đúng chiều rộng thực tế (trackWidthPx) —
+            không cố kéo dãn lấp đầy container khi thêm speed x2, giữ nguyên thang đo
+            thời gian để khung thời gian timeline đứng yên không bị dịch chuyển. */}
+        <div style={{ width: trackWidthPx > 0 ? `${trackWidthPx}px` : `${zoom * 100}%`, position: "relative" }}>
           {/* Track hiệu ứng (Khung vẽ / Che mờ) */}
           <OverlayTimelineTrack
             overlays={overlays}
@@ -2799,7 +2796,7 @@ export default function VideoTrimmer({
             {visibleTiles.map(({ key, srcMs, leftPct, widthPct }) => {
               const url = nearestFrameUrl(srcMs);
               return (
-                <div key={key} style={{ ...filmstripTile, left: `${leftPct}%`, width: `${widthPct}%` }}>
+                <div key={key} style={{ ...filmstripTile, left: `${leftPct}%`, width: `calc(${widthPct}% + 0.5px)` }}>
                   {url ? (
                     <img src={url} style={filmstripImg} draggable={false} alt="" />
                   ) : (
@@ -3382,6 +3379,7 @@ const trackScroll: React.CSSProperties = {
   overflowY: "hidden",
   borderRadius: 8,
   flexShrink: 0,
+  background: "rgba(0, 0, 0, 0.25)",
 };
 
 /** Lớp filmstrip nằm dưới cùng trong `track` — `pointerEvents:none` để không
@@ -3406,6 +3404,8 @@ const filmstripTile: React.CSSProperties = {
   bottom: 0,
   overflow: "hidden",
   background: "rgba(255,255,255,0.04)",
+  boxSizing: "border-box",
+  borderRight: "1px solid rgba(0,0,0,0.35)",
 };
 
 const filmstripImg: React.CSSProperties = {
