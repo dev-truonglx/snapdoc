@@ -6,6 +6,7 @@ import {
   type Segment,
   MIN_SEG_MS,
   initialSegments,
+  segmentPlayMs,
   totalTimelineMs,
   timelineMsToSource,
   sourceMsToTimeline,
@@ -963,24 +964,25 @@ export default function VideoTrimmer({
     }
 
     const onTime = () => {
-      let seg = effectiveSegments[currentSegIndexRef.current];
-      if (seg && v.currentTime * 1000 >= seg.srcEnd - BOUNDARY_EPS_MS) {
-        const next = effectiveSegments[currentSegIndexRef.current + 1];
-        if (next) {
-          currentSegIndexRef.current += 1;
-          v.currentTime = next.srcStart / 1000;
-          seg = next;
-        } else {
-          v.pause();
+      const curSrcMs = v.currentTime * 1000;
+      let idx = effectiveSegments.findIndex((s) => curSrcMs >= s.srcStart && curSrcMs <= s.srcEnd);
+      if (idx < 0 && effectiveSegments.length > 0) {
+        idx = Math.max(0, effectiveSegments.findIndex((s) => curSrcMs <= s.srcEnd));
+      }
+      if (idx >= 0) {
+        currentSegIndexRef.current = idx;
+        const seg = effectiveSegments[idx];
+        if (seg) {
+          const targetRate = seg.speed != null && seg.speed > 0 ? seg.speed : 1.0;
+          if (Math.abs(v.playbackRate - targetRate) > 0.01) {
+            v.playbackRate = targetRate;
+          }
         }
       }
-      if (seg) {
-        const targetRate = seg.speed != null && seg.speed > 0 ? seg.speed : 1.0;
-        if (Math.abs(v.playbackRate - targetRate) > 0.01) {
-          v.playbackRate = targetRate;
-        }
+      const tlMs = sourceMsToTimeline(effectiveSegments, curSrcMs);
+      if (tlMs != null) {
+        setPlayheadMs(tlMs);
       }
-      setPlayheadMs(sourceMsToTimeline(effectiveSegments, v.currentTime * 1000) ?? 0);
     };
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
@@ -1007,7 +1009,7 @@ export default function VideoTrimmer({
     const el = scrollRef.current;
     if (!el) return;
 
-    const total = totalTimelineMs(segments);
+    const total = totalTimelineMs(effectiveSegments);
     if (total <= 0) return;
 
     const trackWidthPx = containerWidth * zoom;
@@ -1139,7 +1141,7 @@ export default function VideoTrimmer({
   // dưới không bao giờ "lắng" được.
   const visibleTiles = useMemo(() => {
     const trackWidthPx = containerWidth * zoom;
-    const total = totalTimelineMs(segments);
+    const total = totalTimelineMs(effectiveSegments);
     if (containerWidth <= 0 || trackWidthPx <= 0 || total <= 0) {
       return [] as { key: string; srcMs: number; leftPct: number; widthPct: number }[];
     }
@@ -1151,9 +1153,10 @@ export default function VideoTrimmer({
 
     const tiles: { key: string; srcMs: number; leftPct: number; widthPct: number }[] = [];
     let acc = 0;
-    for (const seg of segments) {
+    for (const seg of effectiveSegments) {
       const segTlStart = acc;
-      acc += seg.srcEnd - seg.srcStart;
+      const playLen = segmentPlayMs(seg);
+      acc += playLen;
       const segTlEnd = acc;
 
       const iStart = Math.max(segTlStart, winStart);
@@ -1162,10 +1165,12 @@ export default function VideoTrimmer({
 
       const iPx = ((iEnd - iStart) / total) * trackWidthPx;
       const count = clamp(Math.ceil(iPx / THUMB_TARGET_PX), MIN_THUMBS_PER_SEG, MAX_THUMBS);
+      const speed = seg.speed != null && seg.speed > 0 ? seg.speed : 1.0;
       for (let i = 0; i < count; i++) {
         const tlMs = count === 1 ? iStart : iStart + ((iEnd - iStart) * i) / (count - 1);
         const rightMs = i < count - 1 ? iStart + ((iEnd - iStart) * (i + 1)) / (count - 1) : iEnd;
-        const srcMs = seg.srcStart + (tlMs - segTlStart);
+        const offsetPlay = tlMs - segTlStart;
+        const srcMs = clamp(seg.srcStart + Math.round(offsetPlay * speed), seg.srcStart, seg.srcEnd);
         tiles.push({
           key: `${seg.id}-${i}`,
           srcMs: Math.round(srcMs / FRAME_ROUND_MS) * FRAME_ROUND_MS,
@@ -1175,7 +1180,7 @@ export default function VideoTrimmer({
       }
     }
     return tiles;
-  }, [segments, containerWidth, zoom, scrollLeft]);
+  }, [effectiveSegments, containerWidth, zoom, scrollLeft]);
 
   // Mốc thời gian trên ruler — bước nhảy tự đổi theo zoom (xem
   // `NICE_TICK_INTERVALS_MS`/`MIN_TICK_PX`) để không bao giờ dày đặc/rối mắt
@@ -1183,7 +1188,7 @@ export default function VideoTrimmer({
   // ~vài chục mốc cho toàn timeline nên render hết luôn, không cần cửa sổ nhìn.
   const timeTicks = useMemo(() => {
     const trackWidthPx = containerWidth * zoom;
-    const total = totalTimelineMs(segments);
+    const total = totalTimelineMs(effectiveSegments);
     if (trackWidthPx <= 0 || total <= 0) return [] as { ms: number; leftPct: number }[];
 
     let intervalMs = NICE_TICK_INTERVALS_MS[NICE_TICK_INTERVALS_MS.length - 1];
@@ -1198,7 +1203,7 @@ export default function VideoTrimmer({
       ticks.push({ ms: t, leftPct: (t / total) * 100 });
     }
     return ticks;
-  }, [segments, containerWidth, zoom]);
+  }, [effectiveSegments, containerWidth, zoom]);
 
   const runFetch = (missing: number[]) => {
     if (fetchInFlightRef.current) {
@@ -1552,12 +1557,15 @@ export default function VideoTrimmer({
     const pos = timelineMsToSource(effectiveSegments, timelineMs);
     if (!v || !pos) return;
     v.currentTime = pos.srcMs / 1000;
-    currentSegIndexRef.current = pos.segIndex;
-    const curSeg = effectiveSegments[pos.segIndex];
-    if (curSeg) {
-      const targetRate = curSeg.speed != null && curSeg.speed > 0 ? curSeg.speed : 1.0;
-      if (Math.abs(v.playbackRate - targetRate) > 0.01) {
-        v.playbackRate = targetRate;
+    const effIdx = effectiveSegments.findIndex((s) => pos.srcMs >= s.srcStart && pos.srcMs <= s.srcEnd);
+    if (effIdx >= 0) {
+      currentSegIndexRef.current = effIdx;
+      const curSeg = effectiveSegments[effIdx];
+      if (curSeg) {
+        const targetRate = curSeg.speed != null && curSeg.speed > 0 ? curSeg.speed : 1.0;
+        if (Math.abs(v.playbackRate - targetRate) > 0.01) {
+          v.playbackRate = targetRate;
+        }
       }
     }
     setPlayheadMs(clamp(timelineMs, 0, totalTimelineMs(effectiveSegments)));
@@ -1619,7 +1627,7 @@ export default function VideoTrimmer({
   const onTrackMove = (e: React.PointerEvent) => {
     const rect = trackRef.current?.getBoundingClientRect();
     const ms = snapTimelineMs(posToTimelineMs(e.clientX));
-    const pos = timelineMsToSource(segments, ms);
+    const pos = timelineMsToSource(effectiveSegments, ms);
     setHoverInfo({ clientX: e.clientX, trackTop: rect?.top ?? 0, srcMs: pos?.srcMs ?? 0 });
     if (!draggingRef.current) return;
     seekTo(ms);
@@ -1753,7 +1761,8 @@ export default function VideoTrimmer({
           future: [],
         };
       } else {
-        const total = totalTimelineMs(st.segments);
+        const eff = buildEffectiveSegments(st.segments, st.speedRegions, st.globalSpeed);
+        const total = totalTimelineMs(eff);
         const segs = mouseTelemetry
           ? generateAutoZoomSegments(mouseTelemetry, total)
           : [];
@@ -1771,7 +1780,8 @@ export default function VideoTrimmer({
 
   const handleAddZoomAtPlayhead = (targetMs?: number) => {
     setEditState((st) => {
-      const total = totalTimelineMs(st.segments);
+      const eff = buildEffectiveSegments(st.segments, st.speedRegions, st.globalSpeed);
+      const total = totalTimelineMs(eff);
       const dur = 2500;
       const atMs = typeof targetMs === "number" ? targetMs : playheadMs;
       const start = clamp(atMs, 0, Math.max(0, total - MIN_ZOOM_DURATION_MS));

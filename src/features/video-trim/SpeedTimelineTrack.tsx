@@ -297,8 +297,8 @@ export default function SpeedTimelineTrack({
 
       {speedRegions.map((item) => {
         const isSelected = item.id === selectedId;
-        const startTlMs = sourceMsToTimeline(effectiveSegments, item.startTimeMs) ?? 0;
-        const endTlMs = sourceMsToTimeline(effectiveSegments, item.endTimeMs) ?? totalMs;
+        const startTlMs = sourceMsToTimeline(effectiveSegments, item.startTimeMs) ?? item.startTimeMs;
+        const endTlMs = sourceMsToTimeline(effectiveSegments, item.endTimeMs) ?? item.endTimeMs;
         const leftPct = pct(startTlMs);
         const widthPct = Math.max(0.8, pct(endTlMs) - leftPct);
 
