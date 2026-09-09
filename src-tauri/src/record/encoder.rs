@@ -531,13 +531,45 @@ pub struct ZoomSegment {
     pub easing: Option<String>,
 }
 
+/// Sinh chuỗi filter atempo cho FFmpeg (hỗ trợ speed từ 0.05 đến 16.0 bằng cách xâu chuỗi atempo=2.0 hoặc atempo=0.5).
+pub fn build_atempo_filter(speed: f64) -> String {
+    let mut s = if speed > 0.01 { speed } else { 1.0 };
+    let mut filters = Vec::new();
+    while s > 2.0001 {
+        filters.push("atempo=2.0".to_string());
+        s /= 2.0;
+    }
+    while s < 0.4999 {
+        filters.push("atempo=0.5".to_string());
+        s /= 0.5;
+    }
+    if (s - 1.0).abs() > 0.001 {
+        if (s - 2.0).abs() < 0.001 {
+            filters.push("atempo=2.0".to_string());
+        } else if (s - 0.5).abs() < 0.001 {
+            filters.push("atempo=0.5".to_string());
+        } else {
+            let formatted = format!("{:.4}", s);
+            let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+            filters.push(format!("atempo={trimmed}"));
+        }
+    }
+    if filters.is_empty() {
+        "anull".to_string()
+    } else {
+        filters.join(",")
+    }
+}
+
 pub fn build_overlay_filter_graph(
     overlays: &[VideoOverlay],
     image_overlays: &[&VideoOverlay],
     crop: Option<&VideoCrop>,
     zoom_segments: Option<&[ZoomSegment]>,
     video_size: Option<(u32, u32)>,
+    speed: Option<f64>,
 ) -> Option<String> {
+    let has_speed = speed.map(|s| (s - 1.0).abs() > 0.01).unwrap_or(false);
     let valid: Vec<&VideoOverlay> = overlays
         .iter()
         .filter(|o| o.rel_w > 0.001 && o.rel_h > 0.001 && o.end_time_ms > o.start_time_ms)
@@ -553,7 +585,19 @@ pub fn build_overlay_filter_graph(
     });
 
     if valid.is_empty() && image_overlays.is_empty() && !has_zooms {
-        return crop_filter.map(|cf| format!("[0:v]{cf}[outv]"));
+        if let Some(cf) = crop_filter {
+            if has_speed {
+                let sp = speed.unwrap();
+                return Some(format!("[0:v]{cf},setpts={:.4}*PTS[outv]", 1.0 / sp));
+            } else {
+                return Some(format!("[0:v]{cf}[outv]"));
+            }
+        } else if has_speed {
+            let sp = speed.unwrap();
+            return Some(format!("[0:v]setpts={:.4}*PTS[outv]", 1.0 / sp));
+        } else {
+            return None;
+        }
     }
 
     let mut fg = String::new();
@@ -561,7 +605,17 @@ pub fn build_overlay_filter_graph(
 
     if let Some(cf) = crop_filter {
         fg.push_str(&format!("[0:v]{cf}[v_cropped];"));
-        base_input = "v_cropped".to_string();
+        if has_speed {
+            let sp = speed.unwrap();
+            fg.push_str(&format!("[v_cropped]setpts={:.4}*PTS[v_speed];", 1.0 / sp));
+            base_input = "v_speed".to_string();
+        } else {
+            base_input = "v_cropped".to_string();
+        }
+    } else if has_speed {
+        let sp = speed.unwrap();
+        fg.push_str(&format!("[0:v]setpts={:.4}*PTS[v_speed];", 1.0 / sp));
+        base_input = "v_speed".to_string();
     } else {
         base_input = "0:v".to_string();
     }
@@ -763,7 +817,7 @@ pub fn copy_without_audio(input_path: &Path, output_path: &Path) -> Result<(), S
 
 pub fn trim(
     input_path: &Path,
-    keep_ranges_ms: &[(i64, i64)],
+    keep_ranges_ms: &[(i64, i64, f64)],
     output_path: &Path,
     remove_audio: bool,
     overlays: Option<&[VideoOverlay]>,
@@ -780,7 +834,14 @@ pub fn trim(
     let tmp_dir = std::env::temp_dir().join(format!("snapdoc-trim-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("Không tạo được thư mục tạm: {e}"))?;
 
-    let total_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum::<i64>().max(1);
+    let total_ms: i64 = keep_ranges_ms
+        .iter()
+        .map(|(s, e, sp)| {
+            let speed = if *sp > 0.01 { *sp } else { 1.0 };
+            (((*e - *s).max(0) as f64) / speed).round() as i64
+        })
+        .sum::<i64>()
+        .max(1);
     on_progress(0.0);
 
     let mut run = || -> Result<(), String> {
@@ -806,22 +867,31 @@ pub fn trim(
         }
 
         let img_refs: Vec<&VideoOverlay> = image_overlays.iter().map(|(_, o)| *o).collect();
+        let single_pass_speed = if keep_ranges_ms.len() == 1 && (keep_ranges_ms[0].2 - 1.0).abs() > 0.01 {
+            Some(keep_ranges_ms[0].2)
+        } else {
+            None
+        };
         let filter_graph = build_overlay_filter_graph(
             overlays.unwrap_or(&[]),
             &img_refs,
             crop,
             zoom_segments,
             video_size,
+            single_pass_speed,
         );
 
         // TỐI ƯU HOÁ: Nếu chỉ có 1 đoạn giữ lại (chiếm đa số các tác vụ cắt hoặc thêm overlay),
         // chạy Single-Pass: cắt thời lượng + áp dụng filter graph + encode trong 1 lệnh duy nhất!
         // Tránh hoàn toàn việc encode seg_0.mp4 rồi lại re-encode lần 2 khi có overlay.
         if keep_ranges_ms.len() == 1 {
-            let (start_ms, end_ms) = keep_ranges_ms[0];
+            let (start_ms, end_ms, speed) = keep_ranges_ms[0];
             let start_s = (start_ms as f64) / 1000.0;
             let dur_ms = (end_ms - start_ms).max(0);
             let dur_s = (dur_ms as f64) / 1000.0;
+            let has_speed = (speed - 1.0).abs() > 0.01;
+            let effective_speed = if speed > 0.01 { speed } else { 1.0 };
+            let seg_play_ms = ((dur_ms as f64) / effective_speed).round() as i64;
 
             let mut cmd = Command::new(&ffmpeg);
             cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
@@ -848,6 +918,9 @@ pub fn trim(
 
             if remove_audio {
                 cmd.arg("-an");
+            } else if has_speed {
+                let af = build_atempo_filter(speed);
+                cmd.args(["-map", "0:a?", "-af", &af, "-c:a", "aac", "-b:a", "160k"]);
             } else if start_ms > 0 {
                 // Tránh lệch sync âm thanh khi seek
                 cmd.args(["-map", "0:a?", "-c:a", "aac", "-b:a", "160k"]);
@@ -886,8 +959,8 @@ pub fn trim(
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     if let Some(v) = line.strip_prefix("out_time_us=") {
                         if let Ok(us) = v.trim().parse::<i64>() {
-                            let cur_ms = (us / 1000).clamp(0, dur_ms);
-                            on_progress((cur_ms as f64 / dur_ms.max(1) as f64).min(1.0));
+                            let cur_ms = (us / 1000).clamp(0, seg_play_ms);
+                            on_progress((cur_ms as f64 / seg_play_ms.max(1) as f64).min(1.0));
                         }
                     }
                 }
@@ -908,11 +981,14 @@ pub fn trim(
         // Trường hợp nhiều đoạn giữ lại (xoá đoạn ở giữa): encode từng đoạn với fast seeking
         let mut seg_paths = Vec::with_capacity(keep_ranges_ms.len());
         let mut done_ms: i64 = 0;
-        for (i, (start_ms, end_ms)) in keep_ranges_ms.iter().enumerate() {
+        for (i, (start_ms, end_ms, speed)) in keep_ranges_ms.iter().enumerate() {
             let seg_path = tmp_dir.join(format!("seg_{i}.mp4"));
             let start_s = (*start_ms as f64) / 1000.0;
             let dur_ms = (*end_ms - *start_ms).max(0);
             let dur_s = (dur_ms as f64) / 1000.0;
+            let has_speed = (*speed - 1.0).abs() > 0.01;
+            let effective_speed = if *speed > 0.01 { *speed } else { 1.0 };
+            let seg_play_ms = ((dur_ms as f64) / effective_speed).round() as i64;
 
             let mut cmd = Command::new(&ffmpeg);
             cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
@@ -922,9 +998,16 @@ pub fn trim(
             cmd.arg("-i").arg(input_path);
             cmd.args(["-t", &format!("{dur_s:.3}")]);
 
+            if has_speed {
+                cmd.args(["-vf", &format!("setpts={:.4}*PTS", 1.0 / speed)]);
+            }
+
             cmd.args(best_h264_encoder_args(&ffmpeg));
             if remove_audio {
                 cmd.arg("-an");
+            } else if has_speed {
+                let af = build_atempo_filter(*speed);
+                cmd.args(["-af", &af, "-c:a", "aac", "-b:a", "160k"]);
             } else {
                 cmd.args(["-c:a", "aac", "-b:a", "160k"]);
             }
@@ -958,8 +1041,8 @@ pub fn trim(
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     if let Some(v) = line.strip_prefix("out_time_us=") {
                         if let Ok(us) = v.trim().parse::<i64>() {
-                            let seg_ms = (us / 1000).clamp(0, dur_ms);
-                            on_progress(((seg_base_ms + seg_ms) as f64 / total_ms as f64).min(1.0));
+                            let cur_ms = (us / 1000).clamp(0, seg_play_ms);
+                            on_progress(((seg_base_ms + cur_ms) as f64 / total_ms as f64).min(1.0));
                         }
                     }
                 }
@@ -972,7 +1055,7 @@ pub fn trim(
             if !status.success() {
                 return Err(format!("ffmpeg cắt đoạn {i} thất bại: {status} — {stderr}"));
             }
-            done_ms += dur_ms;
+            done_ms += seg_play_ms;
             on_progress((done_ms as f64 / total_ms as f64).min(1.0));
             seg_paths.push(seg_path);
         }
@@ -1313,8 +1396,18 @@ mod tests {
         let mut last_progress: f64 = 0.0;
         // `remove_audio = false`: video test không có audio track, và test này
         // kiểm cú pháp ffmpeg của đường cắt, không kiểm nhánh bỏ audio.
-        trim(&src, &[(0, 1_500), (3_500, 5_000)], &out, false, None, None, |p| last_progress = p)
-            .expect("trim() thất bại — kiểm tra cú pháp ffmpeg");
+        trim(
+            &src,
+            &[(0, 1_500, 1.0), (3_500, 5_000, 1.0)],
+            &out,
+            false,
+            None,
+            None,
+            None,
+            None,
+            |p| last_progress = p,
+        )
+        .expect("trim() thất bại — kiểm tra cú pháp ffmpeg");
         assert!((last_progress - 1.0).abs() < 1e-9, "progress cuối phải là 1.0, thấy {last_progress}");
 
         let meta = std::fs::metadata(&out).expect("không đọc được file output");
@@ -1322,6 +1415,16 @@ mod tests {
         eprintln!("[test] đã cắt video -> {} ({} byte)", out.display(), meta.len());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_atempo_filter_chain() {
+        assert_eq!(build_atempo_filter(1.0), "anull");
+        assert_eq!(build_atempo_filter(2.0), "atempo=2.0");
+        assert_eq!(build_atempo_filter(4.0), "atempo=2.0,atempo=2.0");
+        assert_eq!(build_atempo_filter(0.5), "atempo=0.5");
+        assert_eq!(build_atempo_filter(0.25), "atempo=0.5,atempo=0.5");
+        assert_eq!(build_atempo_filter(1.5), "atempo=1.5");
     }
 }
 

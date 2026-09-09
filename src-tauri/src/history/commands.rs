@@ -586,7 +586,7 @@ fn list_items_with_draft_sync(app: &AppHandle) -> Result<Vec<String>, String> {
 fn trim_history_video_sync(
     app: &AppHandle,
     id: &str,
-    keep_ranges_ms: &[(i64, i64)],
+    keep_ranges_ms: &[(i64, i64, f64)],
     remove_audio: bool,
     output_path: Option<&str>,
     overlays: Option<&[crate::record::encoder::VideoOverlay]>,
@@ -619,8 +619,8 @@ fn trim_history_video_sync(
     let has_zoom = zoom_segments.map(|z| !z.is_empty()).unwrap_or(false);
     let has_crop = crop.is_some();
     let is_untrimmed = !has_crop && !has_zoom && !has_overlays && keep_ranges_ms.len() == 1 && {
-        let (s, e) = keep_ranges_ms[0];
-        s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
+        let (s, e, speed) = keep_ranges_ms[0];
+        (speed - 1.0).abs() < 0.01 && s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
     };
 
     if is_untrimmed {
@@ -664,7 +664,13 @@ fn trim_history_video_sync(
         let _ = std::fs::copy(&orig_telem, &new_telem);
     }
 
-    let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
+    let new_duration_ms: i64 = keep_ranges_ms
+        .iter()
+        .map(|(s, e, speed)| {
+            let sp = if *speed > 0.01 { *speed } else { 1.0 };
+            (((*e - *s).max(0) as f64) / sp).round() as i64
+        })
+        .sum();
     let file_size = std::fs::metadata(&new_path).ok().map(|m| m.len() as i64);
 
     let new_id = uuid::Uuid::new_v4().to_string();
@@ -723,7 +729,7 @@ fn trim_history_video_sync(
 fn overwrite_history_video_sync(
     app: &AppHandle,
     id: &str,
-    keep_ranges_ms: &[(i64, i64)],
+    keep_ranges_ms: &[(i64, i64, f64)],
     remove_audio: bool,
     overlays: Option<&[crate::record::encoder::VideoOverlay]>,
     zoom_segments: Option<&[crate::record::encoder::ZoomSegment]>,
@@ -740,8 +746,8 @@ fn overwrite_history_video_sync(
     let has_zoom = zoom_segments.map(|z| !z.is_empty()).unwrap_or(false);
     let has_crop = crop.is_some();
     let is_untrimmed = !has_crop && !has_zoom && !has_overlays && keep_ranges_ms.len() == 1 && {
-        let (s, e) = keep_ranges_ms[0];
-        s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
+        let (s, e, speed) = keep_ranges_ms[0];
+        (speed - 1.0).abs() < 0.01 && s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
     };
 
     // Đường dẫn file telemetry chuột (.mouse.json) nếu có
@@ -794,7 +800,13 @@ fn overwrite_history_video_sync(
         }
     }
 
-    let new_duration_ms: i64 = keep_ranges_ms.iter().map(|(s, e)| (e - s).max(0)).sum();
+    let new_duration_ms: i64 = keep_ranges_ms
+        .iter()
+        .map(|(s, e, speed)| {
+            let sp = if *speed > 0.01 { *speed } else { 1.0 };
+            (((*e - *s).max(0) as f64) / sp).round() as i64
+        })
+        .sum();
     let file_size = std::fs::metadata(asset_path).ok().map(|m| m.len() as i64);
     if let Err(e) = super::video_thumbnail::generate(asset_path, std::path::Path::new(&rec.thumb_path)) {
         eprintln!("[SnapDoc][history] Sinh lại thumbnail sau khi ghi đè thất bại: {e}");
@@ -1010,6 +1022,25 @@ pub async fn list_items_with_draft(app: AppHandle) -> Result<Vec<String>, String
         .map_err(|e| format!("Task join error: {e}"))?
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum RangeInput {
+    WithSpeed(f64, f64, f64),
+    Pair(f64, f64),
+}
+
+impl RangeInput {
+    pub fn to_segment(&self) -> (i64, i64, f64) {
+        match *self {
+            RangeInput::WithSpeed(s, e, sp) => {
+                let speed = if sp > 0.01 { sp } else { 1.0 };
+                (s.round() as i64, e.round() as i64, speed)
+            }
+            RangeInput::Pair(s, e) => (s.round() as i64, e.round() as i64, 1.0),
+        }
+    }
+}
+
 /// Cắt 1 video đã lưu trong Library — xem `trim_history_video_sync`.
 /// `spawn_blocking` bắt buộc: chạy ffmpeg re-encode + concat, có thể mất vài
 /// giây (cùng lý do `commands::stop_recording`).
@@ -1022,16 +1053,16 @@ pub async fn list_items_with_draft(app: AppHandle) -> Result<Vec<String>, String
 pub async fn trim_history_video(
     app: AppHandle,
     id: String,
-    ranges: Vec<(f64, f64)>,
+    ranges: Vec<RangeInput>,
     remove_audio: bool,
     output_path: Option<String>,
     overlays: Option<Vec<crate::record::encoder::VideoOverlay>>,
     zoom_segments: Option<Vec<crate::record::encoder::ZoomSegment>>,
     crop: Option<crate::record::encoder::VideoCrop>,
 ) -> Result<HistoryRecord, String> {
-    let int_ranges: Vec<(i64, i64)> = ranges
+    let int_ranges: Vec<(i64, i64, f64)> = ranges
         .into_iter()
-        .map(|(s, e)| (s.round() as i64, e.round() as i64))
+        .map(|r| r.to_segment())
         .collect();
     let app_for_blocking = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -1058,15 +1089,15 @@ pub async fn trim_history_video(
 pub async fn overwrite_history_video(
     app: AppHandle,
     id: String,
-    ranges: Vec<(f64, f64)>,
+    ranges: Vec<RangeInput>,
     remove_audio: bool,
     overlays: Option<Vec<crate::record::encoder::VideoOverlay>>,
     zoom_segments: Option<Vec<crate::record::encoder::ZoomSegment>>,
     crop: Option<crate::record::encoder::VideoCrop>,
 ) -> Result<HistoryRecord, String> {
-    let int_ranges: Vec<(i64, i64)> = ranges
+    let int_ranges: Vec<(i64, i64, f64)> = ranges
         .into_iter()
-        .map(|(s, e)| (s.round() as i64, e.round() as i64))
+        .map(|r| r.to_segment())
         .collect();
     tauri::async_runtime::spawn_blocking(move || {
         overwrite_history_video_sync(

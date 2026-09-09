@@ -1,5 +1,5 @@
 import type { Segment } from "./segments";
-import type { VideoOverlayItem, ZoomSegment, VideoCrop } from "./types";
+import type { VideoOverlayItem, ZoomSegment, VideoCrop, SpeedRegion } from "./types";
 
 export interface VideoSessionSnapshot {
   segments: Segment[];
@@ -8,6 +8,8 @@ export interface VideoSessionSnapshot {
   zoomSegments?: ZoomSegment[];
   autoZoomEnabled?: boolean;
   crop?: VideoCrop | null;
+  speedRegions?: SpeedRegion[];
+  globalSpeed?: number;
 }
 
 export interface VideoSessionState {
@@ -17,11 +19,14 @@ export interface VideoSessionState {
   zoomSegments?: ZoomSegment[];
   autoZoomEnabled?: boolean;
   crop?: VideoCrop | null;
+  speedRegions?: SpeedRegion[];
+  globalSpeed?: number;
   past: VideoSessionSnapshot[];
   future: VideoSessionSnapshot[];
   selectedSegmentId: string | null;
   selectedOverlayId: string | null;
   selectedZoomId?: string | null;
+  selectedSpeedRegionId?: string | null;
   playheadMs?: number;
 }
 
