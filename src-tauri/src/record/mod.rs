@@ -714,8 +714,13 @@ fn record_keystroke_rect(target: &crate::capture::mac_stream::RecordTarget) -> O
 
 #[cfg(target_os = "windows")]
 fn record_border_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
-    let (x, y, w, h, _) = record_target_rect(target)?;
-    Some((x, y, w, h))
+    match target {
+        crate::capture::windows_stream::RecordTarget::Region { .. } => None,
+        _ => {
+            let (x, y, w, h, _) = record_target_rect(target)?;
+            Some((x, y, w, h))
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -753,7 +758,7 @@ fn record_target_rect(target: &crate::capture::windows_stream::RecordTarget) -> 
                 .into_iter()
                 .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
             let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
-            Some((m.x().ok()? as f64 + *x * scale, m.y().ok()? as f64 + *y * scale, *w * scale, *h * scale, scale))
+            Some((m.x().ok()? as f64 + *x, m.y().ok()? as f64 + *y, *w, *h, scale))
         }
     }
 }

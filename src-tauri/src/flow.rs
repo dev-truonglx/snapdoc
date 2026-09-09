@@ -228,33 +228,57 @@ pub fn cancel_capture_countdown(app: &AppHandle) {
     let _ = app.emit("capture-countdown-cancel", ());
 }
 
+/// Cấu trúc lưu vùng quay gần nhất (persist trong settings.json)
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastRecordRegion {
+    pub display_id: u32,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub is_primary: Option<bool>,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
 /// Đọc vùng quay gần nhất đã lưu (persist trong settings.json, sống qua cả
-/// lần khởi động lại app — không chỉ trong 1 phiên) — (display_id, x, y, w, h)
+/// lần khởi động lại app — không chỉ trong 1 phiên)
 /// theo ĐÚNG hệ đơn vị của `MonitorSnap` (points trên macOS, physical px trên
 /// Windows/Linux), local theo màn hình (KHÔNG cộng offset `snap.x`/`snap.y`),
 /// giống hệt `rx/ry/rw/rh` mà `finalize_region` tính ra. `None` nếu chưa từng
 /// quay vùng chọn lần nào hoặc file settings hỏng.
-pub fn load_last_region(app: &AppHandle) -> Option<(u32, f64, f64, f64, f64)> {
+pub fn load_last_region(app: &AppHandle) -> Option<LastRecordRegion> {
     let config_dir = app.path().app_config_dir().ok()?;
     let settings = storage::settings::load(&config_dir);
     let v = settings.get("lastRecordRegion")?;
-    Some((
-        v.get("displayId")?.as_u64()? as u32,
-        v.get("x")?.as_f64()?,
-        v.get("y")?.as_f64()?,
-        v.get("w")?.as_f64()?,
-        v.get("h")?.as_f64()?,
-    ))
+    serde_json::from_value(v.clone()).ok()
 }
 
 /// Lưu lại vùng vừa dùng để quay — gọi mỗi khi 1 phiên quay vùng chọn bắt đầu
 /// thành công, để lần "Quay > Vùng chọn" tiếp theo có thể đề xuất dùng lại
 /// ngay (xem `run_record_picker`), không bắt user kéo chọn lại từ đầu.
-fn save_last_region(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h: f64) {
+fn save_last_region(
+    app: &AppHandle,
+    display_id: u32,
+    display_name: &str,
+    is_primary: bool,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+) {
     let Ok(config_dir) = app.path().app_config_dir() else { return };
     let mut settings = storage::settings::load(&config_dir);
     settings["lastRecordRegion"] = serde_json::json!({
-        "displayId": display_id, "x": x, "y": y, "w": w, "h": h,
+        "displayId": display_id,
+        "displayName": display_name,
+        "isPrimary": is_primary,
+        "x": x,
+        "y": y,
+        "w": w,
+        "h": h,
     });
     let _ = storage::settings::save(&config_dir, &settings);
 }
@@ -429,7 +453,7 @@ fn window_snap_and_rect(
     if rw < 1.0 || rh < 1.0 {
         return None;
     }
-    Some((idx, *snap, rx, ry, rw, rh))
+    Some((idx, snap.clone(), rx, ry, rw, rh))
 }
 
 /// macOS: chụp lại "cửa sổ sản phẩm nào đang thật sự hiển thị" NGAY LÚC mở
@@ -655,7 +679,7 @@ fn overlay_snap(app: &AppHandle, win: &WebviewWindow) -> Option<MonitorSnap> {
     let idx = win.label().strip_prefix("overlay-")?.parse::<usize>().ok()?;
     let state = app.state::<AppState>();
     let g = state.overlay_monitors.lock().ok()?;
-    g.get(idx).copied()
+    g.get(idx).cloned()
 }
 
 pub fn run(app: &AppHandle, mode: &str, output: &str) {
@@ -853,7 +877,9 @@ pub fn finalize_region(
         windows::restore_regular_activation(app);
 
         let display_id = m.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
-        save_last_region(app, display_id, rx, ry, rw, rh);
+        let display_name = m.name().unwrap_or_default();
+        let is_primary = m.is_primary().unwrap_or(false);
+        save_last_region(app, display_id, &display_name, is_primary, rx, ry, rw, rh);
 
         crate::record::start_recording_region(app, display_id, rx, ry, rw, rh)?;
 

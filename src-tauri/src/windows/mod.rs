@@ -1524,14 +1524,72 @@ pub fn close_window_picker(app: &AppHandle) {
     }
 }
 
-/// Như `open_overlays`, kèm `record` (đang chọn phạm vi QUAY, không phải chụp
-/// ảnh — frontend `Overlay.tsx` dựa vào đây để hiện bước "chỉnh vùng + nút
-/// Bắt đầu" thay vì quay ngay khi thả chuột) và `preset` = vùng chọn lần quay
-/// gần nhất (`display_id`, x, y, w, h theo hệ đơn vị của `MonitorSnap`) để đề
-/// xuất lại — chỉ overlay đúng màn hình chứa `display_id` đó nhận preset qua
-/// query string (`px/py/pw/ph`, đã đổi sang CSS px cục bộ của màn đó); preset
-/// không khớp màn nào hiện tại (đổi cấu hình màn hình) hoặc vượt biên thì bị
-/// bỏ qua lặng lẽ, coi như chưa từng có.
+/// Tìm index màn hình khớp với preset vùng quay trước đó theo mức độ ưu tiên:
+/// 1. Khớp runtime ID (cùng phiên làm việc hoặc macOS CGDirectDisplayID).
+/// 2. Khớp theo tên thiết bị GDI bền vững (vd "\\.\DISPLAY1" trên Windows).
+/// 3. Khớp màn hình chính nếu trước đó ghi nhận ở màn hình chính.
+/// 4. Khớp fallback khi hệ thống chỉ có đúng 1 màn hình duy nhất.
+pub fn find_matching_monitor_index(
+    preset: &crate::flow::LastRecordRegion,
+    snaps: &[MonitorSnap],
+) -> Option<usize> {
+    if snaps.is_empty() {
+        return None;
+    }
+    // 1. Runtime ID
+    if let Some(idx) = snaps.iter().position(|s| s.id == preset.display_id) {
+        return Some(idx);
+    }
+    // 2. Persistent name
+    if let Some(ref name) = preset.display_name {
+        if !name.is_empty() {
+            if let Some(idx) = snaps.iter().position(|s| &s.name == name) {
+                return Some(idx);
+            }
+        }
+    }
+    // 3. Primary monitor
+    if preset.is_primary.unwrap_or(false) {
+        if let Some(idx) = snaps.iter().position(|s| s.is_primary) {
+            return Some(idx);
+        }
+    }
+    // 4. Fallback cho hệ thống 1 màn hình
+    if snaps.len() == 1 {
+        return Some(0);
+    }
+    None
+}
+
+/// Tính toạ độ CSS px và tự động clamp nếu độ phân giải/DPI scale thay đổi
+pub fn compute_preset_css_rect(
+    snap: &MonitorSnap,
+    preset: &crate::flow::LastRecordRegion,
+) -> Option<(f64, f64, f64, f64)> {
+    #[cfg(target_os = "windows")]
+    let scale_conv = snap.scale.max(0.0001);
+    #[cfg(not(target_os = "windows"))]
+    let scale_conv = 1.0_f64;
+
+    let snap_w_css = snap.w / scale_conv;
+    let snap_h_css = snap.h / scale_conv;
+
+    let cw = (preset.w / scale_conv).min(snap_w_css);
+    let ch = (preset.h / scale_conv).min(snap_h_css);
+    if cw < 20.0 || ch < 20.0 {
+        return None;
+    }
+
+    let mut cx = preset.x / scale_conv;
+    let mut cy = preset.y / scale_conv;
+
+    // Clamp để đảm bảo khung luôn nằm trọn vẹn trong màn hình
+    cx = cx.clamp(0.0, (snap_w_css - cw).max(0.0));
+    cy = cy.clamp(0.0, (snap_h_css - ch).max(0.0));
+
+    Some((cx, cy, cw, ch))
+}
+
 /// Query string cho 1 overlay ở monitor `snap` (idx `i`) — tách riêng khỏi
 /// `open_overlays_ex` để `prewarm_overlays`/`try_reuse_prewarmed_overlays`
 /// dùng chung, không lặp lại logic tính preset/scale.
@@ -1540,7 +1598,8 @@ fn build_overlay_query(
     i: usize,
     snap: &MonitorSnap,
     record: bool,
-    preset: Option<(u32, f64, f64, f64, f64)>,
+    preset: Option<&crate::flow::LastRecordRegion>,
+    matched_idx: Option<usize>,
     gen: u64,
 ) -> String {
     // scale: cần cho mode "quick" (Chụp nhanh) để canvas chú thích render
@@ -1551,17 +1610,9 @@ fn build_overlay_query(
     if record {
         query.push_str("&record=1");
     }
-    if let Some((preset_display, px, py, pw, ph)) = preset {
-        if preset_display == snap.id {
-            #[cfg(target_os = "windows")]
-            let scale_conv = snap.scale.max(0.0001);
-            #[cfg(not(target_os = "windows"))]
-            let scale_conv = 1.0_f64;
-            let (cx, cy, cw, ch) = (px / scale_conv, py / scale_conv, pw / scale_conv, ph / scale_conv);
-            let (snap_w_css, snap_h_css) = (snap.w / scale_conv, snap.h / scale_conv);
-            let fits = cw >= 1.0 && ch >= 1.0 && cx >= 0.0 && cy >= 0.0
-                && cx + cw <= snap_w_css + 0.5 && cy + ch <= snap_h_css + 0.5;
-            if fits {
+    if matched_idx == Some(i) {
+        if let Some(p) = preset {
+            if let Some((cx, cy, cw, ch)) = compute_preset_css_rect(snap, p) {
                 query.push_str(&format!("&px={cx}&py={cy}&pw={cw}&ph={ch}"));
             }
         }
@@ -1778,6 +1829,8 @@ pub fn prewarm_overlays(app: &AppHandle) {
         }
         let snap = MonitorSnap {
             id: m.id().unwrap_or(0),
+            name: m.name().unwrap_or_default(),
+            is_primary: m.is_primary().unwrap_or(false),
             x: m.x().unwrap_or(0) as f64,
             y: m.y().unwrap_or(0) as f64,
             w: m.width().unwrap_or(0) as f64,
@@ -1786,7 +1839,7 @@ pub fn prewarm_overlays(app: &AppHandle) {
         };
         // gen=0: cửa sổ pre-warm chưa thuộc phiên chụp thật nào — sẽ được
         // navigate() lại với gen thật trước khi dùng (xem `try_reuse_prewarmed_overlays`).
-        let query = build_overlay_query("region", i, &snap, false, None, 0);
+        let query = build_overlay_query("region", i, &snap, false, None, None, 0);
         let win = match build_overlay_window_with_retry(app, &label, &query) {
             Ok(w) => w,
             Err(e) => {
@@ -1834,9 +1887,10 @@ fn try_reuse_prewarmed_overlays(
     app: &AppHandle,
     mode: &str,
     record: bool,
-    preset: Option<(u32, f64, f64, f64, f64)>,
+    preset: Option<&crate::flow::LastRecordRegion>,
+    matched_idx: Option<usize>,
     snaps: &[MonitorSnap],
-    cursor_idx: usize,
+    focus_idx: usize,
     gen: u64,
 ) -> bool {
     let windows = app.webview_windows();
@@ -1864,21 +1918,25 @@ fn try_reuse_prewarmed_overlays(
 
     for (i, (snap, win)) in snaps.iter().zip(wins.iter()).enumerate() {
         position_overlay(app, win, snap);
-        let preset_json = preset.and_then(|(preset_display, px, py, pw, ph)| {
-            if preset_display == snap.id {
-                Some(serde_json::json!({
-                    "x": px, "y": py, "w": pw, "h": ph
-                }))
-            } else {
-                None
-            }
-        });
-        if let Err(e) = win.emit("overlay-session-start", serde_json::json!({
+        let preset_json = if matched_idx == Some(i) {
+            preset
+                .and_then(|p| compute_preset_css_rect(snap, p))
+                .map(|(cx, cy, cw, ch)| {
+                    serde_json::json!({
+                        "x": cx, "y": cy, "w": cw, "h": ch
+                    })
+                })
+        } else {
+            None
+        };
+        let payload = serde_json::json!({
+            "targetIdx": i,
             "mode": mode,
             "gen": gen,
             "record": record,
             "preset": preset_json,
-        })) {
+        });
+        if let Err(e) = app.emit_to(win.label(), "overlay-session-start", &payload) {
             eprintln!("[SnapDoc] Gửi session tới overlay-{i} thất bại: {e}");
             return false;
         }
@@ -1890,7 +1948,7 @@ fn try_reuse_prewarmed_overlays(
     wait_for_overlays_ready(app, gen, snaps.len());
     for (i, win) in wins.iter().enumerate() {
         reveal_overlay(app, win, &snaps[i]);
-        if i == cursor_idx {
+        if i == focus_idx {
             let _ = win.set_focus();
         }
     }
@@ -1915,7 +1973,7 @@ pub fn open_overlays_ex(
     app: &AppHandle,
     mode: &str,
     record: bool,
-    preset: Option<(u32, f64, f64, f64, f64)>,
+    preset: Option<crate::flow::LastRecordRegion>,
 ) -> Result<(), String> {
     // Chặn 2 lệnh mở overlay chạy CHỒNG NHAU (double-click nút chụp, hotkey
     // double-fire, ...) — nếu không, cả 2 luồng có thể cùng lúc chạy
@@ -1957,6 +2015,8 @@ pub fn open_overlays_ex(
         .iter()
         .map(|m| MonitorSnap {
             id: m.id().unwrap_or(0),
+            name: m.name().unwrap_or_default(),
+            is_primary: m.is_primary().unwrap_or(false),
             x: m.x().unwrap_or(0) as f64,
             y: m.y().unwrap_or(0) as f64,
             w: m.width().unwrap_or(0) as f64,
@@ -1964,6 +2024,27 @@ pub fn open_overlays_ex(
             scale: m.scale_factor().unwrap_or(1.0).max(1.0) as f64,
         })
         .collect();
+
+    // Kiểm tra xem cấu trúc màn hình (topology) có bị thay đổi (cắm/rút màn hình) so với pool prewarm trước đó không.
+    // Nếu topology thay đổi, TUYỆT ĐỐI không tái sử dụng cửa sổ cũ vì Windows đã dồn các cửa sổ về màn hình chính
+    // và làm lệch toạ độ native / DPI của WebView2.
+    let topology_changed = match app.state::<AppState>().overlay_monitors.lock() {
+        Ok(g) => {
+            if g.is_empty() || g.len() != snaps.len() {
+                true
+            } else {
+                g.iter().zip(snaps.iter()).any(|(old, new)| {
+                    old.id != new.id
+                        || (old.x - new.x).abs() > 0.5
+                        || (old.y - new.y).abs() > 0.5
+                        || (old.w - new.w).abs() > 0.5
+                        || (old.h - new.h).abs() > 0.5
+                        || (old.scale - new.scale).abs() > 0.01
+                })
+            }
+        }
+        Err(_) => true,
+    };
 
     if let Ok(mut g) = app.state::<AppState>().overlay_monitors.lock() {
         *g = snaps.clone();
@@ -1986,6 +2067,13 @@ pub fn open_overlays_ex(
         }
     };
 
+    // Khớp preset vùng quay cũ với màn hình tương ứng
+    let matched_preset_idx = preset
+        .as_ref()
+        .and_then(|p| find_matching_monitor_index(p, &snaps));
+    // Ưu tiên focus vào màn hình chứa khung preset nếu có
+    let focus_idx = matched_preset_idx.unwrap_or(cursor_idx);
+
     // Tính gen TRƯỚC khi mở overlay (không phải sau như trước): cần nhúng
     // vào query string ngay từ navigate()/build() đầu tiên để frontend echo
     // lại đúng giá trị khi báo "đã paint xong" (xem `wait_for_overlays_ready`).
@@ -1996,7 +2084,20 @@ pub fn open_overlays_ex(
         + 1;
 
     let t_reuse = std::time::Instant::now();
-    let reused = try_reuse_prewarmed_overlays(app, mode, record, preset, &snaps, cursor_idx, gen);
+    let reused = if topology_changed {
+        false
+    } else {
+        try_reuse_prewarmed_overlays(
+            app,
+            mode,
+            record,
+            preset.as_ref(),
+            matched_preset_idx,
+            &snaps,
+            focus_idx,
+            gen,
+        )
+    };
     eprintln!("[SnapDoc Timing] try_reuse_prewarmed_overlays: {:?}, reused={}", t_reuse.elapsed(), reused);
     if !reused {
         let t_build = std::time::Instant::now();
@@ -2004,7 +2105,15 @@ pub fn open_overlays_ex(
         let mut wins = Vec::with_capacity(snaps.len());
         for (i, snap) in snaps.iter().enumerate() {
             let label = format!("overlay-{i}");
-            let query = build_overlay_query(mode, i, snap, record, preset, gen);
+            let query = build_overlay_query(
+                mode,
+                i,
+                snap,
+                record,
+                preset.as_ref(),
+                matched_preset_idx,
+                gen,
+            );
             let win = build_overlay_window_with_retry(app, &label, &query)?;
 
             let record_self = crate::storage::settings::is_record_self(app);
@@ -2017,7 +2126,7 @@ pub fn open_overlays_ex(
         wait_for_overlays_ready(app, gen, snaps.len());
         for (i, win) in wins.iter().enumerate() {
             reveal_overlay(app, win, &snaps[i]);
-            if i == cursor_idx {
+            if i == focus_idx {
                 let _ = win.set_focus();
             }
         }
