@@ -473,15 +473,17 @@ export default function VideoTrimmer({
     const startFocusX = selectedZoom.focusX;
     const startFocusY = selectedZoom.focusY;
 
-    // Xác định tỉ lệ phóng to thực tế của camera tại thời điểm hiện tại
-    const cam = interpolateCamera(zoomSegments, playheadMs);
-    const effectiveScale = cam.scale > 1.05 ? cam.scale : (selectedZoom.scale || 1.5);
+    // Tỉ lệ scale hiển thị thực tế của khung camera trên màn hình (đo trực tiếp từ DOM bounding box)
+    const currentScale = cw > 0 ? wrapRect.width / cw : 1;
 
-    // Tỉ lệ scale thực tế: 1 đơn vị focusX tương ứng với (vidW * effectiveScale) pixels trên màn hình
-    const pxPerUnitX = Math.max(10, vidW * effectiveScale);
-    const pxPerUnitY = Math.max(10, vidH * effectiveScale);
+    // Tỉ lệ chuyển đổi chính xác 1:1 từ pixel chuột trên màn hình sang toạ độ focus [0..1]
+    const pxPerUnitX = Math.max(10, vidW * currentScale);
+    const pxPerUnitY = Math.max(10, vidH * currentScale);
 
-    const onMove = (ev: PointerEvent) => {
+    let pendingRaf: number | null = null;
+    let latestEv: PointerEvent | null = null;
+
+    const updatePosition = (ev: PointerEvent) => {
       const dx = ev.clientX - startClientX;
       const dy = ev.clientY - startClientY;
 
@@ -495,7 +497,22 @@ export default function VideoTrimmer({
       });
     };
 
+    const onMove = (ev: PointerEvent) => {
+      latestEv = ev;
+      if (pendingRaf === null) {
+        pendingRaf = requestAnimationFrame(() => {
+          pendingRaf = null;
+          if (latestEv) updatePosition(latestEv);
+        });
+      }
+    };
+
     const onUp = (ev: PointerEvent) => {
+      if (pendingRaf !== null) {
+        cancelAnimationFrame(pendingRaf);
+        pendingRaf = null;
+      }
+      updatePosition(ev);
       try {
         targetEl.releasePointerCapture(ev.pointerId);
       } catch {}
