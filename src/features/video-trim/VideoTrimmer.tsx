@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ipc } from "../../lib/ipc";
+import { ipc, type KeepRange } from "../../lib/ipc";
 import GifExportModal from "./GifExportModal";
 import {
   type Segment,
@@ -19,21 +19,28 @@ import {
   trimHead,
   trimTail,
   computeKeepRanges,
+  buildEffectiveSegments,
+  updateAllSegmentsSpeed,
 } from "./segments";
 import {
   type VideoOverlayItem,
   type VideoCrop,
   type ZoomSegment,
+  type SpeedRegion,
   renderOverlayToDataUrl,
   drawOverlaysOnCanvas,
   makeZoomSegmentUid,
+  makeSpeedRegionUid,
   MIN_ZOOM_DURATION_MS,
   ZOOM_SCALE_OPTIONS,
+  DEFAULT_SPEED_ZONE_DURATION_MS,
+  MIN_SPEED_ZONE_DURATION_MS,
 } from "./types";
 import VideoCanvasOverlay, { type VideoOverlayTool } from "./VideoCanvasOverlay";
 import VideoCropOverlay from "./VideoCropOverlay";
 import OverlayTimelineTrack from "./OverlayTimelineTrack";
 import ZoomTimelineTrack from "./ZoomTimelineTrack";
+import SpeedTimelineTrack from "./SpeedTimelineTrack";
 import {
   generateAutoZoomSegments,
   interpolateCamera,
@@ -71,7 +78,7 @@ export interface VideoTrimmerProps {
    * nội bộ, xem khai báo `canSave`). */
   onStateChange?: (state: {
     hasChanges: boolean;
-    keepRanges: [number, number][];
+    keepRanges: KeepRange[];
     removeAudio: boolean;
     overlays: VideoOverlayItem[];
     zoomSegments: ZoomSegment[];
@@ -111,11 +118,9 @@ const BOUNDARY_EPS_MS = 20;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 32;
 const ZOOM_STEP = 1.5;
-/** ~1 thumbnail mỗi 100px bề rộng khung nhìn — vừa đủ dày để trông như 1
- * filmstrip liên tục mà không cần quá nhiều lệnh ffmpeg mỗi lần fetch. */
-const THUMB_TARGET_PX = 100;
-const MIN_THUMBS_PER_SEG = 2;
-const MAX_THUMBS = 60;
+/** ~1 thumbnail mỗi 78px bề rộng khung nhìn — chuẩn tỉ lệ ~16:9 với FILMSTRIP_BAND_H (44px)
+ * tạo lưới đồng nhất (Uniform Grid) toàn dải timeline, không bị méo/nở frame. */
+const THUMB_TARGET_PX = 78;
 /** Đệm thêm 2 bên khung đang xem khi tính mốc cần fetch — đỡ giật/trắng khi
  * cuộn nhẹ (mốc đã fetch sẵn ngay ngoài rìa khung nhìn). */
 const VISIBLE_PADDING_RATIO = 0.25;
@@ -152,6 +157,8 @@ const TRACK_H = 60;
 const OVERLAY_TRACK_H = 24;
 /** Chiều cao track thu phóng / zoom focus theo chuột */
 const ZOOM_TRACK_H = 24;
+/** Chiều cao track vùng tốc độ (Speed Zone) */
+const SPEED_TRACK_H = 24;
 /** Khoảng cách nhỏ chèn giữa 2 đoạn giữ lại liền nhau (mỗi bên inset
  * `SEGMENT_GAP_PX / 2`) — để lộ nền track ở giữa, giúp ranh giới điểm cắt rõ
  * ràng hơn là chỉ dựa vào `borderRight` khi 2 khối chạm sát nhau. */
@@ -234,6 +241,9 @@ export default function VideoTrimmer({
   const scrollRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
+  /** RAF ID để throttle `onTrackMove` — chỉ xử lý 1 frame mỗi animation frame (~60fps),
+   * tránh render hàng trăm lần/giây khi trackpad macOS bắn ~250Hz pointer event. */
+  const trackMoveRafRef = useRef<number | null>(null);
   /** Đảm bảo chỉ 1 lần gọi `generateVideoFrames` chạy đồng thời — nếu 1 lần
    * debounce khác "muốn" fetch trong lúc batch trước còn chạy, chỉ ghi đè
    * `pendingMissingRef` (thay batch mới nhất) thay vì bắn thêm request chồng
@@ -253,7 +263,7 @@ export default function VideoTrimmer({
   // thay vì áp tuần tự — lỗi này đã tự bắt được khi test 2 cú redo liên tiếp.
   // Gộp vào 1 object + luôn dùng dạng updater `setEditState(st => ...)` thì
   // React đảm bảo áp lần lượt, mỗi lần tính trên đúng kết quả của lần trước.
-  /** 1 mốc lịch sử undo/redo — gộp CẢ `segments` LẪN `removeAudio`, `overlays` và `zoomSegments`
+  /** 1 mốc lịch sử undo/redo — gộp CẢ `segments` LẪN `removeAudio`, `overlays`, `zoomSegments`, `speedRegions` và `globalSpeed`
    * để Ctrl+Z hoàn tác đúng bất kể thao tác gần nhất là gì. */
   interface HistorySnapshot {
     segments: Segment[];
@@ -262,6 +272,8 @@ export default function VideoTrimmer({
     crop?: VideoCrop | null;
     zoomSegments: ZoomSegment[];
     autoZoomEnabled: boolean;
+    speedRegions: SpeedRegion[];
+    globalSpeed: number;
   }
   interface EditState {
     segments: Segment[];
@@ -270,11 +282,14 @@ export default function VideoTrimmer({
     crop: VideoCrop | null;
     zoomSegments: ZoomSegment[];
     autoZoomEnabled: boolean;
+    speedRegions: SpeedRegion[];
+    globalSpeed: number;
     past: HistorySnapshot[];
     future: HistorySnapshot[];
     selectedSegmentId: string | null;
     selectedOverlayId: string | null;
     selectedZoomId: string | null;
+    selectedSpeedRegionId: string | null;
   }
 
   const takeSnapshot = (st: EditState): HistorySnapshot => ({
@@ -284,6 +299,8 @@ export default function VideoTrimmer({
     crop: st.crop,
     zoomSegments: st.zoomSegments,
     autoZoomEnabled: st.autoZoomEnabled,
+    speedRegions: st.speedRegions,
+    globalSpeed: st.globalSpeed,
   });
 
   const sessionKey = sourceHistoryId
@@ -305,21 +322,28 @@ export default function VideoTrimmer({
         crop: savedSession.crop ?? null,
         zoomSegments: savedSession.zoomSegments ?? [],
         autoZoomEnabled: savedSession.autoZoomEnabled ?? false,
+        speedRegions: savedSession.speedRegions ?? [],
+        globalSpeed: savedSession.globalSpeed ?? 1.0,
         past: (savedSession.past || []).map((p) => ({
           ...p,
           crop: p.crop ?? null,
           zoomSegments: p.zoomSegments ?? [],
           autoZoomEnabled: p.autoZoomEnabled ?? false,
+          speedRegions: p.speedRegions ?? [],
+          globalSpeed: p.globalSpeed ?? 1.0,
         })),
         future: (savedSession.future || []).map((f) => ({
           ...f,
           crop: f.crop ?? null,
           zoomSegments: f.zoomSegments ?? [],
           autoZoomEnabled: f.autoZoomEnabled ?? false,
+          speedRegions: f.speedRegions ?? [],
+          globalSpeed: f.globalSpeed ?? 1.0,
         })),
         selectedSegmentId: savedSession.selectedSegmentId,
         selectedOverlayId: savedSession.selectedOverlayId,
         selectedZoomId: null,
+        selectedSpeedRegionId: null,
       };
     }
     return {
@@ -329,11 +353,14 @@ export default function VideoTrimmer({
       crop: null,
       zoomSegments: [],
       autoZoomEnabled: false,
+      speedRegions: [],
+      globalSpeed: 1.0,
       past: [],
       future: [],
       selectedSegmentId: null,
       selectedOverlayId: null,
       selectedZoomId: null,
+      selectedSpeedRegionId: null,
     };
   };
   const [editState, setEditState] = useState<EditState>(makeInitialEditState);
@@ -344,12 +371,23 @@ export default function VideoTrimmer({
     crop,
     zoomSegments,
     autoZoomEnabled,
+    speedRegions,
+    globalSpeed,
     past,
     future,
     selectedSegmentId,
     selectedOverlayId,
     selectedZoomId,
+    selectedSpeedRegionId,
   } = editState;
+
+  const effectiveSegments = useMemo(() => {
+    return buildEffectiveSegments(segments, speedRegions, globalSpeed);
+  }, [segments, speedRegions, globalSpeed]);
+
+  const effectiveSegmentsRef = useRef(effectiveSegments);
+  effectiveSegmentsRef.current = effectiveSegments;
+
   const [isCropMode, setIsCropMode] = useState(false);
   const [videoNaturalSize, setVideoNaturalSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [wrapSize, setWrapSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
@@ -546,6 +584,133 @@ export default function VideoTrimmer({
     window.addEventListener("mousedown", onClickOutside);
     return () => window.removeEventListener("mousedown", onClickOutside);
   }, [showSaveAsMenu]);
+
+  const hasAnySpeedChanged =
+    Math.abs(globalSpeed - 1.0) > 0.01 ||
+    speedRegions.length > 0 ||
+    segments.some((s) => s.speed != null && Math.abs(s.speed - 1.0) > 0.01);
+
+  const handleAddSpeedRegionAtPlayhead = (targetMs?: number, targetSpeed: number = 2.0) => {
+    setEditState((st) => {
+      const atMs = typeof targetMs === "number" ? targetMs : playheadMs;
+      // Quy đổi mốc timeline ms hiện tại sang mốc video gốc (source ms)
+      const pos = timelineMsToSource(effectiveSegments, atMs);
+      const startSrcMs = pos ? pos.srcMs : clamp(atMs, 0, durationMs);
+
+      // Nếu con trỏ đang đứng trong một vùng speed đã có: chọn vùng đó, không tạo khối trùng lặp
+      const existing = st.speedRegions.find(
+        (r) => startSrcMs >= r.startTimeMs && startSrcMs <= r.endTimeMs,
+      );
+      if (existing) {
+        return {
+          ...st,
+          selectedSpeedRegionId: existing.id,
+          selectedZoomId: null,
+          selectedOverlayId: null,
+        };
+      }
+
+      // Giới hạn biên với các vùng lân cận để các vùng không bao giờ chồng lấn nhau
+      const nextRegion = st.speedRegions
+        .filter((r) => r.startTimeMs > startSrcMs)
+        .sort((a, b) => a.startTimeMs - b.startTimeMs)[0];
+      const maxEndSrcMs = nextRegion ? nextRegion.startTimeMs : durationMs;
+
+      const prevRegion = st.speedRegions
+        .filter((r) => r.endTimeMs < startSrcMs)
+        .sort((a, b) => b.endTimeMs - a.endTimeMs)[0];
+      const minStartSrcMs = prevRegion ? prevRegion.endTimeMs : 0;
+
+      let safeStart = Math.max(minStartSrcMs, startSrcMs);
+      let availableSpace = maxEndSrcMs - safeStart;
+
+      // Nếu sát biên cuối không đủ chỗ tối thiểu, lùi safeStart về trước nếu còn chỗ
+      if (availableSpace < MIN_SPEED_ZONE_DURATION_MS) {
+        safeStart = Math.max(minStartSrcMs, maxEndSrcMs - DEFAULT_SPEED_ZONE_DURATION_MS);
+        availableSpace = maxEndSrcMs - safeStart;
+      }
+
+      if (availableSpace < MIN_SPEED_ZONE_DURATION_MS) {
+        return st;
+      }
+
+      const dur = Math.min(DEFAULT_SPEED_ZONE_DURATION_MS, availableSpace);
+      const endSrcMs = safeStart + dur;
+
+      const newRegion: SpeedRegion = {
+        id: makeSpeedRegionUid(),
+        startTimeMs: Math.round(safeStart),
+        endTimeMs: Math.round(endSrcMs),
+        speed: targetSpeed,
+      };
+
+      const updated = [...st.speedRegions, newRegion].sort(
+        (a, b) => a.startTimeMs - b.startTimeMs,
+      );
+
+      return {
+        ...st,
+        speedRegions: updated,
+        selectedSpeedRegionId: null,
+        selectedZoomId: null,
+        selectedOverlayId: null,
+        past: [...st.past, takeSnapshot(st)],
+        future: [],
+      };
+    });
+  };
+
+  const handleChangeSpeedRegion = (item: SpeedRegion) => {
+    setEditState((st) => ({
+      ...st,
+      speedRegions: st.speedRegions.map((r) => (r.id === item.id ? item : r)),
+    }));
+  };
+
+  const handleDeleteSpeedRegion = (id: string) => {
+    setEditState((st) => {
+      const remaining = st.speedRegions.filter((r) => r.id !== id);
+      return {
+        ...st,
+        speedRegions: remaining,
+        globalSpeed: remaining.length === 0 ? 1.0 : st.globalSpeed,
+        segments: remaining.length === 0 ? updateAllSegmentsSpeed(st.segments, 1.0) : st.segments,
+        selectedSpeedRegionId: null,
+        past: [...st.past, takeSnapshot(st)],
+        future: [],
+      };
+    });
+  };
+
+  const handleApplySpeedToAll = (speed: number) => {
+    setEditState((st) => {
+      const cleanSpeed = Math.max(0.25, Math.min(8.0, Number(speed.toFixed(2))));
+      // Tạo 1 vùng speed bao trọn toàn bộ video với tốc độ được chọn
+      const newRegion: SpeedRegion = {
+        id: makeSpeedRegionUid(),
+        startTimeMs: 0,
+        endTimeMs: durationMs,
+        speed: cleanSpeed,
+      };
+      return {
+        ...st,
+        globalSpeed: cleanSpeed,
+        segments: updateAllSegmentsSpeed(st.segments, cleanSpeed),
+        speedRegions: [newRegion],
+        selectedSpeedRegionId: null,
+        past: [...st.past, takeSnapshot(st)],
+        future: [],
+      };
+    });
+  };
+
+  const handleCommitSpeedSnapshot = () => {
+    setEditState((st) => ({
+      ...st,
+      past: [...st.past, takeSnapshot(st)],
+      future: [],
+    }));
+  };
   const [playheadMs, setPlayheadMs] = useState(() => savedSession?.playheadMs ?? 0);
   const [isPlaying, setIsPlaying] = useState(false);
 
@@ -591,7 +756,7 @@ export default function VideoTrimmer({
         // Nội suy mượt mà liên tục giữa các frame của video (khắc phục độ trễ 30fps của currentTime HTML5)
         const elapsedSinceUpdateMs = (now - lastWallClock) * (v.playbackRate || 1);
         const smoothSrcMs = lastVideoSec * 1000 + Math.min(elapsedSinceUpdateMs, 80);
-        const tlMs = sourceMsToTimeline(segmentsRef.current, smoothSrcMs) ?? 0;
+        const tlMs = sourceMsToTimeline(effectiveSegmentsRef.current, smoothSrcMs) ?? 0;
         const cam = interpolateCamera(zoomSegmentsRef.current, tlMs);
         const rect = parent.getBoundingClientRect();
         const tf = calculateCameraTransform(cam, rect.width, rect.height);
@@ -637,6 +802,20 @@ export default function VideoTrimmer({
   const [zoom, setZoom] = useState(1);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [containerWidth, setContainerWidth] = useState(0);
+
+  const total = useMemo(() => totalTimelineMs(effectiveSegments), [effectiveSegments]);
+
+  // Tỉ lệ thang thời gian: khi video ban đầu mở = 1.0, khi thêm speed x2 giảm còn 0.5, v.v.
+  // Dùng để tính vị trí tile/tick/playhead theo trục thời gian gốc (durationMs), không theo total.
+  // KHÔNG dùng cho layout DOM (tránh ResizeObserver feedback loop).
+  const timeScale = durationMs > 0 && total > 0 ? total / durationMs : 1;
+
+  // Chiều rộng pixel thực tế của nội dung timeline:
+  // - timeScale co bóp theo tỷ lệ speed (x2 → 50% của container).
+  // - zoom kéo dãn thêm: speed x2 + zoom x2 = 100% container, bù lại nhau.
+  // macOS dùng overlay scrollbar nên containerWidth từ ResizeObserver ổn định
+  // dù inner div rộng hơn scrollRef — không gây feedback loop.
+  const trackWidthPx = timeScale * containerWidth * zoom;
   const [frames, setFrames] = useState<Map<number, string>>(() => {
     if (initialThumbUrl) {
       return new Map([[0, initialThumbUrl]]);
@@ -718,11 +897,22 @@ export default function VideoTrimmer({
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey) return; // lăn/vuốt ngang thường: để scroll mặc định
-      e.preventDefault();
-      // deltaY của pinch nhỏ và liên tục — exp() cho cảm giác mượt, đối xứng
-      // 2 chiều (phóng/thu cùng tốc độ).
-      zoomAtPoint(e.clientX, zoomRef.current * Math.exp(-e.deltaY * 0.01));
+      if (e.ctrlKey) {
+        // Ctrl + lăn / pinch: zoom neo vào vị trí con trỏ
+        e.preventDefault();
+        zoomAtPoint(e.clientX, zoomRef.current * Math.exp(-e.deltaY * 0.01));
+        return;
+      }
+      // Lăn thường (không Ctrl): scroll timeline ngang.
+      // - deltaX: vuốt 2 ngón ngang trên trackpad → scroll trực tiếp.
+      // - deltaY: lăn con lăn chuột dọc → chuyển thành scroll ngang.
+      // preventDefault để trang không scroll dọc trong lúc dùng timeline.
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (delta !== 0) {
+        e.preventDefault();
+        el.scrollLeft = Math.max(0, el.scrollLeft + delta);
+        setScrollLeft(el.scrollLeft);
+      }
     };
 
     let gestureStartZoom = 1;
@@ -768,45 +958,62 @@ export default function VideoTrimmer({
       isInitialMountRef.current = false;
       const targetMs = savedSession?.playheadMs ?? 0;
       if (targetMs > 0) {
-        const pos = timelineMsToSource(segments, targetMs);
+        const pos = timelineMsToSource(effectiveSegments, targetMs);
         if (pos) {
           v.currentTime = pos.srcMs / 1000;
           currentSegIndexRef.current = pos.segIndex;
           setPlayheadMs(targetMs);
         }
       } else {
-        setPlayheadMs(sourceMsToTimeline(segments, v.currentTime * 1000) ?? 0);
+        setPlayheadMs(sourceMsToTimeline(effectiveSegments, v.currentTime * 1000) ?? 0);
       }
     } else {
       const srcMs = v.currentTime * 1000;
-      let idx = segments.findIndex((s) => srcMs >= s.srcStart && srcMs <= s.srcEnd);
+      let idx = effectiveSegments.findIndex((s) => srcMs >= s.srcStart && srcMs <= s.srcEnd);
       if (idx < 0) {
-        const snapped = nearestValidSourceMs(segments, srcMs);
+        const snapped = nearestValidSourceMs(effectiveSegments, srcMs);
         v.currentTime = snapped / 1000;
-        idx = Math.max(0, segments.findIndex((s) => snapped >= s.srcStart && snapped <= s.srcEnd));
+        idx = Math.max(0, effectiveSegments.findIndex((s) => snapped >= s.srcStart && snapped <= s.srcEnd));
       }
       currentSegIndexRef.current = idx;
-      setPlayheadMs(sourceMsToTimeline(segments, v.currentTime * 1000) ?? 0);
+      setPlayheadMs(sourceMsToTimeline(effectiveSegments, v.currentTime * 1000) ?? 0);
+    }
+
+    v.preservesPitch = true;
+    const curSeg = effectiveSegments[currentSegIndexRef.current];
+    if (curSeg) {
+      const targetRate = curSeg.speed != null && curSeg.speed > 0 ? curSeg.speed : 1.0;
+      if (Math.abs(v.playbackRate - targetRate) > 0.01) {
+        v.playbackRate = targetRate;
+      }
     }
 
     const onTime = () => {
-      const seg = segments[currentSegIndexRef.current];
-      if (seg && v.currentTime * 1000 >= seg.srcEnd - BOUNDARY_EPS_MS) {
-        const next = segments[currentSegIndexRef.current + 1];
-        if (next) {
-          currentSegIndexRef.current += 1;
-          v.currentTime = next.srcStart / 1000;
-        } else {
-          v.pause();
+      const curSrcMs = v.currentTime * 1000;
+      let idx = effectiveSegments.findIndex((s) => curSrcMs >= s.srcStart && curSrcMs <= s.srcEnd);
+      if (idx < 0 && effectiveSegments.length > 0) {
+        idx = Math.max(0, effectiveSegments.findIndex((s) => curSrcMs <= s.srcEnd));
+      }
+      if (idx >= 0) {
+        currentSegIndexRef.current = idx;
+        const seg = effectiveSegments[idx];
+        if (seg) {
+          const targetRate = seg.speed != null && seg.speed > 0 ? seg.speed : 1.0;
+          if (Math.abs(v.playbackRate - targetRate) > 0.01) {
+            v.playbackRate = targetRate;
+          }
         }
       }
-      setPlayheadMs(sourceMsToTimeline(segments, v.currentTime * 1000) ?? 0);
+      const tlMs = sourceMsToTimeline(effectiveSegments, curSrcMs);
+      if (tlMs != null) {
+        setPlayheadMs(tlMs);
+      }
     };
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
     const onEnded = () => {
       setIsPlaying(false);
-      setPlayheadMs(totalTimelineMs(segments));
+      setPlayheadMs(totalTimelineMs(effectiveSegments));
     };
     v.addEventListener("timeupdate", onTime);
     v.addEventListener("play", onPlay);
@@ -818,20 +1025,18 @@ export default function VideoTrimmer({
       v.removeEventListener("pause", onPause);
       v.removeEventListener("ended", onEnded);
     };
-  }, [segments]);
+  }, [effectiveSegments]);
 
-  // Tự động cuộn timeline theo playhead khi đang phát video (zoom > 1)
+  // Tự động cuộn timeline theo playhead khi đang phát video (khi timeline dài hơn khung nhìn)
   // để vạch phát luôn nằm trong khung nhìn (kiểu CapCut/Premiere).
   useEffect(() => {
     if (!isPlaying || zoom <= 1 || containerWidth <= 0 || draggingRef.current) return;
     const el = scrollRef.current;
-    if (!el) return;
+    if (!el || total <= 0 || trackWidthPx <= 0) return;
 
-    const total = totalTimelineMs(segments);
-    if (total <= 0) return;
-
-    const trackWidthPx = containerWidth * zoom;
-    const playheadX = (playheadMs / total) * trackWidthPx;
+    // playheadX trong không gian scrollRef — contentWrapper bắt đầu từ left=0,
+    // nên playhead ở (playheadMs/total) * contentWidthPx = timeScale * trackWidthPx * ratio.
+    const playheadX = (playheadMs / total) * timeScale * trackWidthPx;
     const currentScroll = el.scrollLeft;
 
     // Vạch phát vượt quá 85% khung nhìn hiện tại -> cuộn tiếp để playhead ở ~15% lề trái
@@ -845,7 +1050,7 @@ export default function VideoTrimmer({
       el.scrollLeft = targetScroll;
       setScrollLeft(el.scrollLeft);
     }
-  }, [playheadMs, isPlaying, zoom, containerWidth, segments]);
+  }, [playheadMs, isPlaying, zoom, trackWidthPx, containerWidth, total]);
 
   // Phím tắt Undo/Redo/Xoá/Chia/Cắt đầu-cuối — handler ghi vào ref MỖI render
   // (luôn thấy `segments`/`past`/`future`/`selectedSegmentId` mới nhất, không
@@ -872,7 +1077,10 @@ export default function VideoTrimmer({
         e.preventDefault();
         redo();
       } else if (e.key === "Delete" || e.key === "Backspace") {
-        if (selectedZoomId) {
+        if (selectedSpeedRegionId) {
+          e.preventDefault();
+          handleDeleteSpeedRegion(selectedSpeedRegionId);
+        } else if (selectedZoomId) {
           e.preventDefault();
           handleDeleteZoomSegment(selectedZoomId);
         } else if (selectedSegmentId) {
@@ -908,7 +1116,7 @@ export default function VideoTrimmer({
           setIsCropMode(false);
         } else {
           setOverlayTool("select");
-          setEditState((st) => ({ ...st, selectedOverlayId: null, selectedZoomId: null }));
+          setEditState((st) => ({ ...st, selectedOverlayId: null, selectedZoomId: null, selectedSpeedRegionId: null }));
         }
       } else if (!mod && !e.shiftKey && !e.altKey && e.code === "Space") {
         // preventDefault: chặn hành vi mặc định (cuộn trang / bấm lại nút
@@ -947,75 +1155,77 @@ export default function VideoTrimmer({
     return () => ro.disconnect();
   }, []);
 
-  // Danh sách tile filmstrip cần hiển thị/fetch cho khung đang xem — tính
-  // theo timeline-ms (zoom/cuộn) rồi quy đổi phần giao với TỪNG segment sang
-  // source-ms qua `srcStart` (segment chưa từng bị chia cắt nội bộ nên map
-  // tuyến tính là đủ). CHỈ phụ thuộc zoom/cuộn/kích thước khung/segments —
-  // KHÔNG phụ thuộc `playheadMs` (đổi liên tục lúc phát) nên giữ nguyên tham
-  // chiếu giữa các lần render do phát video gây ra, tránh debounce fetch bên
-  // dưới không bao giờ "lắng" được.
+  // Danh sách tile filmstrip hiển thị theo Lưới Đồng Nhất (Uniform Grid) — Phương án 2:
+  // - Mỗi tile có bề rộng cố định đồng nhất (~78px, chuẩn tỉ lệ 16:9 với FILMSTRIP_BAND_H = 44px).
+  // - contentWrapper (nơi render tiles) rộng = timeScale * trackWidthPx;
+  //   tileWidthPct tính trong hệ 0-100% của contentWrapper.
   const visibleTiles = useMemo(() => {
-    const trackWidthPx = containerWidth * zoom;
-    const total = totalTimelineMs(segments);
     if (containerWidth <= 0 || trackWidthPx <= 0 || total <= 0) {
       return [] as { key: string; srcMs: number; leftPct: number; widthPct: number }[];
     }
-    const visStart = (scrollLeft / trackWidthPx) * total;
-    const visEnd = ((scrollLeft + containerWidth) / trackWidthPx) * total;
+    // Pixel width của vùng nội dung thực tế (video end)
+    const contentWidthPx = timeScale * trackWidthPx;
+    if (contentWidthPx <= 0) return [] as { key: string; srcMs: number; leftPct: number; widthPct: number }[];
+
+    // scrollLeft ở trong scrollRef (zoom*trackWidthPx không gian) — cần chuyển về
+    // không gian contentWrapper (timeScale*trackWidthPx) để tính ms.
+    const visStart = clamp((scrollLeft / contentWidthPx) * total, 0, total);
+    const visEnd = clamp(((scrollLeft + containerWidth) / contentWidthPx) * total, 0, total);
+    if (visStart >= total) return [] as { key: string; srcMs: number; leftPct: number; widthPct: number }[];
     const pad = (visEnd - visStart) * VISIBLE_PADDING_RATIO;
     const winStart = clamp(visStart - pad, 0, total);
     const winEnd = clamp(visEnd + pad, 0, total);
 
+    // Số tile đặt trên toàn dải nội dung
+    const totalTiles = Math.max(1, Math.round(contentWidthPx / THUMB_TARGET_PX));
+    // Trong contentWrapper (0-100%), mỗi tile rộng 100/totalTiles %
+    const tileWidthPct = 100 / totalTiles;
+
+    const winStartTile = Math.max(0, Math.floor((winStart / total) * totalTiles));
+    const winEndTile = Math.min(totalTiles - 1, Math.ceil((winEnd / total) * totalTiles));
+    if (winEndTile < winStartTile) {
+      return [] as { key: string; srcMs: number; leftPct: number; widthPct: number }[];
+    }
+
     const tiles: { key: string; srcMs: number; leftPct: number; widthPct: number }[] = [];
-    let acc = 0;
-    for (const seg of segments) {
-      const segTlStart = acc;
-      acc += seg.srcEnd - seg.srcStart;
-      const segTlEnd = acc;
-
-      const iStart = Math.max(segTlStart, winStart);
-      const iEnd = Math.min(segTlEnd, winEnd);
-      if (iEnd <= iStart) continue;
-
-      const iPx = ((iEnd - iStart) / total) * trackWidthPx;
-      const count = clamp(Math.ceil(iPx / THUMB_TARGET_PX), MIN_THUMBS_PER_SEG, MAX_THUMBS);
-      for (let i = 0; i < count; i++) {
-        const tlMs = count === 1 ? iStart : iStart + ((iEnd - iStart) * i) / (count - 1);
-        const rightMs = i < count - 1 ? iStart + ((iEnd - iStart) * (i + 1)) / (count - 1) : iEnd;
-        const srcMs = seg.srcStart + (tlMs - segTlStart);
-        tiles.push({
-          key: `${seg.id}-${i}`,
-          srcMs: Math.round(srcMs / FRAME_ROUND_MS) * FRAME_ROUND_MS,
-          leftPct: (tlMs / total) * 100,
-          widthPct: Math.max(0, ((rightMs - tlMs) / total) * 100),
-        });
-      }
+    for (let k = winStartTile; k <= winEndTile; k++) {
+      // leftPct trong hệ contentWrapper (0-100%)
+      const leftPct = (k / totalTiles) * 100;
+      const widthPct = tileWidthPct;
+      const midTlMs = ((k + 0.5) / totalTiles) * total;
+      const pos = timelineMsToSource(effectiveSegments, midTlMs);
+      const srcMs = pos ? pos.srcMs : 0;
+      tiles.push({
+        key: `tile-${k}`,
+        srcMs: Math.round(srcMs / FRAME_ROUND_MS) * FRAME_ROUND_MS,
+        leftPct,
+        widthPct,
+      });
     }
     return tiles;
-  }, [segments, containerWidth, zoom, scrollLeft]);
+  }, [effectiveSegments, containerWidth, trackWidthPx, timeScale, total, scrollLeft]);
 
   // Mốc thời gian trên ruler — bước nhảy tự đổi theo zoom (xem
   // `NICE_TICK_INTERVALS_MS`/`MIN_TICK_PX`) để không bao giờ dày đặc/rối mắt
-  // hay quá thưa. KHÔNG phụ thuộc `scrollLeft` (khác `visibleTiles`) — chỉ
-  // ~vài chục mốc cho toàn timeline nên render hết luôn, không cần cửa sổ nhìn.
+  // hay quá thưa. Renders trong contentWrapper nên leftPct là 0-100% = 0 đến total.
   const timeTicks = useMemo(() => {
-    const trackWidthPx = containerWidth * zoom;
-    const total = totalTimelineMs(segments);
     if (trackWidthPx <= 0 || total <= 0) return [] as { ms: number; leftPct: number }[];
-
+    // Spacing tính theo pixel thực tế của vùng nội dung
+    const contentWidthPx = timeScale * trackWidthPx;
     let intervalMs = NICE_TICK_INTERVALS_MS[NICE_TICK_INTERVALS_MS.length - 1];
     for (const candidate of NICE_TICK_INTERVALS_MS) {
-      if ((candidate / total) * trackWidthPx >= MIN_TICK_PX) {
+      if ((candidate / total) * contentWidthPx >= MIN_TICK_PX) {
         intervalMs = candidate;
         break;
       }
     }
     const ticks: { ms: number; leftPct: number }[] = [];
     for (let t = 0; t <= total; t += intervalMs) {
+      // Trong contentWrapper: 0-100% = 0-total
       ticks.push({ ms: t, leftPct: (t / total) * 100 });
     }
     return ticks;
-  }, [segments, containerWidth, zoom]);
+  }, [trackWidthPx, timeScale, total]);
 
   const runFetch = (missing: number[]) => {
     if (fetchInFlightRef.current) {
@@ -1198,19 +1408,25 @@ export default function VideoTrimmer({
     const v = videoRef.current;
     if (!v) return;
     if (v.paused) {
-      const total = totalTimelineMs(segments);
+      const total = totalTimelineMs(effectiveSegments);
       const isAtEnd =
         v.ended ||
-        (segments.length > 0 &&
-          (v.currentTime * 1000 >= segments[segments.length - 1].srcEnd - BOUNDARY_EPS_MS ||
+        (effectiveSegments.length > 0 &&
+          (v.currentTime * 1000 >= effectiveSegments[effectiveSegments.length - 1].srcEnd - BOUNDARY_EPS_MS ||
             playheadMs >= total - BOUNDARY_EPS_MS));
-      if (isAtEnd && segments.length > 0) {
+      if (isAtEnd && effectiveSegments.length > 0) {
         currentSegIndexRef.current = 0;
-        v.currentTime = segments[0].srcStart / 1000;
+        v.currentTime = effectiveSegments[0].srcStart / 1000;
+        v.playbackRate = effectiveSegments[0].speed != null && effectiveSegments[0].speed > 0 ? effectiveSegments[0].speed : 1.0;
         setPlayheadMs(0);
         if (scrollRef.current) {
           scrollRef.current.scrollLeft = 0;
           setScrollLeft(0);
+        }
+      } else {
+        const curSeg = effectiveSegments[currentSegIndexRef.current];
+        if (curSeg) {
+          v.playbackRate = curSeg.speed != null && curSeg.speed > 0 ? curSeg.speed : 1.0;
         }
       }
       v.play().catch(() => {});
@@ -1360,11 +1576,21 @@ export default function VideoTrimmer({
 
   const seekTo = (timelineMs: number) => {
     const v = videoRef.current;
-    const pos = timelineMsToSource(segments, timelineMs);
+    const pos = timelineMsToSource(effectiveSegments, timelineMs);
     if (!v || !pos) return;
     v.currentTime = pos.srcMs / 1000;
-    currentSegIndexRef.current = pos.segIndex;
-    setPlayheadMs(clamp(timelineMs, 0, totalTimelineMs(segments)));
+    const effIdx = effectiveSegments.findIndex((s) => pos.srcMs >= s.srcStart && pos.srcMs <= s.srcEnd);
+    if (effIdx >= 0) {
+      currentSegIndexRef.current = effIdx;
+      const curSeg = effectiveSegments[effIdx];
+      if (curSeg) {
+        const targetRate = curSeg.speed != null && curSeg.speed > 0 ? curSeg.speed : 1.0;
+        if (Math.abs(v.playbackRate - targetRate) > 0.01) {
+          v.playbackRate = targetRate;
+        }
+      }
+    }
+    setPlayheadMs(clamp(timelineMs, 0, total));
   };
 
   const segmentAtTimelineMs = (segs: Segment[], timelineMs: number): Segment | null => {
@@ -1374,8 +1600,7 @@ export default function VideoTrimmer({
 
   const posToTimelineMs = (clientX: number): number => {
     const rect = trackRef.current?.getBoundingClientRect();
-    const total = totalTimelineMs(segments);
-    if (!rect || rect.width === 0) return 0;
+    if (!rect || rect.width === 0 || total <= 0) return 0;
     const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
     return ratio * total;
   };
@@ -1383,16 +1608,16 @@ export default function VideoTrimmer({
   /** Hút `ms` vào ranh giới đoạn gần nhất (đầu/cuối timeline hoặc điểm nối 2
    * đoạn) nếu trong bán kính `SNAP_PX` — giúp kéo/chia trúng đúng ranh giới
    * đã có mà không cần zoom cực sâu để nhắm bằng tay. Bán kính tính theo px
-   * MÀN HÌNH nên quy đổi qua bề rộng track thực tế (`containerWidth * zoom`)
+   * MÀN HÌNH nên quy đổi qua bề rộng track thực tế (`trackWidthPx`)
    * để không đổi cảm giác bắt dính giữa các mức zoom khác nhau. */
   const snapTimelineMs = (ms: number): number => {
-    const trackWidthPx = containerWidth * zoom;
-    const total = totalTimelineMs(segments);
     if (trackWidthPx <= 0 || total <= 0) return ms;
-    const tolMs = (SNAP_PX / trackWidthPx) * total;
+    // Tolerance in ms — dựa trên contentWidthPx (pixel thực tế của vùng nội dung)
+    const contentWidthPx = timeScale * trackWidthPx;
+    const tolMs = contentWidthPx > 0 ? (SNAP_PX / contentWidthPx) * total : 0;
     let best = ms;
     let bestDist = tolMs;
-    for (const b of segmentBoundariesMs(segments)) {
+    for (const b of segmentBoundariesMs(effectiveSegments)) {
       const d = Math.abs(b - ms);
       if (d <= bestDist) {
         bestDist = d;
@@ -1408,23 +1633,42 @@ export default function VideoTrimmer({
     draggingRef.current = true;
     const ms = snapTimelineMs(posToTimelineMs(e.clientX));
     seekTo(ms);
-    setEditState((st) => ({ ...st, selectedSegmentId: segmentAtTimelineMs(st.segments, ms)?.id ?? null }));
+    setEditState((st) => ({
+      ...st,
+      selectedSegmentId: segmentAtTimelineMs(st.segments, ms)?.id ?? null,
+      selectedSpeedRegionId: null,
+      selectedZoomId: null,
+      selectedOverlayId: null,
+    }));
   };
 
   /** Dùng chung cho cả kéo-scrub (playhead) VÀ hover-scrub (preview nổi chưa
    * click) — luôn cập nhật `hoverInfo` để hiện preview, CHỈ seek/chọn đoạn
-   * khi đang kéo (`draggingRef`). */
+   * khi đang kéo (`draggingRef`).
+   * RAF throttle: snapshot `clientX` đồng bộ (trước khi event bị recycle),
+   * defer tính toán nặng sang frame kế tiếp — giới hạn tốc độ render ~60fps
+   * thay vì ~250fps của trackpad macOS. */
   const onTrackMove = (e: React.PointerEvent) => {
-    const rect = trackRef.current?.getBoundingClientRect();
-    const ms = snapTimelineMs(posToTimelineMs(e.clientX));
-    const pos = timelineMsToSource(segments, ms);
-    setHoverInfo({ clientX: e.clientX, trackTop: rect?.top ?? 0, srcMs: pos?.srcMs ?? 0 });
-    if (!draggingRef.current) return;
-    seekTo(ms);
-    setEditState((st) => ({ ...st, selectedSegmentId: segmentAtTimelineMs(st.segments, ms)?.id ?? null }));
+    const clientX = e.clientX; // snapshot TRƯỚC khi event có thể bị recycle
+    if (trackMoveRafRef.current !== null) return; // đã có frame đang chờ → bỏ qua
+    trackMoveRafRef.current = requestAnimationFrame(() => {
+      trackMoveRafRef.current = null;
+      const rect = trackRef.current?.getBoundingClientRect();
+      const ms = snapTimelineMs(posToTimelineMs(clientX));
+      const pos = timelineMsToSource(effectiveSegments, ms);
+      setHoverInfo({ clientX, trackTop: rect?.top ?? 0, srcMs: pos?.srcMs ?? 0 });
+      if (!draggingRef.current) return;
+      seekTo(ms);
+      setEditState((st) => ({ ...st, selectedSegmentId: segmentAtTimelineMs(st.segments, ms)?.id ?? null }));
+    });
   };
 
   const onTrackLeave = () => {
+    // Huỷ frame đang chờ để không cập nhật hover sau khi chuột đã rời track
+    if (trackMoveRafRef.current !== null) {
+      cancelAnimationFrame(trackMoveRafRef.current);
+      trackMoveRafRef.current = null;
+    }
     if (!draggingRef.current) setHoverInfo(null);
   };
 
@@ -1551,7 +1795,8 @@ export default function VideoTrimmer({
           future: [],
         };
       } else {
-        const total = totalTimelineMs(st.segments);
+        const eff = buildEffectiveSegments(st.segments, st.speedRegions, st.globalSpeed);
+        const total = totalTimelineMs(eff);
         const segs = mouseTelemetry
           ? generateAutoZoomSegments(mouseTelemetry, total)
           : [];
@@ -1569,7 +1814,8 @@ export default function VideoTrimmer({
 
   const handleAddZoomAtPlayhead = (targetMs?: number) => {
     setEditState((st) => {
-      const total = totalTimelineMs(st.segments);
+      const eff = buildEffectiveSegments(st.segments, st.speedRegions, st.globalSpeed);
+      const total = totalTimelineMs(eff);
       const dur = 2500;
       const atMs = typeof targetMs === "number" ? targetMs : playheadMs;
       const start = clamp(atMs, 0, Math.max(0, total - MIN_ZOOM_DURATION_MS));
@@ -1648,11 +1894,14 @@ export default function VideoTrimmer({
         crop: prev.crop ?? null,
         zoomSegments: prev.zoomSegments ?? [],
         autoZoomEnabled: prev.autoZoomEnabled ?? false,
+        speedRegions: prev.speedRegions ?? [],
+        globalSpeed: prev.globalSpeed ?? 1.0,
         past: st.past.slice(0, -1),
         future: [takeSnapshot(st), ...st.future],
         selectedSegmentId: null,
         selectedOverlayId: null,
         selectedZoomId: null,
+        selectedSpeedRegionId: null,
       };
     });
   };
@@ -1669,11 +1918,14 @@ export default function VideoTrimmer({
         crop: next.crop ?? null,
         zoomSegments: next.zoomSegments ?? [],
         autoZoomEnabled: next.autoZoomEnabled ?? false,
+        speedRegions: next.speedRegions ?? [],
+        globalSpeed: next.globalSpeed ?? 1.0,
         past: [...st.past, takeSnapshot(st)],
         future: st.future.slice(1),
         selectedSegmentId: null,
         selectedOverlayId: null,
         selectedZoomId: null,
+        selectedSpeedRegionId: null,
       };
     });
   };
@@ -1687,29 +1939,34 @@ export default function VideoTrimmer({
       crop: null,
       zoomSegments: [],
       autoZoomEnabled: false,
+      speedRegions: [],
+      globalSpeed: 1.0,
       past: [],
       future: [],
       selectedSegmentId: null,
       selectedOverlayId: null,
       selectedZoomId: null,
+      selectedSpeedRegionId: null,
     });
     setIsCropMode(false);
     setPlayheadMs(0);
     seekTo(0);
   };
 
-  const total = totalTimelineMs(segments);
   // useMemo (không tính thẳng mỗi render như trước) — tham chiếu ổn định
-  // giữa các lần render KHÔNG đổi `segments` (phát video/hover-scrub/zoom đổi
+  // giữa các lần render KHÔNG đổi `effectiveSegments` (phát video/hover-scrub/zoom đổi
   // liên tục) để effect báo `onStateChange` bên dưới không bắn dồn dập.
-  const keepRanges = useMemo(() => computeKeepRanges(segments), [segments]);
+  const keepRanges = useMemo(() => computeKeepRanges(effectiveSegments), [effectiveSegments]);
   const hasChanges =
     past.length > 0 ||
     overlays.length > 0 ||
     zoomSegments.length > 0 ||
+    speedRegions.length > 0 ||
+    Math.abs(globalSpeed - 1.0) > 0.01 ||
     editState.crop != null ||
     removeAudio ||
     segments.length > 1 ||
+    hasAnySpeedChanged ||
     (segments[0] && (segments[0].srcStart > 0 || (durationMs > 0 && Math.abs(segments[0].srcEnd - durationMs) > 200)));
   // "Lưu đè" cần CÓ thay đổi để ghi đè (không có gì để lưu nếu chưa cắt hoặc chưa vẽ overlay) VÀ
   // đoạn giữ lại còn đủ dài (không cho ghi đè thành video gần như rỗng).
@@ -1784,13 +2041,14 @@ export default function VideoTrimmer({
 
   const pct = (ms: number) => (total <= 0 ? 0 : (clamp(ms, 0, total) / total) * 100);
 
-  let acc = 0;
-  const laidOut = segments.map((seg) => {
-    const lenMs = seg.srcEnd - seg.srcStart;
-    const startMs = acc;
-    acc += lenMs;
-    return { seg, startMs, lenMs };
-  });
+  const laidOut = useMemo(() => {
+    return segments.map((seg) => {
+      const startMs = sourceMsToTimeline(effectiveSegments, seg.srcStart) ?? 0;
+      const endMs = sourceMsToTimeline(effectiveSegments, seg.srcEnd) ?? startMs;
+      const lenMs = Math.max(0, endMs - startMs);
+      return { seg, startMs, lenMs };
+    });
+  }, [segments, effectiveSegments]);
 
   const isCroppedPreview = Boolean(crop && !isCropMode && videoNaturalSize.w > 0 && videoNaturalSize.h > 0);
 
@@ -2286,6 +2544,29 @@ export default function VideoTrimmer({
           <span style={bracketGlyph}>]</span>
         </button>
         <div style={toolDivider} />
+
+        {/* Nút thêm vùng tốc độ (Speed Control) */}
+        <button
+          style={{
+            ...iconToolBtn,
+            ...(hasAnySpeedChanged ? iconToolBtnActive : null),
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            width: "auto",
+            padding: "0 8px",
+          }}
+          onClick={() => handleAddSpeedRegionAtPlayhead(playheadMs, 2.0)}
+          title={t("videoTrimmer.addSpeedZoneAtPlayhead", "+ Thêm vùng tốc độ 2x tại con trỏ")}
+        >
+          <SpeedIcon />
+          <span style={{ fontSize: 11, fontWeight: 700 }}>
+            {speedRegions.length > 0
+              ? t("videoTrimmer.speedRegionsCount", { count: speedRegions.length, defaultValue: `${speedRegions.length} vùng` })
+              : t("videoTrimmer.speed", "Tốc độ")}
+          </span>
+        </button>
+        <div style={toolDivider} />
         <button style={iconToolBtn} disabled={capturingFrame} onClick={doCaptureFrame} title={t("videoTrimmer.exportFrame")}>
           <CameraIcon />
         </button>
@@ -2440,27 +2721,31 @@ export default function VideoTrimmer({
           minHeight:
             (overlays.length > 0 ? OVERLAY_TRACK_H : 0) +
             (zoomSegments.length > 0 || autoZoomEnabled ? ZOOM_TRACK_H : 0) +
+            (speedRegions.length > 0 ? SPEED_TRACK_H : 0) +
             RULER_H +
             TRACK_H,
-          overflowX: zoom > 1 ? "auto" : "hidden",
+          overflowX: timeScale * zoom > 1 ? "auto" : "hidden",
         }}
         onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
       >
-        {/* Bọc chung ruler + track theo đúng 1 chiều rộng (zoom) — cùng cuộn
-            với nhau vì là con trực tiếp của `trackScroll`, không cần đồng bộ
-            scrollLeft riêng cho ruler. */}
-        <div style={{ width: `${zoom * 100}%` }}>
+        {/* Wrapper duy nhất: width = timeScale × zoom × 100% của scrollRef.
+            - timeScale co bóp khi thêm speed zone (x2 → 50%).
+            - zoom kéo dãn đều: speed x2 + zoom x2 → 100% container, lấp đầy.
+            - zoom x4 + speed x2 → 200%, scrollable.
+            Không cần 2 wrapper lồng nhau — 1 div đủ để tất cả sub-components
+            (OverlayTrack, SpeedTrack, ruler, filmstrip, playhead) tự căn đúng. */}
+        <div style={{ width: `${timeScale * zoom * 100}%`, position: "relative" }}>
           {/* Track hiệu ứng (Khung vẽ / Che mờ) */}
           <OverlayTimelineTrack
             overlays={overlays}
             totalMs={total}
             playheadMs={playheadMs}
             selectedId={selectedOverlayId}
-            onSelect={(id) => setEditState((st) => ({ ...st, selectedOverlayId: id, selectedZoomId: null }))}
+            onSelect={(id) => setEditState((st) => ({ ...st, selectedOverlayId: id, selectedZoomId: null, selectedSpeedRegionId: null }))}
             onChangeOverlay={handleChangeOverlay}
             onCommitSnapshot={handleCommitOverlaySnapshot}
             onSeek={(ms) => seekTo(ms)}
-            snapPoints={segmentBoundariesMs(segments)}
+            snapPoints={segmentBoundariesMs(effectiveSegments)}
           />
 
           {/* Track hiệu ứng Zoom Focus theo chuột */}
@@ -2470,13 +2755,49 @@ export default function VideoTrimmer({
               totalMs={total}
               playheadMs={playheadMs}
               selectedId={selectedZoomId}
-              onSelect={(id) => setEditState((st) => ({ ...st, selectedZoomId: id, selectedOverlayId: null }))}
+              onSelect={(id) => setEditState((st) => ({ ...st, selectedZoomId: id, selectedOverlayId: null, selectedSpeedRegionId: null }))}
               onChangeZoomSegment={handleChangeZoomSegment}
               onDeleteZoomSegment={handleDeleteZoomSegment}
               onCommitSnapshot={handleCommitZoomSnapshot}
               onSeek={(ms) => seekTo(ms)}
-              snapPoints={segmentBoundariesMs(segments)}
+              snapPoints={segmentBoundariesMs(effectiveSegments)}
               onAddZoomSegment={(ms) => handleAddZoomAtPlayhead(ms)}
+            />
+          )}
+
+          {/* Track hiệu ứng Vùng Tốc Độ (Speed Zone) */}
+          {speedRegions.length > 0 && (
+            <SpeedTimelineTrack
+              speedRegions={speedRegions}
+              effectiveSegments={effectiveSegments}
+              durationMs={durationMs}
+              totalMs={total}
+              playheadMs={playheadMs}
+              selectedId={selectedSpeedRegionId}
+              onSelect={(id) => {
+                setEditState((st) => {
+                  if (
+                    st.selectedSpeedRegionId === id &&
+                    st.selectedZoomId === null &&
+                    st.selectedOverlayId === null
+                  ) {
+                    return st;
+                  }
+                  return {
+                    ...st,
+                    selectedSpeedRegionId: id,
+                    selectedZoomId: null,
+                    selectedOverlayId: null,
+                  };
+                });
+              }}
+              onChangeSpeedRegion={handleChangeSpeedRegion}
+              onDeleteSpeedRegion={handleDeleteSpeedRegion}
+              onApplyAll={handleApplySpeedToAll}
+              onCommitSnapshot={handleCommitSpeedSnapshot}
+              onSeek={(ms) => seekTo(ms)}
+              snapPoints={segmentBoundariesMs(effectiveSegments)}
+              onAddSpeedRegion={(ms) => handleAddSpeedRegionAtPlayhead(ms, 2.0)}
             />
           )}
 
@@ -2513,7 +2834,7 @@ export default function VideoTrimmer({
             {visibleTiles.map(({ key, srcMs, leftPct, widthPct }) => {
               const url = nearestFrameUrl(srcMs);
               return (
-                <div key={key} style={{ ...filmstripTile, left: `${leftPct}%`, width: `${widthPct}%` }}>
+                <div key={key} style={{ ...filmstripTile, left: `${leftPct}%`, width: `calc(${widthPct}% + 0.5px)` }}>
                   {url ? (
                     <img src={url} style={filmstripImg} draggable={false} alt="" />
                   ) : (
@@ -2529,46 +2850,40 @@ export default function VideoTrimmer({
             })}
           </div>
 
-          {/* Lớp phủ ĐỤC tại mỗi khoảng cách giữa 2 đoạn — che hẳn filmstrip
-              bên dưới (nếu không, khoảng hở của segmentBlock vẫn lộ khung
-              hình phía dưới do `filmstripLayer` trải liên tục suốt track,
-              trông như 2 đoạn còn dính liền). Render TRƯỚC segmentBlock để
-              nằm dưới border/outline của segment khi cần, nhưng vẫn trên
-              `filmstripLayer` (theo thứ tự DOM). */}
-          {laidOut.slice(0, -1).map(({ seg, startMs, lenMs }) => (
-            <div
-              key={`gap-${seg.id}`}
-              style={{ ...segmentGapCover, left: `calc(${pct(startMs + lenMs)}% - ${SEGMENT_GAP_PX / 2}px)` }}
-            />
-          ))}
-
-          {/* Từng đoạn giữ lại — ghép liền nhau, đoạn đã xoá đóng khoảng trống
-              (khác bản cũ làm mờ tại chỗ). Cách nhau `SEGMENT_GAP_PX` ở mỗi
-              điểm cắt (trừ 2 đầu timeline) + viền phải trên đoạn trước gap,
-              để ranh giới giữa các đoạn rõ ràng hơn khi nhìn. Thuần hiển thị
-              (pointerEvents:none), mọi tương tác xử lý ở track cha. */}
-          {laidOut.map(({ seg, startMs, lenMs }, i) => {
-            const leftPct = pct(startMs);
-            const rightPct = pct(startMs + lenMs);
-            const isFirst = i === 0;
-            const isLast = i === laidOut.length - 1;
-            const leftInset = isFirst ? 0 : SEGMENT_GAP_PX / 2;
-            const rightInset = isLast ? 0 : SEGMENT_GAP_PX / 2;
-            return (
+          {/* Lớp phủ ĐỤC tại mỗi khoảng cách giữa các đoạn thật (khi người dùng cắt bằng Scissors/Split) */}
+          {segments.length > 1 &&
+            laidOut.slice(0, -1).map(({ seg, startMs, lenMs }) => (
               <div
-                key={seg.id}
-                style={{
-                  ...segmentBlock,
-                  left: `calc(${leftPct}% + ${leftInset}px)`,
-                  width: `calc(${rightPct - leftPct}% - ${leftInset + rightInset}px)`,
-                  ...(seg.id === selectedSegmentId ? segmentSelected : null),
-                  ...(!isLast ? { borderRight: "1px solid rgba(0,0,0,0.5)" } : null),
-                }}
+                key={`gap-${seg.id}`}
+                style={{ ...segmentGapCover, left: `calc(${pct(startMs + lenMs)}% - ${SEGMENT_GAP_PX / 2}px)` }}
               />
-            );
-          })}
+            ))}
 
-          {/* Vạch phát hiện tại — transform kẹp biên để luôn hiển thị và không tràn ra ngoài track */}
+          {/* Từng đoạn cắt thật giữ lại (chỉ hiển thị viền/khung khi có từ 2 đoạn cắt trở lên) */}
+          {segments.length > 1 &&
+            laidOut.map(({ seg, startMs, lenMs }, i) => {
+              const leftPct = pct(startMs);
+              const rightPct = pct(startMs + lenMs);
+              const isFirst = i === 0;
+              const isLast = i === laidOut.length - 1;
+              const leftInset = isFirst ? 0 : SEGMENT_GAP_PX / 2;
+              const rightInset = isLast ? 0 : SEGMENT_GAP_PX / 2;
+              return (
+                <div
+                  key={seg.id}
+                  style={{
+                    ...segmentBlock,
+                    left: `calc(${leftPct}% + ${leftInset}px)`,
+                    width: `calc(${rightPct - leftPct}% - ${leftInset + rightInset}px)`,
+                    ...(seg.id === selectedSegmentId ? segmentSelected : null),
+                    ...(!isLast ? { borderRight: "1px solid rgba(0,0,0,0.5)" } : null),
+                  }}
+                />
+              );
+            })}
+          </div>
+
+          {/* Vạch phát hiện tại — bao trùm toàn bộ chiều cao tất cả các dải timeline (Khung, Focus, Speed, Thước, Video) */}
           <div
             style={{
               ...playhead,
@@ -2580,7 +2895,9 @@ export default function VideoTrimmer({
                   ? "translateX(0)"
                   : "translateX(-50%)",
             }}
-          />
+          >
+            {/* Chỏm con trỏ định vị ở đỉnh timeline */}
+            <div style={playheadCap} />
           </div>
         </div>
       </div>
@@ -3100,6 +3417,7 @@ const trackScroll: React.CSSProperties = {
   overflowY: "hidden",
   borderRadius: 8,
   flexShrink: 0,
+  background: "rgba(0, 0, 0, 0.25)",
 };
 
 /** Lớp filmstrip nằm dưới cùng trong `track` — `pointerEvents:none` để không
@@ -3124,6 +3442,8 @@ const filmstripTile: React.CSSProperties = {
   bottom: 0,
   overflow: "hidden",
   background: "rgba(255,255,255,0.04)",
+  boxSizing: "border-box",
+  borderRight: "1px solid rgba(0,0,0,0.35)",
 };
 
 const filmstripImg: React.CSSProperties = {
@@ -3206,21 +3526,30 @@ const segmentGapCover: React.CSSProperties = {
   pointerEvents: "none",
 };
 
-// Đỏ cam (thay vì trắng cũ) — clip quay màn hình rất hay có nền trắng, vạch
-// trắng lúc đó gần như biến mất vào nền. Kèm viền đen mỏng (`boxShadow`) để
-// vẫn nổi rõ cả trên clip sáng màu. `top:0, bottom:0` = tràn hết chiều cao
-// TĂNG THÊM của `track` (xem `TRACK_H`) — nhô ra khỏi dải khung hình
-// (`FILMSTRIP_BAND_H`, thấp hơn) ở cả trên và dưới.
+// Đỏ cam — vạch phát hiện tại (playhead) bao trùm toàn bộ chiều cao các track
+// (Overlay, Focus, Speed, Ruler, Video filmstrip) để người dùng luôn biết rõ
+// vị trí đang phát trên tất cả các dải hiệu ứng.
 const playhead: React.CSSProperties = {
   position: "absolute",
   top: 0,
   bottom: 0,
   width: 2,
   background: "#ff5252",
-  boxShadow: "0 0 0 1px rgba(0,0,0,0.6)",
+  boxShadow: "0 0 0 1px rgba(0,0,0,0.7), 0 0 4px rgba(255,82,82,0.5)",
   borderRadius: 1,
   pointerEvents: "none",
-  zIndex: 5,
+  zIndex: 50,
+};
+
+const playheadCap: React.CSSProperties = {
+  position: "absolute",
+  top: 0,
+  left: "50%",
+  transform: "translateX(-50%)",
+  width: 8,
+  height: 8,
+  backgroundColor: "#ff5252",
+  clipPath: "polygon(0 0, 100% 0, 100% 45%, 50% 100%, 0 45%)",
 };
 
 // Cao 26px khớp `iconToolBtn` cùng hàng — to hơn bản cũ (padding "6px 10px",
@@ -3338,3 +3667,14 @@ function PlusZoomIcon() {
     </svg>
   );
 }
+
+function SpeedIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 14l3.5-3.5" />
+      <circle cx="12" cy="14" r="1.5" fill="currentColor" />
+      <path d="M3.34 17a10 10 0 1 1 17.32 0" />
+    </svg>
+  );
+}
+

@@ -503,7 +503,22 @@
     "cropRatio": "Ratio",
     "cropFree": "Free",
     "resetCrop": "Reset to full frame",
-    "applyCrop": "Apply"
+    "applyCrop": "Apply",
+    "speed": "Speed",
+    "speedTitle": "Adjust Video Speed",
+    "speedSegment": "Selected Segment Speed",
+    "speedAll": "Apply to Entire Video",
+    "speedReset": "Reset 1.0x",
+    "speedApplyAll": "Apply to All",
+    "speedCustom": "Custom",
+    "speedHint": "Speed up to shorten videos, slow down for detailed inspection",
+    "addSpeedZone": "Add Speed Zone",
+    "addSpeedZoneAtPlayhead": "+ Add Speed Zone at Playhead",
+    "deleteSpeedZone": "Delete this speed zone",
+    "speedZoneTrack": "Speed Track",
+    "speedZoneSelected": "Selected Speed Zone",
+    "speedRegionsCount": "{{count}} speed zones",
+    "speedZoneThis": "Speed of this segment"
   },
   "gifExport": {
     "title": "Export Animated GIF",
@@ -540,7 +555,6 @@
     "savedLibraryToast": "Saved GIF to Library",
     "exportFailed": "GIF export failed"
   },
-
   "recordingIndicator": {
     "clickToStop": "Click to stop recording",
     "clickToToggle": "Click time to stop · Click ⏸ to pause",

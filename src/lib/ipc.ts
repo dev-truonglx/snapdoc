@@ -428,7 +428,7 @@ export const ipc = {
    * item MỚI (id khác `id` truyền vào). */
   trimHistoryVideo: (
     id: string,
-    ranges: [number, number][],
+    ranges: ([number, number] | [number, number, number])[],
     removeAudio: boolean,
     outputPath?: string,
     overlays?: VideoOverlayItem[],
@@ -449,7 +449,7 @@ export const ipc = {
    * bản gốc. */
   overwriteHistoryVideo: (
     id: string,
-    ranges: [number, number][],
+    ranges: ([number, number] | [number, number, number])[],
     removeAudio: boolean,
     overlays?: VideoOverlayItem[],
     zoomSegments?: ZoomSegment[],
@@ -499,11 +499,20 @@ export const ipc = {
 };
 
 
-/** Rust nhận `Vec<(i64, i64)>` — `ranges` tính từ tỉ lệ pixel kéo-thả
- * (`VideoTrimmer.tsx`) luôn ra số thập phân (JS không phân biệt int/float),
- * làm tròn ở biên IPC để tránh lỗi deserialize "expected i64". */
-function roundRanges(ranges: [number, number][]): [number, number][] {
-  return ranges.map(([s, e]) => [Math.round(s), Math.round(e)]);
+export type KeepRange = [number, number] | [number, number, number];
+
+/** Rust nhận `Vec<RangeInput>` — `ranges` tính từ tỉ lệ pixel kéo-thả
+ * (`VideoTrimmer.tsx`) luôn ra số thập phân, làm tròn ở biên IPC để tránh lỗi
+ * deserialize float sang i64, đồng thời giữ nguyên tham số speed thứ 3 (nếu có). */
+function roundRanges(ranges: ([number, number] | [number, number, number])[]): ([number, number] | [number, number, number])[] {
+  return ranges.map((r) => {
+    const s = Math.round(r[0]);
+    const e = Math.round(r[1]);
+    if (r.length >= 3 && r[2] != null && Number.isFinite(r[2])) {
+      return [s, e, Number(r[2].toFixed(3))];
+    }
+    return [s, e];
+  });
 }
 
 /** Làm sạch và chuẩn hoá các overlay trước khi truyền sang backend qua IPC,

@@ -29,7 +29,7 @@ import {
   stampVideoName,
   dirnameOf,
 } from "../../features/output/useOutput";
-import { ipc, type Pending, type HistoryItem, type VideoCrop } from "../../lib/ipc";
+import { ipc, type Pending, type HistoryItem, type VideoCrop, type KeepRange } from "../../lib/ipc";
 import { editorToolFromKey } from "../../lib/toolShortcuts";
 import StitchDialog from "../../features/annotation/compose/StitchDialog";
 import type { StitchResult } from "../../features/annotation/compose/stitch";
@@ -47,7 +47,7 @@ import type { ZoomSegment } from "../../features/video-trim/types";
 
 const EMPTY_TRIM_STATE = {
   hasChanges: false,
-  keepRanges: [] as [number, number][],
+  keepRanges: [] as KeepRange[],
   removeAudio: false,
   overlays: [] as VideoOverlayItem[],
   zoomSegments: [] as ZoomSegment[],

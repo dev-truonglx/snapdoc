@@ -103,6 +103,20 @@ export function makeZoomSegmentUid(): string {
   return "zm_" + Math.random().toString(36).slice(2, 9);
 }
 
+export interface SpeedRegion {
+  id: string;
+  startTimeMs: number; // Mốc thời gian bắt đầu trên source video
+  endTimeMs: number;   // Mốc thời gian kết thúc trên source video
+  speed: number;       // Tốc độ áp dụng (vd: 0.25, 0.5, 1.5, 2.0, 4.0)
+}
+
+export const DEFAULT_SPEED_ZONE_DURATION_MS = 3000;
+export const MIN_SPEED_ZONE_DURATION_MS = 400;
+
+export function makeSpeedRegionUid(): string {
+  return "spd_" + Math.random().toString(36).slice(2, 9);
+}
+
 export function clamp(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, v));
 }

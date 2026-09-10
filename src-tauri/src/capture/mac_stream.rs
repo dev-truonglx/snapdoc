@@ -922,10 +922,10 @@ mod tests {
         let fps = 30;
 
         let (handle, rx, _audio_rx) =
-            start(RecordTarget::Display(display_id), fps, false).expect("start() thất bại");
+            start(RecordTarget::Display(display_id), fps, false, false, &[]).expect("start() thất bại");
 
         let mut count = 0u32;
-        let mut last: Option<Frame> = None;
+        let mut last: Option<std::sync::Arc<Frame>> = None;
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while std::time::Instant::now() < deadline {
             if let Ok(frame) = rx.recv_timeout(Duration::from_millis(500)) {

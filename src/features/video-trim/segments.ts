@@ -15,6 +15,8 @@ export interface Segment {
   srcStart: number;
   /** ms trong video gốc, cuối đoạn (giữ lại). */
   srcEnd: number;
+  /** Tốc độ phát (0.25 .. 8.0, mặc định 1.0). */
+  speed?: number;
 }
 
 export const MIN_SEG_MS = 300;
@@ -26,11 +28,17 @@ function makeId(): string {
 }
 
 export function initialSegments(durationMs: number): Segment[] {
-  return [{ id: makeId(), srcStart: 0, srcEnd: Math.max(0, durationMs) }];
+  return [{ id: makeId(), srcStart: 0, srcEnd: Math.max(0, durationMs), speed: 1.0 }];
+}
+
+/** Thời lượng hiển thị trên timeline của 1 segment sau khi chia theo tốc độ */
+export function segmentPlayMs(seg: Segment): number {
+  const speed = seg.speed != null && seg.speed > 0 ? seg.speed : 1.0;
+  return Math.max(0, Math.round((seg.srcEnd - seg.srcStart) / speed));
 }
 
 export function totalTimelineMs(segments: Segment[]): number {
-  return segments.reduce((sum, s) => sum + (s.srcEnd - s.srcStart), 0);
+  return segments.reduce((sum, s) => sum + segmentPlayMs(s), 0);
 }
 
 export interface TimelinePos {
@@ -47,13 +55,16 @@ export function timelineMsToSource(segments: Segment[], timelineMs: number): Tim
   const clamped = Math.min(Math.max(timelineMs, 0), total);
   let acc = 0;
   for (let i = 0; i < segments.length; i++) {
-    const segLen = segments[i].srcEnd - segments[i].srcStart;
+    const seg = segments[i];
+    const speed = seg.speed != null && seg.speed > 0 ? seg.speed : 1.0;
+    const playLen = segmentPlayMs(seg);
     const isLast = i === segments.length - 1;
-    if (clamped <= acc + segLen || isLast) {
-      const offset = Math.min(Math.max(clamped - acc, 0), segLen);
-      return { segIndex: i, srcMs: segments[i].srcStart + offset };
+    if (clamped <= acc + playLen || isLast) {
+      const offsetPlay = Math.min(Math.max(clamped - acc, 0), playLen);
+      const offsetSrc = Math.round(offsetPlay * speed);
+      return { segIndex: i, srcMs: Math.min(seg.srcStart + offsetSrc, seg.srcEnd) };
     }
-    acc += segLen;
+    acc += playLen;
   }
   return null;
 }
@@ -69,8 +80,13 @@ export function sourceMsToTimeline(segments: Segment[], srcMs: number): number |
   if (srcMs >= lastSeg.srcEnd) return totalTimelineMs(segments);
   let acc = 0;
   for (const seg of segments) {
-    if (srcMs >= seg.srcStart && srcMs <= seg.srcEnd) return acc + (srcMs - seg.srcStart);
-    acc += seg.srcEnd - seg.srcStart;
+    const speed = seg.speed != null && seg.speed > 0 ? seg.speed : 1.0;
+    const playLen = segmentPlayMs(seg);
+    if (srcMs >= seg.srcStart && srcMs <= seg.srcEnd) {
+      const offsetSrc = srcMs - seg.srcStart;
+      return acc + Math.round(offsetSrc / speed);
+    }
+    acc += playLen;
   }
   return null;
 }
@@ -98,30 +114,34 @@ export function segmentBoundariesMs(segments: Segment[]): number[] {
   const result: number[] = [0];
   let acc = 0;
   for (const seg of segments) {
-    acc += seg.srcEnd - seg.srcStart;
+    acc += segmentPlayMs(seg);
     result.push(acc);
   }
   return result;
 }
 
 /** Có chia được tại `timelineMs` không — cả 2 nửa sau khi chia phải
- * >= `MIN_SEG_MS`. Dùng để disable nút "Chia đoạn" trên UI. */
+ * >= `MIN_SEG_MS` trên timeline. Dùng để disable nút "Chia đoạn" trên UI. */
 export function canSplitAt(segments: Segment[], timelineMs: number): boolean {
   const pos = timelineMsToSource(segments, timelineMs);
   if (!pos) return false;
   const seg = segments[pos.segIndex];
-  return pos.srcMs - seg.srcStart >= MIN_SEG_MS && seg.srcEnd - pos.srcMs >= MIN_SEG_MS;
+  const speed = seg.speed != null && seg.speed > 0 ? seg.speed : 1.0;
+  const leftPlayMs = (pos.srcMs - seg.srcStart) / speed;
+  const rightPlayMs = (seg.srcEnd - pos.srcMs) / speed;
+  return leftPlayMs >= MIN_SEG_MS && rightPlayMs >= MIN_SEG_MS;
 }
 
 /** Chia đoạn đang chứa `timelineMs` thành 2 tại đúng mốc đó. Trả nguyên
  * `segments` (không đổi) nếu không chia được — luôn kiểm `canSplitAt` trước
- * ở UI để disable nút thay vì dựa vào no-op này. */
+ * ở UI để disable nút thay vì dựa vào no-op này. Cả hai đoạn con kế thừa
+ * tốc độ (`speed`) của đoạn gốc. */
 export function splitSegmentAt(segments: Segment[], timelineMs: number): Segment[] {
   const pos = timelineMsToSource(segments, timelineMs);
   if (!pos || !canSplitAt(segments, timelineMs)) return segments;
   const seg = segments[pos.segIndex];
-  const left: Segment = { id: makeId(), srcStart: seg.srcStart, srcEnd: pos.srcMs };
-  const right: Segment = { id: makeId(), srcStart: pos.srcMs, srcEnd: seg.srcEnd };
+  const left: Segment = { id: makeId(), srcStart: seg.srcStart, srcEnd: pos.srcMs, speed: seg.speed };
+  const right: Segment = { id: makeId(), srcStart: pos.srcMs, srcEnd: seg.srcEnd, speed: seg.speed };
   return [...segments.slice(0, pos.segIndex), left, right, ...segments.slice(pos.segIndex + 1)];
 }
 
@@ -150,33 +170,127 @@ export function canTrimTail(segments: Segment[], timelineMs: number): boolean {
 
 /** Cắt bỏ mọi thứ TRƯỚC `timelineMs` — segment chứa mốc đó bị rút ngắn lại
  * (giữ từ `timelineMs` tới hết đoạn), mọi segment đứng trước bị loại hẳn.
- * Tự no-op (trả nguyên tham chiếu `segments`) khi `canTrimHead` không cho
- * phép — cùng khuôn an-toàn-double-invoke với `splitSegmentAt`/`deleteSegment`
- * (xem `applyEdit` ở VideoTrimmer: so sánh tham chiếu để bỏ qua lịch sử). */
+ * Đoạn giữ lại bảo lưu `speed` vốn có. */
 export function trimHead(segments: Segment[], timelineMs: number): Segment[] {
   if (!canTrimHead(segments, timelineMs)) return segments;
   const pos = timelineMsToSource(segments, timelineMs);
   if (!pos) return segments;
   const seg = segments[pos.segIndex];
-  const head: Segment = { id: seg.id, srcStart: pos.srcMs, srcEnd: seg.srcEnd };
+  const head: Segment = { id: seg.id, srcStart: pos.srcMs, srcEnd: seg.srcEnd, speed: seg.speed };
   const result = [head, ...segments.slice(pos.segIndex + 1)].filter((s) => s.srcEnd - s.srcStart > 0);
   return result.length > 0 ? result : segments;
 }
 
-/** Cắt bỏ mọi thứ SAU `timelineMs` — đối xứng với `trimHead`. */
+/** Cắt bỏ mọi thứ SAU `timelineMs` — đối xứng với `trimHead`. Đoạn giữ lại bảo lưu `speed`. */
 export function trimTail(segments: Segment[], timelineMs: number): Segment[] {
   if (!canTrimTail(segments, timelineMs)) return segments;
   const pos = timelineMsToSource(segments, timelineMs);
   if (!pos) return segments;
   const seg = segments[pos.segIndex];
-  const tail: Segment = { id: seg.id, srcStart: seg.srcStart, srcEnd: pos.srcMs };
+  const tail: Segment = { id: seg.id, srcStart: seg.srcStart, srcEnd: pos.srcMs, speed: seg.speed };
   const result = [...segments.slice(0, pos.segIndex), tail].filter((s) => s.srcEnd - s.srcStart > 0);
   return result.length > 0 ? result : segments;
 }
 
+/** Cập nhật tốc độ phát của một segment cụ thể theo ID. */
+export function updateSegmentSpeed(segments: Segment[], id: string, speed: number): Segment[] {
+  const cleanSpeed = Math.max(0.25, Math.min(8.0, Number(speed.toFixed(2))));
+  return segments.map((s) => (s.id === id ? { ...s, speed: cleanSpeed } : s));
+}
+
+/** Áp dụng một tốc độ phát chung cho tất cả các segment hiện có. */
+export function updateAllSegmentsSpeed(segments: Segment[], speed: number): Segment[] {
+  const cleanSpeed = Math.max(0.25, Math.min(8.0, Number(speed.toFixed(2))));
+  return segments.map((s) => ({ ...s, speed: cleanSpeed }));
+}
+
 /** Danh sách đoạn giữ lại gửi cho `record::encoder::trim` qua
- * `trim_pending_recording`/`trim_history_video` — đã đúng thứ tự tăng dần,
- * không chồng lấp (bất biến của `segments`), không cần sort/merge thêm. */
-export function computeKeepRanges(segments: Segment[]): [number, number][] {
-  return segments.map((s) => [s.srcStart, s.srcEnd]);
+ * `trim_pending_recording`/`trim_history_video` — tuple [srcStart, srcEnd, speed].
+ * Đã đúng thứ tự tăng dần, không chồng lấp (bất biến của `segments`). */
+export function computeKeepRanges(segments: Segment[]): [number, number, number][] {
+  return segments.map((s) => [s.srcStart, s.srcEnd, s.speed != null && s.speed > 0 ? s.speed : 1.0]);
+}
+
+/**
+ * Hợp nhất các đoạn cắt gốc (baseSegments) với các vùng tốc độ độc lập (speedRegions).
+ * Cho phép người dùng chỉnh tốc độ cho bất kỳ phân đoạn nào mà KHÔNG CẦN phải cắt clip gốc.
+ *
+ * Thuật toán:
+ * 1. Với mỗi segment gốc [srcStart, srcEnd], tìm các speedRegions có giao thoa.
+ * 2. Chia nhỏ segment thành các lát cắt thời gian theo biên của các speedRegions.
+ * 3. Mỗi lát cắt được gán tốc độ tương ứng của speedRegion (hoặc globalSpeed nếu nằm ngoài).
+ * 4. Ghép nối (merge) các lát cắt liên tiếp có cùng tốc độ để tối ưu hóa pipeline FFmpeg.
+ */
+export function buildEffectiveSegments(
+  baseSegments: Segment[],
+  speedRegions: import("./types").SpeedRegion[] = [],
+  globalSpeed: number = 1.0,
+): Segment[] {
+  const cleanGlobalSpeed = Math.max(0.25, Math.min(8.0, Number(globalSpeed.toFixed(2))));
+
+  // Nếu không có speedRegion nào, trả về baseSegments với globalSpeed
+  if (speedRegions.length === 0) {
+    return baseSegments.map((s) => ({
+      ...s,
+      speed: s.speed ?? cleanGlobalSpeed,
+    }));
+  }
+
+  // Lọc và sắp xếp các speedRegion hợp lệ
+  const validRegions = speedRegions
+    .filter((r) => r.endTimeMs > r.startTimeMs)
+    .sort((a, b) => a.startTimeMs - b.startTimeMs);
+
+  const effective: Segment[] = [];
+  let subId = 0;
+
+  for (const base of baseSegments) {
+    const bStart = base.srcStart;
+    const bEnd = base.srcEnd;
+    if (bEnd <= bStart) continue;
+
+    // Tìm tất cả các điểm mốc phân chia bên trong [bStart, bEnd]
+    const splitPoints = new Set<number>([bStart, bEnd]);
+
+    for (const r of validRegions) {
+      if (r.endTimeMs <= bStart || r.startTimeMs >= bEnd) continue;
+      if (r.startTimeMs > bStart && r.startTimeMs < bEnd) splitPoints.add(Math.round(r.startTimeMs));
+      if (r.endTimeMs > bStart && r.endTimeMs < bEnd) splitPoints.add(Math.round(r.endTimeMs));
+    }
+
+    const sortedPoints = Array.from(splitPoints).sort((a, b) => a - b);
+
+    // Duyệt qua từng lát cắt giữa 2 điểm liên tiếp
+    for (let i = 0; i < sortedPoints.length - 1; i++) {
+      const pStart = sortedPoints[i];
+      const pEnd = sortedPoints[i + 1];
+      if (pEnd <= pStart) continue;
+
+      const mid = (pStart + pEnd) / 2;
+      // Tìm xem điểm giữa lát cắt này thuộc về speedRegion nào
+      const matchingRegion = validRegions.find(
+        (r) => mid >= r.startTimeMs && mid <= r.endTimeMs,
+      );
+
+      const sp = matchingRegion
+        ? Math.max(0.25, Math.min(8.0, Number(matchingRegion.speed.toFixed(2))))
+        : (base.speed ?? cleanGlobalSpeed);
+
+      // Thử gộp với lát cắt trước nếu cùng tốc độ và nối tiếp nhau
+      const last = effective[effective.length - 1];
+      if (last && last.srcEnd === pStart && Math.abs((last.speed ?? 1.0) - sp) < 0.01) {
+        last.srcEnd = pEnd;
+      } else {
+        subId += 1;
+        effective.push({
+          id: `${base.id}_eff${subId}`,
+          srcStart: pStart,
+          srcEnd: pEnd,
+          speed: sp,
+        });
+      }
+    }
+  }
+
+  return effective.length > 0 ? effective : baseSegments;
 }
