@@ -241,6 +241,9 @@ export default function VideoTrimmer({
   const scrollRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
+  /** RAF ID để throttle `onTrackMove` — chỉ xử lý 1 frame mỗi animation frame (~60fps),
+   * tránh render hàng trăm lần/giây khi trackpad macOS bắn ~250Hz pointer event. */
+  const trackMoveRafRef = useRef<number | null>(null);
   /** Đảm bảo chỉ 1 lần gọi `generateVideoFrames` chạy đồng thời — nếu 1 lần
    * debounce khác "muốn" fetch trong lúc batch trước còn chạy, chỉ ghi đè
    * `pendingMissingRef` (thay batch mới nhất) thay vì bắn thêm request chồng
@@ -807,10 +810,12 @@ export default function VideoTrimmer({
   // KHÔNG dùng cho layout DOM (tránh ResizeObserver feedback loop).
   const timeScale = durationMs > 0 && total > 0 ? total / durationMs : 1;
 
-  // Chiều rộng DOM layout — LUÔN = containerWidth * zoom, không phụ thuộc speed zone.
-  // Điều này tránh feedback loop: thay đổi width → toggle scrollbar → containerWidth thay đổi → width thay đổi → lặp vô tận.
-  // Thay vào đó, nội dung bên trong (tiles/ruler/tracks) tự giới hạn theo timeScale.
-  const trackWidthPx = containerWidth * zoom;
+  // Chiều rộng pixel thực tế của nội dung timeline:
+  // - timeScale co bóp theo tỷ lệ speed (x2 → 50% của container).
+  // - zoom kéo dãn thêm: speed x2 + zoom x2 = 100% container, bù lại nhau.
+  // macOS dùng overlay scrollbar nên containerWidth từ ResizeObserver ổn định
+  // dù inner div rộng hơn scrollRef — không gây feedback loop.
+  const trackWidthPx = timeScale * containerWidth * zoom;
   const [frames, setFrames] = useState<Map<number, string>>(() => {
     if (initialThumbUrl) {
       return new Map([[0, initialThumbUrl]]);
@@ -892,11 +897,22 @@ export default function VideoTrimmer({
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey) return; // lăn/vuốt ngang thường: để scroll mặc định
-      e.preventDefault();
-      // deltaY của pinch nhỏ và liên tục — exp() cho cảm giác mượt, đối xứng
-      // 2 chiều (phóng/thu cùng tốc độ).
-      zoomAtPoint(e.clientX, zoomRef.current * Math.exp(-e.deltaY * 0.01));
+      if (e.ctrlKey) {
+        // Ctrl + lăn / pinch: zoom neo vào vị trí con trỏ
+        e.preventDefault();
+        zoomAtPoint(e.clientX, zoomRef.current * Math.exp(-e.deltaY * 0.01));
+        return;
+      }
+      // Lăn thường (không Ctrl): scroll timeline ngang.
+      // - deltaX: vuốt 2 ngón ngang trên trackpad → scroll trực tiếp.
+      // - deltaY: lăn con lăn chuột dọc → chuyển thành scroll ngang.
+      // preventDefault để trang không scroll dọc trong lúc dùng timeline.
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (delta !== 0) {
+        e.preventDefault();
+        el.scrollLeft = Math.max(0, el.scrollLeft + delta);
+        setScrollLeft(el.scrollLeft);
+      }
     };
 
     let gestureStartZoom = 1;
@@ -1574,7 +1590,7 @@ export default function VideoTrimmer({
         }
       }
     }
-    setPlayheadMs(clamp(timelineMs, 0, totalTimelineMs(effectiveSegments)));
+    setPlayheadMs(clamp(timelineMs, 0, total));
   };
 
   const segmentAtTimelineMs = (segs: Segment[], timelineMs: number): Segment | null => {
@@ -1628,18 +1644,31 @@ export default function VideoTrimmer({
 
   /** Dùng chung cho cả kéo-scrub (playhead) VÀ hover-scrub (preview nổi chưa
    * click) — luôn cập nhật `hoverInfo` để hiện preview, CHỈ seek/chọn đoạn
-   * khi đang kéo (`draggingRef`). */
+   * khi đang kéo (`draggingRef`).
+   * RAF throttle: snapshot `clientX` đồng bộ (trước khi event bị recycle),
+   * defer tính toán nặng sang frame kế tiếp — giới hạn tốc độ render ~60fps
+   * thay vì ~250fps của trackpad macOS. */
   const onTrackMove = (e: React.PointerEvent) => {
-    const rect = trackRef.current?.getBoundingClientRect();
-    const ms = snapTimelineMs(posToTimelineMs(e.clientX));
-    const pos = timelineMsToSource(effectiveSegments, ms);
-    setHoverInfo({ clientX: e.clientX, trackTop: rect?.top ?? 0, srcMs: pos?.srcMs ?? 0 });
-    if (!draggingRef.current) return;
-    seekTo(ms);
-    setEditState((st) => ({ ...st, selectedSegmentId: segmentAtTimelineMs(st.segments, ms)?.id ?? null }));
+    const clientX = e.clientX; // snapshot TRƯỚC khi event có thể bị recycle
+    if (trackMoveRafRef.current !== null) return; // đã có frame đang chờ → bỏ qua
+    trackMoveRafRef.current = requestAnimationFrame(() => {
+      trackMoveRafRef.current = null;
+      const rect = trackRef.current?.getBoundingClientRect();
+      const ms = snapTimelineMs(posToTimelineMs(clientX));
+      const pos = timelineMsToSource(effectiveSegments, ms);
+      setHoverInfo({ clientX, trackTop: rect?.top ?? 0, srcMs: pos?.srcMs ?? 0 });
+      if (!draggingRef.current) return;
+      seekTo(ms);
+      setEditState((st) => ({ ...st, selectedSegmentId: segmentAtTimelineMs(st.segments, ms)?.id ?? null }));
+    });
   };
 
   const onTrackLeave = () => {
+    // Huỷ frame đang chờ để không cập nhật hover sau khi chuột đã rời track
+    if (trackMoveRafRef.current !== null) {
+      cancelAnimationFrame(trackMoveRafRef.current);
+      trackMoveRafRef.current = null;
+    }
     if (!draggingRef.current) setHoverInfo(null);
   };
 
@@ -2695,18 +2724,17 @@ export default function VideoTrimmer({
             (speedRegions.length > 0 ? SPEED_TRACK_H : 0) +
             RULER_H +
             TRACK_H,
-          overflowX: zoom > 1 ? "auto" : "hidden",
+          overflowX: timeScale * zoom > 1 ? "auto" : "hidden",
         }}
         onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
       >
-        {/* Outer zoom wrapper — chiều rộng = zoom * 100% của scrollRef. */}
-        <div style={{ width: `${zoom * 100}%`, position: "relative" }}>
-          {/* Content wrapper — chiều rộng = timeScale * 100% của outer wrapper.
-              Tất cả nội dung (sub-components, ruler, filmstrip, playhead) nằm
-              trong đây, tự constrained đến phần video thực tế phát.
-              Khi speed x2: wrapper = 50% outer, phần trống bên phải = không có nội dung.
-              Giữ nguyên thang đo thời gian — không nhảy khi thêm speed zone. */}
-          <div style={{ width: `${timeScale * 100}%`, position: "relative" }}>
+        {/* Wrapper duy nhất: width = timeScale × zoom × 100% của scrollRef.
+            - timeScale co bóp khi thêm speed zone (x2 → 50%).
+            - zoom kéo dãn đều: speed x2 + zoom x2 → 100% container, lấp đầy.
+            - zoom x4 + speed x2 → 200%, scrollable.
+            Không cần 2 wrapper lồng nhau — 1 div đủ để tất cả sub-components
+            (OverlayTrack, SpeedTrack, ruler, filmstrip, playhead) tự căn đúng. */}
+        <div style={{ width: `${timeScale * zoom * 100}%`, position: "relative" }}>
           {/* Track hiệu ứng (Khung vẽ / Che mờ) */}
           <OverlayTimelineTrack
             overlays={overlays}
@@ -2870,7 +2898,6 @@ export default function VideoTrimmer({
           >
             {/* Chỏm con trỏ định vị ở đỉnh timeline */}
             <div style={playheadCap} />
-          </div>
           </div>
         </div>
       </div>
