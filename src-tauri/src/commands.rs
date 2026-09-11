@@ -546,9 +546,11 @@ pub struct OpenedFile {
     pub doc_json: Option<String>,
     /// Đường dẫn file — chỉ đặt cho `.snapdoc` (tài liệu file-backed).
     pub file_path: Option<String>,
+    /// Loại media: "image" hoặc "video"
+    pub media_type: Option<String>,
 }
 
-/// Mở file dialog chọn ảnh hoặc tài liệu `.snapdoc`. `None` nếu user huỷ.
+/// Mở file dialog chọn ảnh, tài liệu `.snapdoc`, hoặc video. `None` nếu user huỷ.
 #[tauri::command]
 pub async fn open_file_dialog(app: AppHandle) -> Result<Option<OpenedFile>, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -557,7 +559,9 @@ pub async fn open_file_dialog(app: AppHandle) -> Result<Option<OpenedFile>, Stri
     let path = app
         .dialog()
         .file()
+        .add_filter("Mọi tệp hỗ trợ", &["snapdoc", "png", "jpg", "jpeg", "webp", "bmp", "gif", "mp4", "mov", "m4v", "webm", "mkv", "avi"])
         .add_filter("Ảnh & tài liệu SnapDoc", &["snapdoc", "png", "jpg", "jpeg", "webp", "bmp", "gif"])
+        .add_filter("Video", &["mp4", "mov", "m4v", "webm", "mkv", "avi"])
         .blocking_pick_file();
 
     let path = match path {
@@ -567,6 +571,23 @@ pub async fn open_file_dialog(app: AppHandle) -> Result<Option<OpenedFile>, Stri
 
     let path_str = path.to_string();
 
+    let ext = std::path::Path::new(&path_str)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // Nếu là file video, gọi luồng mở video chuyên dụng
+    if matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "webm" | "mkv" | "avi") {
+        open_video_file_path_sync(&app, path_str.clone())?;
+        return Ok(Some(OpenedFile {
+            data_url: String::new(),
+            doc_json: None,
+            file_path: Some(path_str),
+            media_type: Some("video".to_string()),
+        }));
+    }
+
     // `.snapdoc` là container ZIP — nhận dạng bằng magic bytes, không bằng phần
     // mở rộng (user có thể đổi tên file).
     if crate::snapdoc_file::is_snapdoc(std::path::Path::new(&path_str)) {
@@ -575,6 +596,7 @@ pub async fn open_file_dialog(app: AppHandle) -> Result<Option<OpenedFile>, Stri
             data_url: format!("data:image/png;base64,{}", STANDARD.encode(&f.base_png)),
             doc_json: Some(f.effective_doc().to_string()),
             file_path: Some(path_str),
+            media_type: Some("image".to_string()),
         }));
     }
 
@@ -595,6 +617,7 @@ pub async fn open_file_dialog(app: AppHandle) -> Result<Option<OpenedFile>, Stri
         data_url: format!("data:{mime};base64,{b64}"),
         doc_json: None,
         file_path: None,
+        media_type: Some("image".to_string()),
     }))
 }
 
@@ -1210,3 +1233,128 @@ pub fn get_video_mouse_telemetry(
     Ok(Some(data))
 }
 
+
+/// Mở và ingest video từ bên ngoài máy tính vào SnapDoc Editor.
+/// - Hỗ trợ các định dạng: mp4, mov, m4v, webm, mkv, avi.
+/// - Tự động remux sang MP4 nếu là container không tương thích với Webview (.mkv, .avi).
+/// - Cấp asset protocol scope cho thư mục chứa video.
+/// - Ingest vào History DB với capture_mode="imported" (nếu chưa có trong DB).
+/// - Nạp vào PendingVideo với duration_ms, history_id, thumb_path chuẩn xác.
+/// - Mở cửa sổ Editor để người dùng xem và chỉnh sửa với đầy đủ tính năng.
+pub fn open_video_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> {
+    let file_path = std::path::Path::new(&path);
+    if !file_path.exists() {
+        return Err(format!("File không tồn tại: {}", path));
+    }
+
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if !matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "avi" | "mkv" | "webm") {
+        return Err(format!("Định dạng video không được hỗ trợ: {}", ext));
+    }
+
+    // Remux sang MP4 nếu là định dạng container không tương thích HTML5 Webview (.mkv, .avi)
+    let effective_path = crate::record::probe::remux_to_mp4_if_needed(app, file_path)?;
+
+    // Cấp asset scope cho thư mục chứa video
+    if let Some(parent) = effective_path.parent() {
+        eprintln!("[SnapDoc] Adding asset scope for: {}", parent.display());
+        crate::record::allow_asset_scope(app, parent);
+    }
+    if file_path != effective_path {
+        if let Some(parent) = file_path.parent() {
+            crate::record::allow_asset_scope(app, parent);
+        }
+    }
+
+    let effective_str = effective_path.to_string_lossy().to_string();
+
+    // Kiểm tra xem video này đã từng được ingest vào History DB chưa
+    let record = match crate::history::find_history_item_by_asset_path_sync(app, &effective_str)? {
+        Some(r) => {
+            eprintln!("[SnapDoc] Video đã có trong History: id={}", r.id);
+            r
+        }
+        None => {
+            // Trích xuất metadata thời lượng và kích thước bằng FFmpeg
+            let meta = crate::record::probe::probe_video_metadata(&effective_path).unwrap_or(
+                crate::record::probe::VideoMetadata {
+                    width: 1920,
+                    height: 1080,
+                    duration_ms: 0,
+                },
+            );
+
+            eprintln!(
+                "[SnapDoc] Ingest video ngoài vào History: {}x{}, duration={}ms",
+                meta.width, meta.height, meta.duration_ms
+            );
+
+            // Ingest vào History DB
+            crate::history::ingest_video(
+                app,
+                &effective_path,
+                meta.width,
+                meta.height,
+                meta.duration_ms,
+                "imported",
+            )?
+        }
+    };
+
+    let pv = PendingVideo {
+        path: record.asset_path.clone(),
+        width: record.width,
+        height: record.height,
+        duration_ms: record.duration_ms.unwrap_or(0),
+        history_id: record.id.clone(),
+        thumb_path: Some(record.thumb_path.clone()),
+    };
+
+    // Đặt vào pending_video của AppState để Editor tự kéo lúc mount / refresh-capture
+    {
+        let state = app.state::<AppState>();
+        let mut g = state.pending_video.lock().map_err(|_| "Lock error".to_string())?;
+        *g = Some(pv.clone());
+    }
+
+    // macOS: nếu là luồng Open with, mở cửa sổ editor chuyên biệt cho video
+    #[cfg(target_os = "macos")]
+    {
+        windows::open_editor_with_video_file(app, pv)?;
+    }
+
+    // Các nền tảng khác (hoặc cửa sổ chuẩn): mở cửa sổ editor chính
+    #[cfg(not(target_os = "macos"))]
+    {
+        windows::open_editor(app)?;
+
+        if let Some(win) = app.get_webview_window("editor") {
+            use tauri::Emitter;
+            let _ = win.emit("refresh-capture", &());
+        }
+    }
+
+    Ok(())
+}
+
+/// Command mở file video từ frontend (khi kéo thả Drag & Drop vào Editor).
+#[tauri::command]
+pub fn open_video_file_path(app: AppHandle, path: String) -> Result<(), String> {
+    open_video_file_path_sync(&app, path)
+}
+
+/// macOS: cửa sổ editor "Open with" tự kéo PendingVideo của nó lúc mount.
+#[tauri::command]
+pub fn take_open_video_file(window: tauri::WebviewWindow, app: AppHandle) -> Option<PendingVideo> {
+    let label = window.label().to_string();
+    app.state::<AppState>()
+        .open_video_files
+        .lock()
+        .ok()?
+        .remove(&label)
+}

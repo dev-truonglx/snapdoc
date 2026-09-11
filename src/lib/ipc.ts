@@ -217,6 +217,8 @@ export interface OpenedFile {
   docJson: string | null;
   /** Đường dẫn file — chỉ có với `.snapdoc` (tài liệu file-backed). */
   filePath: string | null;
+  /** Loại media: "image" hoặc "video". */
+  mediaType?: "image" | "video";
 }
 
 export interface UpdateInfo {
@@ -261,6 +263,10 @@ export const ipc = {
     invoke<void>("set_pending_image", { data, width, height, docJson: docJson ?? null, scaleFactor: scaleFactor ?? 1.0 }),
   /** macOS: lấy data URL ảnh "Open with" của chính cửa sổ editor này (theo label). */
   takeOpenFile: () => invoke<string | null>("take_open_file"),
+  /** macOS: lấy PendingVideo "Open with" của chính cửa sổ editor này (theo label). */
+  takeOpenVideoFile: () => invoke<PendingVideo | null>("take_open_video_file"),
+  /** Mở file video từ đường dẫn (Drag & Drop / Open with). */
+  openVideoFilePath: (path: string) => invoke<void>("open_video_file_path", { path }),
   captureNow: (mode: CaptureMode, output: OutputMode) =>
     invoke<void>("capture_now", { mode, output }),
   /** Chụp nhanh: mở overlay trong suốt trên mọi màn hình để chọn vùng + chú thích. */

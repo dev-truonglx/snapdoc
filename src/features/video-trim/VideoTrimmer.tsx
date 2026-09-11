@@ -364,6 +364,7 @@ export default function VideoTrimmer({
     };
   };
   const [editState, setEditState] = useState<EditState>(makeInitialEditState);
+  
   const {
     segments,
     removeAudio,
@@ -2145,9 +2146,26 @@ export default function VideoTrimmer({
               style={computedVideoStyle}
               onClick={togglePlay}
               onLoadedMetadata={() => {
-                const vw = videoRef.current?.videoWidth || 0;
-                const vh = videoRef.current?.videoHeight || 0;
+                const v = videoRef.current;
+                const vw = v?.videoWidth || 0;
+                const vh = v?.videoHeight || 0;
                 if (vw > 0 && vh > 0) setVideoNaturalSize({ w: vw, h: vh });
+
+                // Safeguard: Nếu initial segments có thời lượng <= 0 nhưng video element đọc được thời lượng thật
+                if (v && v.duration > 0) {
+                  const actualMs = Math.round(v.duration * 1000);
+                  setEditState((prev) => {
+                    const currentTotal = prev.segments.reduce((acc, s) => acc + (s.srcEnd - s.srcStart), 0);
+                    if (currentTotal <= 0 && actualMs > 0) {
+                      return {
+                        ...prev,
+                        segments: initialSegments(actualMs),
+                      };
+                    }
+                    return prev;
+                  });
+                }
+
                 if (savedSession?.playheadMs && savedSession.playheadMs > 0) {
                   seekTo(savedSession.playheadMs);
                 }

@@ -16,6 +16,7 @@ mod windows;
 
 use state::AppState;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::Manager;
 use tauri_plugin_global_shortcut::ShortcutState;
 
 /// True khi process này được khởi chạy qua "Open with" (Windows argv có ảnh).
@@ -51,23 +52,37 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             eprintln!("[SnapDoc] Single instance launched with argv: {:?}", argv);
-            let open_with_path: Option<String> = argv.get(1).and_then(|path| {
+            let open_with_path: Option<(String, bool)> = argv.get(1).and_then(|path| {
                 let ext = std::path::Path::new(path)
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_lowercase();
                 if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif") {
-                    Some(path.clone())
+                    Some((path.clone(), false)) // (path, is_video)
+                } else if matches!(ext.as_str(), "mp4" | "mov" | "avi" | "mkv" | "webm") {
+                    Some((path.clone(), true)) // (path, is_video)
                 } else {
                     None
                 }
             });
 
-            if let Some(path) = open_with_path {
+            if let Some((path, is_video)) = open_with_path {
+                // Add asset scope NGAY nếu là video, TRƯỚC khi spawn thread
+                if is_video {
+                    if let Some(parent) = std::path::Path::new(&path).parent() {
+                        eprintln!("[SnapDoc] Pre-adding asset scope for video: {}", parent.display());
+                        let _ = app.asset_protocol_scope().allow_directory(parent, true);
+                    }
+                }
+                
                 let h = app.clone();
                 std::thread::spawn(move || {
-                    let _ = commands::open_file_path_sync(&h, path);
+                    if is_video {
+                        let _ = commands::open_video_file_path_sync(&h, path);
+                    } else {
+                        let _ = commands::open_file_path_sync(&h, path);
+                    }
                 });
             } else {
                 let _ = windows::open_capture_bar(app);
@@ -129,7 +144,9 @@ pub fn run() {
             commands::open_file_dialog,
             commands::open_files_dialog,
             commands::open_file_path,
+            commands::open_video_file_path,
             commands::take_open_file,
+            commands::take_open_video_file,
             commands::default_save_dir,
             commands::get_settings,
             commands::set_settings,
@@ -482,8 +499,8 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Opened { urls } => {
                     eprintln!("[SnapDoc] RunEvent::Opened nhận {} url", urls.len());
-                    // Mở MỌI ảnh được chọn (mỗi ảnh một cửa sổ editor riêng),
-                    // không chỉ ảnh đầu tiên — hỗ trợ chọn nhiều file → Open with.
+                    // Mở MỌI file được chọn (mỗi file một cửa sổ editor riêng),
+                    // không chỉ file đầu tiên — hỗ trợ chọn nhiều file → Open with.
                     for url in &urls {
                         if url.scheme() == "file" {
                             if let Ok(path) = url.to_file_path() {
@@ -498,6 +515,16 @@ pub fn run() {
                                     "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif"
                                 ) {
                                     let _ = commands::open_file_path_sync(_app, path_str);
+                                } else if matches!(
+                                    ext.as_str(),
+                                    "mp4" | "mov" | "avi" | "mkv" | "webm"
+                                ) {
+                                    // Add scope TRƯỚC khi open
+                                    if let Some(parent) = path.parent() {
+                                        eprintln!("[SnapDoc] Pre-adding asset scope for video: {}", parent.display());
+                                        let _ = _app.asset_protocol_scope().allow_directory(parent, true);
+                                    }
+                                    let _ = commands::open_video_file_path_sync(_app, path_str);
                                 }
                             }
                         }

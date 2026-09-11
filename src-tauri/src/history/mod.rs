@@ -4,6 +4,7 @@ pub mod db;
 pub mod model;
 pub mod thumbnail;
 pub mod video_thumbnail;
+pub use commands::find_history_item_by_asset_path_sync;
 
 use crate::capture;
 use crate::state::AppState;

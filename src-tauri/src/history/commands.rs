@@ -95,6 +95,20 @@ fn get_history_item_sync(app: &AppHandle, id: &str) -> Result<HistoryRecord, Str
         .map_err(|e| format!("Không tìm thấy history item: {e}"))
 }
 
+pub fn find_history_item_by_asset_path_sync(app: &AppHandle, asset_path: &str) -> Result<Option<HistoryRecord>, String> {
+    let st = state(app)?;
+    let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+    match conn.query_row(
+        "SELECT * FROM history WHERE asset_path = ?1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+        [asset_path],
+        HistoryRecord::from_row,
+    ) {
+        Ok(rec) => Ok(Some(rec)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("Lỗi tìm kiếm history item: {e}")),
+    }
+}
+
 fn delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let st = state(app)?;
     let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
