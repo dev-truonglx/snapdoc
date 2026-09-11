@@ -6,7 +6,8 @@ import HistoryItemCard from "./HistoryItemCard";
 
 const CARD_MIN_WIDTH = 160;
 const CARD_GAP = 14;
-const ROW_HEIGHT = 166;
+const ROW_GAP = 18;
+const ROW_HEIGHT = 152;
 
 interface Props {
   onOpenEditor: (id: string) => void;
@@ -43,6 +44,7 @@ export default function HistoryGrid({ onOpenEditor }: Props) {
     count: rowCount,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
+    gap: ROW_GAP,
     overscan: 4,
   });
   const virtualRows = virtualizer.getVirtualItems();
