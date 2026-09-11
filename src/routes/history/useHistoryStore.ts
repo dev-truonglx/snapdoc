@@ -10,6 +10,7 @@ interface HistoryState {
   items: HistoryItem[];
   filter: HistoryFilter;
   selectedId: string | null;
+  selectedIds: string[];
   loading: boolean;
   hasMore: boolean;
   error: string | null;
@@ -20,6 +21,9 @@ interface HistoryState {
    * nhầm kết quả của 2 filter khác nhau vào cùng danh sách hiển thị. */
   generation: number;
   setSelected: (id: string | null) => void;
+  toggleSelect: (id: string, isShift?: boolean, isMetaOrCtrl?: boolean) => void;
+  selectAll: () => void;
+  clearSelection: () => void;
   setFilter: (f: Partial<Omit<HistoryFilter, "limit" | "offset">>) => void;
   reload: () => Promise<void>;
   loadMore: () => Promise<void>;
@@ -27,6 +31,8 @@ interface HistoryState {
   patchItem: (id: string, patch: Partial<HistoryItem>) => void;
   /** Bỏ 1 item khỏi danh sách hiện tại (sau delete/restore đổi view). */
   removeItem: (id: string) => void;
+  /** Bỏ nhiều item khỏi danh sách hiện tại (sau batch delete/restore). */
+  removeItems: (ids: string[]) => void;
   /** Thêm 1 item MỚI lên đầu danh sách (sau khi cắt video — tạo record mới,
    * KHÔNG ghi đè bản gốc, xem `trim_history_video_sync`) rồi chọn luôn item
    * đó — người dùng vừa cắt xong nên thấy ngay kết quả, không phải tự tìm
@@ -49,6 +55,7 @@ export const useHistory = create<HistoryState>((set, get) => ({
     to: todayStartMs() + ONE_DAY_MS,
   },
   selectedId: null,
+  selectedIds: [],
   loading: false,
   hasMore: true,
   error: null,
@@ -57,19 +64,72 @@ export const useHistory = create<HistoryState>((set, get) => ({
 
   setViewMode: (mode) => set({ viewMode: mode }),
 
-  setSelected: (id) => set({ selectedId: id }),
+  setSelected: (id) => set({ selectedId: id, selectedIds: id ? [id] : [] }),
+
+  toggleSelect: (id, isShift, isMetaOrCtrl) => {
+    const { items, selectedIds, selectedId } = get();
+    if (isShift && selectedId) {
+      const idx1 = items.findIndex((it) => it.id === selectedId);
+      const idx2 = items.findIndex((it) => it.id === id);
+      if (idx1 !== -1 && idx2 !== -1) {
+        const start = Math.min(idx1, idx2);
+        const end = Math.max(idx1, idx2);
+        const rangeIds = items.slice(start, end + 1).map((it) => it.id);
+        const newSelected = isMetaOrCtrl
+          ? Array.from(new Set([...selectedIds, ...rangeIds]))
+          : rangeIds;
+        set({ selectedIds: newSelected, selectedId: id });
+        return;
+      }
+    }
+    if (isMetaOrCtrl) {
+      if (selectedIds.includes(id)) {
+        const next = selectedIds.filter((x) => x !== id);
+        set({
+          selectedIds: next,
+          selectedId: selectedId === id ? (next[next.length - 1] ?? null) : selectedId,
+        });
+      } else {
+        set({
+          selectedIds: [...selectedIds, id],
+          selectedId: id,
+        });
+      }
+      return;
+    }
+    set({
+      selectedIds: [id],
+      selectedId: id,
+    });
+  },
+
+  selectAll: () => {
+    const allIds = get().items.map((it) => it.id);
+    set({ selectedIds: allIds, selectedId: allIds[0] ?? null });
+  },
+
+  clearSelection: () => set({ selectedIds: [], selectedId: null }),
 
   setFilter: (f) => {
     const generation = get().generation + 1;
     // loading: false — ép reset để loadMore() bên dưới không bị chặn bởi
     // guard `loading` của 1 request cũ (filter trước) còn đang bay.
-    set((s) => ({ filter: { ...s.filter, ...f }, items: [], hasMore: true, selectedId: null, error: null, generation, loading: false }));
+    set((s) => ({
+      filter: { ...s.filter, ...f },
+      items: [],
+      hasMore: true,
+      selectedId: null,
+      selectedIds: [],
+      error: null,
+      generation,
+      loading: false,
+    }));
     get().loadMore();
   },
 
   reload: async () => {
     const generation = get().generation + 1;
-    set({ items: [], hasMore: true, error: null, generation, loading: false });
+    set({ items: [], hasMore: true, selectedId: null, selectedIds: [], error: null, generation, loading: false });
     await get().loadMore();
   },
 
@@ -102,11 +162,21 @@ export const useHistory = create<HistoryState>((set, get) => ({
   removeItem: (id) => {
     set((s) => ({
       items: s.items.filter((it) => it.id !== id),
+      selectedIds: s.selectedIds.filter((x) => x !== id),
       selectedId: s.selectedId === id ? null : s.selectedId,
     }));
   },
 
+  removeItems: (ids) => {
+    const idSet = new Set(ids);
+    set((s) => ({
+      items: s.items.filter((it) => !idSet.has(it.id)),
+      selectedIds: s.selectedIds.filter((x) => !idSet.has(x)),
+      selectedId: idSet.has(s.selectedId ?? "") ? null : s.selectedId,
+    }));
+  },
+
   addItem: (item) => {
-    set((s) => ({ items: [item, ...s.items], selectedId: item.id }));
+    set((s) => ({ items: [item, ...s.items], selectedId: item.id, selectedIds: [item.id] }));
   },
 }));

@@ -262,7 +262,17 @@
     "library": "Library",
     "trash": "Trash",
     "emptyTrash": "Empty Trash",
-    "emptyTrashConfirm": "Permanently delete all items in Trash? Cannot be undone."
+    "emptyTrashConfirm": "Permanently delete all items in Trash? Cannot be undone.",
+    "selectedCount": "{{count}} items selected",
+    "selectAll": "Select all",
+    "deselectAll": "Deselect all",
+    "deleteSelected": "Delete selected ({{count}})",
+    "deleteSelectedTooltip": "Move selected items to Trash",
+    "restoreSelected": "Restore selected ({{count}})",
+    "permanentDeleteSelected": "Permanently delete ({{count}})",
+    "permanentDeleteSelectedConfirm": "Permanently delete {{count}} selected items? This cannot be undone.",
+    "batchActions": "Batch actions",
+    "totalSelectedSize": "Total size"
   },
   "thumbnail": {
     "openEditorTooltip": "Click to open editor",
