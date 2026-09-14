@@ -1249,7 +1249,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
         }
     }
 
-    if let Err(e) = crate::windows::open_recording_indicator(app) {
+    if let Err(e) = crate::windows::open_recording_indicator(app, click_target_rect) {
         eprintln!("[SnapDoc][record] Không hiện được popup đang quay: {e}");
     }
 

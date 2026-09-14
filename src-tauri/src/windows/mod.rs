@@ -1440,7 +1440,10 @@ pub fn prewarm_recording_indicator(_app: &AppHandle) -> Result<(), String> {
 /// khác + loại khỏi chính video đang quay qua `set_content_protected(true)`
 /// (WGC bỏ qua cửa sổ content-protected, cùng kỹ thuật `open_region_border`).
 #[cfg(target_os = "windows")]
-pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
+pub fn open_recording_indicator(
+    app: &AppHandle,
+    target_rect: Option<(f64, f64, f64, f64, f64)>,
+) -> Result<(), String> {
     if app.get_webview_window("recording-indicator").is_none() {
         prewarm_recording_indicator(app)?;
     }
@@ -1448,10 +1451,65 @@ pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
         .get_webview_window("recording-indicator")
         .ok_or_else(|| "Không tìm thấy popup đang quay".to_string())?;
 
-    place_top_center(app, &win);
-    let _ = win.emit("recording-indicator-reset", ());
-    let _ = win.show();
-    let _ = win.set_always_on_top(true);
+    disable_overlay_transitions(&win);
+
+    // Tính toán toạ độ vật lý (Physical pixels) chuẩn xác ngay trên worker thread
+    // trước khi dispatch lên main thread — đảm bảo main thread chỉ tốn <0.1ms để set_position và show.
+    let target_pos = if let Some((tx, ty, tw, _th, scale)) = target_rect {
+        let (win_w, _) = window_placement_size(&win, scale, (240.0, 44.0));
+        let x = tx + (tw - win_w) / 2.0;
+        let y = ty + (16.0 * scale);
+        Some((x.round() as i32, y.round() as i32))
+    } else if let Some(m) = cursor_or_primary_monitor_bounds(app) {
+        let (win_w, _) = window_placement_size(&win, m.scale, (240.0, 44.0));
+        let x = m.x + (m.w - win_w) / 2.0;
+        let y = m.y + (16.0 * m.scale);
+        Some((x.round() as i32, y.round() as i32))
+    } else {
+        None
+    };
+
+    let win_clone = win.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some((x, y)) = target_pos {
+            let _ = win_clone.set_position(tauri::PhysicalPosition::new(x, y));
+        }
+        let _ = win_clone.emit("recording-indicator-reset", ());
+        let _ = win_clone.show();
+        let _ = win_clone.set_always_on_top(true);
+
+        #[cfg(target_os = "windows")]
+        {
+            use windows_sys::Win32::Foundation::HWND;
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+            };
+            if let Ok(raw_hwnd) = win_clone.hwnd() {
+                let hwnd = raw_hwnd.0 as HWND;
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        HWND_TOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    );
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub fn open_recording_indicator(
+    _app: &AppHandle,
+    _target_rect: Option<(f64, f64, f64, f64, f64)>,
+) -> Result<(), String> {
     Ok(())
 }
 
@@ -1461,18 +1519,6 @@ pub fn open_recording_indicator(app: &AppHandle) -> Result<(), String> {
 pub fn close_recording_indicator(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("recording-indicator") {
         let _ = win.hide();
-    }
-}
-
-/// Đặt cửa sổ ở giữa-đỉnh màn hình chính, cách mép trên 1 khoảng nhỏ (cho
-/// popup "đang quay") — dùng toạ độ vật lý (Physical pixels) trên Windows.
-#[cfg(target_os = "windows")]
-fn place_top_center(app: &AppHandle, win: &tauri::WebviewWindow) {
-    if let Some(m) = cursor_or_primary_monitor_bounds(app) {
-        let (win_w, _win_h) = window_placement_size(win, m.scale, (240.0, 44.0));
-        let x = m.x + (m.w - win_w) / 2.0;
-        let y = m.y + (16.0 * m.scale);
-        let _ = win.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
     }
 }
 
