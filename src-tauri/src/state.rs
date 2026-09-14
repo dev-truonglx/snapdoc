@@ -119,7 +119,7 @@ impl PendingCapture {
 /// `history::commands::open_history_item_in_editor_sync`) hoặc vừa quay xong
 /// (ingest ngay lập tức, xem `record::stop_recording_impl`) — không còn
 /// khái niệm "video chưa lưu" nữa.
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingVideo {
     pub path: String,
@@ -207,6 +207,9 @@ pub struct AppState {
     /// "Open with" mở một cửa sổ editor mới; cửa sổ tự kéo ảnh của nó qua
     /// `take_open_file` lúc mount (pull → không race timing như emit event).
     pub open_files: Mutex<HashMap<String, String>>,
+    /// macOS: thông tin video "Open with" theo label cửa sổ editor. Lưu PendingVideo đầy đủ
+    /// thay vì chỉ đường dẫn file.
+    pub open_video_files: Mutex<HashMap<String, PendingVideo>>,
     /// Bộ đếm tạo label cửa sổ editor "Open with" duy nhất (editor-ow-N).
     /// Chỉ sử dụng trên macOS khi "Open with" được gọi.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

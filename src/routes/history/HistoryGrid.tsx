@@ -5,8 +5,9 @@ import { useHistory } from "./useHistoryStore";
 import HistoryItemCard from "./HistoryItemCard";
 
 const CARD_MIN_WIDTH = 160;
-const CARD_GAP = 10;
-const ROW_HEIGHT = 150;
+const CARD_GAP = 14;
+const ROW_GAP = 18;
+const ROW_HEIGHT = 152;
 
 interface Props {
   onOpenEditor: (id: string) => void;
@@ -17,8 +18,8 @@ interface Props {
 export default function HistoryGrid({ onOpenEditor }: Props) {
   const { t } = useTranslation();
   const items = useHistory((s) => s.items);
-  const selectedId = useHistory((s) => s.selectedId);
-  const setSelected = useHistory((s) => s.setSelected);
+  const selectedIds = useHistory((s) => s.selectedIds);
+  const toggleSelect = useHistory((s) => s.toggleSelect);
   const loadMore = useHistory((s) => s.loadMore);
   const hasMore = useHistory((s) => s.hasMore);
   const loading = useHistory((s) => s.loading);
@@ -43,6 +44,7 @@ export default function HistoryGrid({ onOpenEditor }: Props) {
     count: rowCount,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
+    gap: ROW_GAP,
     overscan: 4,
   });
   const virtualRows = virtualizer.getVirtualItems();
@@ -85,8 +87,9 @@ export default function HistoryGrid({ onOpenEditor }: Props) {
                   <HistoryItemCard
                     key={item.id}
                     item={item}
-                    selected={item.id === selectedId}
-                    onSelect={() => setSelected(item.id)}
+                    selected={selectedIds.includes(item.id)}
+                    onSelect={(e) => toggleSelect(item.id, e.shiftKey, e.metaKey || e.ctrlKey)}
+                    onToggleCheck={() => toggleSelect(item.id, false, true)}
                     onOpenEditor={() => onOpenEditor(item.id)}
                   />
                 ))}

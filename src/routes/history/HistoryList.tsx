@@ -15,8 +15,10 @@ interface Props {
 export default function HistoryList({ onOpenEditor }: Props) {
   const { t } = useTranslation();
   const items = useHistory((s) => s.items);
-  const selectedId = useHistory((s) => s.selectedId);
-  const setSelected = useHistory((s) => s.setSelected);
+  const selectedIds = useHistory((s) => s.selectedIds);
+  const toggleSelect = useHistory((s) => s.toggleSelect);
+  const selectAll = useHistory((s) => s.selectAll);
+  const clearSelection = useHistory((s) => s.clearSelection);
   const loadMore = useHistory((s) => s.loadMore);
   const hasMore = useHistory((s) => s.hasMore);
   const loading = useHistory((s) => s.loading);
@@ -39,10 +41,31 @@ export default function HistoryList({ onOpenEditor }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [virtualRows.map((r) => r.index).join(","), items.length, hasMore, loading]);
 
+  const allSelected = items.length > 0 && selectedIds.length === items.length;
+  const isIndeterminate = selectedIds.length > 0 && selectedIds.length < items.length;
+
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <div style={header}>
-        <span style={{ width: 64 + 10, flexShrink: 0 }} />
+        <div style={{ width: 20, height: 20, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <input
+            type="checkbox"
+            checked={allSelected}
+            ref={(el) => {
+              if (el) el.indeterminate = isIndeterminate;
+            }}
+            onChange={() => {
+              if (allSelected) {
+                clearSelection();
+              } else {
+                selectAll();
+              }
+            }}
+            style={{ cursor: "pointer", width: 15, height: 15, accentColor: "var(--accent)" }}
+            title={allSelected ? t("history.deselectAll") : t("history.selectAll")}
+          />
+        </div>
+        <span style={{ width: 64, flexShrink: 0 }} />
         <span style={{ flex: "1 1 auto" }}>{t("historyView.nameColumn")}</span>
         <span style={{ width: 100, flexShrink: 0 }}>{t("historyView.typeColumn")}</span>
         <span style={{ width: 130, flexShrink: 0 }}>{t("historyView.timeColumn")}</span>
@@ -72,8 +95,9 @@ export default function HistoryList({ onOpenEditor }: Props) {
                 >
                   <HistoryListRow
                     item={item}
-                    selected={item.id === selectedId}
-                    onSelect={() => setSelected(item.id)}
+                    selected={selectedIds.includes(item.id)}
+                    onSelect={(e) => toggleSelect(item.id, e.shiftKey, e.metaKey || e.ctrlKey)}
+                    onToggleCheck={() => toggleSelect(item.id, false, true)}
                     onOpenEditor={() => onOpenEditor(item.id)}
                   />
                 </div>

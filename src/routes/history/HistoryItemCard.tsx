@@ -16,30 +16,91 @@ export const MODE_LABEL: Record<string, string> = {
 interface Props {
   item: HistoryItem;
   selected: boolean;
-  onSelect: () => void;
+  onSelect: (e: React.MouseEvent) => void;
+  onToggleCheck: (e: React.MouseEvent) => void;
   onOpenEditor: () => void;
 }
 
-export default function HistoryItemCard({ item, selected, onSelect, onOpenEditor }: Props) {
+export default function HistoryItemCard({ item, selected, onSelect, onToggleCheck, onOpenEditor }: Props) {
   const { t } = useTranslation();
   const [broken, setBroken] = useState(false);
+  const [hovered, setHovered] = useState(false);
   const isVideo = item.mediaType === "video";
 
   return (
     <div
-      style={{ ...card, outline: selected ? "2px solid var(--accent)" : "2px solid transparent" }}
+      style={{
+        ...card,
+        background: hovered ? "var(--bg-hover)" : "var(--bg-elevated)",
+        outline: selected
+          ? "2px solid var(--accent)"
+          : hovered
+          ? "2px solid rgba(59, 130, 246, 0.7)"
+          : "2px solid transparent",
+        boxShadow: selected
+          ? "0 0 0 1px var(--accent), 0 4px 14px rgba(0,0,0,0.3)"
+          : hovered
+          ? "0 4px 14px rgba(0,0,0,0.35)"
+          : "none",
+        transition: "outline 0.15s ease, background 0.15s ease, box-shadow 0.15s ease",
+      }}
       onClick={onSelect}
       onDoubleClick={onOpenEditor}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       title={item.title ?? undefined}
     >
       <div style={thumbWrap}>
+        {/* Checkbox chọn mục */}
+        <div
+          style={{
+            position: "absolute",
+            top: 6,
+            left: 6,
+            width: 20,
+            height: 20,
+            borderRadius: 5,
+            border: selected ? "1px solid var(--accent)" : "1.5px solid rgba(255,255,255,0.85)",
+            background: selected ? "var(--accent)" : "rgba(0,0,0,0.45)",
+            backdropFilter: "blur(4px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+            transition: "opacity 0.15s ease",
+            opacity: selected || hovered ? 1 : 0,
+            pointerEvents: selected || hovered ? "auto" : "none",
+            zIndex: 3,
+            boxShadow: "0 2px 5px rgba(0,0,0,0.4)",
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleCheck(e);
+          }}
+          title={selected ? t("history.deselectAll") : t("history.selectAll")}
+        >
+          {selected && (
+            <svg width="12" height="12" viewBox="0 0 20 20" fill="#fff">
+              <path
+                fillRule="evenodd"
+                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                clipRule="evenodd"
+              />
+            </svg>
+          )}
+        </div>
+
         {!broken ? (
           <img
             // `?v=updatedAt`: thumbPath không đổi khi cắt video (ghi đè tại
             // chỗ) — bust cache để hiện đúng thumbnail mới sau khi cắt.
             src={`${convertFileSrc(item.thumbPath)}?v=${item.updatedAt}`}
             alt=""
-            style={thumbImg}
+            style={{
+              ...thumbImg,
+              filter: hovered ? "brightness(1.05)" : "none",
+              transition: "filter 0.15s ease",
+            }}
             onError={() => setBroken(true)}
             loading="lazy"
           />
@@ -59,9 +120,9 @@ export default function HistoryItemCard({ item, selected, onSelect, onOpenEditor
           </>
         )}
         {item.scaleFactor > 1 && <span style={badge}>{item.scaleFactor}×</span>}
-        {item.isEdited && <span style={{ ...badge, left: 4, right: "auto" }}>✎</span>}
+        {item.isEdited && <span style={{ ...badge, top: "auto", bottom: 4, left: 4, right: "auto" }}>✎</span>}
       </div>
-      <div style={meta}>
+      <div style={{ ...meta, color: hovered || selected ? "var(--text)" : "var(--text-dim)" }}>
         <span style={metaMode}>{MODE_LABEL[item.captureMode] ?? item.captureMode}</span>
         <span style={metaTime}>{fmtTime(item.createdAt)}</span>
       </div>

@@ -262,7 +262,17 @@
     "library": "Thư viện",
     "trash": "Thùng rác",
     "emptyTrash": "Dọn sạch Thùng rác",
-    "emptyTrashConfirm": "Xoá vĩnh viễn tất cả mục trong Thùng rác? Không thể hoàn tác."
+    "emptyTrashConfirm": "Xoá vĩnh viễn tất cả mục trong Thùng rác? Không thể hoàn tác.",
+    "selectedCount": "Đã chọn {{count}} mục",
+    "selectAll": "Chọn tất cả",
+    "deselectAll": "Bỏ chọn",
+    "deleteSelected": "Xoá đã chọn ({{count}})",
+    "deleteSelectedTooltip": "Chuyển các mục đã chọn vào Thùng rác",
+    "restoreSelected": "Khôi phục đã chọn ({{count}})",
+    "permanentDeleteSelected": "Xoá vĩnh viễn ({{count}})",
+    "permanentDeleteSelectedConfirm": "Xoá vĩnh viễn {{count}} mục đã chọn? Thao tác này không thể hoàn tác.",
+    "batchActions": "Thao tác hàng loạt",
+    "totalSelectedSize": "Tổng dung lượng"
   },
   "thumbnail": {
     "openEditorTooltip": "Nhấn để mở editor",

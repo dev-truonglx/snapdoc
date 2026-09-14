@@ -26,6 +26,7 @@ pub mod filmstrip;
 pub mod keystroke;
 pub mod mouse_click;
 pub mod audio_mic;
+pub mod probe;
 #[cfg(target_os = "windows")]
 mod audio_wasapi;
 

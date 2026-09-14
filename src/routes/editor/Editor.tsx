@@ -338,8 +338,10 @@ export default function Editor() {
 
   // Lấy ảnh chờ khi mở editor + khi có ảnh mới (event refresh-capture)
   useEffect(() => {
+    console.log("[Editor] useEffect mount - initializing...");
     // [DEV] Chạy trên trình duyệt thuần (không Tauri) → nạp ảnh test để thử UI.
     if (!("__TAURI_INTERNALS__" in window)) {
+      console.log("[Editor] Running in browser mode (not Tauri)");
       const c = document.createElement("canvas");
       c.width = 800;
       c.height = 500;
@@ -352,15 +354,37 @@ export default function Editor() {
       return;
     }
 
-    // macOS: cửa sổ "Open with" (editor-ow-N) chỉ hiển thị ĐÚNG ảnh của nó và
+    console.log("[Editor] Running in Tauri mode");
+    // macOS: cửa sổ "Open with" (editor-ow-N) chỉ hiển thị ĐÚNG ảnh/video của nó và
     // KHÔNG nghe event chụp — tránh bị thay ảnh khi user chụp màn hình mới.
     const label = getCurrentWebviewWindow().label;
+    console.log("[Editor] Window label:", label);
     if (label.startsWith("editor-ow")) {
-      // Cố tình KHÔNG bật autosave ở cửa sổ này: ảnh "Open with" không có mặt
+      console.log("[Editor] This is Open with window, checking for video/image...");
+      // Cố tình KHÔNG bật autosave ở cửa sổ này: ảnh/video "Open with" không có mặt
       // trong Library nên chẳng có container nào để ghi nháp, và 2 cửa sổ cùng
       // ghi vào một file là điều phải tránh.
-      ipc.takeOpenFile().then((url) => {
-        if (url) loadFromUrl(url);
+      
+      // Thử lấy video PendingVideo trước
+      ipc.takeOpenVideoFile().then((pv) => {
+        if (pv) {
+          setVideoDoc({
+            historyId: pv.historyId,
+            filePath: pv.path,
+            src: convertFileSrc(pv.path),
+            durationMs: pv.durationMs,
+            thumbUrl: pv.thumbPath ? convertFileSrc(pv.thumbPath) : undefined,
+          });
+          setVideoTrimState(EMPTY_TRIM_STATE);
+          setVideoSavedSig(null);
+          noteActiveKey(`history:${pv.historyId}`);
+          return;
+        }
+
+        // Nếu không phải video, thử lấy ảnh
+        ipc.takeOpenFile().then((url) => {
+          if (url) loadFromUrl(url);
+        });
       });
       return;
     }
@@ -487,12 +511,19 @@ export default function Editor() {
       setVideoDoc(null);
       loadFromUrl(e.payload);
     });
+    
+    // Windows / sự kiện mở video ngoài: load lại pending video
+    const unOpenVideoFile = listen<string>("open-video-file", () => {
+      void loadAnyPending();
+    });
+    
     return () => {
       window.removeEventListener("focus", onFocus);
       stopAutosave();
       un.then((f) => f());
       unFocus.then((f) => f());
       unOpenFile.then((f) => f());
+      unOpenVideoFile.then((f) => f());
     };
   }, []);
 
@@ -805,9 +836,21 @@ export default function Editor() {
 
     getCurrentWebviewWindow()
       .onDragDropEvent(async (event) => {
-        if (videoDoc || !useEditor.getState().doc) return;
         const payload = event.payload;
         if (payload.type === "drop") {
+          const videoPaths = payload.paths.filter((p) =>
+            /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(p),
+          );
+          if (videoPaths.length > 0) {
+            suspendActive();
+            ipc.openVideoFilePath(videoPaths[0]).catch((err) => {
+              console.error("[Editor] Lỗi mở video kéo thả:", err);
+              flash(String(err));
+            });
+            return;
+          }
+
+          if (videoDoc || !useEditor.getState().doc) return;
           const historyId = (window as any).__snapdocDraggingHistoryId;
           if (historyId) {
             (window as any).__snapdocDraggingHistoryId = null;
@@ -944,6 +987,9 @@ export default function Editor() {
       suspendActive();
       const opened = await ipc.openFile();
       if (!opened) return;
+      if (opened.mediaType === "video") {
+        return;
+      }
       // `.snapdoc` mang theo lớp annotation + đường dẫn gốc → mở ra là sửa tiếp
       // được ngay, và Save sẽ ghi thẳng lại chính file đó.
       const payload = parseDocPayload(opened.docJson);

@@ -14,11 +14,15 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
   const { t } = useTranslation();
   const items = useHistory((s) => s.items);
   const selectedId = useHistory((s) => s.selectedId);
+  const selectedIds = useHistory((s) => s.selectedIds);
+  const selectAll = useHistory((s) => s.selectAll);
+  const clearSelection = useHistory((s) => s.clearSelection);
   const filter = useHistory((s) => s.filter);
   const patchItem = useHistory((s) => s.patchItem);
   const removeItem = useHistory((s) => s.removeItem);
+  const removeItems = useHistory((s) => s.removeItems);
 
-  const item = items.find((it) => it.id === selectedId) ?? null;
+  const item = items.find((it) => it.id === (selectedId ?? selectedIds[0])) ?? null;
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -61,6 +65,104 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
       if (url) URL.revokeObjectURL(url);
     };
   }, [previewKey]);
+
+  if (selectedIds.length > 1) {
+    const selectedItems = items.filter((it) => selectedIds.includes(it.id));
+    const totalSize = selectedItems.reduce((acc, it) => acc + (it.fileSize ?? 0), 0);
+    const imageCount = selectedItems.filter((it) => it.mediaType !== "video").length;
+    const videoCount = selectedItems.filter((it) => it.mediaType === "video").length;
+    const isTrash = !!filter.trashOnly;
+
+    const doBatchDelete = async () => {
+      setBusy(true);
+      try {
+        await ipc.deleteHistoryItems(selectedIds);
+        removeItems(selectedIds);
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const doBatchRestore = async () => {
+      setBusy(true);
+      try {
+        await ipc.restoreHistoryItems(selectedIds);
+        removeItems(selectedIds);
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const doBatchPermanentDelete = async () => {
+      if (!confirm(t("history.permanentDeleteSelectedConfirm", { count: selectedIds.length }))) return;
+      setBusy(true);
+      try {
+        await ipc.permanentlyDeleteHistoryItems(selectedIds);
+        removeItems(selectedIds);
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    return (
+      <div style={panel}>
+        <div style={batchThumbGrid}>
+          {selectedItems.slice(0, 4).map((it) => (
+            <div key={it.id} style={batchThumbCell}>
+              <img
+                src={`${convertFileSrc(it.thumbPath)}?v=${it.updatedAt}`}
+                alt=""
+                style={previewImg}
+                loading="lazy"
+              />
+              {it.mediaType === "video" && (
+                <div style={playBadge} aria-hidden>
+                  <svg width="10" height="10" viewBox="0 0 20 20" fill="#fff">
+                    <path d="M6 4.5v11l9-5.5-9-5.5Z" />
+                  </svg>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div style={metaSection}>
+          <div style={{ ...titleRow, borderBottom: "none", cursor: "default" }}>
+            {t("history.selectedCount", { count: selectedIds.length })}
+          </div>
+
+          <Row label={t("history.batchActions")} value={`${selectedIds.length}`} />
+          {imageCount > 0 && <Row label={t("history.images")} value={String(imageCount)} />}
+          {videoCount > 0 && <Row label={t("history.videos")} value={String(videoCount)} />}
+          <Row label={t("history.totalSelectedSize")} value={fmtSize(totalSize)} />
+          {isTrash && <Row label={t("history.status")} value={t("history.inTrash")} />}
+        </div>
+
+        <div style={actions}>
+          {!isTrash ? (
+            <button style={dangerBtn} disabled={busy} onClick={doBatchDelete}>
+              {t("history.deleteSelected", { count: selectedIds.length })}
+            </button>
+          ) : (
+            <>
+              <button style={primaryBtn} disabled={busy} onClick={doBatchRestore}>
+                {t("history.restoreSelected", { count: selectedIds.length })}
+              </button>
+              <button style={dangerBtn} disabled={busy} onClick={doBatchPermanentDelete}>
+                {t("history.permanentDeleteSelected", { count: selectedIds.length })}
+              </button>
+            </>
+          )}
+          <button style={secondaryBtn} disabled={busy} onClick={selectAll}>
+            {t("history.selectAll")}
+          </button>
+          <button style={secondaryBtn} disabled={busy} onClick={clearSelection}>
+            {t("history.deselectAll")}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!item) {
     return <div style={{ ...panel, alignItems: "center", justifyContent: "center", color: "var(--text-dim)" }}>{t("history.selectItem")}</div>;
@@ -260,5 +362,42 @@ const dangerBtn: React.CSSProperties = {
   background: "rgba(239,68,68,0.15)",
   color: "#fca5a5",
   fontSize: 13,
+};
+
+const batchThumbGrid: React.CSSProperties = {
+  width: "100%",
+  aspectRatio: "4 / 3",
+  background: "#111",
+  borderRadius: 8,
+  overflow: "hidden",
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gridTemplateRows: "1fr 1fr",
+  gap: 2,
+  padding: 2,
+};
+
+const batchThumbCell: React.CSSProperties = {
+  position: "relative",
+  width: "100%",
+  height: "100%",
+  overflow: "hidden",
+  borderRadius: 4,
+  background: "#000",
+};
+
+const playBadge: React.CSSProperties = {
+  position: "absolute",
+  top: "50%",
+  left: "50%",
+  transform: "translate(-50%, -50%)",
+  width: 18,
+  height: 18,
+  borderRadius: "50%",
+  background: "rgba(0,0,0,0.5)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  pointerEvents: "none",
 };
 

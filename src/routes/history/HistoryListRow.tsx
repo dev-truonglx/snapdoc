@@ -8,13 +8,14 @@ import { fmtDateTime, fmtSize, fmtDuration } from "./formatUtils";
 interface Props {
   item: HistoryItem;
   selected: boolean;
-  onSelect: () => void;
+  onSelect: (e: React.MouseEvent) => void;
+  onToggleCheck: (e: React.MouseEvent) => void;
   onOpenEditor: () => void;
 }
 
 /** 1 hàng trong list view — cùng dữ liệu với `HistoryItemCard` (grid) nhưng
  * bày ngang: thumbnail nhỏ + loại chụp + thời gian + dung lượng + kích thước. */
-export default function HistoryListRow({ item, selected, onSelect, onOpenEditor }: Props) {
+export default function HistoryListRow({ item, selected, onSelect, onToggleCheck, onOpenEditor }: Props) {
   const { t } = useTranslation();
   const [broken, setBroken] = useState(false);
   const isVideo = item.mediaType === "video";
@@ -26,6 +27,21 @@ export default function HistoryListRow({ item, selected, onSelect, onOpenEditor 
       onDoubleClick={isVideo ? undefined : onOpenEditor}
       title={item.title ?? undefined}
     >
+      <div
+        style={checkCol}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleCheck(e);
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={() => {}}
+          style={checkInput}
+        />
+      </div>
+
       <div style={thumbWrap}>
         {!broken ? (
           <img
@@ -112,3 +128,20 @@ const playBadge: React.CSSProperties = {
 const cell: React.CSSProperties = { flexShrink: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
 
 const titleText: React.CSSProperties = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" };
+
+const checkCol: React.CSSProperties = {
+  width: 20,
+  height: 20,
+  flexShrink: 0,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+};
+
+const checkInput: React.CSSProperties = {
+  cursor: "pointer",
+  width: 15,
+  height: 15,
+  accentColor: "var(--accent)",
+};

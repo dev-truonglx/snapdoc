@@ -95,6 +95,20 @@ fn get_history_item_sync(app: &AppHandle, id: &str) -> Result<HistoryRecord, Str
         .map_err(|e| format!("Không tìm thấy history item: {e}"))
 }
 
+pub fn find_history_item_by_asset_path_sync(app: &AppHandle, asset_path: &str) -> Result<Option<HistoryRecord>, String> {
+    let st = state(app)?;
+    let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+    match conn.query_row(
+        "SELECT * FROM history WHERE asset_path = ?1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+        [asset_path],
+        HistoryRecord::from_row,
+    ) {
+        Ok(rec) => Ok(Some(rec)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("Lỗi tìm kiếm history item: {e}")),
+    }
+}
+
 fn delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let st = state(app)?;
     let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
@@ -130,6 +144,51 @@ fn permanently_delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(),
     let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
     conn.execute("DELETE FROM history WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn delete_history_items_sync(app: &AppHandle, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let st = state(app)?;
+    let mut conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let now = now_ms();
+    {
+        let mut stmt = tx.prepare("UPDATE history SET deleted_at = ?1 WHERE id = ?2").map_err(|e| e.to_string())?;
+        for id in ids {
+            stmt.execute(rusqlite::params![now, id]).map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn restore_history_items_sync(app: &AppHandle, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let st = state(app)?;
+    let mut conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    {
+        let mut stmt = tx.prepare("UPDATE history SET deleted_at = NULL WHERE id = ?1").map_err(|e| e.to_string())?;
+        for id in ids {
+            stmt.execute([id]).map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn permanently_delete_history_items_sync(app: &AppHandle, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    for id in ids {
+        let _ = permanently_delete_history_item_sync(app, id);
+    }
     Ok(())
 }
 
@@ -909,6 +968,27 @@ pub async fn restore_history_item(app: AppHandle, id: String) -> Result<(), Stri
 #[tauri::command]
 pub async fn permanently_delete_history_item(app: AppHandle, id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || permanently_delete_history_item_sync(&app, &id))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn delete_history_items(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_history_items_sync(&app, &ids))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn restore_history_items(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || restore_history_items_sync(&app, &ids))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn permanently_delete_history_items(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || permanently_delete_history_items_sync(&app, &ids))
         .await
         .map_err(|e| format!("Task join error: {e}"))?
 }

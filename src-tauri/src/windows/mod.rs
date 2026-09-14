@@ -2735,6 +2735,52 @@ pub fn open_editor_with_file(app: &AppHandle, data_url: String) -> Result<(), St
     Ok(())
 }
 
+/// macOS: mở cửa sổ editor cho video "Open with" — tương tự `open_editor_with_file`
+/// nhưng lưu video path thay vì data URL. Mỗi video một cửa sổ riêng với label
+/// `editor-ow-N`. Video path được pull qua `take_open_video_file` lúc mount.
+#[cfg(target_os = "macos")]
+pub fn open_editor_with_video_file(app: &AppHandle, pv: crate::state::PendingVideo) -> Result<(), String> {
+    use tauri::ActivationPolicy;
+    // Hiện Dock + cmd+Tab cho cửa sổ editor "thật".
+    let _ = app.set_activation_policy(ActivationPolicy::Regular);
+
+    let n = app
+        .state::<AppState>()
+        .editor_seq
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
+    let label = format!("editor-ow-{n}");
+    eprintln!("[SnapDoc] Open with video → tạo cửa sổ editor mới: {label}");
+
+    if let Ok(mut g) = app.state::<AppState>().open_video_files.lock() {
+        g.insert(label.clone(), pv);
+    }
+
+    let win = WebviewWindowBuilder::new(app, &label, url("editor"))
+        .title("SnapDoc — Video Editor")
+        .inner_size(1040.0, 720.0)
+        .min_inner_size(680.0, 480.0)
+        .resizable(true)
+        .center()
+        .skip_taskbar(false)
+        .build()
+        .map_err(|e| format!("Không tạo được editor: {e}"))?;
+
+    // Cascade: lệch mỗi cửa sổ một chút để không chồng khít lên nhau
+    if n > 1 {
+        if let (Ok(pos), Ok(scale)) = (win.outer_position(), win.scale_factor()) {
+            let scale = scale.max(0.0001);
+            let off = (((n - 1) % 8) as f64) * 32.0;
+            let _ = win.set_position(tauri::LogicalPosition::new(
+                pos.x as f64 / scale + off,
+                pos.y as f64 / scale + off,
+            ));
+        }
+    }
+    bring_to_front(app, &win);
+    Ok(())
+}
+
 /// Cửa sổ "sản phẩm" của SnapDoc (không phải overlay/thanh công cụ tạm) — có
 /// thể đang mở nhưng bị app khác che ở thời điểm chụp, hoặc — đã quan sát
 /// thấy trên macOS — bị hệ thống tự đưa lên trước ngay lúc xử lý phím tắt
