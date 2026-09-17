@@ -68,26 +68,47 @@ fn hide_bar_for_freeze(app: &AppHandle) {
 /// (hoặc ảnh chụp toàn màn hình) vẫn còn "dính" editor. Chỉ sleep khi editor
 /// THẬT SỰ đang visible (tránh delay thừa mỗi lần chụp khi editor đã ẩn sẵn).
 pub(crate) fn hide_editor_for_freeze(app: &AppHandle) {
-    // Nhớ lại việc ta sắp ẩn một editor ĐANG có thay đổi chưa lưu, để các
-    // nhánh chụp không tự mở lại editor (`output = "clipboard"`/`"save"`, huỷ
-    // overlay bằng Esc) vẫn hiện nó lại — xem
-    // `windows::show_editor_if_hidden_dirty`. Chỉ set khi cửa sổ THẬT SỰ đang
-    // hiện và THẬT SỰ đang dirty, để diff này vô hình với editor sạch.
+    // Nhớ lại việc ta sắp ẩn một editor đang hiển thị, để các nhánh chụp không
+    // tự mở lại editor (`output = "clipboard"`/`"save"`, huỷ overlay bằng Esc)
+    // vẫn hiện nó lại — xem `windows::show_editor_if_hidden_for_capture`.
     {
         let visible = app
             .get_webview_window("editor")
             .map(|w| w.is_visible().unwrap_or(false))
             .unwrap_or(false);
-        let dirty = app
-            .state::<AppState>()
-            .editor_dirty
-            .lock()
-            .map(|m| m.get("editor").copied().unwrap_or(false))
-            .unwrap_or(false);
-        if visible && dirty {
+        if visible {
             app.state::<AppState>()
-                .editor_hidden_dirty
+                .editor_hidden_for_capture
                 .store(true, Ordering::SeqCst);
+
+            #[cfg(target_os = "macos")]
+            {
+                let is_editor_active = app
+                    .state::<AppState>()
+                    .restore_front_pid
+                    .lock()
+                    .ok()
+                    .and_then(|g| *g)
+                    .is_none();
+                app.state::<AppState>()
+                    .editor_was_active_before_capture
+                    .store(is_editor_active, Ordering::SeqCst);
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+                let fg = unsafe { GetForegroundWindow() };
+                let is_editor_fg = get_hwnd(app, "editor").map(|h| h == fg).unwrap_or(false);
+                app.state::<AppState>()
+                    .editor_was_active_before_capture
+                    .store(is_editor_fg, Ordering::SeqCst);
+                if !is_editor_fg && !fg.is_null() {
+                    if let Ok(mut g) = app.state::<AppState>().restore_front_hwnd.lock() {
+                        *g = Some(fg as isize);
+                    }
+                }
+            }
         }
     }
 
@@ -206,7 +227,7 @@ fn wait_capture_delay(app: &AppHandle) -> bool {
                 // Huỷ hẹn giờ → không có lần chụp nào, nên không có gì mở lại
                 // editor. Nếu ta vừa ẩn một editor đang dở việc thì phải hiện
                 // lại, nếu không user mất đường vào chính việc của mình.
-                windows::show_editor_if_hidden_dirty(app);
+                windows::show_editor_if_hidden_for_capture(app);
                 return false;
             }
             prev_esc = esc;
@@ -596,8 +617,8 @@ pub fn finish(
             clipboard::copy_png(&cap.base64)?;
             auto_export_copy(app, &cap, ingested_id.as_deref());
             // Nhánh này mở THUMBNAIL, không mở editor — nên phải tự hiện lại
-            // editor nếu vừa ẩn nó lúc nó đang dở việc.
-            windows::show_editor_if_hidden_dirty(app);
+            // editor nếu vừa ẩn nó lúc nó đang hiển thị.
+            windows::show_editor_if_hidden_for_capture(app);
             windows::open_thumbnail(app)
         }
         "copy_editor" => {
@@ -630,7 +651,7 @@ pub fn finish(
                 }
             }
             // Như nhánh "clipboard": mở thumbnail chứ không mở editor.
-            windows::show_editor_if_hidden_dirty(app);
+            windows::show_editor_if_hidden_for_capture(app);
             windows::open_thumbnail(app)
         }
         _ => {
@@ -1082,26 +1103,7 @@ pub fn cancel_overlay(app: &AppHandle) {
     *app.state::<AppState>().pending_record.lock().unwrap_or_else(|e| e.into_inner()) = false;
     // Giải phóng frozen screen data — không còn cần sau khi overlay đóng.
     clear_frozen_screens(app);
-    windows::close_overlays(app);
-    windows::restore_regular_activation(app);
 
-    // Huỷ overlay (Esc) = không có lần chụp nào, nên không có gì mở lại editor.
-    // Hiện lại nếu ta vừa ẩn một editor đang dở việc. Gọi TRƯỚC khối khôi phục
-    // focus macOS bên dưới (và bản thân hàm này không `set_focus()`) nên editor
-    // hiện ra mà KHÔNG giành frontmost khỏi app user đang dùng.
-    // No-op ở đường "Mở trong Editor" của Chụp nhanh: `open_editor` chạy trước
-    // `cancel_overlay` ở đó và đã xoá cờ.
-    windows::show_editor_if_hidden_dirty(app);
-
-    // macOS: dọn dẹp trạng thái focus/ẩn của phiên Chụp nhanh (no-op nếu
-    // phiên này không phải Chụp nhanh — cả 2 field chỉ được set trong
-    // `start_quick`). THỨ TỰ BẮT BUỘC: trả frontmost về app cũ TRƯỚC (nếu
-    // copy/save/hủy — `restore_front_pid` còn Some; mở Editor đã clear nó qua
-    // `keep_capture_focus`), RỒI MỚI phục hồi (orderFront, không focus) các
-    // cửa sổ đã ẩn — phục hồi TRƯỚC khi SnapDoc kịp mất frontmost sẽ khiến
-    // chúng nháy lên lại đúng vấn đề đang tránh (xem
-    // `windows::restore_hidden_product_windows`). Chạy nền sau 1 nhịp ngắn
-    // để overlay đóng hẳn, không chặn caller.
     #[cfg(target_os = "macos")]
     {
         let pid = app
@@ -1117,21 +1119,63 @@ pub fn cancel_overlay(app: &AppHandle) {
             .ok()
             .map(|mut g| std::mem::take(&mut *g))
             .unwrap_or_default();
-        if pid.is_some() || !hidden.is_empty() {
-            let app2 = app.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(150));
-                if let Some(pid) = pid {
-                    windows::reactivate_app_pid(&app2, pid);
-                    // Chờ thêm để việc activate app cũ chạy xong hẳn trên
-                    // main thread trước khi orderFront lại các cửa sổ đã ẩn.
-                    std::thread::sleep(std::time::Duration::from_millis(80));
-                }
-                if !hidden.is_empty() {
-                    windows::restore_hidden_product_windows(&app2, &hidden);
-                }
-            });
+
+        if let Some(pid) = pid {
+            // User vốn đang ở app khác (vd Chrome):
+            // 1. Trả frontmost về app đó NGAY LẬP TỨC (không delay 150ms)
+            windows::reactivate_app_pid(app, pid);
+            // 2. Đóng overlays
+            windows::close_overlays(app);
+            // 3. Phục hồi editor ở z-order phía sau nếu từng bị ẩn (orderBack)
+            windows::show_editor_if_hidden_for_capture(app);
+            // 4. Phục hồi các cửa sổ occluded khác ở z-order phía sau (orderBack)
+            if !hidden.is_empty() {
+                windows::restore_hidden_product_windows(app, &hidden);
+            }
+            // 5. Trả lại Regular activation policy sau khi app khác đã nắm frontmost
+            windows::restore_regular_activation(app);
+        } else {
+            // User vốn đang ở SnapDoc (vd trong Editor) hoặc bấm "Mở trong Editor":
+            windows::show_editor_if_hidden_for_capture(app);
+            windows::close_overlays(app);
+            windows::restore_regular_activation(app);
+            if !hidden.is_empty() {
+                windows::restore_hidden_product_windows(app, &hidden);
+            }
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        windows::show_editor_if_hidden_for_capture(app);
+        windows::close_overlays(app);
+        windows::restore_regular_activation(app);
+
+        let prev_hwnd = app
+            .state::<AppState>()
+            .restore_front_hwnd
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        if let Some(hwnd_val) = prev_hwnd {
+            use windows_sys::Win32::Foundation::HWND;
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                AllowSetForegroundWindow, BringWindowToTop, SetForegroundWindow,
+            };
+            unsafe {
+                AllowSetForegroundWindow(0xFFFFFFFF);
+                let target = hwnd_val as HWND;
+                SetForegroundWindow(target);
+                BringWindowToTop(target);
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        windows::show_editor_if_hidden_for_capture(app);
+        windows::close_overlays(app);
+        windows::restore_regular_activation(app);
     }
 }
 
@@ -1145,8 +1189,20 @@ pub fn keep_capture_focus(app: &AppHandle) {
         if let Ok(mut g) = app.state::<AppState>().restore_front_pid.lock() {
             *g = None;
         }
+        app.state::<AppState>()
+            .editor_was_active_before_capture
+            .store(true, Ordering::SeqCst);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(mut g) = app.state::<AppState>().restore_front_hwnd.lock() {
+            *g = None;
+        }
+        app.state::<AppState>()
+            .editor_was_active_before_capture
+            .store(true, Ordering::SeqCst);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = app;
 }
 
@@ -1177,17 +1233,6 @@ pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> 
 /// đúng vùng nhỏ đã chọn (nhanh), rồi ghép chú thích. Đúng yêu cầu "vẽ khung
 /// xong chưa chụp, di chuyển được, tới lúc lưu/copy mới chụp".
 pub fn start_quick(app: &AppHandle) {
-    // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
-    hide_editor_for_freeze(app);
-    // KHÔNG còn gọi `snapshot_product_windows` ở đây (khác `run()`/
-    // `capture_all_screens`): cơ chế content-protection (`with_product_windows_protected`)
-    // dựa vào nó chỉ là lưới an toàn YẾU cho hiện tượng "cửa sổ occluded bị hệ
-    // thống đẩy lên khi activate app" — `hide_occluded_product_windows` ngay
-    // dưới đây ẩn THẬT SỰ (orderOut) các cửa sổ đó xuyên suốt CẢ phiên Chụp
-    // nhanh (từ đây tới lúc `cancel_overlay` phục hồi), nên khi
-    // `capture_quick_region` chụp pixel sau này, không còn cửa sổ occluded
-    // nào để mà lộ vào ảnh nữa — xem đó để hiểu vì sao không cần bọc
-    // `with_product_windows_protected` quanh bước chụp pixel như trước.
     // macOS: nhớ app đang frontmost (khác SnapDoc) TRƯỚC khi open_overlays
     // kích hoạt SnapDoc — để `cancel_overlay` trả lại focus cho nó sau khi
     // copy/save/hủy xong (xem `AppState::restore_front_pid`). ĐỒNG THỜI ẩn
@@ -1203,11 +1248,17 @@ pub fn start_quick(app: &AppHandle) {
         if let Ok(mut g) = app.state::<AppState>().restore_front_pid.lock() {
             *g = pid;
         }
+        app.state::<AppState>()
+            .editor_was_active_before_capture
+            .store(pid.is_none(), Ordering::SeqCst);
         let hidden = windows::hide_occluded_product_windows(app);
         if let Ok(mut g) = app.state::<AppState>().hidden_for_capture.lock() {
             *g = hidden;
         }
     }
+
+    // Ẩn editor nếu đang mở (giống nhấn button "New" trong editor)
+    hide_editor_for_freeze(app);
     // Đóng băng màn hình: ẩn capture-bar TRƯỚC rồi mới chụp frozen — đảm bảo
     // capture-bar không lọt vào ảnh frozen. Trên macOS cần sleep nhỏ để
     // compositor cập nhật sau khi hide_bar (orderOut) trước khi SCK chụp.
@@ -1308,6 +1359,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 /// Gọi sau khi freeze xong để restore cửa sổ trở lại bình thường —
 /// bỏ cờ `WDA_EXCLUDEFROMCAPTURE` mà `hide_editor_for_freeze` đã đặt, nếu
 /// không thì cửa sổ hiện lại sẽ vô hình trong mọi lần chụp sau đó.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn restore_capture_affinity(_app: &AppHandle) {
     #[cfg(target_os = "windows")]
     {

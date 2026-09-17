@@ -144,9 +144,12 @@ pub fn reactivate_app_pid(app: &AppHandle, pid: i32) {
         let running: *mut AnyObject =
             msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
         if !running.is_null() {
-            // options = 0: chỉ đưa app lên frontmost, không ép mọi cửa sổ của
-            // nó lên (NSApplicationActivateAllWindows).
-            let _: bool = msg_send![running, activateWithOptions: 0usize];
+            // 2usize = NSApplicationActivateIgnoringOtherApps
+            let _: bool = msg_send![running, activateWithOptions: 2usize];
+            let sel = objc2::sel!(activate);
+            if objc2::msg_send![running, respondsToSelector: sel] {
+                let _: bool = msg_send![running, activate];
+            }
         }
     });
 }
@@ -2502,10 +2505,10 @@ pub fn hide_editor(app: &AppHandle) {
 /// Cờ đọc-và-xoá bằng `swap(false)` nên gọi nhiều lần trong cùng một phiên là
 /// idempotent — cần thiết vì `flow::run` gọi `hide_editor_for_freeze` hai lần
 /// (một lần trong `wait_capture_delay` khi bật hẹn giờ).
-pub fn show_editor_if_hidden_dirty(app: &AppHandle) {
+pub fn show_editor_if_hidden_for_capture(app: &AppHandle) {
     if !app
         .state::<AppState>()
-        .editor_hidden_dirty
+        .editor_hidden_for_capture
         .swap(false, Ordering::SeqCst)
     {
         return;
@@ -2513,17 +2516,69 @@ pub fn show_editor_if_hidden_dirty(app: &AppHandle) {
     let Some(win) = app.get_webview_window("editor") else {
         return;
     };
+    let was_active = app
+        .state::<AppState>()
+        .editor_was_active_before_capture
+        .load(Ordering::SeqCst);
+
     #[cfg(target_os = "macos")]
     {
-        use tauri::ActivationPolicy;
-        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+        if was_active {
+            use tauri::ActivationPolicy;
+            let _ = app.set_activation_policy(ActivationPolicy::Regular);
+            let _ = win.show();
+        } else {
+            // User đang ở app khác (vd Chrome) — tuyệt đối KHÔNG gọi `win.show()` hay `orderFront:`!
+            // Cả hai đều đưa Editor đè lên trên Chrome, gây hiện tượng cửa sổ Editor nháy lên rồi biến mất.
+            // Dùng orderBack: trực tiếp để cửa sổ chỉ nằm ở z-order phía sau mà không giành frontmost hay chèn lên Chrome.
+            use objc2::{msg_send, runtime::AnyObject};
+            let _ = app.run_on_main_thread(move || {
+                if let Ok(ptr) = win.ns_window() {
+                    let ptr = ptr as *mut objc2_app_kit::NSWindow;
+                    if !ptr.is_null() {
+                        unsafe {
+                            let ns_win: &objc2_app_kit::NSWindow = &*ptr;
+                            let _: () = msg_send![ns_win, orderBack: Option::<&AnyObject>::None];
+                        }
+                    }
+                }
+            });
+        }
     }
     #[cfg(target_os = "windows")]
-    let _ = win.set_skip_taskbar(false);
-    let _ = win.show();
-    // Windows: bỏ cờ WDA_EXCLUDEFROMCAPTURE mà `hide_editor_for_freeze` đã đặt
-    // — nếu không, cửa sổ vừa hiện lại sẽ vô hình trong MỌI lần chụp sau đó.
-    crate::flow::restore_capture_affinity(app);
+    {
+        // 1. Phải bỏ cờ WDA_EXCLUDEFROMCAPTURE TRƯỚC khi show cửa sổ
+        // — tránh việc DWM compositor vẽ surface đen/trong suốt/trắng.
+        crate::flow::restore_capture_affinity(app);
+        // 2. Phục hồi icon taskbar
+        let _ = win.set_skip_taskbar(false);
+        // 3. Hiển thị lại cửa sổ và unminimize
+        let _ = win.show();
+        let _ = win.unminimize();
+        // 4. Khôi phục foreground z-order và focus Win32 NẾU user vốn đang ở Editor
+        let was_active = app
+            .state::<AppState>()
+            .editor_was_active_before_capture
+            .load(Ordering::SeqCst);
+        if was_active {
+            bring_to_front(app, &win);
+        }
+        // 5. Đánh thức WebView2 message pump / render loop
+        let app_handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = app_handle.emit_to("editor", "refresh-capture", &());
+        });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = win.show();
+    }
+}
+
+/// Alias tương thích ngược cho `show_editor_if_hidden_for_capture`.
+#[allow(dead_code)]
+pub fn show_editor_if_hidden_dirty(app: &AppHandle) {
+    show_editor_if_hidden_for_capture(app);
 }
 
 /// Tạo sẵn editor (ẩn) lúc khởi động để lần chụp đầu hiện ngay, không phải
@@ -2659,11 +2714,11 @@ pub fn bring_to_front(app: &AppHandle, win: &tauri::WebviewWindow) {
 
 /// Editor chú thích.
 pub fn open_editor(app: &AppHandle) -> Result<(), String> {
-    // Đường này tự hiện + focus editor rồi, nên cờ "đã ẩn editor đang dirty"
-    // hết ý nghĩa — xoá để `show_editor_if_hidden_dirty` chạy sau đó (vd
+    // Đường này tự hiện + focus editor rồi, nên cờ "đã ẩn editor khi freeze"
+    // hết ý nghĩa — xoá để `show_editor_if_hidden_for_capture` chạy sau đó (vd
     // `cancel_overlay` trong `finally` của Chụp nhanh) thành no-op.
     app.state::<AppState>()
-        .editor_hidden_dirty
+        .editor_hidden_for_capture
         .store(false, Ordering::SeqCst);
 
     // Đóng toàn bộ overlay trước khi hiển thị/focus Editor để tránh việc overlay
@@ -2970,15 +3025,10 @@ pub fn hide_occluded_product_windows(app: &AppHandle) -> Vec<String> {
 }
 
 /// Phục hồi các cửa sổ đã ẩn bởi `hide_occluded_product_windows`. Dùng
-/// `orderFront:` gọi TRỰC TIẾP qua Objective-C (KHÔNG `.show()`/`set_focus()`
+/// `orderBack:` gọi TRỰC TIẾP qua Objective-C (KHÔNG `.show()`/`set_focus()`
 /// của Tauri — cả 2 đều đi qua `makeKeyAndOrderFront:`, có thể tự activate
 /// lại app) để chỉ đưa cửa sổ trở lại đúng vị trí "đang mở nhưng bị app khác
-/// che" như trước khi ẩn, không cướp lại frontmost.
-///
-/// **BẮT BUỘC gọi SAU KHI** app trước đó đã được activate lại (xem
-/// `reactivate_app_pid`) — gọi trong lúc SnapDoc còn là app frontmost sẽ làm
-/// cửa sổ nháy lên lại y hệt vấn đề ta đang tránh, chỉ là bị trễ ra thêm 1
-/// bước thay vì được ngăn hẳn.
+/// che" ở z-order phía sau như trước khi ẩn, không cướp lại frontmost hay chèn lên Chrome.
 #[cfg(target_os = "macos")]
 pub fn restore_hidden_product_windows(app: &AppHandle, labels: &[String]) {
     use objc2::{msg_send, runtime::AnyObject};
@@ -2990,7 +3040,7 @@ pub fn restore_hidden_product_windows(app: &AppHandle, labels: &[String]) {
                 if !ptr.is_null() {
                     unsafe {
                         let ns_win: &objc2_app_kit::NSWindow = &*ptr;
-                        let _: () = msg_send![ns_win, orderFront: Option::<&AnyObject>::None];
+                        let _: () = msg_send![ns_win, orderBack: Option::<&AnyObject>::None];
                     }
                 }
             }
