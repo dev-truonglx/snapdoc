@@ -1894,8 +1894,8 @@ fn build_overlay_window_with_retry(
     label: &str,
     query: &str,
 ) -> Result<tauri::WebviewWindow, String> {
-    const MAX_RETRIES: u32 = 5;
-    const RETRY_DELAY_MS: u64 = 40;
+    const MAX_RETRIES: u32 = 15;
+    const RETRY_DELAY_MS: u64 = 50;
 
     let mut last_err = String::new();
     for attempt in 0..=MAX_RETRIES {
@@ -2049,9 +2049,11 @@ fn try_reuse_prewarmed_overlays(
             None => return false,
         }
     }
-    if wins.iter().any(|w| w.is_visible().unwrap_or(true)) {
-        return false;
-    }
+    // LƯU Ý: Cho phép tái sử dụng cả khi overlay đang hiển thị (ví dụ người dùng đang
+    // mở overlay hoặc đang kéo dở khung chụp mà bấm tiếp phím tắt chụp nhanh để chụp lại).
+    // Bằng cách tăng gen và gửi overlay-session-start, React frontend sẽ tự động unmount
+    // component cũ, nạp ảnh freeze mới và reset vùng chọn ngay tức thì mà không cần
+    // close_overlays() rồi build() lại native window (tránh lỗi label conflict trên Windows).
 
     // Chuẩn bị channel nhận tín hiệu TRƯỚC KHI emit session-start để không bao giờ bị rớt tín hiệu
     let ready_rx = prepare_overlay_ready_channel(app);
@@ -2487,6 +2489,7 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize, mode: String) {
 pub fn close_overlays(app: &AppHandle) {
     for (label, win) in app.webview_windows() {
         if label.starts_with("overlay") {
+            let _ = win.hide();
             let _ = win.close();
         }
     }

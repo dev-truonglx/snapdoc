@@ -763,6 +763,7 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
         t0.elapsed(), t_snap, t_freeze, t_overlays);
     if let Err(e) = result {
         clear_frozen_screens(app);
+        windows::show_editor_if_hidden_for_capture(app);
         let _ = app.emit("snapdoc-error", e);
     }
 }
@@ -1302,6 +1303,8 @@ pub fn start_quick(app: &AppHandle) {
         windows::open_overlays(app, "quick")
     })();
     if let Err(e) = result {
+        clear_frozen_screens(app);
+        windows::show_editor_if_hidden_for_capture(app);
         let _ = app.emit("snapdoc-error", e);
     }
 }
