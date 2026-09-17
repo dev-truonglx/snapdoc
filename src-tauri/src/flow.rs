@@ -97,15 +97,21 @@ pub(crate) fn hide_editor_for_freeze(app: &AppHandle) {
 
             #[cfg(target_os = "windows")]
             {
-                use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-                let fg = unsafe { GetForegroundWindow() };
-                let is_editor_fg = get_hwnd(app, "editor").map(|h| h == fg).unwrap_or(false);
-                app.state::<AppState>()
-                    .editor_was_active_before_capture
-                    .store(is_editor_fg, Ordering::SeqCst);
-                if !is_editor_fg && !fg.is_null() {
+                let has_restore = app
+                    .state::<AppState>()
+                    .restore_front_hwnd
+                    .lock()
+                    .ok()
+                    .and_then(|g| *g)
+                    .is_some();
+                if !has_restore {
+                    let external_hwnd = windows::get_external_foreground_hwnd(app);
+                    let is_editor_active = external_hwnd.is_none();
+                    app.state::<AppState>()
+                        .editor_was_active_before_capture
+                        .store(is_editor_active, Ordering::SeqCst);
                     if let Ok(mut g) = app.state::<AppState>().restore_front_hwnd.lock() {
-                        *g = Some(fg as isize);
+                        *g = external_hwnd;
                     }
                 }
             }
@@ -1147,27 +1153,37 @@ pub fn cancel_overlay(app: &AppHandle) {
 
     #[cfg(target_os = "windows")]
     {
-        windows::show_editor_if_hidden_for_capture(app);
-        windows::close_overlays(app);
-        windows::restore_regular_activation(app);
-
         let prev_hwnd = app
             .state::<AppState>()
             .restore_front_hwnd
             .lock()
             .ok()
             .and_then(|mut g| g.take());
+
         if let Some(hwnd_val) = prev_hwnd {
-            use windows_sys::Win32::Foundation::HWND;
-            use windows_sys::Win32::UI::WindowsAndMessaging::{
-                AllowSetForegroundWindow, BringWindowToTop, SetForegroundWindow,
-            };
+            // User vốn đang ở app khác (vd Chrome):
+            // 1. Trả foreground về app đó NGAY LẬP TỨC
             unsafe {
+                use windows_sys::Win32::Foundation::HWND;
+                use windows_sys::Win32::UI::WindowsAndMessaging::{
+                    AllowSetForegroundWindow, BringWindowToTop, SetForegroundWindow,
+                };
                 AllowSetForegroundWindow(0xFFFFFFFF);
                 let target = hwnd_val as HWND;
                 SetForegroundWindow(target);
                 BringWindowToTop(target);
             }
+            // 2. Đóng overlays
+            windows::close_overlays(app);
+            // 3. Phục hồi editor ở đáy z-order (HWND_BOTTOM, SWP_NOACTIVATE), không đưa lên foreground
+            windows::show_editor_if_hidden_for_capture(app);
+            // 4. Trả lại activation policy
+            windows::restore_regular_activation(app);
+        } else {
+            // User vốn đang ở Editor hoặc bấm "Mở trong Editor":
+            windows::show_editor_if_hidden_for_capture(app);
+            windows::close_overlays(app);
+            windows::restore_regular_activation(app);
         }
     }
 
@@ -1254,6 +1270,22 @@ pub fn start_quick(app: &AppHandle) {
         let hidden = windows::hide_occluded_product_windows(app);
         if let Ok(mut g) = app.state::<AppState>().hidden_for_capture.lock() {
             *g = hidden;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let external_hwnd = windows::get_external_foreground_hwnd(app);
+        let is_editor_active = external_hwnd.is_none() && {
+            app.get_webview_window("editor")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false)
+        };
+        app.state::<AppState>()
+            .editor_was_active_before_capture
+            .store(is_editor_active, Ordering::SeqCst);
+        if let Ok(mut g) = app.state::<AppState>().restore_front_hwnd.lock() {
+            *g = external_hwnd;
         }
     }
 

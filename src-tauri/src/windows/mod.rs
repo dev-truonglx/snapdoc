@@ -154,6 +154,81 @@ pub fn reactivate_app_pid(app: &AppHandle, pid: i32) {
     });
 }
 
+/// Windows: Lấy HWND của cửa sổ foreground thuộc ứng dụng khác (vd Chrome, Edge)
+/// ngay lúc bắt đầu phiên chụp. Nếu foreground là cửa sổ SnapDoc (Editor) thì trả None.
+/// Nếu foreground là Taskbar/Tray menu (do người dùng click từ system tray), duyệt Z-order
+/// để tìm cửa sổ ứng dụng người dùng đang thao tác trước đó.
+#[cfg(target_os = "windows")]
+pub fn get_external_foreground_hwnd(app: &AppHandle) -> Option<isize> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindow, GetWindowThreadProcessId, IsWindowVisible,
+        GW_HWNDNEXT,
+    };
+
+    let our_pid = std::process::id();
+    let fg = unsafe { GetForegroundWindow() };
+
+    if !fg.is_null() {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(fg, &mut pid) };
+        if pid == our_pid {
+            let is_editor = get_hwnd(app, "editor").map(|h| h == fg).unwrap_or(false);
+            if is_editor {
+                return None; // Đang ở Editor, không phải app khác
+            }
+        } else {
+            let mut class_name = [0u16; 64];
+            let len = unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW(
+                    fg,
+                    class_name.as_mut_ptr(),
+                    64,
+                )
+            };
+            let name = String::from_utf16_lossy(&class_name[..len as usize]);
+            if name != "Shell_TrayWnd" && name != "NotifyIconOverflowWindow" {
+                return Some(fg as isize);
+            }
+        }
+    }
+
+    // Nếu fg là taskbar hoặc tray menu, duyệt Z-order tìm cửa sổ app khác gần nhất
+    let mut curr = fg;
+    while !curr.is_null() {
+        curr = unsafe { GetWindow(curr, GW_HWNDNEXT) };
+        if curr.is_null() {
+            break;
+        }
+        if unsafe { IsWindowVisible(curr) } == 0 {
+            continue;
+        }
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(curr, &mut pid) };
+        if pid == 0 || pid == our_pid {
+            continue;
+        }
+        let mut class_name = [0u16; 64];
+        let len = unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW(
+                curr,
+                class_name.as_mut_ptr(),
+                64,
+            )
+        };
+        let name = String::from_utf16_lossy(&class_name[..len as usize]);
+        if name == "Progman" || name == "WorkerW" || name == "Shell_TrayWnd" {
+            continue;
+        }
+        return Some(curr as isize);
+    }
+
+    if !fg.is_null() {
+        Some(fg as isize)
+    } else {
+        None
+    }
+}
+
 /// Đưa app sở hữu cửa sổ vừa chọn "Bắt đầu quay" lên foreground — nếu cửa sổ
 /// đó đang ẩn phía sau app khác, user sẽ THẤY nó nổi lên ngay khi bắt đầu
 /// quay thay vì phải tự Cmd+Tab/Alt+Tab đi tìm. ScreenCaptureKit/WGC vẫn quay
@@ -2547,23 +2622,39 @@ pub fn show_editor_if_hidden_for_capture(app: &AppHandle) {
     }
     #[cfg(target_os = "windows")]
     {
-        // 1. Phải bỏ cờ WDA_EXCLUDEFROMCAPTURE TRƯỚC khi show cửa sổ
+        // 1. Phải bỏ cờ WDA_EXCLUDEFROMCAPTURE TRƯỚC khi phục hồi cửa sổ
         // — tránh việc DWM compositor vẽ surface đen/trong suốt/trắng.
         crate::flow::restore_capture_affinity(app);
         // 2. Phục hồi icon taskbar
         let _ = win.set_skip_taskbar(false);
-        // 3. Hiển thị lại cửa sổ và unminimize
-        let _ = win.show();
-        let _ = win.unminimize();
-        // 4. Khôi phục foreground z-order và focus Win32 NẾU user vốn đang ở Editor
-        let was_active = app
-            .state::<AppState>()
-            .editor_was_active_before_capture
-            .load(Ordering::SeqCst);
+
         if was_active {
+            // User vốn đang ở Editor: hiển thị lại lên foreground và unminimize
+            let _ = win.show();
+            let _ = win.unminimize();
             bring_to_front(app, &win);
+        } else {
+            // User đang ở app khác (vd Chrome): tuyệt đối KHÔNG gọi win.show() hay win.unminimize()!
+            // Cả hai lệnh này đều kích hoạt và đưa Editor lên đỉnh z-order gây nháy cửa sổ đè lên Chrome.
+            // Dùng SetWindowPos đưa vào HWND_BOTTOM cùng cờ SWP_NOACTIVATE để cửa sổ nằm êm ở đáy z-order.
+            if let Some(hwnd) = get_hwnd(app, "editor") {
+                unsafe {
+                    use windows_sys::Win32::UI::WindowsAndMessaging::{
+                        SetWindowPos, HWND_BOTTOM, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+                    };
+                    SetWindowPos(
+                        hwnd,
+                        HWND_BOTTOM,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    );
+                }
+            }
         }
-        // 5. Đánh thức WebView2 message pump / render loop
+        // 3. Đánh thức WebView2 message pump / render loop
         let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
             let _ = app_handle.emit_to("editor", "refresh-capture", &());
