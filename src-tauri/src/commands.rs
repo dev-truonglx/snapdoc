@@ -1146,7 +1146,7 @@ pub async fn finalize_scroll_stitch(
 #[tauri::command]
 pub fn get_frozen_screen(state: State<AppState>, idx: usize) -> Result<tauri::ipc::Response, String> {
     let mut g = state.frozen_screens.lock().map_err(|e| e.to_string())?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
     while !g.contains_key(&idx) {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {

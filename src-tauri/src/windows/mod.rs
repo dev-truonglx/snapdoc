@@ -1830,17 +1830,30 @@ fn reveal_overlay(
 /// Có timeout an toàn (220ms) để một lỗi/độ trễ bất thường ở frontend không
 /// bao giờ treo cả phiên chụp — hết giờ thì vẫn tiến hành reveal như cũ
 /// (đúng hành vi trước khi có cơ chế chờ này).
-fn wait_for_overlays_ready(app: &AppHandle, gen: u64, expected: usize) {
-    use std::collections::HashSet;
-    use std::sync::mpsc;
-    use std::time::Instant;
-
-    let t_start = Instant::now();
-    let (tx, rx) = mpsc::channel::<(u64, usize)>();
+fn prepare_overlay_ready_channel(app: &AppHandle) -> std::sync::mpsc::Receiver<(u64, usize)> {
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, usize)>();
     if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
         *slot = Some(tx);
     }
+    rx
+}
 
+/// Chờ frontend báo "đã paint xong ảnh đóng băng" cho từng overlay-{idx}
+/// (qua Tauri command `notify_overlay_ready`, xem `commands::notify_overlay_ready`
+/// và `useFrozenScreen` trong Overlay.tsx) trước khi `reveal_overlay` cho
+/// TẤT CẢ màn hình. Mục đích: tất cả overlay trồi lên compositor gần như
+/// cùng một nhịp, với nội dung đã đúng — không màn nào lộ ra chậm hơn màn
+/// khác, không có nhịp "trống" trước khi ảnh đóng băng kịp vẽ.
+fn wait_for_overlays_ready(
+    app: &AppHandle,
+    rx: std::sync::mpsc::Receiver<(u64, usize)>,
+    gen: u64,
+    expected: usize,
+) {
+    use std::collections::HashSet;
+    use std::time::Instant;
+
+    let t_start = Instant::now();
     let deadline = Instant::now() + Duration::from_millis(350);
     let mut seen: HashSet<usize> = HashSet::with_capacity(expected);
     while seen.len() < expected {
@@ -2040,6 +2053,10 @@ fn try_reuse_prewarmed_overlays(
         return false;
     }
 
+    // Chuẩn bị channel nhận tín hiệu TRƯỚC KHI emit session-start để không bao giờ bị rớt tín hiệu
+    let ready_rx = prepare_overlay_ready_channel(app);
+    let t_prep = std::time::Instant::now();
+
     for (i, (snap, win)) in snaps.iter().zip(wins.iter()).enumerate() {
         position_overlay(app, win, snap);
         let preset_json = if matched_idx == Some(i) {
@@ -2065,17 +2082,27 @@ fn try_reuse_prewarmed_overlays(
             return false;
         }
     }
+    let prep_dur = t_prep.elapsed();
 
     // Chờ frontend từng overlay báo đã paint xong ảnh đóng băng, rồi mới
     // order-front TẤT CẢ cùng lúc — tránh nhịp trống/nháy và tránh màn hình
     // này lên hình trước màn hình khác.
-    wait_for_overlays_ready(app, gen, snaps.len());
+    let t_wait = std::time::Instant::now();
+    wait_for_overlays_ready(app, ready_rx, gen, snaps.len());
+    let wait_dur = t_wait.elapsed();
+
+    let t_reveal = std::time::Instant::now();
     for (i, win) in wins.iter().enumerate() {
         reveal_overlay(app, win, &snaps[i]);
         if i == focus_idx {
             let _ = win.set_focus();
         }
     }
+    let reveal_dur = t_reveal.elapsed();
+    eprintln!(
+        "[SnapDoc Timing] try_reuse_prewarmed_overlays breakdown: prep={:?}, wait={:?}, reveal={:?}",
+        prep_dur, wait_dur, reveal_dur
+    );
     true
 }
 
@@ -2225,6 +2252,7 @@ pub fn open_overlays_ex(
     eprintln!("[SnapDoc Timing] try_reuse_prewarmed_overlays: {:?}, reused={}", t_reuse.elapsed(), reused);
     if !reused {
         let t_build = std::time::Instant::now();
+        let ready_rx = prepare_overlay_ready_channel(app);
         close_overlays(app);
         let mut wins = Vec::with_capacity(snaps.len());
         for (i, snap) in snaps.iter().enumerate() {
@@ -2247,7 +2275,7 @@ pub fn open_overlays_ex(
             wins.push(win);
         }
 
-        wait_for_overlays_ready(app, gen, snaps.len());
+        wait_for_overlays_ready(app, ready_rx, gen, snaps.len());
         for (i, win) in wins.iter().enumerate() {
             reveal_overlay(app, win, &snaps[i]);
             if i == focus_idx {
