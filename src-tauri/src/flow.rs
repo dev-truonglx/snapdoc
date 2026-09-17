@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 #[cfg(target_os = "windows")]
-fn get_hwnd(app: &tauri::AppHandle, label: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
+pub(crate) fn get_hwnd(app: &tauri::AppHandle, label: &str) -> Option<windows_sys::Win32::Foundation::HWND> {
     let win = app.get_webview_window(label)?;
     let hwnd = win.hwnd().ok()?; // Tauri's built-in, trả về windows::Win32::Foundation::HWND
     Some(hwnd.0 as windows_sys::Win32::Foundation::HWND)

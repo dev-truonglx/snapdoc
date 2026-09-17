@@ -172,7 +172,7 @@ pub fn get_external_foreground_hwnd(app: &AppHandle) -> Option<isize> {
         let mut pid = 0u32;
         unsafe { GetWindowThreadProcessId(fg, &mut pid) };
         if pid == our_pid {
-            let is_editor = get_hwnd(app, "editor").map(|h| h == fg).unwrap_or(false);
+            let is_editor = crate::flow::get_hwnd(app, "editor").map(|h| h == fg).unwrap_or(false);
             if is_editor {
                 return None; // Đang ở Editor, không phải app khác
             }
@@ -2637,7 +2637,7 @@ pub fn show_editor_if_hidden_for_capture(app: &AppHandle) {
             // User đang ở app khác (vd Chrome): tuyệt đối KHÔNG gọi win.show() hay win.unminimize()!
             // Cả hai lệnh này đều kích hoạt và đưa Editor lên đỉnh z-order gây nháy cửa sổ đè lên Chrome.
             // Dùng SetWindowPos đưa vào HWND_BOTTOM cùng cờ SWP_NOACTIVATE để cửa sổ nằm êm ở đáy z-order.
-            if let Some(hwnd) = get_hwnd(app, "editor") {
+            if let Some(hwnd) = crate::flow::get_hwnd(app, "editor") {
                 unsafe {
                     use windows_sys::Win32::UI::WindowsAndMessaging::{
                         SetWindowPos, HWND_BOTTOM, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
