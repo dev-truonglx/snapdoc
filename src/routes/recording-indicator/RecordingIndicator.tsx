@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Component, ReactNode, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
@@ -17,6 +17,45 @@ interface RecordingTick {
   paused: boolean;
 }
 
+interface ErrorBoundaryState {
+  hasError: boolean;
+}
+
+/** Error Boundary bảo vệ popup khỏi crash trắng trang trên WebView2 (vốn khiến window trong suốt thành vô hình). */
+class IndicatorErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: any) {
+    console.error("[SnapDoc][RecordingIndicator] Render error:", error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={wrap} data-tauri-drag-region>
+          <span style={{ ...dot, pointerEvents: "none" }} />
+          <span style={{ ...time, pointerEvents: "none" }}>REC</span>
+          <button
+            style={stopBtn}
+            onClick={() => ipc.stopRecording().catch(() => {})}
+            title="Stop recording"
+          >
+            ■
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 /** Popup nổi "đang quay" trên Windows (xem `windows::open_recording_indicator`)
  * — thay cho vai trò của `NSStatusItem.title` bên macOS (hiện đồng hồ đếm
  * ngay cạnh icon tray), vì tray icon Win32 không có API tương đương. Lắng
@@ -27,7 +66,7 @@ interface RecordingTick {
  * Nút Pause và Stop được tách biệt nhau bằng divider + khoảng trống để tránh
  * bấm nhầm khi quay full màn hình trên Windows. Có thể kéo thả (drag) để di
  * chuyển popup ra vị trí khác tránh che khuất nội dung cần thao tác. */
-export default function RecordingIndicator() {
+function RecordingIndicatorContent() {
   const { t } = useTranslation();
   const [elapsedMs, setElapsedMs] = useState(0);
   const [stopping, setStopping] = useState(false);
@@ -199,6 +238,14 @@ export default function RecordingIndicator() {
         button:disabled { cursor: not-allowed; }
       `}</style>
     </div>
+  );
+}
+
+export default function RecordingIndicator() {
+  return (
+    <IndicatorErrorBoundary>
+      <RecordingIndicatorContent />
+    </IndicatorErrorBoundary>
   );
 }
 
