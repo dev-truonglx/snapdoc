@@ -1182,16 +1182,17 @@ pub fn cancel_overlay(app: &AppHandle) {
             windows::restore_regular_activation(app);
         } else {
             // User vốn đang ở Editor hoặc bấm "Mở trong Editor":
-            windows::show_editor_if_hidden_for_capture(app);
+            // Đóng overlays trước để khi overlay biến mất không cướp active window của Editor
             windows::close_overlays(app);
+            windows::show_editor_if_hidden_for_capture(app);
             windows::restore_regular_activation(app);
         }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        windows::show_editor_if_hidden_for_capture(app);
         windows::close_overlays(app);
+        windows::show_editor_if_hidden_for_capture(app);
         windows::restore_regular_activation(app);
     }
 }

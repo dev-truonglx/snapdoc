@@ -198,6 +198,10 @@ pub struct AppState {
     /// gây lỗi "a webview with label ... already exists". Xem
     /// `windows::OverlayOpenGuard`.
     pub overlay_opening: AtomicBool,
+    /// `true` trong lúc `windows::prewarm_overlays` đang chạy ngầm khởi tạo pool
+    /// overlay — dùng để `windows::open_overlays_ex` biết và chờ nhẹ nếu người dùng
+    /// bấm chụp ngay khi app vừa bật, tránh race condition mở đè lên quá trình build.
+    pub overlay_prewarming: AtomicBool,
     /// Snapshot màn hình của phiên overlay hiện tại — chia sẻ giữa `open_overlays`
     /// và `input_loop` để chỉ số overlay luôn khớp.
     pub overlay_monitors: Mutex<Vec<MonitorSnap>>,
