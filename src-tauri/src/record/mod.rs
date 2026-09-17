@@ -188,6 +188,7 @@ impl ActiveAudio {
         want_system_audio: bool,
         tmp_dir: PathBuf,
         paused: Arc<AtomicBool>,
+        recording_start: Arc<Mutex<Option<Instant>>>,
     ) -> Result<Self, String> {
         let mic = Arc::new(Mutex::new(None));
         let system_audio = Arc::new(Mutex::new(None));
@@ -202,8 +203,8 @@ impl ActiveAudio {
         let stop_signal_clone = stop_signal.clone();
         let tmp_dir_clone = tmp_dir.clone();
         let paused_clone = paused.clone();
-
-        let t_audio_start = Instant::now();
+        let recording_start_mic = recording_start.clone();
+        let recording_start_sys = recording_start;
 
         let init_thread = std::thread::Builder::new()
             .name("snapdoc-audio-init".into())
@@ -216,6 +217,7 @@ impl ActiveAudio {
                         let dir = tmp_dir_clone.clone();
                         let p = paused_clone.clone();
                         let app_ref = app.clone();
+                        let rec_start = recording_start_mic;
 
                         s.spawn(move || {
                             if stop_sig.load(Ordering::SeqCst) {
@@ -232,7 +234,20 @@ impl ActiveAudio {
 
                             match mic_res {
                                 Ok((mic_cap, rx, sample_rate, channels)) => {
-                                    let delta_ms = t_audio_start.elapsed().as_millis() as usize;
+                                    // Chờ mốc bắt đầu quay chính thức (sau khi Encoder và writer sẵn sàng)
+                                    let start_time = loop {
+                                        if stop_sig.load(Ordering::SeqCst) {
+                                            return;
+                                        }
+                                        if let Some(t) = *rec_start.lock().unwrap_or_else(|p| p.into_inner()) {
+                                            break t;
+                                        }
+                                        // Xả các chunk pre-roll trong lúc chờ encoder khởi động
+                                        while let Ok(_) = rx.try_recv() {}
+                                        std::thread::sleep(std::time::Duration::from_millis(2));
+                                    };
+
+                                    let delta_ms = Instant::now().saturating_duration_since(start_time).as_millis() as usize;
                                     let frame_size = channels as usize * 2;
                                     let num_frames = (sample_rate as usize * delta_ms) / 1000;
                                     let silence_bytes = num_frames * frame_size;
@@ -267,6 +282,7 @@ impl ActiveAudio {
                         let dir = tmp_dir_clone.clone();
                         let p = paused_clone.clone();
                         let app_ref = app.clone();
+                        let rec_start = recording_start_sys;
 
                         s.spawn(move || {
                             if stop_sig.load(Ordering::SeqCst) {
@@ -283,7 +299,20 @@ impl ActiveAudio {
 
                             match sys_res {
                                 Ok((sys_cap, rx, sample_rate, channels)) => {
-                                    let delta_ms = t_audio_start.elapsed().as_millis() as usize;
+                                    // Chờ mốc bắt đầu quay chính thức (sau khi Encoder và writer sẵn sàng)
+                                    let start_time = loop {
+                                        if stop_sig.load(Ordering::SeqCst) {
+                                            return;
+                                        }
+                                        if let Some(t) = *rec_start.lock().unwrap_or_else(|p| p.into_inner()) {
+                                            break t;
+                                        }
+                                        // Xả các chunk pre-roll trong lúc chờ encoder khởi động
+                                        while let Ok(_) = rx.try_recv() {}
+                                        std::thread::sleep(std::time::Duration::from_millis(2));
+                                    };
+
+                                    let delta_ms = Instant::now().saturating_duration_since(start_time).as_millis() as usize;
                                     let frame_size = channels as usize * 2;
                                     let num_frames = (sample_rate as usize * delta_ms) / 1000;
                                     let silence_bytes = num_frames * frame_size;
@@ -1141,6 +1170,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
     let paused = Arc::new(AtomicBool::new(false));
     let paused_accumulated_ms = Arc::new(AtomicU64::new(0));
     let pause_started_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
     // Khởi tạo audio phi đồng bộ (chạy nền) để không chặn việc bắt đầu quay video và hiển thị indicator popup
     let (video_path, output_path, audio) = if has_any_audio {
@@ -1155,6 +1185,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
             want_system_audio,
             tmp_dir,
             paused.clone(),
+            recording_start.clone(),
         )?;
         (video_tmp_path, final_path, Some(audio))
     } else {
@@ -1222,6 +1253,13 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
         None
     };
 
+    // Điểm mốc bắt đầu quay chính thức — Audio, Video, Telemetry và duration_ms đều tính từ đây
+    let start_instant = Instant::now();
+    if let Ok(mut g) = recording_start.lock() {
+        *g = Some(start_instant);
+    }
+    stream.start_ticking();
+
     {
         let mut guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
         *guard = Some(ActiveRecording {
@@ -1230,7 +1268,7 @@ fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::Re
             audio,
             video_path,
             output_path,
-            started_at: Instant::now(),
+            started_at: start_instant,
             width,
             height,
             capture_mode,
