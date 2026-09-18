@@ -1146,7 +1146,7 @@ pub async fn finalize_scroll_stitch(
 #[tauri::command]
 pub fn get_frozen_screen(state: State<AppState>, idx: usize) -> Result<tauri::ipc::Response, String> {
     let mut g = state.frozen_screens.lock().map_err(|e| e.to_string())?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
     while !g.contains_key(&idx) {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
@@ -1215,14 +1215,16 @@ pub fn copy_gif_to_clipboard(file_path: String) -> Result<(), String> {
     crate::clipboard::copy_gif_file(p)
 }
 
-/// Đọc file telemetry chuột (.mouse.json) đi kèm với video (nếu có) để phục vụ tính năng
-/// Auto Focus & Zoom trong VideoTrimmer.
+/// Đọc file telemetry chuột (.json) đi kèm với video (nếu có) để phục vụ tính năng
+/// Auto Focus & Zoom trong VideoTrimmer. File được lưu tách biệt trong folder nội bộ
+/// (`library/focus`) hoặc fallback file legacy (.mouse.json).
 #[tauri::command]
 pub fn get_video_mouse_telemetry(
+    app: AppHandle,
     file_path: String,
 ) -> Result<Option<crate::record::mouse_click::MouseTelemetryFile>, String> {
     let p = std::path::Path::new(&file_path);
-    let telemetry_path = crate::record::mouse_click::telemetry_path_for_video(p);
+    let telemetry_path = crate::record::mouse_click::telemetry_path_for_video(&app, p);
     if !telemetry_path.exists() {
         return Ok(None);
     }

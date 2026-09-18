@@ -210,6 +210,13 @@ impl GraphicsCaptureApiHandler for Capturer {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(u_period: u32) -> u32;
+    fn timeEndPeriod(u_period: u32) -> u32;
+}
+
 /// Thread đếm nhịp đúng `interval` (= 1/fps giây) — MỖI NHỊP lấy frame mới
 /// nhất `Capturer` đã ghi vào `latest` (lặp lại frame cũ nếu WGC chưa gửi gì
 /// mới kể từ nhịp trước) rồi đẩy vào `frame_tx`.
@@ -218,24 +225,54 @@ fn spawn_ticker(
     latest: Arc<Mutex<Option<Arc<Frame>>>>,
     dropped: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    started: Arc<AtomicBool>,
     interval: Duration,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
+        // 1. Chờ tín hiệu bắt đầu phát frame (sau khi Encoder và writer thread đã sẵn sàng)
+        while !started.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        // 2. Chờ WGC gửi frame đầu tiên vào `latest`
+        while latest.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        // 3. Đặt độ phân giải timer của Windows thành 1ms (khắc phục độ trễ 15.6ms của bản release)
+        #[cfg(target_os = "windows")]
+        unsafe {
+            timeBeginPeriod(1);
+        }
+
         let start = Instant::now();
-        let mut frame_index: u32 = 0;
+        let mut frame_index: u64 = 0;
+
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            let target_time = start + interval * frame_index;
+
+            let target_time = start + interval.mul_f64(frame_index as f64);
             let now = Instant::now();
+
             if target_time > now {
-                std::thread::sleep((target_time - now).min(Duration::from_millis(20)));
-                continue;
+                let wait = target_time - now;
+                if wait > Duration::from_millis(1) {
+                    std::thread::sleep(wait - Duration::from_millis(1));
+                }
+                while Instant::now() < target_time {
+                    std::hint::spin_loop();
+                }
             }
-            frame_index = frame_index.wrapping_add(1).max(
-                ((now - start).as_nanos() / interval.as_nanos().max(1)) as u32,
-            );
+
+            frame_index += 1;
 
             let frame = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(frame) = frame {
@@ -243,6 +280,11 @@ fn spawn_ticker(
                     dropped.store(true, Ordering::Relaxed);
                 }
             }
+        }
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            timeEndPeriod(1);
         }
     })
 }
@@ -397,6 +439,7 @@ fn window_capture_size(hwnd: *mut std::ffi::c_void) -> Result<(u32, u32), String
 pub struct RecordingHandle {
     control: Option<CaptureControl<Capturer, Box<dyn std::error::Error + Send + Sync>>>,
     ticker_stop: Arc<AtomicBool>,
+    ticker_started: Arc<AtomicBool>,
     ticker_thread: Option<JoinHandle<()>>,
     dropped: Arc<AtomicBool>,
     stopped_externally: Arc<AtomicBool>,
@@ -405,6 +448,12 @@ pub struct RecordingHandle {
 }
 
 impl RecordingHandle {
+    /// Bắt đầu phát nhịp khung hình từ WGC sang encoder — gọi sau khi Encoder
+    /// và writer thread đã sẵn sàng lắng nghe channel, tránh dồn ứ buffer lúc khởi động.
+    pub fn start_ticking(&self) {
+        self.ticker_started.store(true, Ordering::SeqCst);
+    }
+
     /// WGC đã tự dừng phiên capture ngoài ý muốn hay chưa — `record::mod`
     /// poll cờ này để tự dọn dẹp thay vì chờ mãi frame không bao giờ tới.
     pub fn is_stopped_externally(&self) -> bool {
@@ -581,12 +630,21 @@ pub fn start(
     };
 
     let ticker_stop = Arc::new(AtomicBool::new(false));
-    let ticker_thread = spawn_ticker(frame_tx, latest, dropped.clone(), ticker_stop.clone(), interval);
+    let ticker_started = Arc::new(AtomicBool::new(false));
+    let ticker_thread = spawn_ticker(
+        frame_tx,
+        latest,
+        dropped.clone(),
+        ticker_stop.clone(),
+        ticker_started.clone(),
+        interval,
+    );
 
     Ok((
         RecordingHandle {
             control: Some(control),
             ticker_stop,
+            ticker_started,
             ticker_thread: Some(ticker_thread),
             dropped,
             stopped_externally,
@@ -597,3 +655,72 @@ pub fn start(
         None,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spawn_ticker_accuracy() {
+        let fps = 30u32;
+        let interval = Duration::from_secs_f64(1.0 / fps as f64);
+        let bound = (fps as usize) * 2;
+        let (tx, rx) = mpsc::sync_channel::<Arc<Frame>>(bound);
+        let latest = Arc::new(Mutex::new(Some(Arc::new(Frame {
+            bgra: vec![0; 100],
+            width: 10,
+            height: 10,
+        }))));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicBool::new(false));
+
+        let ticker = spawn_ticker(
+            tx,
+            latest,
+            dropped.clone(),
+            stop.clone(),
+            started.clone(),
+            interval,
+        );
+
+        // Verify that before started is set, no frames are emitted
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(rx.try_recv().is_err(), "Ticker emitted frames before being started!");
+
+        // Consumer thread draining rx
+        let stop_consumer = Arc::new(AtomicBool::new(false));
+        let sc = stop_consumer.clone();
+        let consumer = std::thread::spawn(move || {
+            let mut count = 0;
+            while !sc.load(Ordering::Relaxed) {
+                if let Ok(_) = rx.recv_timeout(Duration::from_millis(50)) {
+                    count += 1;
+                }
+            }
+            while let Ok(_) = rx.try_recv() {
+                count += 1;
+            }
+            count
+        });
+
+        // Start ticking
+        started.store(true, Ordering::SeqCst);
+        let test_duration = Duration::from_secs(3);
+        std::thread::sleep(test_duration);
+
+        stop.store(true, Ordering::SeqCst);
+        let _ = ticker.join();
+        stop_consumer.store(true, Ordering::SeqCst);
+        let total_frames = consumer.join().unwrap();
+
+        eprintln!("[test] ticker in 3.0s produced: {total_frames} frames (expected 90, fps={:.1})", total_frames as f64 / 3.0);
+        assert!(!dropped.load(Ordering::Relaxed), "Dropped flag should be false!");
+        // In 3.0 seconds at 30 fps, we expect 90-91 frames (due to rounding/first tick)
+        assert!(
+            total_frames >= 89 && total_frames <= 92,
+            "Expected ~90 frames in 3s, got {total_frames}"
+        );
+    }
+}
+

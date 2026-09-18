@@ -9,7 +9,7 @@ import AnnotationStage, { type StageHandle, imageAnnCache } from "../../features
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
 import type { VideoOverlayItem } from "../../features/video-trim/types";
 import { dropVideoSession } from "../../features/video-trim/videoSessions";
-import { useEditor } from "../../features/annotation/store";
+import { useEditor, useIsDirty } from "../../features/annotation/store";
 import {
   beginSwitch,
   isCurrentSwitch,
@@ -246,6 +246,22 @@ export default function Editor() {
   useEffect(() => {
     useEditor.getState().setVideoDirty(videoDirty);
   }, [videoDirty]);
+
+  // Đồng bộ trạng thái dirty của Editor sang backend Tauri (AppState.editor_dirty)
+  // để cập nhật title cửa sổ ("• SnapDoc — Editor") và lưu trạng thái sửa đổi.
+  const isDirty = useIsDirty();
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    ipc.setEditorDirty(isDirty).catch(() => {});
+  }, [isDirty]);
+
+  useEffect(() => {
+    return () => {
+      if ("__TAURI_INTERNALS__" in window) {
+        ipc.setEditorDirty(false).catch(() => {});
+      }
+    };
+  }, []);
 
   // Live-update thumbnail dải "Gần đây" khi annotation thay đổi.
   // Debounce 1.5s — đủ thưa để không gọi liên tục khi đang kéo vẽ,

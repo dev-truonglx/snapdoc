@@ -129,7 +129,7 @@ fn run_action(app: &AppHandle, action: &str) {
                     if let Err(e) = crate::record::start_recording(&app) {
                         eprintln!("[SnapDoc] Bắt đầu quay (phím tắt) thất bại: {e}");
                         // Quay không khởi động được → không có gì mở lại editor.
-                        windows::show_editor_if_hidden_dirty(&app);
+                        windows::show_editor_if_hidden_for_capture(&app);
                     }
                 }
             });

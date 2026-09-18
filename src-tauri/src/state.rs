@@ -198,6 +198,10 @@ pub struct AppState {
     /// gây lỗi "a webview with label ... already exists". Xem
     /// `windows::OverlayOpenGuard`.
     pub overlay_opening: AtomicBool,
+    /// `true` trong lúc `windows::prewarm_overlays` đang chạy ngầm khởi tạo pool
+    /// overlay — dùng để `windows::open_overlays_ex` biết và chờ nhẹ nếu người dùng
+    /// bấm chụp ngay khi app vừa bật, tránh race condition mở đè lên quá trình build.
+    pub overlay_prewarming: AtomicBool,
     /// Snapshot màn hình của phiên overlay hiện tại — chia sẻ giữa `open_overlays`
     /// và `input_loop` để chỉ số overlay luôn khớp.
     pub overlay_monitors: Mutex<Vec<MonitorSnap>>,
@@ -239,6 +243,10 @@ pub struct AppState {
     /// `flow::start_quick`/`flow::cancel_overlay`).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub restore_front_pid: Mutex<Option<i32>>,
+    /// Windows: HWND của cửa sổ đang foreground TRƯỚC KHI mở overlay.
+    /// Dùng để trả focus về đúng app cũ (Chrome) sau khi copy/save/hủy chụp.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub restore_front_hwnd: Mutex<Option<isize>>,
     /// macOS: nhãn các cửa sổ sản phẩm (history/settings/preview…) đã bị
     /// `.hide()` THẬT SỰ (orderOut) tạm thời trước khi mở overlay Chụp nhanh.
     /// Lý do cần ẩn thật thay vì chỉ trả focus SAU: `set_focus()` lúc mở
@@ -287,12 +295,13 @@ pub struct AppState {
     /// quá hạn chỉ tốn 1 lần cảnh báo thừa; cờ `false` cũ đi quá hạn thì mất
     /// việc của user.
     pub editor_dirty: Mutex<HashMap<String, bool>>,
-    /// `true` khi phiên chụp hiện tại đã ẩn một cửa sổ editor ĐANG dirty (xem
-    /// `flow::hide_editor_for_freeze`). Có những nhánh chụp KHÔNG bao giờ mở
-    /// lại editor — `output = "clipboard"`/`"save"` chỉ mở cửa sổ thumbnail,
-    /// còn huỷ overlay (Esc) thì không hiện lại gì cả — nên nếu không có cờ
-    /// này thì cửa sổ chứa việc chưa lưu bị ẩn và KHÔNG CÓ CÁCH NÀO mở lại
-    /// (tray không có mục "Mở editor", `RunEvent::Reopen` mở capture-bar).
-    /// Đọc-và-xoá bằng `swap(false)` trong `windows::show_editor_if_hidden_dirty`.
-    pub editor_hidden_dirty: AtomicBool,
+    /// `true` khi phiên chụp hiện tại đã ẩn một cửa sổ editor ĐANG hiển thị (xem
+    /// `flow::hide_editor_for_freeze`). Giúp khôi phục lại Editor sau khi kết thúc
+    /// các nhánh chụp không tự mở editor mới (chụp nhanh copy/save, huỷ overlay Esc).
+    /// Đọc-và-xoá bằng `swap(false)` trong `windows::show_editor_if_hidden_for_capture`.
+    pub editor_hidden_for_capture: AtomicBool,
+    /// Ghi nhận xem cửa sổ Editor có đang là active/foreground window ngay trước khi freeze hay không.
+    /// Dùng để tránh cướp focus/hiển thị đè lên Chrome khi người dùng đang thao tác ở app khác.
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+    pub editor_was_active_before_capture: AtomicBool,
 }

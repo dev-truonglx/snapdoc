@@ -72,19 +72,28 @@ pub fn capture_frozen_screens_streaming(
     {
         use tauri::Manager;
         let state = app.state::<crate::state::AppState>();
-        let points: Vec<(usize, i32, i32, u32)> = monitors
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| match (m.x(), m.y(), m.id()) {
+        let mut points: Vec<(usize, i32, i32, u32)> = Vec::new();
+        for (i, m) in monitors.iter().enumerate() {
+            match (m.x(), m.y(), m.id()) {
                 (Ok(x), Ok(y), Ok(id)) => {
                     if exclude_monitor_ids.contains(&id) {
-                        return None;
+                        eprintln!("[SnapDoc][freeze] Bỏ qua màn hình {i} (display_id={id}) vì chứa cửa sổ editor");
+                        if let Ok(mut g) = state.frozen_screens.lock() {
+                            g.insert(i, Vec::new());
+                        }
+                        state.frozen_screens_cvar.notify_all();
+                    } else {
+                        points.push((i, x, y, id));
                     }
-                    Some((i, x, y, id))
                 }
-                _ => None,
-            })
-            .collect();
+                _ => {
+                    if let Ok(mut g) = state.frozen_screens.lock() {
+                        g.insert(i, Vec::new());
+                    }
+                    state.frozen_screens_cvar.notify_all();
+                }
+            }
+        }
 
         std::thread::scope(|s| {
             for (i, x, y, _id) in points {
@@ -93,11 +102,20 @@ pub fn capture_frozen_screens_streaming(
                     let result = Monitor::from_point(x, y)
                         .map_err(|e| format!("Không tìm lại được màn hình: {e}"))
                         .and_then(|m| capture_one_jpeg(&m));
-                    if let Ok(bytes) = result {
-                        if let Ok(mut g) = state_ref.frozen_screens.lock() {
-                            g.insert(i, bytes);
+                    match result {
+                        Ok(bytes) => {
+                            if let Ok(mut g) = state_ref.frozen_screens.lock() {
+                                g.insert(i, bytes);
+                            }
+                            state_ref.frozen_screens_cvar.notify_all();
                         }
-                        state_ref.frozen_screens_cvar.notify_all();
+                        Err(e) => {
+                            eprintln!("[SnapDoc][freeze] Màn hình {i} lỗi: {e}");
+                            if let Ok(mut g) = state_ref.frozen_screens.lock() {
+                                g.insert(i, Vec::new());
+                            }
+                            state_ref.frozen_screens_cvar.notify_all();
+                        }
                     }
                 });
             }
@@ -195,14 +213,14 @@ fn capture_one_jpeg(m: &Monitor) -> Result<Vec<u8>, String> {
     let raw = capture_raw(m)?;
     let t_raw = t0.elapsed();
 
-    // Encode JPEG quality 85 vào buffer.
+    // Encode JPEG quality 75 vào buffer (chất lượng cao cho freeze preview, nén nhanh hơn).
     let mut buf: Vec<u8> = Vec::new();
     let t1 = std::time::Instant::now();
     let rgb: image::RgbImage = image::DynamicImage::ImageRgba8(raw).into_rgb8();
     let t_rgb = t1.elapsed();
 
     let t2 = std::time::Instant::now();
-    JpegEncoder::new_with_quality(&mut buf, 85)
+    JpegEncoder::new_with_quality(&mut buf, 75)
         .write_image(
             rgb.as_raw(),
             rgb.width(),

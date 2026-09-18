@@ -140,6 +140,14 @@ fn permanently_delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(),
             }
         }
     }
+    let telem_path = crate::record::mouse_click::telemetry_path_for_video(app, std::path::Path::new(&rec.asset_path));
+    if telem_path.exists() {
+        let _ = std::fs::remove_file(&telem_path);
+    }
+    let legacy_telem = std::path::Path::new(&rec.asset_path).with_extension("mouse.json");
+    if legacy_telem.exists() {
+        let _ = std::fs::remove_file(&legacy_telem);
+    }
     let st = state(app)?;
     let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
     conn.execute("DELETE FROM history WHERE id = ?1", [id])
@@ -717,8 +725,8 @@ fn trim_history_video_sync(
     }
 
     // Không sao chép telemetry chuột sang video mới nếu đã burn zoom hoặc đã tắt focus
-    let orig_telem = crate::record::mouse_click::telemetry_path_for_video(asset_path);
-    let new_telem = crate::record::mouse_click::telemetry_path_for_video(&new_path);
+    let orig_telem = crate::record::mouse_click::telemetry_path_for_video(app, asset_path);
+    let new_telem = crate::record::mouse_click::telemetry_path_for_video(app, &new_path);
     if !has_zoom && orig_telem.exists() && !new_telem.exists() && zoom_segments.is_none() {
         let _ = std::fs::copy(&orig_telem, &new_telem);
     }
@@ -809,15 +817,19 @@ fn overwrite_history_video_sync(
         (speed - 1.0).abs() < 0.01 && s <= 30 && (orig_dur == 0 || (e - orig_dur).abs() < 250)
     };
 
-    // Đường dẫn file telemetry chuột (.mouse.json) nếu có
-    let telem_path = crate::record::mouse_click::telemetry_path_for_video(asset_path);
+    // Đường dẫn file telemetry chuột (.json) nếu có
+    let telem_path = crate::record::mouse_click::telemetry_path_for_video(app, asset_path);
     let telem_existed = telem_path.exists();
 
     if is_untrimmed {
-        // Nếu file telemetry chuột (.mouse.json) tồn tại nhưng bản lưu đè không dùng zoom
+        // Nếu file telemetry chuột tồn tại nhưng bản lưu đè không dùng zoom
         // (người dùng đã tắt focus chuột), xóa file telemetry để loại bỏ focus triệt để khỏi video.
         if telem_existed {
             let _ = std::fs::remove_file(&telem_path);
+        }
+        let legacy_telem = asset_path.with_extension("mouse.json");
+        if legacy_telem.exists() {
+            let _ = std::fs::remove_file(&legacy_telem);
         }
 
         if !remove_audio {

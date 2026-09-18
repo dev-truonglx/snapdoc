@@ -144,11 +144,106 @@ pub fn reactivate_app_pid(app: &AppHandle, pid: i32) {
         let running: *mut AnyObject =
             msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
         if !running.is_null() {
-            // options = 0: chỉ đưa app lên frontmost, không ép mọi cửa sổ của
-            // nó lên (NSApplicationActivateAllWindows).
-            let _: bool = msg_send![running, activateWithOptions: 0usize];
+            // 2usize = NSApplicationActivateIgnoringOtherApps
+            let _: bool = msg_send![running, activateWithOptions: 2usize];
+            let sel = objc2::sel!(activate);
+            if objc2::msg_send![running, respondsToSelector: sel] {
+                let _: bool = msg_send![running, activate];
+            }
         }
     });
+}
+
+/// Windows: Lấy HWND của cửa sổ foreground thuộc ứng dụng khác (vd Chrome, Edge)
+/// ngay lúc bắt đầu phiên chụp. Nếu foreground là cửa sổ SnapDoc (Editor) thì trả None.
+/// Nếu foreground là Taskbar/Tray menu (do người dùng click từ system tray), duyệt Z-order
+/// để tìm cửa sổ ứng dụng người dùng đang thao tác trước đó.
+#[cfg(target_os = "windows")]
+pub fn get_external_foreground_hwnd(app: &AppHandle) -> Option<isize> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetForegroundWindow, GetWindow, GetWindowThreadProcessId, IsWindowVisible,
+        GA_ROOT, GW_HWNDNEXT,
+    };
+
+    let our_pid = std::process::id();
+    let fg = unsafe { GetForegroundWindow() };
+
+    if !fg.is_null() {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(fg, &mut pid) };
+        if pid == our_pid {
+            let editor_hwnd = crate::flow::get_hwnd(app, "editor");
+            let is_editor = editor_hwnd
+                .map(|h| {
+                    h == fg || unsafe { GetAncestor(fg, GA_ROOT) } == h
+                })
+                .unwrap_or(false);
+            if is_editor {
+                return None; // Đang ở Editor, không phải app khác
+            }
+
+            // Nếu foreground thuộc SnapDoc (vd: bấm Chụp nhanh từ CaptureBar hoặc menu):
+            // Nếu Editor đang hiển thị (không bị minimize), người dùng đang làm việc trong Editor -> trả None.
+            if let Some(win) = app.get_webview_window("editor") {
+                if win.is_visible().unwrap_or(false) && !win.is_minimized().unwrap_or(false) {
+                    return None;
+                }
+            }
+        } else {
+            let mut class_name = [0u16; 64];
+            let len = unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW(
+                    fg,
+                    class_name.as_mut_ptr(),
+                    64,
+                )
+            };
+            let name = String::from_utf16_lossy(&class_name[..len as usize]);
+            if name != "Shell_TrayWnd" && name != "NotifyIconOverflowWindow" {
+                return Some(fg as isize);
+            }
+        }
+    }
+
+    // Nếu fg là taskbar hoặc tray menu (hoặc SnapDoc khi Editor không hiển thị), duyệt Z-order tìm cửa sổ app khác gần nhất
+    let mut curr = fg;
+    while !curr.is_null() {
+        curr = unsafe { GetWindow(curr, GW_HWNDNEXT) };
+        if curr.is_null() {
+            break;
+        }
+        if unsafe { IsWindowVisible(curr) } == 0 {
+            continue;
+        }
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(curr, &mut pid) };
+        if pid == 0 || pid == our_pid {
+            continue;
+        }
+        let mut class_name = [0u16; 64];
+        let len = unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW(
+                curr,
+                class_name.as_mut_ptr(),
+                64,
+            )
+        };
+        let name = String::from_utf16_lossy(&class_name[..len as usize]);
+        if name == "Progman" || name == "WorkerW" || name == "Shell_TrayWnd" {
+            continue;
+        }
+        return Some(curr as isize);
+    }
+
+    // Nếu không tìm thấy app khác, chỉ trả Some(fg) nếu fg KHÔNG thuộc tiến trình của ta
+    if !fg.is_null() {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(fg, &mut pid) };
+        if pid != our_pid && pid != 0 {
+            return Some(fg as isize);
+        }
+    }
+    None
 }
 
 /// Đưa app sở hữu cửa sổ vừa chọn "Bắt đầu quay" lên foreground — nếu cửa sổ
@@ -1752,17 +1847,30 @@ fn reveal_overlay(
 /// Có timeout an toàn (220ms) để một lỗi/độ trễ bất thường ở frontend không
 /// bao giờ treo cả phiên chụp — hết giờ thì vẫn tiến hành reveal như cũ
 /// (đúng hành vi trước khi có cơ chế chờ này).
-fn wait_for_overlays_ready(app: &AppHandle, gen: u64, expected: usize) {
-    use std::collections::HashSet;
-    use std::sync::mpsc;
-    use std::time::Instant;
-
-    let t_start = Instant::now();
-    let (tx, rx) = mpsc::channel::<(u64, usize)>();
+fn prepare_overlay_ready_channel(app: &AppHandle) -> std::sync::mpsc::Receiver<(u64, usize)> {
+    let (tx, rx) = std::sync::mpsc::channel::<(u64, usize)>();
     if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
         *slot = Some(tx);
     }
+    rx
+}
 
+/// Chờ frontend báo "đã paint xong ảnh đóng băng" cho từng overlay-{idx}
+/// (qua Tauri command `notify_overlay_ready`, xem `commands::notify_overlay_ready`
+/// và `useFrozenScreen` trong Overlay.tsx) trước khi `reveal_overlay` cho
+/// TẤT CẢ màn hình. Mục đích: tất cả overlay trồi lên compositor gần như
+/// cùng một nhịp, với nội dung đã đúng — không màn nào lộ ra chậm hơn màn
+/// khác, không có nhịp "trống" trước khi ảnh đóng băng kịp vẽ.
+fn wait_for_overlays_ready(
+    app: &AppHandle,
+    rx: std::sync::mpsc::Receiver<(u64, usize)>,
+    gen: u64,
+    expected: usize,
+) {
+    use std::collections::HashSet;
+    use std::time::Instant;
+
+    let t_start = Instant::now();
     let deadline = Instant::now() + Duration::from_millis(350);
     let mut seen: HashSet<usize> = HashSet::with_capacity(expected);
     while seen.len() < expected {
@@ -1803,8 +1911,8 @@ fn build_overlay_window_with_retry(
     label: &str,
     query: &str,
 ) -> Result<tauri::WebviewWindow, String> {
-    const MAX_RETRIES: u32 = 5;
-    const RETRY_DELAY_MS: u64 = 40;
+    const MAX_RETRIES: u32 = 15;
+    const RETRY_DELAY_MS: u64 = 50;
 
     let mut last_err = String::new();
     for attempt in 0..=MAX_RETRIES {
@@ -1860,7 +1968,25 @@ fn build_overlay_window_with_retry(
 /// mode/scale/record/preset thật ngay trước khi show(). Không đụng vào
 /// overlay-{i} đã tồn tại (dù đang ẩn/idle hay đang LIVE của 1 phiên khác) —
 /// chỉ tạo bù cho những index còn thiếu.
+struct OverlayPrewarmGuard(AppHandle);
+impl Drop for OverlayPrewarmGuard {
+    fn drop(&mut self) {
+        self.0
+            .state::<AppState>()
+            .overlay_prewarming
+            .store(false, Ordering::SeqCst);
+    }
+}
+
 pub fn prewarm_overlays(app: &AppHandle) {
+    if app.state::<AppState>().overlay_opening.load(Ordering::SeqCst) {
+        return;
+    }
+    app.state::<AppState>()
+        .overlay_prewarming
+        .store(true, Ordering::SeqCst);
+    let _guard = OverlayPrewarmGuard(app.clone());
+
     let xmons = match xcap::Monitor::all() {
         Ok(m) => m,
         Err(e) => {
@@ -1868,11 +1994,8 @@ pub fn prewarm_overlays(app: &AppHandle) {
             return;
         }
     };
+    let mut snaps = Vec::with_capacity(xmons.len());
     for (i, m) in xmons.iter().enumerate() {
-        let label = format!("overlay-{i}");
-        if app.get_webview_window(&label).is_some() {
-            continue;
-        }
         let snap = MonitorSnap {
             id: m.id().unwrap_or(0),
             name: m.name().unwrap_or_default(),
@@ -1883,6 +2006,12 @@ pub fn prewarm_overlays(app: &AppHandle) {
             h: m.height().unwrap_or(0) as f64,
             scale: m.scale_factor().unwrap_or(1.0).max(1.0) as f64,
         };
+        snaps.push(snap.clone());
+
+        let label = format!("overlay-{i}");
+        if app.get_webview_window(&label).is_some() {
+            continue;
+        }
         // gen=0: cửa sổ pre-warm chưa thuộc phiên chụp thật nào — sẽ được
         // navigate() lại với gen thật trước khi dùng (xem `try_reuse_prewarmed_overlays`).
         let query = build_overlay_query("region", i, &snap, false, None, None, 0);
@@ -1910,6 +2039,10 @@ pub fn prewarm_overlays(app: &AppHandle) {
             let _ = win.set_position(PhysicalPosition::new(snap.x as i32, snap.y as i32));
             let _ = win.set_size(PhysicalSize::new(snap.w as u32, snap.h as u32));
         }
+    }
+
+    if let Ok(mut g) = app.state::<AppState>().overlay_monitors.lock() {
+        *g = snaps;
     }
 }
 
@@ -1958,9 +2091,15 @@ fn try_reuse_prewarmed_overlays(
             None => return false,
         }
     }
-    if wins.iter().any(|w| w.is_visible().unwrap_or(true)) {
-        return false;
-    }
+    // LƯU Ý: Cho phép tái sử dụng cả khi overlay đang hiển thị (ví dụ người dùng đang
+    // mở overlay hoặc đang kéo dở khung chụp mà bấm tiếp phím tắt chụp nhanh để chụp lại).
+    // Bằng cách tăng gen và gửi overlay-session-start, React frontend sẽ tự động unmount
+    // component cũ, nạp ảnh freeze mới và reset vùng chọn ngay tức thì mà không cần
+    // close_overlays() rồi build() lại native window (tránh lỗi label conflict trên Windows).
+
+    // Chuẩn bị channel nhận tín hiệu TRƯỚC KHI emit session-start để không bao giờ bị rớt tín hiệu
+    let ready_rx = prepare_overlay_ready_channel(app);
+    let t_prep = std::time::Instant::now();
 
     for (i, (snap, win)) in snaps.iter().zip(wins.iter()).enumerate() {
         position_overlay(app, win, snap);
@@ -1987,17 +2126,27 @@ fn try_reuse_prewarmed_overlays(
             return false;
         }
     }
+    let prep_dur = t_prep.elapsed();
 
     // Chờ frontend từng overlay báo đã paint xong ảnh đóng băng, rồi mới
     // order-front TẤT CẢ cùng lúc — tránh nhịp trống/nháy và tránh màn hình
     // này lên hình trước màn hình khác.
-    wait_for_overlays_ready(app, gen, snaps.len());
+    let t_wait = std::time::Instant::now();
+    wait_for_overlays_ready(app, ready_rx, gen, snaps.len());
+    let wait_dur = t_wait.elapsed();
+
+    let t_reveal = std::time::Instant::now();
     for (i, win) in wins.iter().enumerate() {
         reveal_overlay(app, win, &snaps[i]);
         if i == focus_idx {
             let _ = win.set_focus();
         }
     }
+    let reveal_dur = t_reveal.elapsed();
+    eprintln!(
+        "[SnapDoc Timing] try_reuse_prewarmed_overlays breakdown: prep={:?}, wait={:?}, reveal={:?}",
+        prep_dur, wait_dur, reveal_dur
+    );
     true
 }
 
@@ -2021,6 +2170,18 @@ pub fn open_overlays_ex(
     record: bool,
     preset: Option<crate::flow::LastRecordRegion>,
 ) -> Result<(), String> {
+    // Nếu prewarm_overlays đang chạy ngầm lúc khởi động app, chờ tối đa 600ms
+    // để nó hoàn tất việc tạo pool overlay thay vì race condition hoặc rebuild.
+    if app.state::<AppState>().overlay_prewarming.load(Ordering::SeqCst) {
+        let t0 = std::time::Instant::now();
+        while app.state::<AppState>().overlay_prewarming.load(Ordering::SeqCst) {
+            if t0.elapsed() > Duration::from_millis(600) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     // Chặn 2 lệnh mở overlay chạy CHỒNG NHAU (double-click nút chụp, hotkey
     // double-fire, ...) — nếu không, cả 2 luồng có thể cùng lúc chạy
     // `close_overlays()` + build() lại đúng label `overlay-{i}`, dẫn tới lỗi
@@ -2147,7 +2308,8 @@ pub fn open_overlays_ex(
     eprintln!("[SnapDoc Timing] try_reuse_prewarmed_overlays: {:?}, reused={}", t_reuse.elapsed(), reused);
     if !reused {
         let t_build = std::time::Instant::now();
-        close_overlays(app);
+        let ready_rx = prepare_overlay_ready_channel(app);
+        close_overlays_no_prewarm(app);
         let mut wins = Vec::with_capacity(snaps.len());
         for (i, snap) in snaps.iter().enumerate() {
             let label = format!("overlay-{i}");
@@ -2169,7 +2331,7 @@ pub fn open_overlays_ex(
             wins.push(win);
         }
 
-        wait_for_overlays_ready(app, gen, snaps.len());
+        wait_for_overlays_ready(app, ready_rx, gen, snaps.len());
         for (i, win) in wins.iter().enumerate() {
             reveal_overlay(app, win, &snaps[i]);
             if i == focus_idx {
@@ -2379,8 +2541,17 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize, mode: String) {
 /// finalize_window/finalize_region để DWM có thời gian unregister protected
 /// surface — không cần xác nhận overlay đã đóng hẳn.
 pub fn close_overlays(app: &AppHandle) {
+    close_overlays_internal(app, true);
+}
+
+pub fn close_overlays_no_prewarm(app: &AppHandle) {
+    close_overlays_internal(app, false);
+}
+
+fn close_overlays_internal(app: &AppHandle, should_prewarm: bool) {
     for (label, win) in app.webview_windows() {
         if label.starts_with("overlay") {
+            let _ = win.hide();
             let _ = win.close();
         }
     }
@@ -2396,14 +2567,16 @@ pub fn close_overlays(app: &AppHandle) {
     // đã ghi ở trên). Sleep 300ms trước khi build lại: cùng lý do timing đã
     // ghi ở trên (win.close() là async trên Windows — build() label trùng 1
     // cửa sổ vừa đóng nhưng OS/DWM chưa xử lý xong dễ lỗi/không ổn định).
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        #[cfg(target_os = "macos")]
-        std::thread::sleep(Duration::from_millis(50));
-        #[cfg(not(target_os = "macos"))]
-        std::thread::sleep(Duration::from_millis(300));
-        prewarm_overlays(&handle);
-    });
+    if should_prewarm {
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            #[cfg(target_os = "macos")]
+            std::thread::sleep(Duration::from_millis(50));
+            #[cfg(not(target_os = "macos"))]
+            std::thread::sleep(Duration::from_millis(300));
+            prewarm_overlays(&handle);
+        });
+    }
 }
 
 /// Trả `ActivationPolicy` về Regular sau khi phiên overlay (chụp ảnh/Chụp
@@ -2502,10 +2675,10 @@ pub fn hide_editor(app: &AppHandle) {
 /// Cờ đọc-và-xoá bằng `swap(false)` nên gọi nhiều lần trong cùng một phiên là
 /// idempotent — cần thiết vì `flow::run` gọi `hide_editor_for_freeze` hai lần
 /// (một lần trong `wait_capture_delay` khi bật hẹn giờ).
-pub fn show_editor_if_hidden_dirty(app: &AppHandle) {
+pub fn show_editor_if_hidden_for_capture(app: &AppHandle) {
     if !app
         .state::<AppState>()
-        .editor_hidden_dirty
+        .editor_hidden_for_capture
         .swap(false, Ordering::SeqCst)
     {
         return;
@@ -2513,17 +2686,80 @@ pub fn show_editor_if_hidden_dirty(app: &AppHandle) {
     let Some(win) = app.get_webview_window("editor") else {
         return;
     };
+    let was_active = app
+        .state::<AppState>()
+        .editor_was_active_before_capture
+        .load(Ordering::SeqCst);
+
     #[cfg(target_os = "macos")]
     {
-        use tauri::ActivationPolicy;
-        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+        if was_active {
+            use tauri::ActivationPolicy;
+            let _ = app.set_activation_policy(ActivationPolicy::Regular);
+            let _ = win.show();
+        } else {
+            // User đang ở app khác (vd Chrome) — tuyệt đối KHÔNG gọi `win.show()` hay `orderFront:`!
+            // Cả hai đều đưa Editor đè lên trên Chrome, gây hiện tượng cửa sổ Editor nháy lên rồi biến mất.
+            // Dùng orderBack: trực tiếp để cửa sổ chỉ nằm ở z-order phía sau mà không giành frontmost hay chèn lên Chrome.
+            use objc2::{msg_send, runtime::AnyObject};
+            let _ = app.run_on_main_thread(move || {
+                if let Ok(ptr) = win.ns_window() {
+                    let ptr = ptr as *mut objc2_app_kit::NSWindow;
+                    if !ptr.is_null() {
+                        unsafe {
+                            let ns_win: &objc2_app_kit::NSWindow = &*ptr;
+                            let _: () = msg_send![ns_win, orderBack: Option::<&AnyObject>::None];
+                        }
+                    }
+                }
+            });
+        }
     }
     #[cfg(target_os = "windows")]
-    let _ = win.set_skip_taskbar(false);
-    let _ = win.show();
-    // Windows: bỏ cờ WDA_EXCLUDEFROMCAPTURE mà `hide_editor_for_freeze` đã đặt
-    // — nếu không, cửa sổ vừa hiện lại sẽ vô hình trong MỌI lần chụp sau đó.
-    crate::flow::restore_capture_affinity(app);
+    {
+        // 1. Phải bỏ cờ WDA_EXCLUDEFROMCAPTURE TRƯỚC khi phục hồi cửa sổ
+        // — tránh việc DWM compositor vẽ surface đen/trong suốt/trắng.
+        crate::flow::restore_capture_affinity(app);
+        // 2. Phục hồi icon taskbar
+        let _ = win.set_skip_taskbar(false);
+
+        if was_active {
+            // User vốn đang ở Editor: hiển thị lại lên foreground và unminimize
+            let _ = win.show();
+            let _ = win.unminimize();
+            bring_to_front(app, &win);
+        } else {
+            // User đang ở app khác (vd Chrome): tuyệt đối KHÔNG gọi win.show() hay win.unminimize()!
+            // Cả hai lệnh này đều kích hoạt và đưa Editor lên đỉnh z-order gây nháy cửa sổ đè lên Chrome.
+            // Dùng SetWindowPos đưa vào HWND_BOTTOM cùng cờ SWP_NOACTIVATE để cửa sổ nằm êm ở đáy z-order.
+            if let Some(hwnd) = crate::flow::get_hwnd(app, "editor") {
+                unsafe {
+                    use windows_sys::Win32::UI::WindowsAndMessaging::{
+                        SetWindowPos, HWND_BOTTOM, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+                    };
+                    SetWindowPos(
+                        hwnd,
+                        HWND_BOTTOM,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = win.show();
+    }
+}
+
+/// Alias tương thích ngược cho `show_editor_if_hidden_for_capture`.
+#[allow(dead_code)]
+pub fn show_editor_if_hidden_dirty(app: &AppHandle) {
+    show_editor_if_hidden_for_capture(app);
 }
 
 /// Tạo sẵn editor (ẩn) lúc khởi động để lần chụp đầu hiện ngay, không phải
@@ -2659,11 +2895,11 @@ pub fn bring_to_front(app: &AppHandle, win: &tauri::WebviewWindow) {
 
 /// Editor chú thích.
 pub fn open_editor(app: &AppHandle) -> Result<(), String> {
-    // Đường này tự hiện + focus editor rồi, nên cờ "đã ẩn editor đang dirty"
-    // hết ý nghĩa — xoá để `show_editor_if_hidden_dirty` chạy sau đó (vd
+    // Đường này tự hiện + focus editor rồi, nên cờ "đã ẩn editor khi freeze"
+    // hết ý nghĩa — xoá để `show_editor_if_hidden_for_capture` chạy sau đó (vd
     // `cancel_overlay` trong `finally` của Chụp nhanh) thành no-op.
     app.state::<AppState>()
-        .editor_hidden_dirty
+        .editor_hidden_for_capture
         .store(false, Ordering::SeqCst);
 
     // Đóng toàn bộ overlay trước khi hiển thị/focus Editor để tránh việc overlay
@@ -2970,15 +3206,10 @@ pub fn hide_occluded_product_windows(app: &AppHandle) -> Vec<String> {
 }
 
 /// Phục hồi các cửa sổ đã ẩn bởi `hide_occluded_product_windows`. Dùng
-/// `orderFront:` gọi TRỰC TIẾP qua Objective-C (KHÔNG `.show()`/`set_focus()`
+/// `orderBack:` gọi TRỰC TIẾP qua Objective-C (KHÔNG `.show()`/`set_focus()`
 /// của Tauri — cả 2 đều đi qua `makeKeyAndOrderFront:`, có thể tự activate
 /// lại app) để chỉ đưa cửa sổ trở lại đúng vị trí "đang mở nhưng bị app khác
-/// che" như trước khi ẩn, không cướp lại frontmost.
-///
-/// **BẮT BUỘC gọi SAU KHI** app trước đó đã được activate lại (xem
-/// `reactivate_app_pid`) — gọi trong lúc SnapDoc còn là app frontmost sẽ làm
-/// cửa sổ nháy lên lại y hệt vấn đề ta đang tránh, chỉ là bị trễ ra thêm 1
-/// bước thay vì được ngăn hẳn.
+/// che" ở z-order phía sau như trước khi ẩn, không cướp lại frontmost hay chèn lên Chrome.
 #[cfg(target_os = "macos")]
 pub fn restore_hidden_product_windows(app: &AppHandle, labels: &[String]) {
     use objc2::{msg_send, runtime::AnyObject};
@@ -2990,7 +3221,7 @@ pub fn restore_hidden_product_windows(app: &AppHandle, labels: &[String]) {
                 if !ptr.is_null() {
                     unsafe {
                         let ns_win: &objc2_app_kit::NSWindow = &*ptr;
-                        let _: () = msg_send![ns_win, orderFront: Option::<&AnyObject>::None];
+                        let _: () = msg_send![ns_win, orderBack: Option::<&AnyObject>::None];
                     }
                 }
             }
