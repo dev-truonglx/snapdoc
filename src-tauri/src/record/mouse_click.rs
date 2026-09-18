@@ -45,8 +45,65 @@ pub struct MouseTelemetryFile {
     pub events: Vec<MouseTelemetryItem>,
 }
 
-pub fn telemetry_path_for_video(video_path: &Path) -> PathBuf {
-    video_path.with_extension("mouse.json")
+fn fnv1a_hash(data: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in data.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Xác định đường dẫn file telemetry focus (.json) cho video.
+/// Tách rời khỏi folder video, lưu vào folder riêng nội bộ (`library/focus`)
+/// tương tự như folder file gốc của ảnh chụp (`library/assets`).
+pub fn telemetry_path_for_video(app: &tauri::AppHandle, video_path: &Path) -> PathBuf {
+    let stem = video_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("video");
+    let norm = std::fs::canonicalize(video_path).unwrap_or_else(|_| video_path.to_path_buf());
+    let path_str = norm.to_string_lossy();
+    let hash = fnv1a_hash(&path_str);
+    let filename = format!("{stem}_{hash:016x}.json");
+
+    if let Ok(dir) = crate::history::assets::focus_dir(app) {
+        let target_path = dir.join(&filename);
+
+        // 1. Ưu tiên file theo đúng hash đường dẫn
+        if target_path.exists() {
+            return target_path;
+        }
+
+        // 2. Fallback: file theo stem đơn thuần (nếu từng lưu dạng {stem}.json)
+        let stem_path = dir.join(format!("{stem}.json"));
+        if stem_path.exists() {
+            return stem_path;
+        }
+
+        // 3. Fallback: tìm file {stem}_*.json trong thư mục focus (trường hợp video được đổi tên thư mục cha / di chuyển)
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let prefix = format!("{stem}_");
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with(&prefix) && name_str.ends_with(".json") {
+                    return entry.path();
+                }
+            }
+        }
+
+        // 4. Fallback tương thích ngược: file legacy nằm cùng thư mục video (.mouse.json)
+        let legacy_path = video_path.with_extension("mouse.json");
+        if legacy_path.exists() {
+            return legacy_path;
+        }
+
+        // Mặc định trả về target_path mới để ghi file mới vào đúng thư mục library/focus
+        target_path
+    } else {
+        video_path.with_extension("mouse.json")
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -374,12 +431,13 @@ mod macos {
 
         pub fn save_telemetry(
             &self,
+            app: &AppHandle,
             video_path: &Path,
             width: u32,
             height: u32,
             duration_ms: u64,
         ) -> Result<PathBuf, String> {
-            let out_path = super::telemetry_path_for_video(video_path);
+            let out_path = super::telemetry_path_for_video(app, video_path);
             let events = self
                 .events
                 .lock()
@@ -411,6 +469,13 @@ mod macos {
                 .map_err(|e| format!("Lỗi serialize mouse telemetry: {e}"))?;
             std::fs::write(&out_path, json)
                 .map_err(|e| format!("Lỗi ghi file telemetry: {e}"))?;
+
+            // Đảm bảo không còn file legacy sót lại trong folder video
+            let legacy_path = video_path.with_extension("mouse.json");
+            if legacy_path.exists() && legacy_path != out_path {
+                let _ = std::fs::remove_file(&legacy_path);
+            }
+
             eprintln!(
                 "[SnapDoc][mouse_tracker] Đã lưu telemetry ({} sự kiện) tại: {}",
                 file.events.len(),
@@ -653,12 +718,13 @@ mod windows {
 
         pub fn save_telemetry(
             &self,
+            app: &AppHandle,
             video_path: &Path,
             width: u32,
             height: u32,
             duration_ms: u64,
         ) -> Result<PathBuf, String> {
-            let out_path = super::telemetry_path_for_video(video_path);
+            let out_path = super::telemetry_path_for_video(app, video_path);
             let events = self
                 .events
                 .lock()
@@ -690,6 +756,13 @@ mod windows {
                 .map_err(|e| format!("Lỗi serialize mouse telemetry: {e}"))?;
             std::fs::write(&out_path, json)
                 .map_err(|e| format!("Lỗi ghi file telemetry: {e}"))?;
+
+            // Đảm bảo không còn file legacy sót lại trong folder video
+            let legacy_path = video_path.with_extension("mouse.json");
+            if legacy_path.exists() && legacy_path != out_path {
+                let _ = std::fs::remove_file(&legacy_path);
+            }
+
             eprintln!(
                 "[SnapDoc][mouse_tracker] Đã lưu telemetry ({} sự kiện) tại: {}",
                 file.events.len(),
@@ -724,6 +797,7 @@ mod fallback {
 
         pub fn save_telemetry(
             &self,
+            _app: &AppHandle,
             _video_path: &Path,
             _width: u32,
             _height: u32,

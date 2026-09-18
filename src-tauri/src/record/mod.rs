@@ -1562,7 +1562,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
 
     let path = output_path.to_string_lossy().to_string();
     if let Some(ml) = mouse_click_listener.as_ref() {
-        let _ = ml.save_telemetry(&output_path, active.width, active.height, duration_ms as u64);
+        let _ = ml.save_telemetry(app, &output_path, active.width, active.height, duration_ms as u64);
     }
     // Ingest NGAY vào History — dùng chung cho cả 2 nhánh gọi (trước đây chỉ
     // nhánh thoát app mới ingest ngay, nhánh mở Editor phải chờ user bấm Lưu).

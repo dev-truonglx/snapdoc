@@ -16,12 +16,19 @@ pub fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(root_dir(app)?.join("history.db"))
 }
 
-fn assets_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn assets_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(root_dir(app)?.join("library").join("assets"))
 }
 
-fn thumbs_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn thumbs_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(root_dir(app)?.join("library").join("thumbs"))
+}
+
+pub fn focus_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = root_dir(app)?.join("library").join("focus");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Không tạo được thư mục focus: {e}"))?;
+    Ok(dir)
 }
 
 /// Đường dẫn tuyệt đối (asset_path, thumb_path) cho một id — tạo sẵn thư mục
