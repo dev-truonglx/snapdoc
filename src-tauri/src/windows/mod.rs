@@ -1844,9 +1844,8 @@ fn reveal_overlay(
 /// cùng một nhịp, với nội dung đã đúng — không màn nào lộ ra chậm hơn màn
 /// khác, không có nhịp "trống" trước khi ảnh đóng băng kịp vẽ.
 ///
-/// Có timeout an toàn (220ms) để một lỗi/độ trễ bất thường ở frontend không
-/// bao giờ treo cả phiên chụp — hết giờ thì vẫn tiến hành reveal như cũ
-/// (đúng hành vi trước khi có cơ chế chờ này).
+/// Có timeout an toàn (xem `wait_for_overlays_ready`) — hết giờ thì CHỈ show
+/// những overlay đã báo ready, không bao giờ show overlay chưa xác nhận sống.
 fn prepare_overlay_ready_channel(app: &AppHandle) -> std::sync::mpsc::Receiver<(u64, usize)> {
     let (tx, rx) = std::sync::mpsc::channel::<(u64, usize)>();
     if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
@@ -1855,27 +1854,47 @@ fn prepare_overlay_ready_channel(app: &AppHandle) -> std::sync::mpsc::Receiver<(
     rx
 }
 
+/// Overlay ở màn hình phụ đã báo ready sớm thì vẫn chờ thêm tối đa chừng này
+/// (tính từ lúc bắt đầu chờ) cho các màn khác, để tất cả lên hình cùng nhịp.
+const OVERLAY_READY_SOFT_MS: u64 = 250;
+/// Trần chờ overlay của màn hình được focus (có con trỏ / chứa preset). Quá
+/// mốc này mà nó vẫn chưa báo ready → coi như frontend không sống (trang chưa
+/// load, mất event phiên, WebView2 treo...) và HUỶ phiên thay vì show().
+/// Nhánh reuse pool prewarm: trang thường đã load sẵn (hoặc đang load dở).
+const OVERLAY_READY_HARD_MS_REUSE: u64 = 2000;
+/// Nhánh build() mới: WebView2 khởi tạo từ đầu nên cho trần rộng hơn.
+const OVERLAY_READY_HARD_MS_BUILD: u64 = 4000;
+
 /// Chờ frontend báo "đã paint xong ảnh đóng băng" cho từng overlay-{idx}
 /// (qua Tauri command `notify_overlay_ready`, xem `commands::notify_overlay_ready`
-/// và `useFrozenScreen` trong Overlay.tsx) trước khi `reveal_overlay` cho
-/// TẤT CẢ màn hình. Mục đích: tất cả overlay trồi lên compositor gần như
-/// cùng một nhịp, với nội dung đã đúng — không màn nào lộ ra chậm hơn màn
-/// khác, không có nhịp "trống" trước khi ảnh đóng băng kịp vẽ.
+/// và `useFrozenScreen` trong Overlay.tsx) trước khi `reveal_overlay`.
+///
+/// Trả về tập idx ĐÃ báo ready (đúng `gen`) — CHỈ những overlay này được phép
+/// show(). Trước đây hết giờ là show() tất cả bất kể frontend có sống hay
+/// không → một cửa sổ trong suốt, always-on-top, phủ toàn màn hình nhưng
+/// không có JS (trang trắng / gen=0 render null) nuốt toàn bộ chuột/phím =
+/// "treo màn hình". Giờ: chờ tối đa `OVERLAY_READY_SOFT_MS` cho đủ mọi màn,
+/// riêng màn `focus_idx` được chờ tới `hard_ms`. Trả lại `rx`
+/// để `reveal_ready_overlays` tiếp tục nhận tín hiệu trễ của màn phụ.
 fn wait_for_overlays_ready(
     app: &AppHandle,
     rx: std::sync::mpsc::Receiver<(u64, usize)>,
     gen: u64,
     expected: usize,
-) {
+    focus_idx: usize,
+    hard_ms: u64,
+) -> (std::collections::HashSet<usize>, std::sync::mpsc::Receiver<(u64, usize)>) {
     use std::collections::HashSet;
     use std::time::Instant;
 
     let t_start = Instant::now();
-    // Deadline tối đa 150ms: đủ cho WebView2 paint ảnh freeze, nhưng không để
-    // một màn hình phụ bị chậm làm treo trễ toàn bộ phiên chụp của màn hình chính.
-    let deadline = Instant::now() + Duration::from_millis(150);
+    let soft = t_start + Duration::from_millis(OVERLAY_READY_SOFT_MS);
+    let hard = t_start + Duration::from_millis(hard_ms);
     let mut seen: HashSet<usize> = HashSet::with_capacity(expected);
     while seen.len() < expected {
+        // Chưa thấy màn focus → được chờ tới mốc cứng; thấy rồi → chỉ chờ
+        // nốt tới mốc mềm cho các màn còn lại.
+        let deadline = if seen.contains(&focus_idx) { soft } else { hard };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
@@ -1887,14 +1906,130 @@ fn wait_for_overlays_ready(
             Ok((g, idx)) => {
                 eprintln!("[SnapDoc Timing] wait_for_overlays_ready: ignored stale signal g={g} != gen={gen}, idx={idx}");
             }
-            Err(_) => break, // timeout
+            Err(_) => break, // timeout hoặc sender đã bị phiên mới thay
         }
     }
 
     eprintln!("[SnapDoc Timing] wait_for_overlays_ready: {:?}, seen={}/{}", t_start.elapsed(), seen.len(), expected);
 
-    if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
-        *slot = None;
+    if seen.len() == expected {
+        if let Ok(mut slot) = app.state::<AppState>().overlay_ready_tx.lock() {
+            *slot = None;
+        }
+    }
+    (seen, rx)
+}
+
+/// show() các overlay ĐÃ báo ready (xem `wait_for_overlays_ready`), focus đúng
+/// `focus_idx`. Nếu chính màn focus không ready → đóng toàn bộ overlay, trả
+/// `Err` (caller báo lỗi qua `snapdoc-error`) — tuyệt đối không show một
+/// overlay mà frontend chưa xác nhận đang sống. Màn phụ chưa ready được giữ
+/// ẨN; một thread nền tiếp tục nhận tín hiệu trễ và show() chúng khi sẵn
+/// sàng (nếu phiên `gen` vẫn còn hiệu lực), thêm tối đa `hard_ms`.
+fn reveal_ready_overlays(
+    app: &AppHandle,
+    wins: &[tauri::WebviewWindow],
+    snaps: &[MonitorSnap],
+    focus_idx: usize,
+    gen: u64,
+    ready: std::collections::HashSet<usize>,
+    rx: std::sync::mpsc::Receiver<(u64, usize)>,
+    hard_ms: u64,
+) -> Result<(), String> {
+    if !ready.contains(&focus_idx) {
+        eprintln!(
+            "[SnapDoc] overlay-{focus_idx} (màn focus) không báo ready sau {}ms — huỷ phiên, không show overlay",
+            hard_ms
+        );
+        close_overlays(app);
+        restore_regular_activation(app);
+        return Err("Overlay chụp màn hình chưa sẵn sàng, vui lòng thử lại.".to_string());
+    }
+
+    for (i, win) in wins.iter().enumerate() {
+        if !ready.contains(&i) {
+            eprintln!("[SnapDoc] overlay-{i} chưa báo ready — giữ ẩn, chờ tín hiệu trễ");
+            continue;
+        }
+        reveal_overlay(app, win, &snaps[i]);
+        if i == focus_idx {
+            let _ = win.set_focus();
+        }
+    }
+
+    if ready.len() < wins.len() {
+        let handle = app.clone();
+        let wins = wins.to_vec();
+        let snaps = snaps.to_vec();
+        let mut revealed = ready;
+        std::thread::spawn(move || {
+            let hard = std::time::Instant::now() + Duration::from_millis(hard_ms);
+            while revealed.len() < wins.len() {
+                let remaining = hard.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let Ok((g, idx)) = rx.recv_timeout(remaining) else { break };
+                let state = handle.state::<AppState>();
+                if state.overlay_gen.load(Ordering::SeqCst) != gen {
+                    break; // phiên mới đã thay
+                }
+                // `close_overlays` (Esc, chụp xong...) xoá session nhưng không
+                // bump gen — không show lại overlay của phiên đã đóng.
+                if !state.overlay_session.lock().map(|g| g.is_some()).unwrap_or(false) {
+                    break;
+                }
+                if g != gen || revealed.contains(&idx) {
+                    continue;
+                }
+                if let (Some(win), Some(snap)) = (wins.get(idx), snaps.get(idx)) {
+                    eprintln!("[SnapDoc] overlay-{idx} ready trễ — show()");
+                    reveal_overlay(&handle, win, snap);
+                    revealed.insert(idx);
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Payload phiên cho từng overlay (cùng nội dung event `overlay-session-start`).
+/// Lưu vào `AppState::overlay_session` để overlay tự kéo về lúc mount
+/// (`commands::get_overlay_session`) — event Tauri không được buffer, trang
+/// prewarm chưa kịp đăng ký listener sẽ mất event và kẹt ở gen=0.
+fn overlay_session_payloads(
+    mode: &str,
+    record: bool,
+    preset: Option<&crate::flow::LastRecordRegion>,
+    matched_idx: Option<usize>,
+    snaps: &[MonitorSnap],
+    gen: u64,
+) -> Vec<serde_json::Value> {
+    snaps
+        .iter()
+        .enumerate()
+        .map(|(i, snap)| {
+            let preset_json = if matched_idx == Some(i) {
+                preset
+                    .and_then(|p| compute_preset_css_rect(snap, p))
+                    .map(|(cx, cy, cw, ch)| serde_json::json!({ "x": cx, "y": cy, "w": cw, "h": ch }))
+            } else {
+                None
+            };
+            serde_json::json!({
+                "targetIdx": i,
+                "mode": mode,
+                "gen": gen,
+                "record": record,
+                "preset": preset_json,
+            })
+        })
+        .collect()
+}
+
+fn store_overlay_session(app: &AppHandle, payloads: &[serde_json::Value]) {
+    if let Ok(mut g) = app.state::<AppState>().overlay_session.lock() {
+        *g = Some(payloads.to_vec());
     }
 }
 
@@ -1908,6 +2043,9 @@ fn wait_for_overlays_ready(
 /// tổng tối đa ~200ms) đủ để hứng đúng khoảng hở này mà không cần đoán 1 con
 /// số sleep cố định trước khi build() như cách cũ. Lỗi KHÁC "already exists"
 /// (ví dụ hết bộ nhớ, permission...) trả về ngay lập tức, không retry.
+const OVERLAY_INIT_SCRIPT: &str =
+    "window.addEventListener('contextmenu', function (e) { e.preventDefault(); }, true);";
+
 fn build_overlay_window_with_retry(
     app: &AppHandle,
     label: &str,
@@ -1936,6 +2074,10 @@ fn build_overlay_window_with_retry(
         // Không cho OS resize overlay — toạ độ CSS/tính rect trong
         // Overlay.tsx giả định cửa sổ luôn khớp CHÍNH XÁC `MonitorSnap`.
         .resizable(false)
+        // Chặn menu chuột phải mặc định (Back/Reload/Share...) NGAY từ lúc tạo
+        // document — trước cả khi bundle JS (`main.tsx`) kịp load. Overlay
+        // toàn màn hình không bao giờ được để lộ menu này.
+        .initialization_script(OVERLAY_INIT_SCRIPT)
         .build();
 
         match result {
@@ -2010,6 +2152,13 @@ pub fn prewarm_overlays(app: &AppHandle) {
         };
         snaps.push(snap.clone());
 
+        // Một phiên vừa bắt đầu mở overlay (open_overlays_ex không chờ prewarm
+        // quá 600ms) → dừng ngay, không build() tranh label với nhánh fallback
+        // (vòng retry "already exists" chỉ đổ thêm tải lên UI thread).
+        if app.state::<AppState>().overlay_opening.load(Ordering::SeqCst) {
+            eprintln!("[SnapDoc] prewarm_overlays: phiên mở overlay đang chạy — dừng prewarm");
+            return;
+        }
         let label = format!("overlay-{i}");
         if app.get_webview_window(&label).is_some() {
             continue;
@@ -2043,8 +2192,12 @@ pub fn prewarm_overlays(app: &AppHandle) {
         }
     }
 
-    if let Ok(mut g) = app.state::<AppState>().overlay_monitors.lock() {
-        *g = snaps;
+    // Không ghi đè snapshot của một phiên vừa mở trong lúc prewarm đang chạy
+    // (input_loop/finalize dùng nó để quy đổi toạ độ theo idx).
+    if !app.state::<AppState>().overlay_opening.load(Ordering::SeqCst) {
+        if let Ok(mut g) = app.state::<AppState>().overlay_monitors.lock() {
+            *g = snaps;
+        }
     }
 }
 
@@ -2073,7 +2226,7 @@ fn try_reuse_prewarmed_overlays(
     snaps: &[MonitorSnap],
     focus_idx: usize,
     gen: u64,
-) -> bool {
+) -> Option<Result<(), String>> {
     let windows = app.webview_windows();
     let has_extra = windows.keys().any(|l| {
         l.starts_with("overlay-")
@@ -2083,14 +2236,14 @@ fn try_reuse_prewarmed_overlays(
                 .unwrap_or(true)
     });
     if has_extra {
-        return false;
+        return None;
     }
 
     let mut wins = Vec::with_capacity(snaps.len());
     for i in 0..snaps.len() {
         match windows.get(&format!("overlay-{i}")) {
             Some(w) => wins.push(w.clone()),
-            None => return false,
+            None => return None,
         }
     }
     // LƯU Ý: Cho phép tái sử dụng cả khi overlay đang hiển thị (ví dụ người dùng đang
@@ -2103,53 +2256,36 @@ fn try_reuse_prewarmed_overlays(
     let ready_rx = prepare_overlay_ready_channel(app);
     let t_prep = std::time::Instant::now();
 
+    // Lưu session TRƯỚC khi emit: trang nào chưa kịp nghe event sẽ tự kéo về
+    // lúc mount (xem `overlay_session_payloads`).
+    let payloads = overlay_session_payloads(mode, record, preset, matched_idx, snaps, gen);
+    store_overlay_session(app, &payloads);
+
     for (i, (snap, win)) in snaps.iter().zip(wins.iter()).enumerate() {
         position_overlay(app, win, snap);
-        let preset_json = if matched_idx == Some(i) {
-            preset
-                .and_then(|p| compute_preset_css_rect(snap, p))
-                .map(|(cx, cy, cw, ch)| {
-                    serde_json::json!({
-                        "x": cx, "y": cy, "w": cw, "h": ch
-                    })
-                })
-        } else {
-            None
-        };
-        let payload = serde_json::json!({
-            "targetIdx": i,
-            "mode": mode,
-            "gen": gen,
-            "record": record,
-            "preset": preset_json,
-        });
-        if let Err(e) = app.emit_to(win.label(), "overlay-session-start", &payload) {
+        if let Err(e) = app.emit_to(win.label(), "overlay-session-start", &payloads[i]) {
             eprintln!("[SnapDoc] Gửi session tới overlay-{i} thất bại: {e}");
-            return false;
+            return None;
         }
     }
     let prep_dur = t_prep.elapsed();
 
     // Chờ frontend từng overlay báo đã paint xong ảnh đóng băng, rồi mới
-    // order-front TẤT CẢ cùng lúc — tránh nhịp trống/nháy và tránh màn hình
-    // này lên hình trước màn hình khác.
+    // order-front những overlay đã sẵn sàng — overlay chưa xác nhận sống thì
+    // KHÔNG bao giờ được show (xem `reveal_ready_overlays`).
     let t_wait = std::time::Instant::now();
-    wait_for_overlays_ready(app, ready_rx, gen, snaps.len());
+    let hard_ms = OVERLAY_READY_HARD_MS_REUSE;
+    let (ready, ready_rx) = wait_for_overlays_ready(app, ready_rx, gen, snaps.len(), focus_idx, hard_ms);
     let wait_dur = t_wait.elapsed();
 
     let t_reveal = std::time::Instant::now();
-    for (i, win) in wins.iter().enumerate() {
-        reveal_overlay(app, win, &snaps[i]);
-        if i == focus_idx {
-            let _ = win.set_focus();
-        }
-    }
+    let result = reveal_ready_overlays(app, &wins, snaps, focus_idx, gen, ready, ready_rx, hard_ms);
     let reveal_dur = t_reveal.elapsed();
     eprintln!(
         "[SnapDoc Timing] try_reuse_prewarmed_overlays breakdown: prep={:?}, wait={:?}, reveal={:?}",
         prep_dur, wait_dur, reveal_dur
     );
-    true
+    Some(result)
 }
 
 /// Nhả `overlay_opening` khi ra khỏi scope của `open_overlays_ex` — kể cả qua
@@ -2294,7 +2430,7 @@ pub fn open_overlays_ex(
 
     let t_reuse = std::time::Instant::now();
     let reused = if topology_changed {
-        false
+        None
     } else {
         try_reuse_prewarmed_overlays(
             app,
@@ -2307,40 +2443,43 @@ pub fn open_overlays_ex(
             gen,
         )
     };
-    eprintln!("[SnapDoc Timing] try_reuse_prewarmed_overlays: {:?}, reused={}", t_reuse.elapsed(), reused);
-    if !reused {
-        let t_build = std::time::Instant::now();
-        let ready_rx = prepare_overlay_ready_channel(app);
-        close_overlays_no_prewarm(app);
-        let mut wins = Vec::with_capacity(snaps.len());
-        for (i, snap) in snaps.iter().enumerate() {
-            let label = format!("overlay-{i}");
-            let query = build_overlay_query(
-                mode,
-                i,
-                snap,
-                record,
-                preset.as_ref(),
-                matched_preset_idx,
-                gen,
-            );
-            let win = build_overlay_window_with_retry(app, &label, &query)?;
+    eprintln!("[SnapDoc Timing] try_reuse_prewarmed_overlays: {:?}, reused={}", t_reuse.elapsed(), reused.is_some());
+    match reused {
+        Some(result) => result?,
+        None => {
+            let t_build = std::time::Instant::now();
+            let ready_rx = prepare_overlay_ready_channel(app);
+            close_overlays_no_prewarm(app);
+            // Sau close (close xoá session) — trang mới đọc session từ query
+            // string, lưu thêm để đồng nhất với nhánh reuse.
+            let payloads = overlay_session_payloads(mode, record, preset.as_ref(), matched_preset_idx, &snaps, gen);
+            store_overlay_session(app, &payloads);
+            let mut wins = Vec::with_capacity(snaps.len());
+            for (i, snap) in snaps.iter().enumerate() {
+                let label = format!("overlay-{i}");
+                let query = build_overlay_query(
+                    mode,
+                    i,
+                    snap,
+                    record,
+                    preset.as_ref(),
+                    matched_preset_idx,
+                    gen,
+                );
+                let win = build_overlay_window_with_retry(app, &label, &query)?;
 
-            let record_self = crate::storage::settings::is_record_self(app);
-            let _ = win.set_content_protected(!record_self);
-            // Chỉ định vị (ẩn) — CHƯA show(), giống nhánh reuse ở trên.
-            position_overlay(app, &win, snap);
-            wins.push(win);
-        }
-
-        wait_for_overlays_ready(app, ready_rx, gen, snaps.len());
-        for (i, win) in wins.iter().enumerate() {
-            reveal_overlay(app, win, &snaps[i]);
-            if i == focus_idx {
-                let _ = win.set_focus();
+                let record_self = crate::storage::settings::is_record_self(app);
+                let _ = win.set_content_protected(!record_self);
+                // Chỉ định vị (ẩn) — CHƯA show(), giống nhánh reuse ở trên.
+                position_overlay(app, &win, snap);
+                wins.push(win);
             }
+
+            let hard_ms = OVERLAY_READY_HARD_MS_BUILD;
+            let (ready, ready_rx) = wait_for_overlays_ready(app, ready_rx, gen, snaps.len(), focus_idx, hard_ms);
+            reveal_ready_overlays(app, &wins, &snaps, focus_idx, gen, ready, ready_rx, hard_ms)?;
+            eprintln!("[SnapDoc Timing] rebuild overlays total: {:?}", t_build.elapsed());
         }
-        eprintln!("[SnapDoc Timing] rebuild overlays total: {:?}", t_build.elapsed());
     }
 
     let handle = app.clone();
@@ -2475,6 +2614,12 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize, mode: String) {
                 // sang màn hình khác) khiến x/y "nhảy cóc" về giá trị nhỏ/âm,
                 // làm khung chọn bị lật (rectFrom ở frontend dùng min/abs nên
                 // đảo ngược ngay khi x/y đột ngột đổi dấu/độ lớn).
+                // `drag_idx` lấy từ snapshot của vòng lặp trước — nếu số màn hình
+                // vừa đổi (cắm/rút màn) thì bỏ drag, KHÔNG index vượt biên (panic
+                // = mất luôn Esc/chuột phải native trong khi overlay vẫn hiện).
+                if drag_idx.is_some_and(|d| d >= snaps.len()) {
+                    drag_idx = None;
+                }
                 let target_idx = drag_idx.unwrap_or(i);
                 // Vùng chọn vốn không thể kéo sang màn hình khác, nên khi con
                 // trỏ vượt biên, khung chỉ dừng lại đúng mép thay vì báo kích
@@ -2493,6 +2638,7 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize, mode: String) {
                     // toạ độ thả chuột có thể tràn biên dù lúc di chuyển đã
                     // được clamp đúng, làm khung/toolbar cuối cùng vẫn lệch).
                     let (rx, ry) = if release_idx != i {
+                        // release_idx = drag_idx đã được kiểm tra biên ở trên.
                         to_css_clamped(&snaps[release_idx], cx, cy)
                     } else {
                         (x, y)
@@ -2507,8 +2653,8 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize, mode: String) {
             } else if !left && prev_left {
                 // Thả chuột ở NGOÀI mọi màn hình (kéo tràn ra rìa desktop ảo)
                 // — cùng lý do clamp với 2 nhánh trên.
-                if let Some(src_idx) = drag_idx.take() {
-                    let (rx, ry) = to_css_clamped(&snaps[src_idx], cx, cy);
+                if let Some((src_idx, src)) = drag_idx.take().and_then(|d| snaps.get(d).map(|s| (d, s))) {
+                    let (rx, ry) = to_css_clamped(src, cx, cy);
                     let _ = app.emit("overlay-release", (src_idx, rx, ry));
                 }
             }
@@ -2551,6 +2697,9 @@ pub fn close_overlays_no_prewarm(app: &AppHandle) {
 }
 
 fn close_overlays_internal(app: &AppHandle, should_prewarm: bool) {
+    if let Ok(mut g) = app.state::<AppState>().overlay_session.lock() {
+        *g = None;
+    }
     for (label, win) in app.webview_windows() {
         if label.starts_with("overlay") {
             let _ = win.hide();

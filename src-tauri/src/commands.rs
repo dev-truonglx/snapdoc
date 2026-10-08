@@ -95,6 +95,9 @@ pub fn set_pending_image(
 /// Chụp theo mode + output (gọi từ capture bar). Chạy nền để không chặn UI.
 #[tauri::command]
 pub fn capture_now(app: AppHandle, mode: String, output: String) {
+    if !flow::try_begin_capture_trigger(&app) {
+        return;
+    }
     std::thread::spawn(move || flow::run(&app, &mode, &output));
 }
 
@@ -108,6 +111,9 @@ pub fn cancel_capture_countdown(app: AppHandle) {
 /// "Chụp nhanh": mở overlay trong suốt trên mọi màn hình để chọn vùng + chú thích.
 #[tauri::command]
 pub fn start_quick(app: AppHandle) {
+    if !flow::try_begin_capture_trigger(&app) {
+        return;
+    }
     std::thread::spawn(move || flow::start_quick(&app));
 }
 
@@ -214,9 +220,21 @@ pub async fn capture_window_thumbs_stream(app: AppHandle, ids: Vec<u32>) -> Resu
     .map_err(|e| format!("Task join error: {e}"))
 }
 
+/// async: chạy NGOÀI UI thread — command sync chạy inline trên UI thread của
+/// WebView2 (Windows), mà `cancel_overlay` đụng tới nhiều cửa sổ/Win32 focus.
+/// `error` (tuỳ chọn): overlay gặp lỗi (finalize thất bại...) — đóng overlay
+/// TRƯỚC rồi mới báo lỗi qua `snapdoc-error` (CaptureBar hiển thị), thay vì
+/// `alert()` ngay trong overlay toàn màn hình (dialog modal disable cửa sổ
+/// overlay topmost → người dùng không click được gì).
 #[tauri::command]
-pub fn cancel_overlay(app: AppHandle) {
-    flow::cancel_overlay(&app);
+pub async fn cancel_overlay(app: AppHandle, error: Option<String>) {
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        flow::cancel_overlay(&app);
+        if let Some(e) = error {
+            let _ = app.emit("snapdoc-error", e);
+        }
+    })
+    .await;
 }
 
 /// Chụp nhanh "Mở trong Editor": báo Rust GIỮ SnapDoc frontmost (không trả
@@ -255,9 +273,13 @@ pub fn save_and_copy(path: String, data: String) -> Result<String, String> {
     storage::save::write_png_exact(&path, &data)
 }
 
+/// async + spawn_blocking: có thể phải `build()` lại webview — làm việc đó
+/// trong command sync (chạy trên UI thread) dễ deadlock WebView2 trên Windows.
 #[tauri::command]
-pub fn open_capture_bar(app: AppHandle) -> Result<(), String> {
-    windows::open_capture_bar(&app)
+pub async fn open_capture_bar(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || windows::open_capture_bar(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// Nút "New" trong editor — chạy THẲNG đúng chế độ chụp gần nhất, KHÔNG mở/hiện
@@ -277,6 +299,9 @@ pub fn open_capture_bar(app: AppHandle) -> Result<(), String> {
 ///   thread không có message loop.
 #[tauri::command]
 pub fn open_capture_bar_for_new(app: AppHandle) -> Result<(), String> {
+    if !flow::try_begin_capture_trigger(&app) {
+        return Ok(());
+    }
     std::thread::spawn(move || {
         windows::hide_editor(&app);
         // Trên Windows: đợi WM_SHOWWINDOW được xử lý trước khi tiếp tục,
@@ -303,9 +328,12 @@ pub fn open_editor(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// async + spawn_blocking: cùng lý do với `open_capture_bar`.
 #[tauri::command]
-pub fn open_settings(app: AppHandle) -> Result<(), String> {
-    windows::open_settings(&app)
+pub async fn open_settings(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || windows::open_settings(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[tauri::command]
@@ -945,6 +973,9 @@ pub async fn start_recording(app: AppHandle) -> Result<(), String> {
 /// input của nút "Chụp".
 #[tauri::command]
 pub fn start_record_picker(app: AppHandle, mode: String) {
+    if !flow::try_begin_capture_trigger(&app) {
+        return;
+    }
     std::thread::spawn(move || flow::run_record_picker(&app, &mode));
 }
 
@@ -1141,42 +1172,67 @@ pub async fn finalize_scroll_stitch(
 /// Frontend gọi khi mount overlay để lấy background tĩnh thay vì nhìn xuyên
 /// qua overlay trong suốt vào app đang chạy phía sau.
 /// Trả binary IPC response (ArrayBuffer ở frontend).
-/// Nếu luồng chụp freeze đang chạy song song, hàm này chờ tối đa 2s trên Condvar
+/// Nếu luồng chụp freeze đang chạy song song, hàm này chờ tối đa 800ms trên Condvar
 /// và trả về ngay khi màn hình `idx` nén xong mà không phải chờ các màn khác.
+///
+/// BẮT BUỘC async + spawn_blocking: command sync chạy inline trên UI thread của
+/// WebView2 (Windows) — chờ Condvar ở đó khoá UI thread tới N×800ms (N màn
+/// hình): trang overlay không load được asset (trắng, chuột phải ra menu
+/// Reload/Share), `notify_overlay_ready` kẹt phía sau, và lệnh hide/close của
+/// `input_loop` (Esc/chuột phải) không được xử lý → "treo màn hình".
 #[tauri::command]
-pub fn get_frozen_screen(state: State<AppState>, idx: usize) -> Result<tauri::ipc::Response, String> {
-    let mut g = state.frozen_screens.lock().map_err(|e| e.to_string())?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
-    while !g.contains_key(&idx) {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            break;
+pub async fn get_frozen_screen(app: AppHandle, idx: usize) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut g = state.frozen_screens.lock().map_err(|e| e.to_string())?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+        while !g.contains_key(&idx) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            g = state
+                .frozen_screens_cvar
+                .wait_timeout(g, remaining)
+                .map_err(|e| e.to_string())?
+                .0;
         }
-        g = state
-            .frozen_screens_cvar
-            .wait_timeout(g, remaining)
-            .map_err(|e| e.to_string())?
-            .0;
-    }
-    g.get(&idx)
-        .cloned()
-        .map(tauri::ipc::Response::new)
-        .ok_or_else(|| "No frozen screen available".to_string())
+        g.get(&idx)
+            .cloned()
+            .map(tauri::ipc::Response::new)
+            .ok_or_else(|| "No frozen screen available".to_string())
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
-/// Frontend gọi NGAY SAU KHI đã paint xong ảnh đóng băng (double rAF, xem
-/// `useFrozenScreen` trong Overlay.tsx) — báo cho `windows::wait_for_overlays_ready`
-/// biết overlay `idx` (thuộc phiên `gen`) đã sẵn sàng để `win.show()`.
-/// Không có Sender đang chờ (đã timeout hoặc phiên cũ) thì bỏ qua im lặng.
+/// Frontend gọi NGAY SAU KHI đã paint xong ảnh đóng băng (xem `useFrozenScreen`
+/// trong Overlay.tsx) — báo cho `windows::wait_for_overlays_ready` biết overlay
+/// `idx` (thuộc phiên `gen`) đã sẵn sàng để `win.show()`. Không có Sender đang
+/// chờ (đã timeout hoặc phiên cũ) thì bỏ qua im lặng. async: không xếp hàng
+/// sau các việc khác trên UI thread.
 #[tauri::command]
-pub fn notify_overlay_ready(state: State<AppState>, gen: u64, idx: usize) {
+pub async fn notify_overlay_ready(app: AppHandle, gen: u64, idx: usize) {
+    let state = app.state::<AppState>();
     if let Ok(slot) = state.overlay_ready_tx.lock() {
         if let Some(tx) = slot.as_ref() {
             let _ = tx.send((gen, idx));
         } else {
             eprintln!("[SnapDoc Timing] notify_overlay_ready dropped (no receiver): gen={gen}, idx={idx}");
         }
-    }
+    };
+}
+
+/// Overlay tự KÉO phiên chụp hiện tại khi mount (bổ sung cho event
+/// `overlay-session-start`, vốn KHÔNG được buffer — nếu trang prewarm chưa kịp
+/// đăng ký listener lúc Rust emit, event mất và overlay kẹt ở gen=0, không
+/// render gì). Trả payload cho đúng `idx` (preset chỉ có ở màn hình khớp).
+#[tauri::command]
+pub async fn get_overlay_session(app: AppHandle, idx: usize) -> Option<Value> {
+    let state = app.state::<AppState>();
+    let g = state.overlay_session.lock().ok()?;
+    let session = g.as_ref().and_then(|sessions| sessions.get(idx).cloned());
+    session
 }
 
 /// Xuất video hoặc một đoạn video sang ảnh GIF động chất lượng cao.

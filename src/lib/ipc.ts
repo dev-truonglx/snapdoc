@@ -237,6 +237,11 @@ export const ipc = {
    * băng — Rust chờ tín hiệu này (tất cả overlay) rồi mới show() đồng loạt,
    * tránh nhịp trống/nháy khi show() rồi mới paint sau (xem `useFrozenScreen`). */
   notifyOverlayReady: (idx: number, gen: number) => invoke<void>("notify_overlay_ready", { idx, gen }),
+  /** Overlay tự kéo payload phiên chụp hiện tại (cùng nội dung event
+   * `overlay-session-start`) — phòng khi event bị mất vì trang chưa kịp đăng
+   * ký listener lúc Rust emit. `null` nếu không có phiên nào đang mở. */
+  getOverlaySession: <T>(idx: number) =>
+    invoke<T | null>("get_overlay_session", { idx }).catch(() => null),
   peekPending: async (): Promise<Pending | null> => {
     try {
       const buf = await invoke<ArrayBuffer>("peek_pending");
@@ -286,7 +291,10 @@ export const ipc = {
   listWindows: () => invoke<WindowInfo[]>("list_windows"),
   listWindowMetas: () => invoke<WindowMetaInfo[]>("list_window_metas"),
   captureWindowThumbsStream: (ids: number[]) => invoke<void>("capture_window_thumbs_stream", { ids }),
-  cancelOverlay: () => invoke<void>("cancel_overlay"),
+  /** Đóng overlay. `error`: báo lỗi qua `snapdoc-error` SAU khi overlay đã
+   * đóng — KHÔNG dùng `alert()` trong overlay (dialog modal disable cửa sổ
+   * overlay toàn màn hình → người dùng không click được gì). */
+  cancelOverlay: (error?: string) => invoke<void>("cancel_overlay", { error: error ?? null }),
   // Chụp nhanh "Mở trong Editor": giữ SnapDoc frontmost (không trả focus về
   // app cũ). Gọi TRƯỚC openEditor. Xem `flow::keep_capture_focus`.
   keepCaptureFocus: () => invoke<void>("keep_capture_focus"),

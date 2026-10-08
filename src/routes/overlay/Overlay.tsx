@@ -170,13 +170,26 @@ export default function Overlay() {
   }));
 
   useEffect(() => {
-    const unlisten = listen<OverlaySession>("overlay-session-start", (e) => {
-      if (e.payload.targetIdx !== undefined && e.payload.targetIdx !== MY_IDX) {
-        return;
-      }
-      setSession(e.payload);
-    });
+    let disposed = false;
+    // Chỉ nhận phiên MỚI hơn phiên đang hiển thị — event và lệnh kéo phiên
+    // bên dưới có thể về theo thứ tự bất kỳ.
+    const accept = (next: OverlaySession | null) => {
+      if (disposed || !next) return;
+      if (next.targetIdx !== undefined && next.targetIdx !== MY_IDX) return;
+      setSession((prev) => (next.gen > prev.gen ? next : prev));
+    };
+    const unlisten = listen<OverlaySession>("overlay-session-start", (e) => accept(e.payload));
+    // Event Tauri KHÔNG được buffer: nếu Rust emit `overlay-session-start` lúc
+    // trang (pool prewarm) chưa load xong/chưa đăng ký listener thì event mất
+    // và overlay kẹt ở gen=0 (render null) — nhưng Rust vẫn có thể show() nó
+    // thành tấm kính chặn toàn màn hình. Kéo phiên hiện tại SAU khi listener
+    // đã đăng ký để không lọt khe nào.
+    unlisten
+      .then(() => ipc.getOverlaySession<OverlaySession>(MY_IDX))
+      .then(accept)
+      .catch(() => {});
     return () => {
+      disposed = true;
       unlisten.then((f) => f());
     };
   }, []);
@@ -325,7 +338,7 @@ function RegionSelect() {
         // đầu kéo/chọn cửa sổ (`startRef.current` vẫn null), chỉ cần gọi thẳng
         // action ở đây, không phụ thuộc DOM `onClick` của nút có thật sự nhận
         // được click hay không.
-        ipc.finalizeMonitor().catch((e) => alert(String(e)));
+        ipc.finalizeMonitor().catch((e) => ipc.cancelOverlay(String(e)).catch(() => {}));
         return;
       }
       const s = startRef.current;
@@ -340,7 +353,7 @@ function RegionSelect() {
       // như cũ, không đổi hành vi.
       const dist = Math.hypot(x - s[0], y - s[1]);
       if (dist < 4 && w && pickWindow(winsRef.current, x, y)?.id === w.id) {
-        ipc.finalizeWindow(w.id).catch((e) => alert(String(e)));
+        ipc.finalizeWindow(w.id).catch((e) => ipc.cancelOverlay(String(e)).catch(() => {}));
         return;
       }
       const r = rectFrom(s[0], s[1], x, y);
@@ -348,7 +361,7 @@ function RegionSelect() {
         scrollRectRef.current = r;
         ipc.finalizeRegion(r.x, r.y, r.w, r.h).catch((e) => {
           scrollRectRef.current = null;
-          alert(String(e));
+          ipc.cancelOverlay(String(e)).catch(() => {});
         });
       }
     },
@@ -795,7 +808,9 @@ function RecordRegionSelect() {
       setBusy(false);
     } catch (e) {
       setBusy(false);
-      alert(String(e));
+      // Rust đã đóng overlay khi không quay được (xem `flow::finalize_region`);
+      // gọi lại cancel để dọn state + báo lỗi qua CaptureBar.
+      ipc.cancelOverlay(String(e)).catch(() => {});
     }
   };
 
@@ -1355,7 +1370,9 @@ function QuickAnnotate() {
       onPointerUp={onPointerUp}
       onContextMenu={(e) => {
         e.preventDefault();
-        doClose();
+        // Đã có khung (đang chú thích) → chuột phải KHÔNG huỷ, tránh mất chú
+        // thích vì lỡ tay — khớp với `input_loop` (mode quick sau khi kéo).
+        if (!sel) doClose();
       }}
     >
       {sel ? (
@@ -1490,7 +1507,7 @@ function MonitorPick() {
 
   useInput(
     (a) => setActive(a),
-    () => ipc.finalizeMonitor().catch((e) => alert(String(e))),
+    () => ipc.finalizeMonitor().catch((e) => ipc.cancelOverlay(String(e)).catch(() => {})),
     () => {},
   );
 

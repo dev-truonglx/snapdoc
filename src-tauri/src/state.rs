@@ -280,6 +280,15 @@ pub struct AppState {
     /// trễ từ phiên overlay cũ. Được thay Sender mới mỗi lần mở overlay,
     /// không cần dọn tay khi đóng overlay.
     pub overlay_ready_tx: Mutex<Option<std::sync::mpsc::Sender<(u64, usize)>>>,
+    /// Payload phiên overlay hiện tại theo idx màn hình (cùng nội dung event
+    /// `overlay-session-start`) — overlay tự kéo qua `commands::get_overlay_session`
+    /// lúc mount, phòng trường hợp event bị mất vì trang prewarm chưa kịp
+    /// đăng ký listener (event Tauri không được buffer).
+    pub overlay_session: Mutex<Option<Vec<serde_json::Value>>>,
+    /// Generation của lượt chụp freeze (`flow::take_frozen_screens_async`) —
+    /// thread chụp của lượt cũ (spam phím tắt) chỉ ghi vào `frozen_screens`
+    /// khi gen còn khớp, không đè ảnh cũ lên phiên mới.
+    pub freeze_gen: AtomicU64,
     /// Generation của phiên đếm ngược "hẹn giờ chụp" hiện tại (xem
     /// `flow::wait_capture_delay`) — bump lên để huỷ đếm ngược đang chạy dở
     /// (user bấm Esc, hoặc trigger 1 lần chụp mới trong lúc đang đếm).
