@@ -348,26 +348,17 @@ export const ipc = {
   installUpdate: () => invoke<void>("install_update"),
   restartApp: () => invoke<void>("restart_app"),
   // Scroll
-  captureScrollSlice: (mx: number, my: number, rx: number, ry: number, rw: number, rh: number) =>
-    invoke<ArrayBuffer>("capture_scroll_slice", { mx, my, rx, ry, rw, rh }),
-  commitScrollSlice: (sliceIndex: number) =>
-    invoke<void>("commit_scroll_slice", { sliceIndex }),
-  finalizeScrollCapture: (base64: string, width: number, height: number, mx?: number, my?: number) =>
-    invoke<void>("finalize_scroll_capture", { base64, width, height, mx, my }),
   startScrollSession: () =>
     invoke<void>("start_scroll_session"),
-  finalizeScrollStitch: (
-    width: number,
-    instructions: {
-      sliceIndex: number;
-      srcY: number;
-      srcH: number;
-      contentX?: number;
-      sidebarBg?: [number, number, number, number];
-    }[],
-    mx?: number,
-    my?: number,
-  ) => invoke<void>("finalize_scroll_stitch", { width, instructions, mx, my }),
+  /** 1 nhịp chụp cuộn — trả Binary IPC, parse bằng `parseScrollTick` (ScrollControl). */
+  scrollTick: (mx: number, my: number, rx: number, ry: number, rw: number, rh: number, previewW: number) =>
+    invoke<ArrayBuffer>("scroll_tick", { mx, my, rx, ry, rw, rh, previewW }),
+  scrollBridge: (previewW: number) =>
+    invoke<ArrayBuffer>("scroll_bridge", { previewW }),
+  scrollSetOptions: (pinFooter: boolean, extendSidebar: boolean, previewW: number) =>
+    invoke<ArrayBuffer>("scroll_set_options", { pinFooter, extendSidebar, previewW }),
+  finalizeScrollStitch: (mx?: number, my?: number) =>
+    invoke<void>("finalize_scroll_stitch", { mx, my }),
   // History / Library
   listHistory: (filter: HistoryFilter) => invoke<HistoryPage>("list_history", { filter }),
   getHistoryItem: (id: string) => invoke<HistoryItem>("get_history_item", { id }),

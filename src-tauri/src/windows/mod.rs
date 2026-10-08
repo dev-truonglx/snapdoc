@@ -2781,7 +2781,7 @@ pub fn end_scroll_session(app: &AppHandle) {
     let state = app.state::<AppState>();
     state.overlay_gen.fetch_add(1, Ordering::SeqCst);
     state.last_capture.clear_mode();
-    let _ = state.scroll_slices.lock().map(|mut s| s.clear());
+    let _ = state.scroll_session.lock().map(|mut s| s.reset());
     let _ = state.frozen_screens.lock().map(|mut s| s.clear());
 }
 
