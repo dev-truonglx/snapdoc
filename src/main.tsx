@@ -3,6 +3,24 @@ import ReactDOM from "react-dom/client";
 import "./styles/global.css";
 import "./i18n/config"; // Initialize i18next
 
+// Chặn context menu mặc định của trình duyệt/WebView2 (Reload, Share, Back, Forward...)
+// để tránh chiếm modal message loop trên Windows, nhưng giữ lại cho input/textarea.
+window.addEventListener(
+  "contextmenu",
+  (e) => {
+    const target = e.target as HTMLElement | null;
+    if (
+      target?.tagName === "INPUT" ||
+      target?.tagName === "TEXTAREA" ||
+      target?.isContentEditable
+    ) {
+      return;
+    }
+    e.preventDefault();
+  },
+  true
+);
+
 const which = new URLSearchParams(window.location.search).get("win") ?? "capture-bar";
 
 const routeLoaders: Record<string, () => Promise<{ default: React.ComponentType<any> }>> = {

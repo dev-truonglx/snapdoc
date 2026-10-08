@@ -93,7 +93,26 @@ pub fn handle(app: &AppHandle, fired: &Shortcut) {
     }
 }
 
+static LAST_CAPTURE_TRIGGER_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn run_action(app: &AppHandle, action: &str) {
+    // Tránh spam phím tắt liên tục tạo bão thread chụp DWM làm nghẽn compositor trên Windows.
+    // Nếu khoảng cách giữa 2 lần bấm < 300ms hoặc đang trong quá trình mở overlay -> bỏ qua an toàn.
+    if matches!(action, "region" | "full" | "quick" | "window" | "all" | "scroll" | "captureCopy") {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let prev = LAST_CAPTURE_TRIGGER_MS.load(std::sync::atomic::Ordering::SeqCst);
+        if now.saturating_sub(prev) < 300 {
+            return;
+        }
+        if app.state::<crate::state::AppState>().overlay_opening.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        LAST_CAPTURE_TRIGGER_MS.store(now, std::sync::atomic::Ordering::SeqCst);
+    }
+
     match action {
         "bar" => {
             let _ = windows::open_capture_bar(app);

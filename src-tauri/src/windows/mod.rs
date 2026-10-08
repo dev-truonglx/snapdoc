@@ -1871,7 +1871,9 @@ fn wait_for_overlays_ready(
     use std::time::Instant;
 
     let t_start = Instant::now();
-    let deadline = Instant::now() + Duration::from_millis(350);
+    // Deadline tối đa 150ms: đủ cho WebView2 paint ảnh freeze, nhưng không để
+    // một màn hình phụ bị chậm làm treo trễ toàn bộ phiên chụp của màn hình chính.
+    let deadline = Instant::now() + Duration::from_millis(150);
     let mut seen: HashSet<usize> = HashSet::with_capacity(expected);
     while seen.len() < expected {
         let remaining = deadline.saturating_duration_since(Instant::now());

@@ -3,7 +3,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { ipc, type WindowInfo } from "../../lib/ipc";
-import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
+import { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
+const AnnotationStage = React.lazy(() => import("../../features/annotation/canvas/AnnotationStage"));
 import { useEditor } from "../../features/annotation/store";
 import { PRESET_COLORS, type Tool } from "../../features/annotation/model";
 import { quickToolFromKey } from "../../lib/toolShortcuts";
@@ -394,10 +395,16 @@ function RegionSelect() {
   // đúng `cursorPos` + `inFsBtn` đang dùng để xử lý click).
   const overFsBtn = !!cursorPos && inFsBtn(cursorPos[0], cursorPos[1]);
 
+  // Màn hình phụ (cursorHere = false) hoặc khi ảnh freeze chưa kịp tải xong:
+  // Luôn hiển thị ngay (không để visibility: hidden) với lớp mờ rgba(0,0,0,0.45)
+  // để tránh biến thành tấm kính trong suốt vô hình che mất desktop.
+  // Khi frozenUrl sẵn sàng, background-image sẽ lập tức phủ lên.
+  const isVisible = frozenReady || !cursorHere;
+
   const rootStyle: React.CSSProperties = {
     ...root,
-    // Ẩn hoàn toàn cho đến khi frozen image load xong — tránh flash transparent.
-    visibility: frozenReady ? "visible" : "hidden",
+    visibility: isVisible ? "visible" : "hidden",
+    backgroundColor: cursorHere ? "transparent" : "rgba(0,0,0,0.45)",
     ...(frozenUrl ? {
       backgroundImage: `url("${frozenUrl}")`,
       backgroundSize: "100% 100%",
@@ -407,7 +414,14 @@ function RegionSelect() {
   };
 
   return (
-    <div key="drag" style={rootStyle}>
+    <div
+      key="drag"
+      style={rootStyle}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        ipc.cancelOverlay().catch(() => {});
+      }}
+    >
       {sel && sel.w > 0 ? (
         <div
           style={{
@@ -809,12 +823,15 @@ function RecordRegionSelect() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, sel, recording, busy]);
 
+  const isVisible = frozenReady || !cursorHere;
+
   return (
     <div
       ref={rootRef}
       style={{
         ...root,
-        visibility: frozenReady ? "visible" : "hidden",
+        visibility: isVisible ? "visible" : "hidden",
+        backgroundColor: cursorHere ? "transparent" : "rgba(0,0,0,0.45)",
         // Khi đang quay: bỏ frozen background để màn hình thật hiện ra.
         // 4 div nền xám bên dưới sẽ che phần ngoài vùng quay.
         ...(!recording && frozenUrl ? {
@@ -1312,13 +1329,15 @@ function QuickAnnotate() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, sel]);
 
+  const isVisible = frozenReady || !cursorHere;
+
   return (
     <div
       ref={rootRef}
       style={{
         ...root,
-        // Ẩn cho đến khi frozen image load xong — tránh flash transparent.
-        visibility: frozenReady ? "visible" : "hidden",
+        visibility: isVisible ? "visible" : "hidden",
+        backgroundColor: cursorHere ? "transparent" : "rgba(0,0,0,0.45)",
         ...(frozenUrl ? {
           backgroundImage: `url("${frozenUrl}")`,
           backgroundSize: "100% 100%",
@@ -1334,7 +1353,10 @@ function QuickAnnotate() {
       onPointerDownCapture={onDownCapture}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onContextMenu={(e) => { e.preventDefault(); if (!sel) doClose(); }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        doClose();
+      }}
     >
       {sel ? (
         <div
@@ -1396,7 +1418,9 @@ function QuickAnnotate() {
         <div
           style={{ position: "fixed", left: sel.x - STAGE_PAD, top: sel.y - STAGE_PAD, width: sel.w + STAGE_PAD * 2, height: sel.h + STAGE_PAD * 2 }}
         >
-          <AnnotationStage ref={stageRef} hideZoomBar />
+          <React.Suspense fallback={null}>
+            <AnnotationStage ref={stageRef} hideZoomBar />
+          </React.Suspense>
         </div>
       )}
 
