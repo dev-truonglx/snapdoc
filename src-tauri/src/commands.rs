@@ -837,113 +837,100 @@ pub fn restart_app(app: AppHandle) {
 
 #[tauri::command]
 pub fn start_scroll_session(state: State<'_, AppState>) {
-    if let Ok(mut slices) = state.scroll_slices.lock() {
-        slices.clear();
+    if let Ok(mut s) = state.scroll_session.lock() {
+        s.reset();
     }
 }
 
-/// Giới hạn số lát cắt ĐÃ XÁC NHẬN (thực sự ghép) tối đa cho 1 phiên chụp cuộn —
-/// chỉ tính các lát được frontend commit, không tính các tick đứng yên / bỏ qua.
-/// 300 lát tương ứng chiều cao hàng chục nghìn pixel, đủ cho mọi trang web siêu dài.
-const MAX_SCROLL_SLICES: usize = 300;
+/// Đóng gói kết quả 1 nhịp chụp cuộn + phần preview đã đổi thành Binary IPC
+/// (little-endian), tránh encode/decode PNG mỗi nhịp:
+/// `[status u8][flags u8][0u8;2][dy i32][canvas_h u32][strips u32]
+///  [preview_w u32][preview_from u32][preview_total u32][diag_len u32]
+///  [diag utf8][rgba preview]` — flags: 1 = footer cố định, 2 = sidebar, 4 = cuộn quá nhanh.
+fn scroll_response(
+    s: &mut crate::capture::scroll_stitch::Session,
+    status: u8,
+    dy: i32,
+    fast: bool,
+    diag: &str,
+    preview_w: u32,
+) -> tauri::ipc::Response {
+    let p = s.take_preview(preview_w as usize);
+    let mut flags = 0u8;
+    if s.footer_locked() > 0 {
+        flags |= 1;
+    }
+    if s.sidebar_locked() {
+        flags |= 2;
+    }
+    if fast {
+        flags |= 4;
+    }
+    let mut buf = Vec::with_capacity(32 + diag.len() + p.rgba.len());
+    buf.extend_from_slice(&[status, flags, 0, 0]);
+    buf.extend_from_slice(&dy.to_le_bytes());
+    for v in [
+        s.canvas_h() as u32,
+        s.strip_count() as u32,
+        p.width,
+        p.from_row,
+        p.total_rows,
+        diag.len() as u32,
+    ] {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    buf.extend_from_slice(diag.as_bytes());
+    buf.extend_from_slice(&p.rgba);
+    tauri::ipc::Response::new(buf)
+}
 
-/// Chụp một lát cắt trong tính năng chụp cuộn.
-/// Trả về Binary IPC `tauri::ipc::Response`: [slice_index: 4 bytes u32 LE] + [png_bytes].
-/// Lát cắt được đưa vào bộ đệm `uncommitted` (tối đa 16 lát gần nhất).
+/// 1 nhịp chụp cuộn: chụp vùng, so khớp & ghép ngay trong Rust
+/// (`capture::scroll_stitch`), trả về trạng thái + phần preview thu nhỏ đã đổi.
 #[tauri::command]
-pub async fn capture_scroll_slice(
-    state: State<'_, AppState>,
+#[allow(clippy::too_many_arguments)]
+pub async fn scroll_tick(
+    app: AppHandle,
     mx: i32,
     my: i32,
     rx: u32,
     ry: u32,
     rw: u32,
     rh: u32,
+    preview_w: u32,
 ) -> Result<tauri::ipc::Response, String> {
-    let raw_img = tauri::async_runtime::spawn_blocking(move || -> Result<image::RgbaImage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
         let m = crate::capture::monitor::at_point(mx, my)?;
+        let scale = m.scale_factor().unwrap_or(1.0).max(1.0);
         let img = crate::capture::region::capture_region_raw(&m, rx, ry, rw, rh)?;
-        Ok(img)
+        let state = app.state::<AppState>();
+        let mut s = state.scroll_session.lock().map_err(|_| "Lỗi lock scroll_session".to_string())?;
+        let r = s.tick(img, scale);
+        Ok(scroll_response(&mut s, r.status as u8, r.dy, r.fast, &r.diag, preview_w))
     })
     .await
-    .map_err(|e| format!("Task join error: {e}"))??;
-
-    let png_bytes = crate::capture::encode_png(&raw_img)?;
-    let slice_index = {
-        let mut slices = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
-        let idx = slices.next_id;
-        slices.next_id += 1;
-        // Ring buffer: chỉ giữ tối đa 16 uncommitted gần nhất để tránh tràn RAM khi user nghỉ tay hoặc cuộn nhanh
-        if slices.uncommitted.len() >= 16 {
-            let oldest = slices.next_id.saturating_sub(17);
-            slices.uncommitted.retain(|&k, _| k > oldest);
-        }
-        slices.uncommitted.insert(idx, raw_img);
-        idx
-    };
-
-    let mut payload = Vec::with_capacity(4 + png_bytes.len());
-    payload.extend_from_slice(&(slice_index as u32).to_le_bytes());
-    payload.extend_from_slice(&png_bytes);
-
-    Ok(tauri::ipc::Response::new(payload))
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
-/// Xác nhận một lát cắt được đưa vào danh sách ghép (chuyển từ `uncommitted` sang `committed`).
+/// Nút "Nối tiếp": ghép thẳng khung mới nhất khi đang mất dấu.
 #[tauri::command]
-pub fn commit_scroll_slice(state: State<'_, AppState>, slice_index: usize) -> Result<(), String> {
-    let mut slices = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
-    if slices.committed.len() >= MAX_SCROLL_SLICES {
-        return Err(format!(
-            "Đã đạt giới hạn {MAX_SCROLL_SLICES} lát cắt cho 1 lần chụp cuộn — hãy dừng lại và ghép ảnh."
-        ));
-    }
-    if let Some(img) = slices.uncommitted.remove(&slice_index) {
-        slices.committed.insert(slice_index, img);
-    }
-    Ok(())
+pub fn scroll_bridge(state: State<'_, AppState>, preview_w: u32) -> Result<tauri::ipc::Response, String> {
+    let mut s = state.scroll_session.lock().map_err(|_| "Lỗi lock scroll_session".to_string())?;
+    let ok = s.bridge();
+    let status = if ok { 1 } else { 2 };
+    Ok(scroll_response(&mut s, status, 0, false, if ok { "nối tiếp" } else { "không có khung để nối" }, preview_w))
 }
 
-/// Hoàn tất chụp cuộn: nhận base64 của canvas đã ghép, chuyển về flow để kết xuất.
+/// Đổi tuỳ chọn ghim footer / kéo dài nền sidebar; trả về preview vẽ lại nếu cần.
 #[tauri::command]
-pub fn finalize_scroll_capture(
-    app: AppHandle,
-    base64: String,
-    width: u32,
-    height: u32,
-    mx: Option<i32>,
-    my: Option<i32>,
-) -> Result<(), String> {
-    // Khung viền chụp cuộn giờ là overlay tái sử dụng (xem
-    // `windows::open_scroll_control`) — phiên đã HOÀN TẤT, dùng
-    // `end_scroll_session` để đóng overlay đó VÀ dọn state phòng "kích hoạt
-    // lại" (xem hàm đó).
-    crate::windows::end_scroll_session(&app);
-    use base64::{engine::general_purpose::STANDARD, Engine};
-    let bytes = STANDARD.decode(&base64).unwrap_or_default();
-    let cap = crate::capture::Capture {
-        bytes,
-        base64,
-        width,
-        height,
-    };
-    let output = crate::flow::get_output(&app);
-    let scale_factor = match (mx, my) {
-        (Some(x), Some(y)) => crate::capture::monitor::at_point(x, y)
-            .map(|m| m.scale_factor().unwrap_or(1.0).max(1.0) as f64)
-            .unwrap_or(1.0),
-        _ => crate::capture::monitor::primary()
-            .ok()
-            .map(|m| m.scale_factor().unwrap_or(1.0).max(1.0) as f64)
-            .unwrap_or(1.0),
-    };
-    // flow::finish() có thể gọi windows::open_editor() (build() cửa sổ mới) —
-    // tách sang thread riêng để không deadlock IPC thread trên Windows, xem
-    // comment ở commands::open_editor.
-    std::thread::spawn(move || {
-        let _ = crate::flow::finish(&app, cap, &output, scale_factor);
-    });
-    Ok(())
+pub fn scroll_set_options(
+    state: State<'_, AppState>,
+    pin_footer: bool,
+    extend_sidebar: bool,
+    preview_w: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let mut s = state.scroll_session.lock().map_err(|_| "Lỗi lock scroll_session".to_string())?;
+    s.set_options(pin_footer, extend_sidebar);
+    Ok(scroll_response(&mut s, 2, 0, false, "", preview_w))
 }
 
 // ── Quay màn hình ────────────────────────────────────────────────────────────
@@ -1031,125 +1018,30 @@ pub fn recording_paused_state(app: AppHandle) -> Option<bool> {
     crate::record::paused_state(&app)
 }
 
-#[derive(serde::Deserialize)]
-pub struct StitchInstruction {
-    #[serde(rename = "sliceIndex")]
-    slice_index: usize,
-    #[serde(rename = "srcY")]
-    src_y: u32,
-    #[serde(rename = "srcH")]
-    src_h: u32,
-    #[serde(default, rename = "contentX")]
-    content_x: Option<u32>,
-    #[serde(default, rename = "sidebarBg")]
-    sidebar_bg: Option<[u8; 4]>,
-}
-
-/// Ghép ảnh cuộn ở backend dựa trên danh sách các lát cắt đã lưu và hướng dẫn ghép.
+/// Hoàn tất chụp cuộn: dựng ảnh ghép cuối cùng từ phiên trong Rust rồi chuyển về flow.
 #[tauri::command]
-pub async fn finalize_scroll_stitch(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    width: u32,
-    instructions: Vec<StitchInstruction>,
-    mx: Option<i32>,
-    my: Option<i32>,
-) -> Result<(), String> {
-    let (committed, uncommitted) = {
-        let mut guard = state.scroll_slices.lock().map_err(|_| "Lỗi lock scroll_slices".to_string())?;
-        (std::mem::take(&mut guard.committed), std::mem::take(&mut guard.uncommitted))
-    };
-
-    if instructions.is_empty() {
-        return Err("Không có dữ liệu hướng dẫn ghép".to_string());
-    }
-
+pub async fn finalize_scroll_stitch(app: AppHandle, mx: Option<i32>, my: Option<i32>) -> Result<(), String> {
+    let app2 = app.clone();
     let cap = tauri::async_runtime::spawn_blocking(move || -> Result<crate::capture::Capture, String> {
-        let mut total_height = 0u32;
-        for inst in &instructions {
-            total_height += inst.src_h;
-        }
-
-        if total_height == 0 {
-            return Err("Chiều cao ảnh ghép bằng 0".to_string());
-        }
-
-        const MAX_TOTAL_HEIGHT: u32 = 32_768;
-        if total_height > MAX_TOTAL_HEIGHT {
-            return Err(format!(
-                "Chiều cao ảnh ghép ({total_height}px) vượt quá giới hạn an toàn ({MAX_TOTAL_HEIGHT}px). Hãy dừng cuộn sớm hơn."
-            ));
-        }
-
-        let mut final_img = image::RgbaImage::new(width, total_height);
-
-        let mut current_y = 0u32;
-        for inst in &instructions {
-            let slice = committed.get(&inst.slice_index).or_else(|| uncommitted.get(&inst.slice_index)).ok_or_else(|| {
-                format!("Không tìm thấy lát cắt index {}", inst.slice_index)
-            })?;
-
-            let slice_w = slice.width();
-            let slice_h = slice.height();
-
-            // Nối toàn bộ bề rộng nội dung khớp với preview, copy theo hàng siêu tốc
-            let copy_w = width.min(slice_w);
-            if copy_w > 0 {
-                let src_raw: &[u8] = slice.as_raw();
-                let dst_raw: &mut [u8] = &mut final_img;
-                let content_x = inst.content_x.unwrap_or(0).min(copy_w);
-
-                for y in 0..inst.src_h {
-                    let src_pixel_y = inst.src_y + y;
-                    if src_pixel_y >= slice_h {
-                        continue;
-                    }
-                    let dest_pixel_y = current_y + y;
-                    if dest_pixel_y >= total_height {
-                        continue;
-                    }
-
-                    let dst_row_off = (dest_pixel_y as usize * width as usize) * 4;
-
-                    // 1. Cột Sidebar bên trái: điền màu nền Sidebar vào vùng 0..content_x
-                    if content_x > 0 {
-                        if let Some(bg) = inst.sidebar_bg {
-                            for x in 0..content_x as usize {
-                                let px_off = dst_row_off + x * 4;
-                                dst_raw[px_off..px_off + 4].copy_from_slice(&bg);
-                            }
-                        }
-                    }
-
-                    // 2. Cột nội dung cuộn bên phải: copy từ lát cắt thô
-                    let content_w = copy_w - content_x;
-                    if content_w > 0 {
-                        let content_len = (content_w * 4) as usize;
-                        let src_off = (src_pixel_y as usize * slice_w as usize + content_x as usize) * 4;
-                        let dst_off = dst_row_off + (content_x as usize * 4);
-                        dst_raw[dst_off..dst_off + content_len]
-                            .copy_from_slice(&src_raw[src_off..src_off + content_len]);
-                    }
-                }
+        let state = app2.state::<AppState>();
+        let final_img = {
+            let s = state.scroll_session.lock().map_err(|_| "Lỗi lock scroll_session".to_string())?;
+            const MAX_TOTAL_HEIGHT: usize = 32_768;
+            let total_height = s.final_height();
+            if total_height > MAX_TOTAL_HEIGHT {
+                return Err(format!(
+                    "Chiều cao ảnh ghép ({total_height}px) vượt quá giới hạn an toàn ({MAX_TOTAL_HEIGHT}px). Hãy dừng cuộn sớm hơn."
+                ));
             }
-
-            current_y += inst.src_h;
-        }
-
-        // Dọn bộ nhớ lát cắt thô ngay lập tức trước khi mã hoá để tránh đỉnh RAM
-        drop(committed);
-        drop(uncommitted);
-
-        let cap = crate::capture::persist_scroll(&final_img)?;
-        drop(final_img);
-        Ok(cap)
+            s.finalize().ok_or_else(|| "Chưa có dữ liệu để ghép".to_string())?
+        };
+        crate::capture::persist_scroll(&final_img)
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))??;
 
     // Khung viền chụp cuộn giờ là overlay tái sử dụng (xem
-    // `windows::open_scroll_control`) — phiên đã HOÀN TẤT (đây là đường "Hoàn
-    // thành" chính, gọi TRƯỚC `close_self`/`finalize_scroll_capture`), dùng
+    // `windows::open_scroll_control`) — phiên đã HOÀN TẤT, dùng
     // `end_scroll_session` để đóng overlay đó VÀ dọn state phòng "kích hoạt
     // lại" (xem hàm đó).
     crate::windows::end_scroll_session(&app);

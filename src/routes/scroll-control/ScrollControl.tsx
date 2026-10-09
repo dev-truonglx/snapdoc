@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
-import { toSafeBlobUrl } from "../../lib/blobUtils";
 
 const params = new URLSearchParams(window.location.search);
 const mx = Number(params.get("mx") ?? "0");
@@ -11,732 +10,52 @@ const ry = Number(params.get("ry") ?? "0");
 const rw = Number(params.get("rw") ?? "0");
 const rh = Number(params.get("rh") ?? "0");
 
-const toSafeImageUrl = (src: string) => toSafeBlobUrl(src, 200_000);
+// Toàn bộ thuật toán so khớp/ghép nằm ở Rust (`capture::scroll_stitch`); panel
+// này chỉ điều nhịp chụp, hiển thị preview thu nhỏ và các nút tuỳ chọn.
+const DEBUG = false; // bật true để hiện log chẩn đoán (do Rust trả về) trên panel
+const TICK_GAP_MS = 40; // nghỉ giữa 2 nhịp — nhịp sau chỉ bắt đầu khi nhịp trước xong
+// Giới hạn chiều cao preview canvas để không vượt trần texture của trình duyệt.
+const MAX_PREVIEW_CANVAS_HEIGHT = 16384;
 
-function loadImage(src: string, t: any): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const safe = toSafeImageUrl(src);
-    const img = new Image();
-    img.onload = () => {
-      safe.revoke?.();
-      resolve(img);
-    };
-    img.onerror = () => {
-      safe.revoke?.();
-      reject(new Error(t("scroll.imageLoadError")));
-    };
-    img.src = safe.url;
-  });
+// Khớp `scroll_stitch::TickStatus` và cờ trong `commands::scroll_response`.
+const ST_FIRST = 0;
+const ST_APPENDED = 1;
+const ST_IDLE = 2;
+const ST_LOST = 3;
+const ST_REANCHORED = 4;
+const FLAG_FOOTER = 1;
+const FLAG_SIDEBAR = 2;
+const FLAG_FAST = 4;
+
+interface ScrollTick {
+  status: number;
+  flags: number;
+  dy: number;
+  canvasH: number;
+  strips: number;
+  previewW: number;
+  previewFrom: number;
+  previewTotal: number;
+  diag: string;
+  rgba: Uint8ClampedArray;
 }
 
-const COLOR_TOL = 16; // sai khác màu cho phép mỗi kênh (hỗ trợ tốt hơn cho ClearType trên Windows)
-const SCROLLBAR_MARGIN = 25; // bỏ lề phải tránh thanh cuộn
-const SAMPLE_STEP = 2; // bước lấy mẫu pixel theo chiều ngang (dày để bắt chính xác từng điểm ảnh)
-const BG_SAMPLE_STEP = 8; // bước lấy mẫu khi ước lượng màu nền của dòng
-const BG_DEV = 16; // độ lệch sáng so với nền để coi 1 điểm là "có nội dung"
-const SAME_RATIO = 0.9; // tỉ lệ khớp (trên điểm nội dung) để coi 2 dòng "y hệt" (vùng cố định)
-const PROFILE_STEP = 3; // bước lấy mẫu x khi tính biên dạng cạnh ngang
-const MIN_DY = 2; // bỏ qua dịch chuyển quá nhỏ (nhận diện được cả cuộn mượt 2px)
-const MIN_OVERLAP = 36; // số dòng chồng lấn tối thiểu để NCC đáng tin (mở rộng khả năng bắt cuộn dài)
-const MAX_SCROLL_FRAC = 0.88; // dy tối đa = 88% vùng cuộn (tương thích chuột lăn Windows & HiDPI)
-const NBINS = 16; // số ô ngang của biên dạng cạnh (tăng độ mịn để nhận diện tốt lưới sản phẩm)
-const NCC_ACCEPT = 0.52; // NCC tại đỉnh ≥ ngưỡng này thì đưa vào so khớp 2D tinh chỉnh
-const CHANGE_TOL = 16; // độ lệch sáng để coi 1 điểm là "đã đổi" giữa 2 khung
-const FIXED_FG_FRAC = 0.05; // mật độ nội dung tối thiểu để 1 ô được xét là cột cố định
-const FIXED_CHANGE_MAX = 0.2; // tỉ lệ nội dung thay đổi tối đa để coi ô là CỐ ĐỊNH (sidebar dính)
-const FOOTER_SHADOW_MARGIN = 14; // khoảng đệm an toàn loại trừ dải bóng đổ (box-shadow) trên đỉnh footer cố định
-const DEBUG = false; // bật true để hiện log chẩn đoán trên panel khi cần dò lỗi cuộn
-
-// Độ sáng (luminance) gần đúng của 1 pixel — dùng phân biệt nền/nội dung.
-function lumAt(d: Uint8ClampedArray, i: number): number {
-  return (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000;
-}
-
-// Ước lượng độ sáng NỀN của 1 dòng = trung vị các điểm mẫu. Với dòng thưa
-// (table, dashboard) phần lớn là nền nên trung vị chính là màu nền; nhờ đó ta
-// tách được pixel "nội dung" khỏi nền dù nội dung chỉ chiếm vài phần trăm.
-function rowBgLum(d: Uint8ClampedArray, off: number, w: number): number {
-  const lums: number[] = [];
-  for (let x = 0; x < w - SCROLLBAR_MARGIN; x += BG_SAMPLE_STEP) {
-    lums.push(lumAt(d, off + x * 4));
-  }
-  if (lums.length === 0) return 0;
-  lums.sort((a, b) => a - b);
-  return lums[lums.length >> 1];
-}
-
-interface RowCmp {
-  ratio: number; // tỉ lệ khớp trên TẤT CẢ điểm mẫu (dùng cho dòng nền trơn)
-  contentRatio: number; // tỉ lệ khớp chỉ trên điểm CÓ NỘI DUNG
-  content: number; // số điểm có nội dung (độ mạnh của bằng chứng)
-}
-
-// So 2 dòng theo mẫu, nhưng TÁCH RIÊNG điểm nội dung khỏi nền.
-function rowCompare(
-  d1: Uint8ClampedArray,
-  off1: number,
-  bg1: number,
-  d2: Uint8ClampedArray,
-  off2: number,
-  bg2: number,
-  w: number,
-): RowCmp {
-  let total = 0;
-  let ok = 0;
-  let content = 0;
-  let contentOk = 0;
-  for (let x = 0; x < w - SCROLLBAR_MARGIN; x += SAMPLE_STEP) {
-    const i1 = off1 + x * 4;
-    const i2 = off2 + x * 4;
-    const matched =
-      Math.abs(d1[i1] - d2[i2]) <= COLOR_TOL &&
-      Math.abs(d1[i1 + 1] - d2[i2 + 1]) <= COLOR_TOL &&
-      Math.abs(d1[i1 + 2] - d2[i2 + 2]) <= COLOR_TOL;
-    total++;
-    if (matched) ok++;
-    // Điểm "có nội dung" nếu lệch khỏi nền ở ÍT NHẤT một trong hai khung.
-    if (Math.abs(lumAt(d1, i1) - bg1) > BG_DEV || Math.abs(lumAt(d2, i2) - bg2) > BG_DEV) {
-      content++;
-      if (matched) contentOk++;
-    }
-  }
-  const ratio = total === 0 ? 1 : ok / total;
+// Giải mã Binary IPC của `commands::scroll_response` (little-endian).
+function parseScrollTick(buf: ArrayBuffer): ScrollTick {
+  const v = new DataView(buf);
+  const diagLen = v.getUint32(28, true);
   return {
-    ratio,
-    contentRatio: content === 0 ? ratio : contentOk / content,
-    content,
+    status: v.getUint8(0),
+    flags: v.getUint8(1),
+    dy: v.getInt32(4, true),
+    canvasH: v.getUint32(8, true),
+    strips: v.getUint32(12, true),
+    previewW: v.getUint32(16, true),
+    previewFrom: v.getUint32(20, true),
+    previewTotal: v.getUint32(24, true),
+    diag: new TextDecoder().decode(new Uint8Array(buf, 32, diagLen)),
+    rgba: new Uint8ClampedArray(buf, 32 + diagLen),
   };
-}
-
-// Đánh giá tỉ lệ sai khác pixel nhanh giữa 2 frame liên tiếp (để phát hiện trạng thái đứng yên)
-function computeDiffFrac(d1: ImageData, d2: ImageData): number {
-  if (d1.width !== d2.width || d1.height !== d2.height) return 1.0;
-  const p = d1.data;
-  const c = d2.data;
-  const w = d1.width;
-  const h = d1.height;
-  const stride = w * 4;
-  let sampled = 0;
-  let changed = 0;
-  for (let y = 0; y < h; y += 6) {
-    const row = y * stride;
-    for (let x = 0; x < w; x += 12) {
-      const i = row + x * 4;
-      if (
-        Math.abs(p[i] - c[i]) > COLOR_TOL ||
-        Math.abs(p[i + 1] - c[i + 1]) > COLOR_TOL ||
-        Math.abs(p[i + 2] - c[i + 2]) > COLOR_TOL
-      ) {
-        changed++;
-      }
-      sampled++;
-    }
-  }
-  return sampled === 0 ? 0 : changed / sampled;
-}
-
-// Biên dạng cạnh ngang CHIA Ô (binned): với mỗi dòng y, năng lượng cạnh dọc
-// (|Δsáng| so với dòng trên) được gom vào NBINS ô theo bề ngang.
-function edgeProfileBinned(d: Uint8ClampedArray, w: number, h: number, stride: number): Float32Array {
-  const xEnd = w - SCROLLBAR_MARGIN;
-  const binW = Math.max(1, Math.floor(xEnd / NBINS));
-  const prof = new Float32Array(h * NBINS);
-  for (let y = 1; y < h; y++) {
-    const off = y * stride;
-    const up = off - stride;
-    const base = y * NBINS;
-    for (let x = 0; x < xEnd; x += PROFILE_STEP) {
-      const b = Math.min(NBINS - 1, Math.floor(x / binW));
-      const i = off + x * 4;
-      const j = up + x * 4;
-      prof[base + b] += Math.abs(lumAt(d, i) - lumAt(d, j));
-    }
-  }
-  return prof;
-}
-
-// Mặt nạ ô "đang cuộn": phát hiện CỘT CỐ ĐỊNH (sidebar/panel dính) để loại khỏi NCC.
-function activeBinMask(
-  p: Uint8ClampedArray,
-  c: Uint8ClampedArray,
-  bgP: Float32Array,
-  bgC: Float32Array,
-  w: number,
-  h: number,
-  stride: number,
-): Uint8Array {
-  const xEnd = w - SCROLLBAR_MARGIN;
-  const binW = Math.max(1, Math.floor(xEnd / NBINS));
-  const cnt = new Float64Array(NBINS);
-  const fg = new Float64Array(NBINS);
-  const chg = new Float64Array(NBINS);
-  for (let y = 0; y < h; y += 4) {
-    const row = y * stride;
-    const bp = bgP[y];
-    const bc = bgC[y];
-    for (let x = 0; x < xEnd; x += PROFILE_STEP) {
-      const b = Math.min(NBINS - 1, Math.floor(x / binW));
-      const i = row + x * 4;
-      const lp = lumAt(p, i);
-      const lc = lumAt(c, i);
-      cnt[b]++;
-      if (Math.abs(lp - bp) > BG_DEV || Math.abs(lc - bc) > BG_DEV) {
-        fg[b]++;
-        if (Math.abs(lp - lc) > CHANGE_TOL) chg[b]++;
-      }
-    }
-  }
-  const mask = new Uint8Array(NBINS);
-  let active = 0;
-  for (let b = 0; b < NBINS; b++) {
-    const fgFrac = cnt[b] > 0 ? fg[b] / cnt[b] : 0;
-    const chgOfContent = fg[b] > 0 ? chg[b] / fg[b] : 1;
-    const isFixed = fgFrac >= FIXED_FG_FRAC && chgOfContent <= FIXED_CHANGE_MAX;
-    mask[b] = isFixed ? 0 : 1;
-    active += mask[b];
-  }
-  if (active === 0) mask.fill(1);
-  return mask;
-}
-
-// Tương quan chuẩn hoá (NCC) giữa biên dạng binned của prev và cur khi nội dung dịch LÊN dy px.
-function shiftNCC(
-  profP: Float32Array,
-  profC: Float32Array,
-  scrollTop: number,
-  scrollBottom: number,
-  dy: number,
-  mask: Uint8Array,
-  activeBins: number,
-): number {
-  const y0 = scrollTop + dy;
-  const nRows = scrollBottom - y0;
-  if (nRows < MIN_OVERLAP || activeBins === 0) return -1;
-  const n = nRows * activeBins;
-  let sa = 0;
-  let sb = 0;
-  let saa = 0;
-  let sbb = 0;
-  let sab = 0;
-  for (let y = y0; y < scrollBottom; y++) {
-    const ip = y * NBINS;
-    const ic = (y - dy) * NBINS;
-    for (let b = 0; b < NBINS; b++) {
-      if (mask[b] === 0) continue;
-      const a = profP[ip + b];
-      const bb = profC[ic + b];
-      sa += a;
-      sb += bb;
-      saa += a * a;
-      sbb += bb * bb;
-      sab += a * bb;
-    }
-  }
-  const ma = sa / n;
-  const mb = sb / n;
-  const cov = sab / n - ma * mb;
-  const va = saa / n - ma * ma;
-  const vb = sbb / n - mb * mb;
-  const denom = Math.sqrt(va * vb);
-  return denom > 1e-6 ? cov / denom : 0;
-}
-
-// Xác thực 2D tinh chỉnh (Fine 2D Validation)
-function validateCandidateDy(
-  p: Uint8ClampedArray,
-  c: Uint8ClampedArray,
-  bgP: Float32Array,
-  bgC: Float32Array,
-  w: number,
-  _h: number,
-  scrollTop: number,
-  scrollBottom: number,
-  candidates: number[],
-  stride: number,
-  vEst: number,
-  _span: number,
-): number {
-  if (candidates.length === 1) return candidates[0];
-
-  const minDy = candidates[0];
-  const sampleY0 = scrollTop + minDy;
-  const sampleY1 = scrollBottom;
-  const testRows: number[] = [];
-  const step = Math.max(1, Math.floor((sampleY1 - sampleY0) / 32));
-
-  for (let y = sampleY0; y < sampleY1; y += step) {
-    testRows.push(y);
-    if (testRows.length >= 32) break;
-  }
-
-  if (testRows.length === 0) return candidates[0];
-
-  let bestCand = candidates[0];
-  let bestScore = -1;
-
-  for (const cand of candidates) {
-    let totalContent = 0;
-    let matchedContent = 0;
-
-    for (const yp of testRows) {
-      const yc = yp - cand;
-      if (yc < scrollTop || yc >= scrollBottom) continue;
-      const offP = yp * stride;
-      const offC = yc * stride;
-      const cmp = rowCompare(p, offP, bgP[yp], c, offC, bgC[yc], w);
-      totalContent += cmp.content;
-      matchedContent += cmp.contentRatio * cmp.content;
-    }
-
-    const matchRatio = totalContent > 0 ? matchedContent / totalContent : 0;
-    // Điểm cộng quán tính cuộn (vEst): Ưu tiên ứng cử viên tiệm cận với tốc độ cuộn mượt hiện tại
-    const velDiff = vEst > 0 ? Math.abs(cand - vEst) : 0;
-    const velBonus = vEst > 0 ? (1 - Math.min(1, velDiff / Math.max(vEst * 1.5, 40))) * 0.15 : 0;
-    const finalScore = matchRatio + velBonus;
-
-    if (finalScore > bestScore) {
-      bestScore = finalScore;
-      bestCand = cand;
-    }
-  }
-
-  return bestCand;
-}
-
-// Tinh chỉnh vi mô ±2px dựa trên tổng sai số tuyệt đối (SAD) của tất cả các dòng pixel thực tế
-function refineDyLocal(
-  p: Uint8ClampedArray,
-  c: Uint8ClampedArray,
-  w: number,
-  scrollTop: number,
-  scrollBottom: number,
-  initialDy: number,
-  maxDy: number,
-  stride: number,
-): number {
-  if (initialDy < MIN_DY) return initialDy;
-
-  const rMin = Math.max(MIN_DY, initialDy - 2);
-  const rMax = Math.min(maxDy, initialDy + 2);
-  if (rMin >= rMax) return initialDy;
-
-  let bestDy = initialDy;
-  let minSad = Infinity;
-
-  const sampleY0 = scrollTop + rMax;
-  const sampleY1 = scrollBottom;
-  const step = Math.max(1, Math.floor((sampleY1 - sampleY0) / 64));
-
-  for (let cand = rMin; cand <= rMax; cand++) {
-    let sad = 0;
-    let count = 0;
-    for (let yp = sampleY0; yp < sampleY1; yp += step) {
-      const yc = yp - cand;
-      if (yc < scrollTop || yc >= scrollBottom) continue;
-      const offP = yp * stride;
-      const offC = yc * stride;
-      for (let x = 0; x < w - SCROLLBAR_MARGIN; x += SAMPLE_STEP) {
-        const iP = offP + x * 4;
-        const iC = offC + x * 4;
-        const diff = Math.abs(p[iP] - c[iC]) + Math.abs(p[iP + 1] - c[iC + 1]) + Math.abs(p[iP + 2] - c[iC + 2]);
-        // Tăng trọng số x3 cho các pixel cạnh/chữ/số (đặc trưng cấu trúc cố định) để khoá vị trí chính xác
-        const edgeP = x + SAMPLE_STEP < w - SCROLLBAR_MARGIN ? Math.abs(lumAt(p, iP) - lumAt(p, iP + SAMPLE_STEP * 4)) : 0;
-        const weight = edgeP > 15 ? 3 : 1;
-        sad += diff * weight;
-        count += weight;
-      }
-    }
-    const avgSad = count > 0 ? sad / count : Infinity;
-    if (avgSad < minSad) {
-      minSad = avgSad;
-      bestDy = cand;
-    }
-  }
-
-  return bestDy;
-}
-
-export interface DetectedSidebar {
-  width: number;
-  bg: [number, number, number, number];
-  hex: string;
-}
-
-// Nhận diện cột Sidebar cố định bên trái dựa trên ma trận so sánh vi phân 2D:
-// Cột Sidebar đứng yên (P == C) trong khi nội dung bên phải cuộn (P != C tại cùng toạ độ và P == C(y - dy)).
-function detectSidebar(
-  prev: Uint8ClampedArray,
-  cur: Uint8ClampedArray,
-  w: number,
-  h: number,
-  scrollTop: number,
-  scrollBottom: number,
-  dy: number,
-): DetectedSidebar | null {
-  if (dy < 4) return null;
-  const stride = w * 4;
-  const y0 = Math.max(0, scrollTop + 16);
-  const y1 = Math.min(h, scrollBottom - 16);
-  const span = y1 - y0;
-  if (span < 40) return null;
-
-  // Sidebar luôn ở nửa trái màn hình (tối đa 48% chiều rộng và không quá 640px)
-  const maxCol = Math.min(Math.floor(w * 0.48), 640);
-  if (maxCol < 60) return null;
-
-  const stepY = Math.max(6, Math.min(12, Math.floor(span / 45)));
-  const testRows: number[] = [];
-  for (let y = y0; y < y1; y += stepY) {
-    testRows.push(y);
-  }
-  const nRows = testRows.length;
-  if (nRows < 6) return null;
-
-  const colStep = 4;
-  const testLimitX = Math.min(w - 20, Math.max(maxCol + 80, Math.floor(w * 0.65)));
-
-  interface ColStat {
-    x: number;
-    sameRate: number;
-    diffRate: number;
-    structRate: number;
-  }
-  const colStats: ColStat[] = [];
-
-  for (let x = 0; x < testLimitX; x += colStep) {
-    let same = 0;
-    let diff = 0;
-    let struct = 0;
-    let testedDy = 0;
-
-    for (const y of testRows) {
-      const idx = y * stride + x * 4;
-      const d0 =
-        Math.abs(prev[idx] - cur[idx]) +
-        Math.abs(prev[idx + 1] - cur[idx + 1]) +
-        Math.abs(prev[idx + 2] - cur[idx + 2]);
-
-      if (d0 <= 24) {
-        same++;
-      } else if (d0 > 30) {
-        diff++;
-      }
-
-      const yShift = y - dy;
-      if (yShift >= scrollTop && yShift < scrollBottom) {
-        testedDy++;
-        const idxShift = yShift * stride + x * 4;
-        const dShift =
-          Math.abs(prev[idx] - cur[idxShift]) +
-          Math.abs(prev[idx + 1] - cur[idxShift + 1]) +
-          Math.abs(prev[idx + 2] - cur[idxShift + 2]);
-        // Pixel đứng yên tại chỗ nhưng khi dịch dy thì khác biệt -> đặc trưng cố định (icon/chữ/kẻ viền)
-        if (d0 <= 24 && dShift > 30) {
-          struct++;
-        }
-      }
-    }
-
-    colStats.push({
-      x,
-      sameRate: same / nRows,
-      diffRate: diff / nRows,
-      structRate: testedDy > 0 ? struct / testedDy : 0,
-    });
-  }
-
-  // Tìm cột đầu tiên bắt đầu có chuyển động cuộn rõ rệt
-  let firstMoveIdx = -1;
-  for (let i = 0; i < colStats.length; i++) {
-    const stat = colStats[i];
-    if (stat.diffRate >= 0.12 || (stat.sameRate < 0.82 && stat.diffRate >= 0.06)) {
-      const next1 = colStats[i + 1];
-      const next2 = colStats[i + 2];
-      if (stat.diffRate >= 0.22 || (next1 && next1.diffRate >= 0.06) || (next2 && next2.diffRate >= 0.06)) {
-        firstMoveIdx = i;
-        break;
-      }
-    }
-  }
-
-  if (firstMoveIdx === -1) return null;
-  const xMove = colStats[firstMoveIdx].x;
-  // Nếu nội dung cuộn bắt đầu ngay sát mép trái (< 60px): không có sidebar
-  if (xMove < 60) return null;
-
-  // Kiểm tra dải bên trái [0..xMove] có thực sự đứng yên không
-  let stationaryColumns = 0;
-  let structColumns = 0;
-  for (let i = 0; i < firstMoveIdx; i++) {
-    if (colStats[i].sameRate >= 0.85) {
-      stationaryColumns++;
-    }
-    if (colStats[i].structRate >= 0.03) {
-      structColumns++;
-    }
-  }
-
-  const stationaryFrac = stationaryColumns / firstMoveIdx;
-  if (stationaryFrac < 0.82) return null;
-
-  // Kiểm tra xem đây có phải là Sidebar thực sự (có icon/chữ hoặc màu nền khác nội dung)
-  // hay chỉ là lề trắng vô vị của tài liệu căn giữa
-  const testSbX = Math.max(8, Math.floor(xMove * 0.4));
-  const testContentX = Math.min(w - 20, xMove + 80);
-  const midY = Math.floor((y0 + y1) / 2);
-  const idxSb = midY * stride + testSbX * 4;
-  const idxCnt = midY * stride + testContentX * 4;
-  const diffBg =
-    Math.abs(cur[idxSb] - cur[idxCnt]) +
-    Math.abs(cur[idxSb + 1] - cur[idxCnt + 1]) +
-    Math.abs(cur[idxSb + 2] - cur[idxCnt + 2]);
-
-  if (structColumns < 2 && diffBg < 15) {
-    // Không có icon/chữ và màu nền giống hệt vùng cuộn -> chỉ là lề trống
-    return null;
-  }
-
-  // Xác định toạ độ cắt sidebar chính xác
-  let sidebarW = xMove;
-  const searchStartX = Math.max(50, xMove - 60);
-  const searchEndX = Math.min(maxCol, xMove + 4);
-
-  // 1. Tìm đường kẻ phân cách (divider border line)
-  let bestBorderX = -1;
-  let maxBorderScore = -1;
-
-  for (let bx = searchStartX; bx <= searchEndX; bx++) {
-    let borderScore = 0;
-    for (const y of testRows) {
-      const idx = y * stride + bx * 4;
-      const lum = lumAt(cur, idx);
-      const lumL = lumAt(cur, idx - 8); // bx - 2
-      const lumR = lumAt(cur, idx + 8); // bx + 2
-      if (Math.abs(lum - lumL) >= 8 || Math.abs(lum - lumR) >= 8) {
-        borderScore++;
-      }
-    }
-    if (borderScore >= nRows * 0.55 && borderScore > maxBorderScore) {
-      maxBorderScore = borderScore;
-      bestBorderX = bx;
-    }
-  }
-
-  if (bestBorderX !== -1) {
-    sidebarW = bestBorderX + 1;
-  } else {
-    // 2. Dò lùi pixel từ xMove để tìm mép pixel dừng cuộn
-    for (let px = xMove; px >= searchStartX; px--) {
-      let pxDiff = 0;
-      for (const y of testRows) {
-        const idx = y * stride + px * 4;
-        const d =
-          Math.abs(prev[idx] - cur[idx]) +
-          Math.abs(prev[idx + 1] - cur[idx + 1]) +
-          Math.abs(prev[idx + 2] - cur[idx + 2]);
-        if (d > 28) pxDiff++;
-      }
-      if (pxDiff / nRows <= 0.04) {
-        sidebarW = px + 1;
-        break;
-      }
-    }
-  }
-
-  sidebarW = Math.max(60, Math.min(maxCol, sidebarW));
-
-  // Lấy mẫu màu nền đại diện của Sidebar (lấy màu xuất hiện áp đảo)
-  const sampleXs = [
-    Math.max(8, Math.floor(sidebarW * 0.2)),
-    Math.max(8, Math.floor(sidebarW * 0.4)),
-    Math.max(8, Math.floor(sidebarW * 0.6)),
-    Math.max(8, Math.floor(sidebarW * 0.8)),
-  ];
-
-  const colorSamples: [number, number, number, number][] = [];
-  for (const sx of sampleXs) {
-    for (const y of testRows) {
-      const idx = y * stride + sx * 4;
-      colorSamples.push([cur[idx], cur[idx + 1], cur[idx + 2], cur[idx + 3]]);
-    }
-  }
-
-  let bestColor = colorSamples[0] || [245, 245, 247, 255];
-  let maxCount = 0;
-
-  for (let i = 0; i < colorSamples.length; i++) {
-    const c1 = colorSamples[i];
-    let count = 0;
-    for (let j = 0; j < colorSamples.length; j++) {
-      const c2 = colorSamples[j];
-      if (
-        Math.abs(c1[0] - c2[0]) <= 12 &&
-        Math.abs(c1[1] - c2[1]) <= 12 &&
-        Math.abs(c1[2] - c2[2]) <= 12
-      ) {
-        count++;
-      }
-    }
-    if (count > maxCount) {
-      maxCount = count;
-      bestColor = c1;
-    }
-  }
-
-  const bg: [number, number, number, number] = [
-    bestColor[0],
-    bestColor[1],
-    bestColor[2],
-    255,
-  ];
-  const hex = `rgb(${bg[0]}, ${bg[1]}, ${bg[2]})`;
-
-  return {
-    width: sidebarW,
-    bg,
-    hex,
-  };
-}
-
-interface ScrollAnalysis {
-  dy: number; // số pixel nội dung mới (0 = không cuộn, -1 = không khớp được)
-  topFixed: number; // chiều cao dải cố định trên (header dính)
-  botFixed: number; // chiều cao dải cố định dưới (footer dính / nền trơn cuối)
-  ncc?: number; // NCC cao nhất tìm được (chẩn đoán)
-  bestDy?: number; // dy tại đỉnh NCC (chẩn đoán)
-  span?: number; // chiều cao vùng cuộn = scrollBottom - scrollTop (chẩn đoán)
-  changedFrac?: number; // tỉ lệ dòng thay đổi giữa 2 khung (chẩn đoán)
-  activeBins?: number; // số ô ngang đang cuộn (đã loại cột cố định) (chẩn đoán)
-}
-
-// Phân tích 2 khung liên tiếp
-function analyzeScroll(prev: ImageData, cur: ImageData, vEst: number = 0, forceTopFixed: number = 0): ScrollAnalysis {
-  const w = prev.width;
-  const h = prev.height;
-  const stride = w * 4;
-  const p = prev.data;
-  const c = cur.data;
-  const maxBand = Math.floor(h * 0.4);
-
-  const bgP = new Float32Array(h);
-  const bgC = new Float32Array(h);
-  for (let yy = 0; yy < h; yy++) {
-    bgP[yy] = rowBgLum(p, yy * stride, w);
-    bgC[yy] = rowBgLum(c, yy * stride, w);
-  }
-
-  const sameInPlace = (y: number): boolean => {
-    const off = y * stride;
-    const cmp = rowCompare(p, off, bgP[y], c, off, bgC[y], w);
-    return cmp.content >= 2 ? cmp.contentRatio >= SAME_RATIO : cmp.ratio >= SAME_RATIO;
-  };
-
-  let sampled = 0;
-  let changed = 0;
-  for (let y = 0; y < h; y += 4) {
-    sampled++;
-    if (!sameInPlace(y)) changed++;
-  }
-  const changedFrac = sampled ? changed / sampled : 0;
-
-  // 1) Dải cố định trên/dưới: DỪNG ngay ở dòng đầu tiên khác (break-on-mismatch).
-  let topFixed = 0;
-  while (topFixed < maxBand && sameInPlace(topFixed)) topFixed++;
-  if (forceTopFixed > 0) {
-    topFixed = Math.max(topFixed, forceTopFixed);
-  }
-  let botFixed = 0;
-  while (botFixed < maxBand && sameInPlace(h - 1 - botFixed)) botFixed++;
-
-  if (h - topFixed - botFixed < h * 0.25) {
-    topFixed = 0;
-    botFixed = 0;
-  }
-
-  const scrollTop = topFixed;
-  const scrollBottom = h - botFixed;
-  const span = scrollBottom - scrollTop;
-
-  if (changedFrac < 0.02 || span < 24) {
-    return { dy: 0, topFixed, botFixed, span, changedFrac };
-  }
-
-  // 3) Ước lượng dy bằng TƯƠNG QUAN BIÊN DẠNG CẠNH (Edge Profile Correlation)
-  const profP = edgeProfileBinned(p, w, h, stride);
-  const profC = edgeProfileBinned(c, w, h, stride);
-
-  const mask = activeBinMask(p, c, bgP, bgC, w, h, stride);
-  let activeBins = 0;
-  for (let b = 0; b < NBINS; b++) activeBins += mask[b];
-
-  const maxDy = Math.min(span - MIN_OVERLAP, Math.floor(span * MAX_SCROLL_FRAC));
-  if (maxDy < MIN_DY) return { dy: 0, topFixed, botFixed, span, changedFrac };
-
-  const scores = new Float32Array(maxDy + 1);
-  let bestNcc = -1;
-  let bestDy = 0;
-
-  for (let dy = MIN_DY; dy <= maxDy; dy++) {
-    const ncc = shiftNCC(profP, profC, scrollTop, scrollBottom, dy, mask, activeBins);
-    scores[dy] = ncc;
-    if (ncc > bestNcc) {
-      bestNcc = ncc;
-      bestDy = dy;
-    }
-  }
-
-  if (bestNcc < NCC_ACCEPT) {
-    return { dy: -1, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
-  }
-
-  const NEAR = 0.06;
-  const candidates: number[] = [];
-  for (let d2 = MIN_DY; d2 <= maxDy; d2++) {
-    if (scores[d2] >= bestNcc - NEAR) {
-      candidates.push(d2);
-    }
-  }
-
-  // Luôn gọi xác thực 2D pixel (validateCandidateDy) nếu có nhiều hơn 1 ứng cử viên
-  const finalDy =
-    candidates.length <= 1
-      ? bestDy
-      : validateCandidateDy(
-          p,
-          c,
-          bgP,
-          bgC,
-          w,
-          h,
-          scrollTop,
-          scrollBottom,
-          candidates,
-          stride,
-          vEst,
-          span,
-        );
-
-  // Tinh chỉnh vi mô ±2px dựa trên tổng sai số tuyệt đối (SAD) để triệt tiêu vệt gạch ngang 1-2px
-  const refinedDy = refineDyLocal(
-    p,
-    c,
-    w,
-    scrollTop,
-    scrollBottom,
-    finalDy,
-    maxDy,
-    stride,
-  );
-
-  return { dy: refinedDy, topFixed, botFixed, ncc: bestNcc, bestDy, span, changedFrac, activeBins };
-}
-
-interface FrameHistoryItem {
-  imgData: ImageData;
-  img: HTMLImageElement;
-  sliceIdx: number;
-  botFixed: number;
-  usedHeightAtFrame: number;
 }
 
 export default function ScrollControl() {
@@ -748,12 +67,8 @@ export default function ScrollControl() {
   const [error, setError] = useState<string | null>(null);
   // Cảnh báo cuộn quá nhanh
   const [fastWarn, setFastWarn] = useState(false);
-  const fastWarnRef = useRef(false);
-  // Mất dấu nối (để hỗ trợ nút nối tiếp nếu muốn bỏ qua khoảng trống)
+  // Mất dấu nối (hiện nút "nối tiếp" để bỏ qua khoảng trống)
   const [lostTracking, setLostTracking] = useState(false);
-  const lostTrackingRef = useRef(false);
-  const lastRawImgDataRef = useRef<ImageData | null>(null);
-  const latestRawFrameRef = useRef<{ img: HTMLImageElement; imgData: ImageData; sliceIdx: number } | null>(null);
 
   // Chẩn đoán hiển thị ngay trên panel
   const [dbg, setDbg] = useState<string>("");
@@ -762,46 +77,42 @@ export default function ScrollControl() {
   const seqRef = useRef(0);
   const [copied, setCopied] = useState(false);
 
-  // Nhận diện & ghim footer cố định (Sticky Footer Bottom Pinning)
-  const detectedFooterHeightRef = useRef(0);
-  const hasTrimmedInitialFrameRef = useRef(false);
+  // Footer cố định (ghim xuống đáy ảnh) & sidebar cố định (kéo dài màu nền) — Rust nhận diện
   const [pinFooterToBottom, setPinFooterToBottom] = useState(true);
   const [hasStickyFooter, setHasStickyFooter] = useState(false);
-
-  // Nhận diện & kéo dài màu nền Sidebar cố định (Sidebar Background Extension)
-  const detectedSidebarRef = useRef<DetectedSidebar | null>(null);
   const [extendSidebar, setExtendSidebar] = useState(true);
-  const extendSidebarRef = useRef(true);
   const [hasSidebar, setHasSidebar] = useState(false);
+  const optionsRef = useRef({ pinFooter: true, extendSidebar: true });
 
-  // Master canvas dùng "capacity doubling"
+  // Preview canvas (độ phân giải preview) dùng "capacity doubling"
   const masterRef = useRef<HTMLCanvasElement | null>(null);
   const masterCtxRef = useRef<CanvasRenderingContext2D | null>(null);
   const usedHeightRef = useRef(0);
-  const frameWidthRef = useRef(0);
-
-  // Bộ đệm lịch sử tham chiếu đa khung hình (Multi-Frame Reference History)
-  const recentFramesRef = useRef<FrameHistoryItem[]>([]);
-  // Vận tốc cuộn ước tính (px/tick) để hỗ trợ phân biệt chu kỳ bảng biểu
-  const velocityRef = useRef(0);
-
-  const instructionsRef = useRef<{
-    sliceIndex: number;
-    srcY: number;
-    srcH: number;
-    contentX?: number;
-    sidebarBg?: [number, number, number, number];
-  }[]>([]);
-  const totalSlicesRef = useRef(0);
+  const previewWRef = useRef(0);
 
   const isCapturingRef = useRef(false);
-  const tickBusyRef = useRef(false);
-  const intervalRef = useRef<number | null>(null);
+  const timerRef = useRef<number | null>(null);
   const startedRef = useRef(false);
+  // Hàng đợi tuần tự hoá mọi lệnh IPC của phiên (nhịp chụp, tuỳ chọn, nối tiếp,
+  // hoàn tất) để kết quả preview luôn áp dụng đúng thứ tự.
+  const queueRef = useRef<Promise<unknown>>(Promise.resolve());
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const cropWrapperRef = useRef<HTMLDivElement | null>(null);
-  const tempCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const runExclusive = <T,>(fn: () => Promise<T>): Promise<T> => {
+    const next = queueRef.current.then(fn, fn);
+    queueRef.current = next.catch(() => undefined);
+    return next;
+  };
+
+  const stopLoop = () => {
+    isCapturingRef.current = false;
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
 
   const cleanupMemory = () => {
     stopLoop();
@@ -811,22 +122,10 @@ export default function ScrollControl() {
       masterRef.current = null;
       masterCtxRef.current = null;
     }
-    if (tempCanvasRef.current) {
-      tempCanvasRef.current.width = 0;
-      tempCanvasRef.current.height = 0;
-      tempCanvasRef.current = null;
-    }
     if (cropWrapperRef.current) {
       cropWrapperRef.current.replaceChildren();
     }
-    recentFramesRef.current = [];
-    lastRawImgDataRef.current = null;
-    latestRawFrameRef.current = null;
-    instructionsRef.current = [];
-    detectedFooterHeightRef.current = 0;
-    hasTrimmedInitialFrameRef.current = false;
-    detectedSidebarRef.current = null;
-    setHasSidebar(false);
+    usedHeightRef.current = 0;
   };
 
   // Phím tắt bắt đầu / hoàn thành / huỷ
@@ -848,10 +147,7 @@ export default function ScrollControl() {
     return () => window.removeEventListener("keydown", onKey);
   }, [status]);
 
-  // Giới hạn chiều cao tối đa cho preview canvas để không vượt trần texture GPU WebGL/Browser (16,384px)
-  const MAX_PREVIEW_CANVAS_HEIGHT = 16384;
-
-  // Bảo đảm master canvas đủ chỗ cho `neededHeight` dòng (tối đa 16K px cho preview UI)
+  // Bảo đảm preview canvas đủ chỗ cho `neededHeight` dòng
   const ensureCapacity = (neededHeight: number, width: number) => {
     const current = masterRef.current;
     if (current && current.width === width && current.height >= neededHeight) {
@@ -860,9 +156,9 @@ export default function ScrollControl() {
     const clampedNeeded = Math.min(neededHeight, MAX_PREVIEW_CANVAS_HEIGHT);
     const newCapacity = Math.min(
       MAX_PREVIEW_CANVAS_HEIGHT,
-      Math.max(clampedNeeded, current ? current.height * 2 : clampedNeeded),
+      Math.max(clampedNeeded, current && current.width === width ? current.height * 2 : clampedNeeded),
     );
-    if (current && current.height >= newCapacity) {
+    if (current && current.width === width && current.height >= newCapacity) {
       return;
     }
     const next = document.createElement("canvas");
@@ -870,7 +166,7 @@ export default function ScrollControl() {
     next.height = newCapacity;
     const ctx = next.getContext("2d");
     if (!ctx) return;
-    if (current) ctx.drawImage(current, 0, 0);
+    if (current && current.width === width) ctx.drawImage(current, 0, 0);
 
     masterRef.current = next;
     masterCtxRef.current = ctx;
@@ -891,7 +187,7 @@ export default function ScrollControl() {
   const updatePreview = () => {
     const host = cropWrapperRef.current;
     const cont = scrollContainerRef.current;
-    const fw = frameWidthRef.current;
+    const fw = previewWRef.current;
 
     const stickToBottom = cont
       ? cont.scrollHeight - cont.scrollTop - cont.clientHeight < 48
@@ -911,418 +207,102 @@ export default function ScrollControl() {
     }
   };
 
-  // Nối tiếp từ vị trí hiện tại nếu người dùng chủ động bỏ qua khoảng nhảy
-  const handleBridgeCurrentFrame = async () => {
-    const raw = latestRawFrameRef.current;
-    if (!raw || !masterRef.current) return;
-    const { img, imgData, sliceIdx } = raw;
-    const fw = img.naturalWidth;
-    const fh = img.naturalHeight;
-
-    const footerH = detectedFooterHeightRef.current;
-    const bridgeH = footerH > 0 ? Math.max(0, fh - footerH) : fh;
-    if (bridgeH === 0) return;
-
-    const useSidebar = extendSidebarRef.current && !!detectedSidebarRef.current;
-    const contentX = useSidebar ? detectedSidebarRef.current!.width : 0;
-    const sidebarBg = useSidebar ? detectedSidebarRef.current!.bg : undefined;
-
-    const at = usedHeightRef.current;
-    ensureCapacity(at + bridgeH, fw);
-
-    if (useSidebar && contentX > 0 && contentX < fw) {
-      masterCtxRef.current!.fillStyle = detectedSidebarRef.current!.hex;
-      masterCtxRef.current!.fillRect(0, at, contentX, bridgeH);
-      const contentW = fw - contentX;
-      masterCtxRef.current?.drawImage(
-        img,
-        contentX, 0, contentW, bridgeH,
-        contentX, at, contentW, bridgeH
-      );
-    } else {
-      masterCtxRef.current?.drawImage(img, 0, 0, fw, bridgeH, 0, at, fw, bridgeH);
+  // Vẽ phần preview Rust trả về (chỉ các dòng đã đổi) và cập nhật thống kê.
+  const applyTick = (tk: ScrollTick) => {
+    const pw = tk.previewW;
+    const rows = tk.previewTotal - tk.previewFrom;
+    if (pw > 0 && rows > 0 && tk.rgba.length >= rows * pw * 4) {
+      ensureCapacity(tk.previewTotal, pw);
+      const data = new Uint8ClampedArray(tk.rgba.subarray(0, rows * pw * 4));
+      masterCtxRef.current?.putImageData(new ImageData(data, pw, rows), 0, tk.previewFrom);
     }
-    usedHeightRef.current = at + bridgeH;
+    if (pw > 0) {
+      usedHeightRef.current = Math.min(tk.previewTotal, MAX_PREVIEW_CANVAS_HEIGHT);
+      setStitchedHeight(tk.canvasH);
+      setFrameCount(tk.strips);
+      setHasStickyFooter((tk.flags & FLAG_FOOTER) !== 0);
+      setHasSidebar((tk.flags & FLAG_SIDEBAR) !== 0);
+      updatePreview();
+    }
 
-    instructionsRef.current.push({
-      sliceIndex: sliceIdx,
-      srcY: 0,
-      srcH: bridgeH,
-      contentX: useSidebar && contentX > 0 ? contentX : undefined,
-      sidebarBg: useSidebar && contentX > 0 ? sidebarBg : undefined,
-    });
+    if (DEBUG && tk.diag) {
+      seqRef.current++;
+      const line = `#${seqRef.current} [${tk.status}] ${tk.diag} h=${tk.canvasH}`;
+      setDbg(line);
+      const buf = logRef.current;
+      buf.push(line);
+      if (buf.length > 400) buf.splice(0, buf.length - 400);
+      setLogText(buf.join("\n"));
+    }
+  };
 
-    await ipc.commitScrollSlice(sliceIdx).catch(console.error);
-
-    recentFramesRef.current = [
-      {
-        imgData,
-        img,
-        sliceIdx,
-        botFixed: footerH,
-        usedHeightAtFrame: usedHeightRef.current,
+  // Nối tiếp từ vị trí hiện tại nếu người dùng chủ động bỏ qua khoảng nhảy
+  const handleBridgeCurrentFrame = () => {
+    void runExclusive(async () => {
+      const tk = parseScrollTick(await ipc.scrollBridge(previewWRef.current));
+      applyTick(tk);
+      if (tk.status === ST_APPENDED) {
+        setLostTracking(false);
+        setFastWarn(false);
       }
-    ];
+    }).catch((err) => setError(String(err)));
+  };
 
-    setFastWarn(false);
-    fastWarnRef.current = false;
-    setLostTracking(false);
-    lostTrackingRef.current = false;
-    velocityRef.current = 0;
+  const syncOptions = (next: { pinFooter: boolean; extendSidebar: boolean }) => {
+    optionsRef.current = next;
+    void runExclusive(async () => {
+      const buf = await ipc.scrollSetOptions(next.pinFooter, next.extendSidebar, previewWRef.current);
+      applyTick(parseScrollTick(buf));
+    }).catch(console.error);
+  };
 
-    setStitchedHeight(usedHeightRef.current);
-    setFrameCount((prev) => prev + 1);
-    updatePreview();
+  const togglePinFooter = () => {
+    const next = { ...optionsRef.current, pinFooter: !optionsRef.current.pinFooter };
+    setPinFooterToBottom(next.pinFooter);
+    syncOptions(next);
+  };
+
+  const toggleExtendSidebar = () => {
+    const next = { ...optionsRef.current, extendSidebar: !optionsRef.current.extendSidebar };
+    setExtendSidebar(next.extendSidebar);
+    syncOptions(next);
   };
 
   const captureTick = async () => {
-    // tickBusyRef chống xếp chồng: nếu 1 tick xử lý lâu thì tick kế tiếp bị bỏ qua
-    if (!isCapturingRef.current || tickBusyRef.current) return;
-    tickBusyRef.current = true;
+    if (!isCapturingRef.current) return;
     try {
-      const buf = await ipc.captureScrollSlice(mx, my, rx, ry, rw, rh);
-      if (!buf || buf.byteLength < 4 || !isCapturingRef.current) return;
-
-      const view = new DataView(buf);
-      const sliceIndex = view.getUint32(0, true);
-      const imgBytes = new Uint8Array(buf, 4);
-      const blob = new Blob([imgBytes], { type: "image/png" });
-      const sliceUrl = URL.createObjectURL(blob);
-
-      totalSlicesRef.current++;
-
-      const img = await loadImage(sliceUrl, t);
-      const fw = img.naturalWidth;
-      const fh = img.naturalHeight;
-
-      // Tái sử dụng canvas ẩn thay vì tạo mới mỗi 120ms tick để triệt tiêu áp lực garbage collection
-      if (!tempCanvasRef.current) {
-        tempCanvasRef.current = document.createElement("canvas");
-      }
-      const tempCanvas = tempCanvasRef.current;
-      if (tempCanvas.width !== fw || tempCanvas.height !== fh) {
-        tempCanvas.width = fw;
-        tempCanvas.height = fh;
-      }
-      const tempCtx = tempCanvas.getContext("2d", { willReadFrequently: true });
-      if (!tempCtx) return;
-      tempCtx.drawImage(img, 0, 0);
-      const newImgData = tempCtx.getImageData(0, 0, fw, fh);
-
-      latestRawFrameRef.current = { img, imgData: newImgData, sliceIdx: sliceIndex };
-
-      // Đánh giá chuyển động giữa 2 nhịp chụp liên tiếp (120ms)
-      const tickDiff = lastRawImgDataRef.current
-        ? computeDiffFrac(lastRawImgDataRef.current, newImgData)
-        : 1.0;
-      lastRawImgDataRef.current = newImgData;
-
-      const isStationary = tickDiff < 0.015;
-
-      const history = recentFramesRef.current;
-
-      if (!masterRef.current || history.length === 0) {
-        // Frame đầu tiên của phiên chụp
-        frameWidthRef.current = fw;
-        ensureCapacity(fh, fw);
-        masterCtxRef.current?.drawImage(img, 0, 0);
-        usedHeightRef.current = fh;
-
-        instructionsRef.current = [
-          { sliceIndex, srcY: 0, srcH: fh }
-        ];
-
-        // Xác nhận lát cắt đầu tiên vào backend
-        await ipc.commitScrollSlice(sliceIndex).catch(console.error);
-
-        recentFramesRef.current = [
-          {
-            imgData: newImgData,
-            img,
-            sliceIdx: sliceIndex,
-            botFixed: 0,
-            usedHeightAtFrame: fh,
-          }
-        ];
-
-        setStitchedHeight(fh);
-        setFrameCount(1);
-        updatePreview();
-        return;
-      }
-
-      // So khớp đa khung hình: Thử với frame gần nhất (k-1), nếu không khớp thì thử với k-2, k-3...
-      let matchedIdx = -1;
-      let matchedAn: ScrollAnalysis | null = null;
-
-      // 1. Thử so khớp với frame mới nhất (k-1)
-      const lastItem = history[history.length - 1];
-      let anLast = analyzeScroll(lastItem.imgData, newImgData, velocityRef.current);
-
-      // Nếu không khớp được ở đợt cuộn đầu tiên (do trang web tự bật Header fixed/đổi padding), thử bỏ qua dải header động (180px)
-      if (anLast.dy < 0 && (history.length <= 2 || lastItem.usedHeightAtFrame <= fh * 1.5)) {
-        const anHeaderEx = analyzeScroll(lastItem.imgData, newImgData, velocityRef.current, 180);
-        if (anHeaderEx.dy >= 0) {
-          anLast = anHeaderEx;
-        }
-      }
-
-      // Xử lý đặc biệt nhịp đầu tiên (history.length === 1): Nếu trang web tự bật Header fixed ở nhịp cuộn đầu,
-      // tự động re-anchor Frame 1 làm mốc mốc tham chiếu chuẩn mới (sau khi Header đã ổn định)
-      if (history.length === 1 && anLast.dy < 0) {
-        recentFramesRef.current = [
-          {
-            imgData: newImgData,
-            img,
-            sliceIdx: sliceIndex,
-            botFixed: 0,
-            usedHeightAtFrame: fh,
-          }
-        ];
-        instructionsRef.current = [
-          { sliceIndex, srcY: 0, srcH: fh }
-        ];
-        detectedFooterHeightRef.current = 0;
-        hasTrimmedInitialFrameRef.current = false;
-        setHasStickyFooter(false);
-        detectedSidebarRef.current = null;
-        setHasSidebar(false);
-        masterCtxRef.current?.drawImage(img, 0, 0);
-        usedHeightRef.current = fh;
-        setStitchedHeight(fh);
-        fastWarnRef.current = false;
-        setFastWarn(false);
-        lostTrackingRef.current = false;
-        setLostTracking(false);
-        updatePreview();
-        return;
-      }
-
-      let bestNccScore = anLast.dy >= 0 ? (anLast.ncc ?? 0) : -1;
-      if (anLast.dy >= 0) {
-        matchedIdx = history.length - 1;
-        matchedAn = anLast;
-      }
-
-      // 2. Nếu frame k-1 bị nhiễu do Lazy-Loading (NCC < 0.65), kiểm tra các frame cũ hơn k-2, k-3 để Rollback thay thế
-      if (history.length > 1 && (anLast.dy < 0 || bestNccScore < 0.65)) {
-        for (let i = history.length - 2; i >= 0; i--) {
-          const anMulti = analyzeScroll(
-            history[i].imgData,
-            newImgData,
-            velocityRef.current,
-          );
-          if (anMulti.dy >= 0 && (anMulti.ncc ?? 0) > bestNccScore + 0.05) {
-            bestNccScore = anMulti.ncc ?? 0;
-            matchedIdx = i;
-            matchedAn = anMulti;
-          }
-        }
-      }
-
-      const an = matchedAn ?? anLast;
-      const { dy, botFixed, topFixed = 0 } = an;
-
-      if (DEBUG) {
-        const ncc = an.ncc === undefined ? "—" : an.ncc.toFixed(2);
-        const diff = an.changedFrac === undefined ? "—" : `${Math.round(an.changedFrac * 100)}%`;
-        const act = dy > 0 ? `APPEND(m=${matchedIdx})` : dy === 0 ? "skip0" : "skip-1";
-        seqRef.current++;
-        const line = `#${seqRef.current} ${act} dy=${dy} tDiff=${Math.round(tickDiff * 100)}% diff=${diff} ncc=${ncc} bestDy=${an.bestDy ?? "—"} bins=${an.activeBins ?? "—"} top=${an.topFixed} bot=${an.botFixed} span=${an.span ?? "—"} fh=${fh}`;
-        setDbg(line);
-        const buf = logRef.current;
-        buf.push(line);
-        if (buf.length > 400) buf.splice(0, buf.length - 400);
-        setLogText(buf.join("\n"));
-      }
-
-      if (dy > 0 && matchedIdx >= 0) {
-        // Ghép thành công! Xoá mọi cảnh báo
-        if (fastWarnRef.current) {
-          fastWarnRef.current = false;
+      const buf = await ipc.scrollTick(mx, my, rx, ry, rw, rh, previewWRef.current);
+      if (!isCapturingRef.current) return;
+      const tk = parseScrollTick(buf);
+      applyTick(tk);
+      switch (tk.status) {
+        case ST_FIRST:
+        case ST_APPENDED:
+        case ST_REANCHORED:
           setFastWarn(false);
-        }
-        if (lostTrackingRef.current) {
-          lostTrackingRef.current = false;
           setLostTracking(false);
-        }
-
-        // 1. Nhận diện & khóa ổn định dải Footer cố định (Sticky Footer)
-        // Mở rộng thêm FOOTER_SHADOW_MARGIN để loại trừ hoàn toàn dải bóng đổ (box-shadow) / viền mờ
-        let effectiveBotFixed = botFixed;
-        if (botFixed >= 16) {
-          const fullFooterH = Math.min(Math.floor(fh * 0.35), botFixed + FOOTER_SHADOW_MARGIN);
-          if (detectedFooterHeightRef.current === 0) {
-            detectedFooterHeightRef.current = fullFooterH;
-            setHasStickyFooter(true);
-          } else if (Math.abs(fullFooterH - detectedFooterHeightRef.current) <= 8) {
-            effectiveBotFixed = detectedFooterHeightRef.current;
-          } else {
-            detectedFooterHeightRef.current = fullFooterH;
-          }
-        }
-        // Khi đã phát hiện footer cố định, LUÔN khóa effectiveBotFixed ở độ cao an toàn này.
-        // Tuyệt đối không để rơi về 0 làm lát cắt bị liếm vào footer/bóng đổ!
-        if (detectedFooterHeightRef.current > 0) {
-          effectiveBotFixed = detectedFooterHeightRef.current;
-        }
-
-        // 2. Cắt tỉa hồi tố Frame 0: loại bỏ dải footer bị dính vào đáy Frame 0 ban đầu
-        const footerH = detectedFooterHeightRef.current;
-        if (footerH > 0 && !hasTrimmedInitialFrameRef.current && instructionsRef.current.length > 0) {
-          hasTrimmedInitialFrameRef.current = true;
-          const trimmedH = Math.max(0, fh - footerH);
-          instructionsRef.current[0].srcH = trimmedH;
-
-          if (history.length > 0) {
-            history[0].usedHeightAtFrame = trimmedH;
-            history[0].botFixed = footerH;
-          }
-
-          if (matchedIdx === 0) {
-            usedHeightRef.current = trimmedH;
-            // Xóa dải footer cũ trên master canvas để các nhịp tiếp theo vẽ đè sạch sẽ
-            masterCtxRef.current?.clearRect(0, trimmedH, fw, footerH);
-          }
-        }
-
-        const matchedItem = history[matchedIdx];
-
-        // 3. Nhận diện & lấy mẫu màu nền Sidebar cố định (nếu có)
-        if (!detectedSidebarRef.current && dy >= 4 && matchedIdx >= 0) {
-          const sb = detectSidebar(
-            matchedItem.imgData.data,
-            newImgData.data,
-            fw,
-            fh,
-            topFixed,
-            fh - effectiveBotFixed,
-            dy,
-          );
-          if (sb) {
-            detectedSidebarRef.current = sb;
-            setHasSidebar(true);
-
-            // Tô màu nền đè lên cột sidebar cho các lát cắt đã ghép trước đó sau Frame 0
-            const initialTopH = history[0]?.usedHeightAtFrame ?? (fh - effectiveBotFixed);
-            if (masterCtxRef.current && usedHeightRef.current > initialTopH) {
-              masterCtxRef.current.fillStyle = sb.hex;
-              masterCtxRef.current.fillRect(0, initialTopH, sb.width, usedHeightRef.current - initialTopH);
-            }
-            for (let k = 1; k < instructionsRef.current.length; k++) {
-              instructionsRef.current[k].contentX = sb.width;
-              instructionsRef.current[k].sidebarBg = sb.bg;
-            }
-          }
-        }
-
-        // Nếu khớp với frame cũ hơn trong buffer, rollback usedHeight và instructions
-        if (matchedIdx < history.length - 1) {
-          usedHeightRef.current = matchedItem.usedHeightAtFrame;
-          while (
-            instructionsRef.current.length > 0 &&
-            instructionsRef.current[instructionsRef.current.length - 1].sliceIndex > matchedItem.sliceIdx
-          ) {
-            instructionsRef.current.pop();
-          }
-        }
-
-        const useSidebar = extendSidebarRef.current && !!detectedSidebarRef.current;
-        const contentX = useSidebar ? detectedSidebarRef.current!.width : 0;
-        const sidebarBg = useSidebar ? detectedSidebarRef.current!.bg : undefined;
-
-        const srcY = Math.max(topFixed, fh - effectiveBotFixed - dy);
-        const at = usedHeightRef.current;
-        ensureCapacity(at + dy, fw);
-
-        if (useSidebar && contentX > 0 && contentX < fw) {
-          // 1. Cột Sidebar bên trái: đổ màu nền Sidebar trơn
-          masterCtxRef.current!.fillStyle = detectedSidebarRef.current!.hex;
-          masterCtxRef.current!.fillRect(0, at, contentX, dy);
-
-          // 2. Cột nội dung bên phải: chỉ ghép phần nội dung cuộn
-          const contentW = fw - contentX;
-          masterCtxRef.current?.drawImage(
-            img,
-            contentX, srcY, contentW, dy,
-            contentX, at,   contentW, dy
-          );
-        } else {
-          masterCtxRef.current?.drawImage(img, 0, srcY, fw, dy, 0, at, fw, dy);
-        }
-
-        usedHeightRef.current = at + dy;
-
-        instructionsRef.current.push({
-          sliceIndex,
-          srcY,
-          srcH: dy,
-          contentX: useSidebar && contentX > 0 ? contentX : undefined,
-          sidebarBg: useSidebar && contentX > 0 ? sidebarBg : undefined,
-        });
-
-        // Xác nhận lát cắt vào backend Rust
-        await ipc.commitScrollSlice(sliceIndex).catch(console.error);
-
-        // Cập nhật vận tốc cuộn ước tính mượt theo EMA
-        velocityRef.current = velocityRef.current === 0 ? dy : velocityRef.current * 0.6 + dy * 0.4;
-
-        // Cập nhật buffer lịch sử: giữ tối đa 8 frame gần nhất
-        const updatedHistory = history.slice(0, matchedIdx + 1);
-        updatedHistory.push({
-          imgData: newImgData,
-          img,
-          sliceIdx: sliceIndex,
-          botFixed: effectiveBotFixed,
-          usedHeightAtFrame: usedHeightRef.current,
-        });
-        if (updatedHistory.length > 8) {
-          updatedHistory.shift();
-        }
-        recentFramesRef.current = updatedHistory;
-
-        setStitchedHeight(usedHeightRef.current);
-        setFrameCount((prev) => prev + 1);
-        updatePreview();
-      } else if (dy === 0 || isStationary) {
-        // Màn hình đứng yên: giảm dần vận tốc cuộn và luôn gỡ bỏ cảnh báo cuộn nhanh
-        velocityRef.current = 0;
-        if (fastWarnRef.current) {
-          fastWarnRef.current = false;
+          break;
+        case ST_IDLE:
           setFastWarn(false);
-        }
-        // Nếu không khớp (dy === -1) nhưng màn hình đã đứng yên, hiển thị trạng thái mất dấu nối
-        if (dy === -1 && !lostTrackingRef.current) {
-          lostTrackingRef.current = true;
+          break;
+        case ST_LOST:
           setLostTracking(true);
-        }
-      } else {
-        // dy === -1 và màn hình đang di chuyển nhanh
-        if (tickDiff >= 0.08) {
-          if (!fastWarnRef.current) {
-            fastWarnRef.current = true;
-            setFastWarn(true);
-          }
-        }
-        if (!lostTrackingRef.current) {
-          lostTrackingRef.current = true;
-          setLostTracking(true);
-        }
+          setFastWarn((tk.flags & FLAG_FAST) !== 0);
+          break;
       }
     } catch (err) {
       console.error(t("scroll.captureSliceError"), err);
       setError(String(err));
-    } finally {
-      tickBusyRef.current = false;
     }
   };
 
-  const stopLoop = () => {
-    isCapturingRef.current = false;
-    if (intervalRef.current !== null) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
+  const scheduleNext = () => {
+    if (!isCapturingRef.current) return;
+    timerRef.current = window.setTimeout(async () => {
+      timerRef.current = null;
+      await runExclusive(captureTick);
+      scheduleNext();
+    }, TICK_GAP_MS);
   };
 
   const startCapture = async () => {
@@ -1330,35 +310,19 @@ export default function ScrollControl() {
     isCapturingRef.current = true;
     setError(null);
     setFastWarn(false);
-    fastWarnRef.current = false;
     setLostTracking(false);
-    lostTrackingRef.current = false;
-    lastRawImgDataRef.current = null;
-    latestRawFrameRef.current = null;
-    instructionsRef.current = [];
-    totalSlicesRef.current = 0;
-    recentFramesRef.current = [];
-    velocityRef.current = 0;
-    detectedFooterHeightRef.current = 0;
-    hasTrimmedInitialFrameRef.current = false;
     setHasStickyFooter(false);
-    detectedSidebarRef.current = null;
-    extendSidebarRef.current = true;
-    setExtendSidebar(true);
     setHasSidebar(false);
+    setPinFooterToBottom(true);
+    setExtendSidebar(true);
+    optionsRef.current = { pinFooter: true, extendSidebar: true };
+    const cssW = cropWrapperRef.current?.clientWidth || scrollContainerRef.current?.clientWidth || 300;
+    previewWRef.current = Math.max(120, Math.round(cssW * (window.devicePixelRatio || 1)));
     await ipc.startScrollSession().catch(console.error);
 
-    // Chụp lát cắt đầu tiên ngay lập tức.
-    await captureTick();
-
-    // Vòng lặp chụp tần số 120ms
-    intervalRef.current = window.setInterval(() => {
-      if (!isCapturingRef.current) {
-        stopLoop();
-        return;
-      }
-      void captureTick();
-    }, 120);
+    // Chụp khung đầu tiên ngay lập tức, sau đó chạy vòng nhịp liên tục.
+    await runExclusive(captureTick);
+    scheduleNext();
   };
 
   // Tự động bắt đầu chụp ngay khi cửa sổ mở
@@ -1379,58 +343,10 @@ export default function ScrollControl() {
       return;
     }
 
-    // Nếu người dùng chọn giữ footer ở đáy và đã phát hiện footer cố định:
-    // Ghim dải footer từ frame cuối cùng vào đáy bức ảnh ghép
-    const footerH = detectedFooterHeightRef.current;
-    if (pinFooterToBottom && footerH > 0 && latestRawFrameRef.current) {
-      const { sliceIdx, img } = latestRawFrameRef.current;
-      const fw = frameWidthRef.current || img.naturalWidth;
-      const fh = img.naturalHeight;
-      const at = usedHeightRef.current;
-      ensureCapacity(at + footerH, fw);
-      masterCtxRef.current?.drawImage(
-        img,
-        0,
-        fh - footerH,
-        fw,
-        footerH,
-        0,
-        at,
-        fw,
-        footerH
-      );
-      usedHeightRef.current = at + footerH;
-
-      instructionsRef.current.push({
-        sliceIndex: sliceIdx,
-        srcY: fh - footerH,
-        srcH: footerH,
-      });
-
-      await ipc.commitScrollSlice(sliceIdx).catch(console.error);
-    }
-
     setStatus("processing");
     try {
-      // Đồng bộ thiết lập kéo dài màu nền sidebar vào danh sách chỉ dẫn ghép Rust
-      if (!extendSidebarRef.current) {
-        for (const inst of instructionsRef.current) {
-          delete inst.contentX;
-          delete inst.sidebarBg;
-        }
-      } else if (detectedSidebarRef.current) {
-        const sb = detectedSidebarRef.current;
-        for (let k = 1; k < instructionsRef.current.length; k++) {
-          if (pinFooterToBottom && footerH > 0 && k === instructionsRef.current.length - 1) {
-            continue;
-          }
-          instructionsRef.current[k].contentX = sb.width;
-          instructionsRef.current[k].sidebarBg = sb.bg;
-        }
-      }
-
-      const w = frameWidthRef.current;
-      await ipc.finalizeScrollStitch(w, instructionsRef.current, mx, my);
+      // Rust dựng ảnh cuối theo tuỳ chọn ghim footer / kéo dài sidebar đã đồng bộ.
+      await runExclusive(() => ipc.finalizeScrollStitch(mx, my));
       cleanupMemory();
       ipc.closeSelf();
     } catch (err) {
@@ -1507,7 +423,7 @@ export default function ScrollControl() {
             <>
               <span>·</span>
               <button
-                onClick={() => setPinFooterToBottom((p) => !p)}
+                onClick={togglePinFooter}
                 style={pinFooterToBottom ? footerPinBtnActive : footerPinBtnInactive}
                 title={pinFooterToBottom ? t("scroll.removeFooter") : t("scroll.pinFooter")}
               >
@@ -1519,13 +435,7 @@ export default function ScrollControl() {
             <>
               <span>·</span>
               <button
-                onClick={() => {
-                  setExtendSidebar((p) => {
-                    const next = !p;
-                    extendSidebarRef.current = next;
-                    return next;
-                  });
-                }}
+                onClick={toggleExtendSidebar}
                 style={extendSidebar ? footerPinBtnActive : footerPinBtnInactive}
                 title={extendSidebar ? t("scroll.normalSidebar") : t("scroll.extendSidebar")}
               >

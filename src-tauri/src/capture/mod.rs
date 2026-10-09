@@ -2,6 +2,7 @@ pub mod freeze;
 pub mod fullscreen;
 pub mod monitor;
 pub mod region;
+pub mod scroll_stitch;
 pub mod window;
 
 #[cfg(target_os = "macos")]
