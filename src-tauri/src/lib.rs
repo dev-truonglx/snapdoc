@@ -174,6 +174,7 @@ pub fn run() {
             commands::start_recording,
             commands::get_frozen_screen,
             commands::notify_overlay_ready,
+            commands::get_overlay_session,
             commands::start_record_picker,
             commands::confirm_region_record_start,
             commands::stop_recording,

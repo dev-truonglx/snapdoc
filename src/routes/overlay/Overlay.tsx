@@ -3,7 +3,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { ipc, type WindowInfo } from "../../lib/ipc";
-import AnnotationStage, { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
+import { type StageHandle } from "../../features/annotation/canvas/AnnotationStage";
+const AnnotationStage = React.lazy(() => import("../../features/annotation/canvas/AnnotationStage"));
 import { useEditor } from "../../features/annotation/store";
 import { PRESET_COLORS, type Tool } from "../../features/annotation/model";
 import { quickToolFromKey } from "../../lib/toolShortcuts";
@@ -169,13 +170,26 @@ export default function Overlay() {
   }));
 
   useEffect(() => {
-    const unlisten = listen<OverlaySession>("overlay-session-start", (e) => {
-      if (e.payload.targetIdx !== undefined && e.payload.targetIdx !== MY_IDX) {
-        return;
-      }
-      setSession(e.payload);
-    });
+    let disposed = false;
+    // Chỉ nhận phiên MỚI hơn phiên đang hiển thị — event và lệnh kéo phiên
+    // bên dưới có thể về theo thứ tự bất kỳ.
+    const accept = (next: OverlaySession | null) => {
+      if (disposed || !next) return;
+      if (next.targetIdx !== undefined && next.targetIdx !== MY_IDX) return;
+      setSession((prev) => (next.gen > prev.gen ? next : prev));
+    };
+    const unlisten = listen<OverlaySession>("overlay-session-start", (e) => accept(e.payload));
+    // Event Tauri KHÔNG được buffer: nếu Rust emit `overlay-session-start` lúc
+    // trang (pool prewarm) chưa load xong/chưa đăng ký listener thì event mất
+    // và overlay kẹt ở gen=0 (render null) — nhưng Rust vẫn có thể show() nó
+    // thành tấm kính chặn toàn màn hình. Kéo phiên hiện tại SAU khi listener
+    // đã đăng ký để không lọt khe nào.
+    unlisten
+      .then(() => ipc.getOverlaySession<OverlaySession>(MY_IDX))
+      .then(accept)
+      .catch(() => {});
     return () => {
+      disposed = true;
       unlisten.then((f) => f());
     };
   }, []);
@@ -324,7 +338,7 @@ function RegionSelect() {
         // đầu kéo/chọn cửa sổ (`startRef.current` vẫn null), chỉ cần gọi thẳng
         // action ở đây, không phụ thuộc DOM `onClick` của nút có thật sự nhận
         // được click hay không.
-        ipc.finalizeMonitor().catch((e) => alert(String(e)));
+        ipc.finalizeMonitor().catch((e) => ipc.cancelOverlay(String(e)).catch(() => {}));
         return;
       }
       const s = startRef.current;
@@ -339,7 +353,7 @@ function RegionSelect() {
       // như cũ, không đổi hành vi.
       const dist = Math.hypot(x - s[0], y - s[1]);
       if (dist < 4 && w && pickWindow(winsRef.current, x, y)?.id === w.id) {
-        ipc.finalizeWindow(w.id).catch((e) => alert(String(e)));
+        ipc.finalizeWindow(w.id).catch((e) => ipc.cancelOverlay(String(e)).catch(() => {}));
         return;
       }
       const r = rectFrom(s[0], s[1], x, y);
@@ -347,7 +361,7 @@ function RegionSelect() {
         scrollRectRef.current = r;
         ipc.finalizeRegion(r.x, r.y, r.w, r.h).catch((e) => {
           scrollRectRef.current = null;
-          alert(String(e));
+          ipc.cancelOverlay(String(e)).catch(() => {});
         });
       }
     },
@@ -394,10 +408,16 @@ function RegionSelect() {
   // đúng `cursorPos` + `inFsBtn` đang dùng để xử lý click).
   const overFsBtn = !!cursorPos && inFsBtn(cursorPos[0], cursorPos[1]);
 
+  // Màn hình phụ (cursorHere = false) hoặc khi ảnh freeze chưa kịp tải xong:
+  // Luôn hiển thị ngay (không để visibility: hidden) với lớp mờ rgba(0,0,0,0.45)
+  // để tránh biến thành tấm kính trong suốt vô hình che mất desktop.
+  // Khi frozenUrl sẵn sàng, background-image sẽ lập tức phủ lên.
+  const isVisible = frozenReady || !cursorHere;
+
   const rootStyle: React.CSSProperties = {
     ...root,
-    // Ẩn hoàn toàn cho đến khi frozen image load xong — tránh flash transparent.
-    visibility: frozenReady ? "visible" : "hidden",
+    visibility: isVisible ? "visible" : "hidden",
+    backgroundColor: cursorHere ? "transparent" : "rgba(0,0,0,0.45)",
     ...(frozenUrl ? {
       backgroundImage: `url("${frozenUrl}")`,
       backgroundSize: "100% 100%",
@@ -407,7 +427,14 @@ function RegionSelect() {
   };
 
   return (
-    <div key="drag" style={rootStyle}>
+    <div
+      key="drag"
+      style={rootStyle}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        ipc.cancelOverlay().catch(() => {});
+      }}
+    >
       {sel && sel.w > 0 ? (
         <div
           style={{
@@ -781,7 +808,9 @@ function RecordRegionSelect() {
       setBusy(false);
     } catch (e) {
       setBusy(false);
-      alert(String(e));
+      // Rust đã đóng overlay khi không quay được (xem `flow::finalize_region`);
+      // gọi lại cancel để dọn state + báo lỗi qua CaptureBar.
+      ipc.cancelOverlay(String(e)).catch(() => {});
     }
   };
 
@@ -809,12 +838,15 @@ function RecordRegionSelect() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, sel, recording, busy]);
 
+  const isVisible = frozenReady || !cursorHere;
+
   return (
     <div
       ref={rootRef}
       style={{
         ...root,
-        visibility: frozenReady ? "visible" : "hidden",
+        visibility: isVisible ? "visible" : "hidden",
+        backgroundColor: cursorHere ? "transparent" : "rgba(0,0,0,0.45)",
         // Khi đang quay: bỏ frozen background để màn hình thật hiện ra.
         // 4 div nền xám bên dưới sẽ che phần ngoài vùng quay.
         ...(!recording && frozenUrl ? {
@@ -1312,13 +1344,15 @@ function QuickAnnotate() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, sel]);
 
+  const isVisible = frozenReady || !cursorHere;
+
   return (
     <div
       ref={rootRef}
       style={{
         ...root,
-        // Ẩn cho đến khi frozen image load xong — tránh flash transparent.
-        visibility: frozenReady ? "visible" : "hidden",
+        visibility: isVisible ? "visible" : "hidden",
+        backgroundColor: cursorHere ? "transparent" : "rgba(0,0,0,0.45)",
         ...(frozenUrl ? {
           backgroundImage: `url("${frozenUrl}")`,
           backgroundSize: "100% 100%",
@@ -1334,7 +1368,12 @@ function QuickAnnotate() {
       onPointerDownCapture={onDownCapture}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onContextMenu={(e) => { e.preventDefault(); if (!sel) doClose(); }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        // Đã có khung (đang chú thích) → chuột phải KHÔNG huỷ, tránh mất chú
+        // thích vì lỡ tay — khớp với `input_loop` (mode quick sau khi kéo).
+        if (!sel) doClose();
+      }}
     >
       {sel ? (
         <div
@@ -1396,7 +1435,9 @@ function QuickAnnotate() {
         <div
           style={{ position: "fixed", left: sel.x - STAGE_PAD, top: sel.y - STAGE_PAD, width: sel.w + STAGE_PAD * 2, height: sel.h + STAGE_PAD * 2 }}
         >
-          <AnnotationStage ref={stageRef} hideZoomBar />
+          <React.Suspense fallback={null}>
+            <AnnotationStage ref={stageRef} hideZoomBar />
+          </React.Suspense>
         </div>
       )}
 
@@ -1466,7 +1507,7 @@ function MonitorPick() {
 
   useInput(
     (a) => setActive(a),
-    () => ipc.finalizeMonitor().catch((e) => alert(String(e))),
+    () => ipc.finalizeMonitor().catch((e) => ipc.cancelOverlay(String(e)).catch(() => {})),
     () => {},
   );
 

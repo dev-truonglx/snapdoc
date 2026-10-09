@@ -26,9 +26,27 @@ pub fn capture_frozen_screens() -> HashMap<usize, Vec<u8>> {
 /// Chụp ảnh đóng băng toàn bộ màn hình và STREAM trực tiếp kết quả vào `AppState.frozen_screens`
 /// ngay khi từng màn hình nén xong, đồng thời gọi `cvar.notify_all()` để webview tương ứng
 /// nhận ảnh và vẽ ngay lập tức.
+/// Ghi ảnh freeze của màn hình `idx` — CHỈ khi lượt chụp `gen` vẫn là lượt
+/// mới nhất (`AppState::freeze_gen`). Spam phím tắt có thể để lại thread chụp
+/// của lượt cũ chạy song song; không cho chúng ghi đè ảnh cũ lên phiên mới.
+fn store_frozen(state: &crate::state::AppState, gen: u64, idx: usize, buf: Vec<u8>) {
+    use std::sync::atomic::Ordering;
+    if state.freeze_gen.load(Ordering::SeqCst) != gen {
+        return;
+    }
+    if let Ok(mut g) = state.frozen_screens.lock() {
+        // Kiểm tra lại dưới lock: `clear_frozen_screens`/lượt mới có thể vừa chạy.
+        if state.freeze_gen.load(Ordering::SeqCst) == gen {
+            g.insert(idx, buf);
+        }
+    }
+    state.frozen_screens_cvar.notify_all();
+}
+
 pub fn capture_frozen_screens_streaming(
     app: &tauri::AppHandle,
     exclude_monitor_ids: &[u32],
+    gen: u64,
 ) {
     let monitors = match Monitor::all() {
         Ok(m) => m,
@@ -54,10 +72,7 @@ pub fn capture_frozen_screens_streaming(
         super::mac_sck::capture_displays_excluding_own_app_jpeg(&targets, 0.8, |idx, res| {
             match res {
                 Ok(buf) => {
-                    if let Ok(mut g) = state.frozen_screens.lock() {
-                        g.insert(idx, buf);
-                    }
-                    state.frozen_screens_cvar.notify_all();
+                    store_frozen(&state, gen, idx, buf);
                     eprintln!("[SnapDoc Timing] stream display {idx} ready (hardware jpeg)");
                 }
                 Err(e) => {
@@ -78,19 +93,13 @@ pub fn capture_frozen_screens_streaming(
                 (Ok(x), Ok(y), Ok(id)) => {
                     if exclude_monitor_ids.contains(&id) {
                         eprintln!("[SnapDoc][freeze] Bỏ qua màn hình {i} (display_id={id}) vì chứa cửa sổ editor");
-                        if let Ok(mut g) = state.frozen_screens.lock() {
-                            g.insert(i, Vec::new());
-                        }
-                        state.frozen_screens_cvar.notify_all();
+                        store_frozen(&state, gen, i, Vec::new());
                     } else {
                         points.push((i, x, y, id));
                     }
                 }
                 _ => {
-                    if let Ok(mut g) = state.frozen_screens.lock() {
-                        g.insert(i, Vec::new());
-                    }
-                    state.frozen_screens_cvar.notify_all();
+                    store_frozen(&state, gen, i, Vec::new());
                 }
             }
         }
@@ -103,18 +112,10 @@ pub fn capture_frozen_screens_streaming(
                         .map_err(|e| format!("Không tìm lại được màn hình: {e}"))
                         .and_then(|m| capture_one_jpeg(&m));
                     match result {
-                        Ok(bytes) => {
-                            if let Ok(mut g) = state_ref.frozen_screens.lock() {
-                                g.insert(i, bytes);
-                            }
-                            state_ref.frozen_screens_cvar.notify_all();
-                        }
+                        Ok(bytes) => store_frozen(state_ref, gen, i, bytes),
                         Err(e) => {
                             eprintln!("[SnapDoc][freeze] Màn hình {i} lỗi: {e}");
-                            if let Ok(mut g) = state_ref.frozen_screens.lock() {
-                                g.insert(i, Vec::new());
-                            }
-                            state_ref.frozen_screens_cvar.notify_all();
+                            store_frozen(state_ref, gen, i, Vec::new());
                         }
                     }
                 });

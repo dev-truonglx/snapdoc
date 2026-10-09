@@ -317,6 +317,9 @@ fn save_last_region(
 fn take_frozen_screens_async(app: &AppHandle) {
     let exclude_ids = get_editor_window_monitor_ids(app);
     let state = app.state::<AppState>();
+    // Lượt chụp mới → thread chụp của lượt trước (nếu còn chạy) không còn
+    // được ghi vào `frozen_screens` nữa (xem `capture::freeze::store_frozen`).
+    let gen = state.freeze_gen.fetch_add(1, Ordering::SeqCst) + 1;
     if let Ok(mut g) = state.frozen_screens.lock() {
         g.clear();
     }
@@ -324,7 +327,7 @@ fn take_frozen_screens_async(app: &AppHandle) {
 
     let app_handle = app.clone();
     std::thread::spawn(move || {
-        capture::freeze::capture_frozen_screens_streaming(&app_handle, &exclude_ids);
+        capture::freeze::capture_frozen_screens_streaming(&app_handle, &exclude_ids, gen);
         #[cfg(target_os = "windows")]
         restore_capture_affinity(&app_handle);
     });
@@ -364,6 +367,9 @@ fn get_editor_window_monitor_ids(app: &AppHandle) -> Vec<u32> {
 /// Dọn dẹp frozen screens sau khi overlay đóng — giải phóng bộ nhớ.
 fn clear_frozen_screens(app: &AppHandle) {
     let state = app.state::<AppState>();
+    // Vô hiệu hoá lượt chụp freeze đang chạy dở (nếu có) — tránh nó ghi lại
+    // ảnh vào map sau khi overlay đã đóng.
+    state.freeze_gen.fetch_add(1, Ordering::SeqCst);
     if let Ok(mut g) = state.frozen_screens.lock() {
         g.clear();
     }
@@ -709,6 +715,31 @@ fn overlay_snap(app: &AppHandle, win: &WebviewWindow) -> Option<MonitorSnap> {
     g.get(idx).cloned()
 }
 
+static LAST_CAPTURE_TRIGGER_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Cổng chung cho MỌI đường kích hoạt 1 phiên chụp/chọn vùng (phím tắt, nút
+/// CaptureBar, tray): bỏ qua nếu lần kích hoạt trước mới cách < 300ms hoặc
+/// đang có 1 phiên mở overlay chạy dở. Spam kích hoạt tạo bão thread chụp
+/// freeze (DWM) + dựng/tái dùng overlay chồng lên nhau trên Windows.
+/// Trả `true` = được phép chạy.
+pub fn try_begin_capture_trigger(app: &AppHandle) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let prev = LAST_CAPTURE_TRIGGER_MS.load(Ordering::SeqCst);
+    if now.saturating_sub(prev) < 300 {
+        return false;
+    }
+    if app.state::<AppState>().overlay_opening.load(Ordering::SeqCst) {
+        return false;
+    }
+    // compare_exchange: 2 luồng kích hoạt cùng lúc chỉ 1 luồng lọt qua.
+    LAST_CAPTURE_TRIGGER_MS
+        .compare_exchange(prev, now, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
 pub fn run(app: &AppHandle, mode: &str, output: &str) {
     // Đếm ngược trước (nếu bật "hẹn giờ chụp") — huỷ ngang (Esc) thì bỏ luôn,
     // không chụp gì cả.
@@ -903,13 +934,25 @@ pub fn finalize_region(
     if take_pending_record(app) {
         windows::close_overlays_except(app, win.label());
         windows::restore_regular_activation(app);
+        // `close_overlays_except` vừa dừng `input_loop` (mất Esc/chuột phải
+        // native) — bật click-through NGAY để overlay còn lại không bao giờ
+        // thành "tấm kính" chặn toàn màn hình, kể cả khi bước sau lỗi.
+        let _ = win.set_ignore_cursor_events(true);
 
-        let display_id = m.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
-        let display_name = m.name().unwrap_or_default();
-        let is_primary = m.is_primary().unwrap_or(false);
-        save_last_region(app, display_id, &display_name, is_primary, rx, ry, rw, rh);
-
-        crate::record::start_recording_region(app, display_id, rx, ry, rw, rh)?;
+        let started = (|| -> Result<(), String> {
+            let display_id = m.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
+            let display_name = m.name().unwrap_or_default();
+            let is_primary = m.is_primary().unwrap_or(false);
+            save_last_region(app, display_id, &display_name, is_primary, rx, ry, rw, rh);
+            crate::record::start_recording_region(app, display_id, rx, ry, rw, rh)
+        })();
+        if let Err(e) = started {
+            // Không bỏ lại overlay phủ màn hình khi không quay được.
+            clear_frozen_screens(app);
+            windows::close_overlays(app);
+            windows::show_editor_if_hidden_for_capture(app);
+            return Err(e);
+        }
 
         // KHÔNG resize/reposition/ẩn/tạo lại BẤT KỲ cửa sổ nào cho phần
         // khung+backdrop — chính overlay đang hiển thị (đã đứng y nguyên từ
@@ -918,8 +961,7 @@ pub fn finalize_region(
         // Vì không có bất kỳ thao tác cửa sổ nào xảy ra, khung đỏ + nền mờ
         // hiển thị Y NGUYÊN PIXEL suốt từ pha "adjusting" sang lúc quay —
         // không một khung hình nào bị bỏ lỡ, loại bỏ HOÀN TOÀN nguồn gây
-        // nháy hình.
-        let _ = win.set_ignore_cursor_events(true);
+        // nháy hình. (click-through đã bật ngay sau `close_overlays_except`.)
 
         // KHÔNG mở nút dừng quay nổi (`open_stop_control`) để tránh che khuất giao
         // diện và chặn thao tác chuột của người dùng trong lúc quay. Việc dừng/tạm
@@ -933,7 +975,13 @@ pub fn finalize_region(
         clear_frozen_screens(app);
         windows::close_overlays_except(app, win.label());
         windows::restore_regular_activation(app);
-        windows::open_scroll_control(app, &win, center_x, center_y, rx as u32, ry as u32, rw as u32, rh as u32)?;
+        // Cùng lý do với nhánh quay ở trên: input_loop đã dừng → lỗi thì đóng
+        // hẳn overlay, không để lại cửa sổ phủ màn hình không ai thoát được.
+        if let Err(e) = windows::open_scroll_control(app, &win, center_x, center_y, rx as u32, ry as u32, rw as u32, rh as u32) {
+            windows::end_scroll_session(app);
+            windows::show_editor_if_hidden_for_capture(app);
+            return Err(e);
+        }
         return Ok(());
     }
 

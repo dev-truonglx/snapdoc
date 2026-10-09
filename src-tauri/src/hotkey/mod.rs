@@ -94,6 +94,13 @@ pub fn handle(app: &AppHandle, fired: &Shortcut) {
 }
 
 fn run_action(app: &AppHandle, action: &str) {
+    // Chống spam phím tắt (xem `flow::try_begin_capture_trigger`).
+    if matches!(action, "region" | "full" | "quick" | "window" | "all" | "scroll" | "captureCopy")
+        && !flow::try_begin_capture_trigger(app)
+    {
+        return;
+    }
+
     match action {
         "bar" => {
             let _ = windows::open_capture_bar(app);

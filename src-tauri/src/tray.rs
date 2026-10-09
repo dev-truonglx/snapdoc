@@ -85,6 +85,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "window" => dispatch(app, "window"),
             "scroll" => dispatch(app, "scroll"),
             "all" => {
+                if !flow::try_begin_capture_trigger(app) {
+                    return;
+                }
                 let app = app.clone();
                 std::thread::spawn(move || {
                     let output = crate::hotkey::default_output(&app);
@@ -95,6 +98,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "record_region" => dispatch_record(app, "region"),
             "record_window" => dispatch_record(app, "window"),
             "quick" => {
+                if !flow::try_begin_capture_trigger(app) {
+                    return;
+                }
                 let app = app.clone();
                 std::thread::spawn(move || flow::start_quick(&app));
             }
@@ -452,6 +458,9 @@ pub fn set_restart_badge(app: &AppHandle) {
 }
 
 fn dispatch(app: &AppHandle, mode: &str) {
+    if !flow::try_begin_capture_trigger(app) {
+        return;
+    }
     let app = app.clone();
     let mode = mode.to_string();
     std::thread::spawn(move || {
@@ -464,6 +473,9 @@ fn dispatch(app: &AppHandle, mode: &str) {
 /// "Quay màn hình" trên tray. Tái dùng nguyên `flow::run_record_picker`, cùng
 /// hàm mà nút "Quay" trong CaptureBar gọi qua IPC `start_record_picker`.
 fn dispatch_record(app: &AppHandle, mode: &str) {
+    if !flow::try_begin_capture_trigger(app) {
+        return;
+    }
     let app = app.clone();
     let mode = mode.to_string();
     std::thread::spawn(move || flow::run_record_picker(&app, &mode));
