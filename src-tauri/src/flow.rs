@@ -740,7 +740,42 @@ pub fn try_begin_capture_trigger(app: &AppHandle) -> bool {
         .is_ok()
 }
 
+/// Đang có phiên quay (khởi động / quay / đang lưu) → KHÔNG mở overlay chụp
+/// hay chọn vùng mới: khi quay VÙNG, khung viền đang hiển thị CHÍNH LÀ 1
+/// overlay-{i} — phiên overlay mới sẽ tái dùng/huỷ nó (mất khung viền), còn
+/// lúc dừng quay `close_overlays` lại đóng luôn overlay người dùng vừa mở.
+/// Trả `true` (và báo người dùng) nếu phải chặn.
+fn blocked_by_recording(app: &AppHandle) -> bool {
+    if !crate::record::is_busy(app) {
+        return false;
+    }
+    let msg = match crate::record::phase(app) {
+        crate::record::Phase::Stopping => "Đang lưu bản quay — vui lòng chờ trong giây lát rồi thử lại.",
+        _ => "Đang quay màn hình — hãy dừng quay trước khi chụp hoặc quay mới.",
+    };
+    crate::notify::info_now(app, msg);
+    true
+}
+
+/// Không bắt đầu quay được sau khi người dùng đã chọn phạm vi: dọn overlay/
+/// ảnh đóng băng, trả Editor về như cũ và BÁO LỖI ngay từ Rust — webview
+/// overlay/dialog gọi lệnh này đã bị đóng nên không còn ai nhận `Err`.
+fn report_record_start_failure(app: &AppHandle, e: &str) {
+    clear_frozen_screens(app);
+    windows::close_overlays(app);
+    windows::restore_regular_activation(app);
+    windows::show_editor_if_hidden_for_capture(app);
+    crate::notify::error(app, &format!("Không bắt đầu quay được: {e}"));
+}
+
 pub fn run(app: &AppHandle, mode: &str, output: &str) {
+    if blocked_by_recording(app) {
+        return;
+    }
+    // Phiên chụp ẢNH: xoá cờ "chọn phạm vi QUAY" có thể còn sót từ 1 lần mở
+    // picker quay trước đó (overlay đang hiện được tái dùng nguyên trạng) —
+    // nếu không, vùng chọn của lần chụp này bị hiểu nhầm thành bắt đầu quay.
+    *app.state::<AppState>().pending_record.lock().unwrap_or_else(|e| e.into_inner()) = false;
     // Đếm ngược trước (nếu bật "hẹn giờ chụp") — huỷ ngang (Esc) thì bỏ luôn,
     // không chụp gì cả.
     if !wait_capture_delay(app) {
@@ -809,6 +844,9 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
 /// biết đường CHUYỂN HƯỚNG sang `record::start_recording_*` thay vì chụp ảnh
 /// + `finish()` như bình thường.
 pub fn run_record_picker(app: &AppHandle, mode: &str) {
+    if blocked_by_recording(app) {
+        return;
+    }
     // Đánh thức trước mic và audio subsystem trong lúc user đang chọn vùng
     crate::record::audio_mic::prewarm();
 
@@ -947,11 +985,10 @@ pub fn finalize_region(
             crate::record::start_recording_region(app, display_id, rx, ry, rw, rh)
         })();
         if let Err(e) = started {
-            // Không bỏ lại overlay phủ màn hình khi không quay được.
-            clear_frozen_screens(app);
-            windows::close_overlays(app);
-            windows::show_editor_if_hidden_for_capture(app);
-            return Err(e);
+            // Không bỏ lại overlay phủ màn hình khi không quay được; lỗi đã
+            // được báo trực tiếp — trả Ok để overlay (đã đóng) không báo lần 2.
+            report_record_start_failure(app, &e);
+            return Ok(());
         }
 
         // KHÔNG resize/reposition/ẩn/tạo lại BẤT KỲ cửa sổ nào cho phần
@@ -962,6 +999,9 @@ pub fn finalize_region(
         // hiển thị Y NGUYÊN PIXEL suốt từ pha "adjusting" sang lúc quay —
         // không một khung hình nào bị bỏ lỡ, loại bỏ HOÀN TOÀN nguồn gây
         // nháy hình. (click-through đã bật ngay sau `close_overlays_except`.)
+
+        // Phiên quay giữ màn hình thật, không cần ảnh đóng băng (vài chục MB/màn hình).
+        clear_frozen_screens(app);
 
         // KHÔNG mở nút dừng quay nổi (`open_stop_control`) để tránh che khuất giao
         // diện và chặn thao tác chuột của người dùng trong lúc quay. Việc dừng/tạm
@@ -1068,7 +1108,10 @@ pub fn finalize_window(app: &AppHandle, id: u32) -> Result<(), String> {
         if let Some(pid) = capture::window::pid_of(id) {
             windows::bring_app_to_front(app, pid, id);
         }
-        return crate::record::start_recording_window(app, id);
+        if let Err(e) = crate::record::start_recording_window(app, id) {
+            report_record_start_failure(app, &e);
+        }
+        return Ok(());
     }
 
     // Ưu tiên CROP từ buffer freeze (grab A — chụp TRƯỚC khi overlay giành key
@@ -1117,8 +1160,16 @@ pub fn finalize_monitor(app: &AppHandle, win: WebviewWindow) -> Result<(), Strin
     if take_pending_record(app) {
         windows::close_overlays(app);
         windows::restore_regular_activation(app);
-        let display_id = m.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
-        return crate::record::start_recording_monitor(app, display_id);
+        // Phiên quay giữ màn hình thật, không cần ảnh đóng băng (vài chục MB/màn hình).
+        clear_frozen_screens(app);
+        let started = m
+            .id()
+            .map_err(|e| format!("Không đọc được id màn hình: {e}"))
+            .and_then(|display_id| crate::record::start_recording_monitor(app, display_id));
+        if let Err(e) = started {
+            report_record_start_failure(app, &e);
+        }
+        return Ok(());
     }
 
     // Ưu tiên dùng NGUYÊN buffer freeze (grab A — chụp TRƯỚC khi overlay giành
@@ -1299,6 +1350,9 @@ pub fn capture_all_screens(app: &AppHandle, output: &str) -> Result<(), String> 
 /// đúng vùng nhỏ đã chọn (nhanh), rồi ghép chú thích. Đúng yêu cầu "vẽ khung
 /// xong chưa chụp, di chuyển được, tới lúc lưu/copy mới chụp".
 pub fn start_quick(app: &AppHandle) {
+    if blocked_by_recording(app) {
+        return;
+    }
     // macOS: nhớ app đang frontmost (khác SnapDoc) TRƯỚC khi open_overlays
     // kích hoạt SnapDoc — để `cancel_overlay` trả lại focus cho nó sau khi
     // copy/save/hủy xong (xem `AppState::restore_front_pid`). ĐỒNG THỜI ẩn

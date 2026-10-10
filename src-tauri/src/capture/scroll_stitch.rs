@@ -539,12 +539,28 @@ fn detect_side(lay: &Layout, r: &Frame, c: &Frame, dy: usize, t: usize, bot: usi
     if (stationary as f32) < first_move as f32 * 0.82 {
         return None;
     }
+    // Chỉ nhận là sidebar khi có NỘI DUNG cố định thật (icon/chữ đứng yên tại
+    // chỗ nhưng không khớp khi dịch theo dy) trải trên nhiều cột VÀ nhiều dòng.
+    // Lề/sidebar một màu trơn (vd lề 2 bên của trang căn giữa) đứng yên nhưng
+    // cũng trùng khi dịch → không có bằng chứng; chép nguyên pixel vẫn liền
+    // mạch nên không cần tô. 1 widget cố định nhỏ (vài dòng) cũng không đủ.
     let struct_cols = stats[..first_move].iter().filter(|s| s.strc >= 0.03).count();
-    let mid = (y0 + y1) / 2;
-    let sb_x = x_of(((d_move as f32 * 0.4) as usize).max(skip + 8));
-    let ct_x = x_of((d_move + 80).min(w - 1));
-    let diff_bg = px_sad(cr, (mid * w + sb_x) * 4, cr, (mid * w + ct_x) * 4);
-    if struct_cols < 2 && diff_bg < 15 {
+    let struct_rows = rows
+        .iter()
+        .filter(|&&y| y >= t + dy)
+        .filter(|&&y| {
+            let hits = dists[..first_move]
+                .iter()
+                .filter(|&&d| {
+                    let x = x_of(d);
+                    let i = (y * w + x) * 4;
+                    px_sad(rr, i, cr, i) <= 24 && px_sad(rr, i, cr, ((y - dy) * w + x) * 4) > 30
+                })
+                .count();
+            hits >= 2
+        })
+        .count();
+    if struct_cols < (first_move / 10).max(2) || struct_rows < (nrows / 20).max(3) {
         return None;
     }
 
@@ -780,8 +796,44 @@ struct Strip {
     /// Số dòng đầu của `img` đang dùng (có thể bị cắt bớt khi chỉnh đường nối / footer).
     use_h: usize,
     frame_id: u64,
-    /// Được tô màu nền sidebar khi kéo dài sidebar (mọi strip trừ khung đầu).
+    /// Dòng (toạ độ khung gốc) của dòng đầu `img` — để so vùng sidebar với khung tham chiếu.
+    src_y0: usize,
+    /// Được xét tô màu nền sidebar khi kéo dài sidebar (mọi strip trừ khung đầu).
     fillable: bool,
+}
+
+/// 1 đoạn của ảnh ghép: dòng `[y0, y1)` của `img`; dòng `sy` của `img` là dòng
+/// `vp_off + sy` của khung gốc.
+struct Seg<'a> {
+    img: &'a RgbaImage,
+    y0: usize,
+    y1: usize,
+    vp_off: usize,
+    fillable: bool,
+}
+
+/// Vùng cột `[x0, x1)` của dòng `row` có trùng với cùng vùng ở dòng `vp` của
+/// khung tham chiếu không — tức sidebar cố định đang thật sự hiển thị ở đó
+/// (không bị footer/banner tràn ngang hay nội dung trang thay chỗ).
+fn side_visible(lay: &Layout, row: &[u8], rf: &Frame, vp: usize, x0: usize, x1: usize) -> bool {
+    if vp >= lay.h || x1 <= x0 {
+        return false;
+    }
+    let rr = &rf.img.as_raw()[vp * lay.w * 4..(vp + 1) * lay.w * 4];
+    let (mut n, mut mism) = (0u32, 0u32);
+    for x in (x0..x1).step_by(XSTEP) {
+        n += 1;
+        if !px_close(row, x * 4, rr, x * 4) {
+            mism += 1;
+        }
+    }
+    mism <= (n / 16).max(1)
+}
+
+fn fill_cols(row: &mut [u8], x0: usize, x1: usize, color: [u8; 4]) {
+    for px in row[x0 * 4..x1 * 4].chunks_exact_mut(4) {
+        px.copy_from_slice(&color);
+    }
 }
 
 struct Accepted {
@@ -836,6 +888,9 @@ pub struct Session {
     footer: Vote<usize>,
     side_l: Vote<Side>,
     side_r: Vote<Side>,
+    /// Khung lúc khoá sidebar — mẫu để biết dòng nào thật sự đang hiện sidebar.
+    side_l_ref: Option<Arc<Frame>>,
+    side_r_ref: Option<Arc<Frame>>,
     pin_footer: bool,
     extend_sidebar: bool,
     dirty_from: Option<usize>,
@@ -855,6 +910,8 @@ impl Default for Session {
             footer: Vote::default(),
             side_l: Vote::default(),
             side_r: Vote::default(),
+            side_l_ref: None,
+            side_r_ref: None,
             pin_footer: true,
             extend_sidebar: true,
             dirty_from: None,
@@ -907,6 +964,7 @@ impl Session {
             img: RgbaImage::from_raw(w, (y1 - y0) as u32, data).expect("kích thước strip hợp lệ"),
             use_h: y1 - y0,
             frame_id: frame.id,
+            src_y0: y0,
             fillable,
         }
     }
@@ -917,6 +975,8 @@ impl Session {
         self.footer = Vote::default();
         self.side_l = Vote::default();
         self.side_r = Vote::default();
+        self.side_l_ref = None;
+        self.side_r_ref = None;
         self.velocity = 0.0;
         self.header_h = 0;
         self.dirty_from = Some(0);
@@ -1059,6 +1119,7 @@ impl Session {
         };
         let strips_len = self.strips.len();
         let last_use_h = self.strips.last().map(|s| s.use_h).unwrap_or(0);
+        let cur_frame = cur.clone();
         self.history.push_back(Accepted { frame: cur, consumed_bottom: cur_cb, strips_len, last_use_h });
         while self.history.len() > MAX_HISTORY {
             self.history.pop_front();
@@ -1077,6 +1138,12 @@ impl Session {
         };
         let newly_l = self.side_l.observe(m.side_l, side_agree, |a, _| a);
         let newly_r = self.side_r.observe(m.side_r, side_agree, |a, _| a);
+        if newly_l {
+            self.side_l_ref = Some(cur_frame.clone());
+        }
+        if newly_r {
+            self.side_r_ref = Some(cur_frame);
+        }
         if (newly_l || newly_r) && self.extend_sidebar {
             self.mark_dirty(self.strips.first().map(|s| s.use_h).unwrap_or(0));
         }
@@ -1123,17 +1190,13 @@ impl Session {
         true
     }
 
-    fn side_fill(&self) -> (Option<Side>, Option<Side>) {
-        if !self.extend_sidebar {
-            return (None, None);
-        }
-        (self.side_l.locked, self.side_r.locked)
-    }
-
-    /// Các đoạn (ảnh, y0, y1, có tô sidebar) tạo nên ảnh ghép, kèm phần đuôi khi hoàn tất.
-    fn segments(&self, with_tail: bool) -> Vec<(&RgbaImage, usize, usize, bool)> {
-        let mut segs: Vec<(&RgbaImage, usize, usize, bool)> =
-            self.strips.iter().map(|s| (&s.img, 0, s.use_h, s.fillable)).collect();
+    /// Các đoạn tạo nên ảnh ghép, kèm phần đuôi khung cuối khi hoàn tất.
+    fn segments(&self, with_tail: bool) -> Vec<Seg<'_>> {
+        let mut segs: Vec<Seg> = self
+            .strips
+            .iter()
+            .map(|s| Seg { img: &s.img, y0: 0, y1: s.use_h, vp_off: s.src_y0, fillable: s.fillable })
+            .collect();
         if with_tail {
             if let (Some(last), Some(lay)) = (self.history.back(), &self.lay) {
                 let h = lay.h;
@@ -1141,55 +1204,61 @@ impl Session {
                 let mid = h - footer.min(h);
                 let end = if self.pin_footer { h } else { mid };
                 let a = last.consumed_bottom;
+                let img = &*last.frame.img;
                 if mid > a {
-                    segs.push((&*last.frame.img, a, mid, true));
+                    segs.push(Seg { img, y0: a, y1: mid, vp_off: 0, fillable: true });
                 }
                 if end > mid.max(a) {
-                    segs.push((&*last.frame.img, mid.max(a), end, false));
+                    segs.push(Seg { img, y0: mid.max(a), y1: end, vp_off: 0, fillable: false });
                 }
             }
         }
         segs
     }
 
-    fn write_row(img: &RgbaImage, y: usize, fill: (Option<Side>, Option<Side>), fillable: bool, out: &mut [u8]) {
-        let bpr = img.width() as usize * 4;
-        out.copy_from_slice(&img.as_raw()[y * bpr..(y + 1) * bpr]);
-        if fillable {
-            if let Some(s) = fill.0 {
-                for px in out[..s.width * 4].chunks_exact_mut(4) {
-                    px.copy_from_slice(&s.color);
-                }
+    /// Ghi dòng `sy` của đoạn vào `out`. Khi kéo dài sidebar, cột sidebar chỉ
+    /// được tô màu nền ở những dòng mà sidebar thật sự đang hiện (trùng khung
+    /// tham chiếu); footer/banner tràn ngang hay nội dung khác ở đó giữ nguyên.
+    fn write_row(&self, lay: &Layout, seg: &Seg, sy: usize, out: &mut [u8]) {
+        let bpr = lay.w * 4;
+        out.copy_from_slice(&seg.img.as_raw()[sy * bpr..(sy + 1) * bpr]);
+        if !seg.fillable || !self.extend_sidebar {
+            return;
+        }
+        let vp = seg.vp_off + sy;
+        if let (Some(s), Some(rf)) = (self.side_l.locked, &self.side_l_ref) {
+            if side_visible(lay, out, rf, vp, 0, s.width) {
+                fill_cols(out, 0, s.width, s.color);
             }
-            if let Some(s) = fill.1 {
-                let from = bpr - s.width * 4;
-                for px in out[from..].chunks_exact_mut(4) {
-                    px.copy_from_slice(&s.color);
-                }
+        }
+        if let (Some(s), Some(rf)) = (self.side_r.locked, &self.side_r_ref) {
+            let x0 = lay.w - s.width;
+            // Bỏ lề thanh cuộn khi so: con trượt đổi vị trí giữa các khung.
+            if side_visible(lay, out, rf, vp, x0, lay.xend) {
+                fill_cols(out, x0, lay.w, s.color);
             }
         }
     }
 
     /// Chiều cao ảnh cuối nếu hoàn tất ngay bây giờ.
     pub fn final_height(&self) -> usize {
-        self.segments(true).iter().map(|s| s.2 - s.1).sum()
+        self.segments(true).iter().map(|s| s.y1 - s.y0).sum()
     }
 
     /// Dựng ảnh ghép cuối cùng.
     pub fn finalize(&self) -> Option<RgbaImage> {
         let lay = self.lay.as_ref()?;
         let segs = self.segments(true);
-        let total: usize = segs.iter().map(|s| s.2 - s.1).sum();
+        let total: usize = segs.iter().map(|s| s.y1 - s.y0).sum();
         if total == 0 {
             return None;
         }
         let bpr = lay.w * 4;
         let mut out = vec![0u8; total * bpr];
-        let fill = self.side_fill();
         let mut y = 0;
-        for (img, y0, y1, fillable) in segs {
-            for sy in y0..y1 {
-                Self::write_row(img, sy, fill, fillable, &mut out[y * bpr..(y + 1) * bpr]);
+        for seg in &segs {
+            for sy in seg.y0..seg.y1 {
+                self.write_row(lay, seg, sy, &mut out[y * bpr..(y + 1) * bpr]);
                 y += 1;
             }
         }
@@ -1209,7 +1278,6 @@ impl Session {
         let (pf, pt) = (py(from), py(total));
         let mut rgba = Vec::with_capacity((pt - pf) * pw * 4);
         if pt > pf {
-            let fill = self.side_fill();
             let segs = self.segments(false);
             let xmap: Vec<usize> = (0..w).map(|x| x * pw / w).collect();
             let mut acc = vec![0u32; pw * 4];
@@ -1224,15 +1292,15 @@ impl Session {
                 acc.iter_mut().for_each(|v| *v = 0);
                 cnt.iter_mut().for_each(|v| *v = 0);
                 for y in sy0..sy1.min(total) {
-                    while seg_i < segs.len() && y >= seg_start + (segs[seg_i].2 - segs[seg_i].1) {
-                        seg_start += segs[seg_i].2 - segs[seg_i].1;
+                    while seg_i < segs.len() && y >= seg_start + (segs[seg_i].y1 - segs[seg_i].y0) {
+                        seg_start += segs[seg_i].y1 - segs[seg_i].y0;
                         seg_i += 1;
                     }
                     if seg_i >= segs.len() {
                         break;
                     }
-                    let (img, y0, _, fillable) = segs[seg_i];
-                    Self::write_row(img, y0 + y - seg_start, fill, fillable, &mut row);
+                    let seg = &segs[seg_i];
+                    self.write_row(&lay, seg, seg.y0 + y - seg_start, &mut row);
                     for x in 0..w {
                         let ox = xmap[x];
                         cnt[ox] += 1;
@@ -1499,6 +1567,83 @@ mod tests {
         let y = out.height() - 5;
         assert_eq!(out.get_pixel(10, y).0, SIDE_BG);
         assert_eq!(out.get_pixel(W as u32 - 10, y).0, SIDE_BG);
+    }
+
+    /// Footer CỦA TRANG (cuộn theo trang, không cố định) tràn hết chiều ngang ở `[from, h)`.
+    fn add_page_footer(page: &mut RgbaImage, from: usize) {
+        let mut rng = Rng(8);
+        for y in from..page.height() as usize {
+            for x in 0..W {
+                let ink = y > from + 10 && (y - from) % 22 < 9 && rng.range(0, 4) == 0;
+                put(page, x, y, if ink { [210, 210, 215, 255] } else { [28, 28, 32, 255] });
+            }
+        }
+    }
+
+    fn scroll_to_end(page_h: usize, step: &[usize]) -> Vec<usize> {
+        let mut v = vec![0];
+        let mut i = 0;
+        while *v.last().unwrap() < page_h - VH {
+            let next = (v.last().unwrap() + step[i % step.len()]).min(page_h - VH);
+            v.push(next);
+            i += 1;
+        }
+        v
+    }
+
+    #[test]
+    fn centered_margins_are_not_sidebar() {
+        // Trang căn giữa: lề hồng trơn 2 bên (thuộc trang), footer tối tràn ngang ở cuối.
+        const PINK: [u8; 4] = [253, 232, 240, 255];
+        let page_h = 1400;
+        let mut page = make_page(page_h, 43, None);
+        for y in 0..page_h {
+            for x in (0..70).chain(250..W) {
+                put(&mut page, x, y, PINK);
+            }
+        }
+        add_page_footer(&mut page, 1250);
+        let scrolls = scroll_to_end(page_h, &[60, 90, 110, 75]);
+        let s = run(&page, &scrolls, Fixed::default());
+        assert!(!s.sidebar_locked(), "lề trơn bị nhận là sidebar");
+        let out = s.finalize().unwrap();
+        assert_eq!(out.height() as usize, page_h);
+        assert_content(&out, &page, 0, page_h, Fixed::default());
+    }
+
+    #[test]
+    fn sidebar_fill_stops_at_full_width_footer() {
+        // Sidebar cố định (sticky) kết thúc khi footer tràn ngang của trang cuộn tới.
+        let (page_h, footer_from) = (1600, 1450);
+        let mut page = make_page(page_h, 47, None);
+        add_page_footer(&mut page, footer_from);
+        let fx = Fixed { left: 60, ..Default::default() };
+        let scrolls = scroll_to_end(page_h, &[50, 80, 40, 100]);
+        let mut s = Session::new();
+        for &sc in &scrolls {
+            let mut f = viewport(&page, sc, fx);
+            for y in 0..VH {
+                if sc + y >= footer_from {
+                    for x in 0..fx.left {
+                        put(&mut f, x, y, page.get_pixel(x as u32, (sc + y) as u32).0);
+                    }
+                }
+            }
+            let r = s.tick(f, 1.0);
+            println!("scroll={sc} {:?} {}", r.status, r.diag);
+        }
+        assert_eq!(s.side_l.locked.map(|s| s.width), Some(60));
+        let out = s.finalize().unwrap();
+        assert_eq!(out.height() as usize, page_h);
+        assert_content(&out, &page, 0, page_h, fx);
+        // Footer giữ đủ chiều ngang, kể cả vùng sidebar.
+        assert_content(&out, &page, footer_from, page_h, Fixed::default());
+        // Phía trên footer, cột sidebar được tô nền liền (không lặp icon).
+        for y in VH + 20..footer_from - 20 {
+            for x in 0..fx.left {
+                assert_eq!(out.get_pixel(x as u32, y as u32).0, SIDE_BG, "chưa tô tại x={x} y={y}");
+            }
+        }
     }
 
     #[test]

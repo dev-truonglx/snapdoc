@@ -5,55 +5,35 @@
 //! với luồng ở đây).
 
 use std::path::Path;
-use std::process::{Command, Stdio};
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use std::process::Command;
+use std::time::Duration;
 
 /// Trích frame ở giây thứ 0.5 (đủ để tránh frame đen đầu tiên của vài video),
 /// scale chiều rộng về tối đa 320px (giữ tỉ lệ), ghi JPEG (`-q:v 4`, chất
-/// lượng vừa đủ cho thumbnail nhỏ) tại `out_thumb_path`.
+/// lượng vừa đủ cho thumbnail nhỏ) tại `out_thumb_path`. Video ngắn hơn 0.5s
+/// (seek quá cuối → ffmpeg không ra frame nào) thì lấy frame đầu tiên.
 pub fn generate(mp4_path: &Path, out_thumb_path: &Path) -> Result<(), String> {
     let ffmpeg = crate::record::encoder::sidecar_path("ffmpeg")?;
-
-    let mut cmd = Command::new(&ffmpeg);
-    cmd.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-ss",
-        "0.5",
-        "-i",
-    ])
-    .arg(mp4_path)
-    .args([
-        "-frames:v",
-        "1",
-        "-vf",
-        "scale=320:-1",
-        "-q:v",
-        "4",
-    ])
-    .arg(out_thumb_path)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg trích thumbnail thất bại: {stderr}"));
-    }
-    Ok(())
+    let attempt = |seek: Option<&str>| -> Result<(), String> {
+        let _ = std::fs::remove_file(out_thumb_path);
+        let mut cmd = Command::new(&ffmpeg);
+        cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
+        if let Some(ss) = seek {
+            cmd.args(["-ss", ss]);
+        }
+        cmd.arg("-i")
+            .arg(mp4_path)
+            .args(["-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "4"])
+            .arg(out_thumb_path);
+        crate::record::proc::run_ok(&mut cmd, Duration::from_secs(30), "ffmpeg trích thumbnail")?;
+        let ok = std::fs::metadata(out_thumb_path).map(|m| m.len() > 0).unwrap_or(false);
+        if ok {
+            Ok(())
+        } else {
+            Err("ffmpeg không xuất được frame thumbnail".to_string())
+        }
+    };
+    attempt(Some("0.5")).or_else(|_| attempt(None))
 }
 
 #[cfg(test)]
@@ -92,5 +72,22 @@ mod tests {
         let meta = std::fs::metadata(&thumb).expect("không đọc được file thumbnail");
         assert!(meta.len() > 100, "thumbnail quá nhỏ ({} byte)", meta.len());
         eprintln!("[test] đã sinh thumbnail {} ({} byte)", thumb.display(), meta.len());
+    }
+
+    /// Video ngắn hơn 0.5s: seek 0.5s không ra frame nào — phải rơi về frame đầu.
+    #[test]
+    fn short_video_still_gets_thumbnail() {
+        let (width, height, fps) = (160u32, 120u32, 10u32);
+        let mp4 = std::env::temp_dir().join(format!("snapdoc_thumb_short_{}.mp4", uuid::Uuid::new_v4()));
+        let mut encoder = Encoder::start(&mp4, width, height, fps).expect("Encoder::start thất bại");
+        for _ in 0..2 {
+            encoder.write_frame(&vec![200u8; (width * height * 4) as usize]).unwrap();
+        }
+        encoder.finish().unwrap();
+        let thumb = mp4.with_extension("jpg");
+        generate(&mp4, &thumb).expect("video 0.2s vẫn phải có thumbnail");
+        assert!(std::fs::metadata(&thumb).unwrap().len() > 100);
+        let _ = std::fs::remove_file(&mp4);
+        let _ = std::fs::remove_file(&thumb);
     }
 }

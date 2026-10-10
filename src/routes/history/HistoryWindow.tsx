@@ -6,6 +6,7 @@ import HistoryList from "./HistoryList";
 import HistoryPreviewPanel from "./HistoryPreviewPanel";
 import { useHistory } from "./useHistoryStore";
 import { ipc, type HistoryItem } from "../../lib/ipc";
+import { showError } from "../../lib/notify";
 
 export default function HistoryWindow() {
   const reload = useHistory((s) => s.reload);
@@ -32,7 +33,7 @@ export default function HistoryWindow() {
     try {
       await ipc.openHistoryItemInEditor(id);
     } catch (e) {
-      alert(String(e));
+      showError(e);
     }
   };
 

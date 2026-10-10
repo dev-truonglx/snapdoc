@@ -830,13 +830,20 @@ function RecordRegionSelect() {
   // tại đây — chỉ phản ứng khi đang ở pha "adjusting" (đã có khung); bắn cho
   // MỌI overlay-{i} nên các màn hình khác (đang "selecting", chưa có khung)
   // tự bỏ qua.
+  //
+  // Đăng ký 1 LẦN, đọc trạng thái mới nhất qua ref: phụ thuộc `sel` (đổi theo
+  // từng lần di chuột lúc kéo/chỉnh khung) từng khiến listener bị gỡ/đăng ký
+  // lại liên tục — mỗi lần là 1 cặp IPC, và event tới đúng khe giữa 2 lần
+  // đăng ký thì bị mất.
+  const confirmRef = useRef({ phase, sel, recording, busy, doStart });
+  confirmRef.current = { phase, sel, recording, busy, doStart };
   useEffect(() => {
     const un = listen("region-record-confirm", () => {
-      if (phase === "adjusting" && sel && !recording && !busy) doStart();
+      const c = confirmRef.current;
+      if (c.phase === "adjusting" && c.sel && !c.recording && !c.busy) c.doStart();
     });
     return () => { un.then((f) => f()); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, sel, recording, busy]);
+  }, []);
 
   const isVisible = frozenReady || !cursorHere;
 

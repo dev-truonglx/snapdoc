@@ -4,37 +4,23 @@
 //! (`.claude/plans/sprightly-yawning-ritchie.md`) để hiểu lý do chọn WGC thay
 //! vì DXGI Desktop Duplication.
 //!
-//! GIAI ĐOẠN 1+2+4 (hiện tại): hỗ trợ cả 3 `RecordTarget` (`Display`,
-//! `Window`, `Region`), CHƯA có audio hệ thống (tham số `capture_system_audio`
-//! bị bỏ qua — giai đoạn 5/6 của plan).
+//! Hỗ trợ cả 3 `RecordTarget` (`Display`, `Window`, `Region`). Audio hệ thống
+//! KHÔNG đi qua WGC mà qua WASAPI loopback riêng (`record::audio_wasapi`).
 //!
-//! KIẾN TRÚC FRAME PACING — khác biệt quan trọng với `mac_stream.rs`:
-//! ScreenCaptureKit gửi frame ĐỀU theo `minimumFrameInterval` bất kể nội dung
-//! màn hình có đổi hay không, nhưng WGC (`on_frame_arrived`) chỉ gọi callback
-//! khi nội dung THỰC SỰ thay đổi — nếu ghi thẳng từng frame nhận được vào
-//! encoder (giả định 1 frame = 1/fps giây, đúng như macOS), video quay ra sẽ
-//! bị "tua nhanh": vd 30 giây quay thực tế nhưng màn hình ít đổi chỉ sinh ra
-//! ~90 frame → ffmpeg (không có timestamp thật, chỉ đếm frame/fps) tính ra
-//! đúng 3 giây video, y hệt nội dung nhưng bị nén thời gian. Cách sửa: TÁCH
-//! RIÊNG "WGC cập nhật nội dung mới nhất" (`on_frame_arrived` chỉ ghi vào
-//! `latest`) khỏi "nhịp đẩy vào encoder" (`spawn_ticker` chạy đúng `fps`
-//! lần/giây, mỗi nhịp lấy `latest` hiện có — LẶP LẠI frame cũ nếu WGC chưa
-//! gửi gì mới — rồi mới đẩy vào channel `Frame`).
+//! KIẾN TRÚC FRAME PACING: WGC (`on_frame_arrived`) chỉ gọi callback khi nội
+//! dung THỰC SỰ thay đổi — module này chỉ cập nhật "frame mới nhất"
+//! (`LatestFrame`); nhịp đẩy frame vào encoder theo đúng đồng hồ của phiên
+//! quay nằm ở `record::pacer` (dùng chung với macOS).
 //!
-//! LƯU Ý: `Settings::new` (8 tham số) và `capture.rs` (`CaptureControl`,
-//! `start_free_threaded`, `Context`) đã đối chiếu đúng với source thật của
-//! crate `windows-capture` cài trên máy Windows dùng để build. Phần còn lại
-//! (`Monitor::enumerate`, `FrameBuffer::as_raw_buffer`) vẫn viết theo API đã
-//! biết lúc lên plan, CHƯA đối chiếu source thật — môi trường phát triển hiện
-//! tại là macOS nên không build/test được trên Windows. Nếu lệch, sửa theo
-//! lỗi biên dịch của `cargo check` trên máy Windows.
+//! Với màn hình tần số quét cao (144/240Hz), WGC có thể gọi callback tới
+//! 144–240 lần/giây — mỗi lần đọc ngược cả khung hình từ GPU về CPU trong khi
+//! encoder chỉ cần 30fps. Khi hệ điều hành hỗ trợ (`MinUpdateInterval`,
+//! Windows 11), giới hạn WGC ở đúng 1/fps.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use super::frame::{publish, Frame, LatestFrame};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame as WgcFrame;
 use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
@@ -45,6 +31,7 @@ use windows_capture::settings::{
 };
 use windows_capture::window::Window as WgcWindow;
 use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+use std::sync::Arc;
 
 /// Phạm vi quay — cùng hình dạng với `mac_stream::RecordTarget` để
 /// `record/mod.rs` dùng chung 1 kiểu dispatch cho cả 2 nền tảng.
@@ -62,54 +49,33 @@ pub enum RecordTarget {
     Window(u32),
 }
 
-/// Một frame video thô: BGRA, chưa nén — cùng định dạng với `mac_stream::Frame`
-/// nên `encoder.rs` (ffmpeg `-pix_fmt bgra`) không cần biết frame đến từ nền
-/// tảng nào. `Clone` để `spawn_ticker` có thể gửi LẠI cùng nội dung cho nhiều
-/// nhịp liên tiếp khi WGC chưa cập nhật frame mới (xem doc-comment đầu file).
-#[derive(Clone)]
-pub struct Frame {
-    pub bgra: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// Làm tròn XUỐNG số chẵn gần nhất — `libx264` + `-pix_fmt yuv420p` (chroma
-/// subsampling 4:2:0) bắt buộc width/height chẵn, trong khi 1 cửa sổ thực tế
-/// có thể có kích thước lẻ bất kỳ (vd 581px) → ffmpeg từ chối mở encoder
-/// ("width not divisible by 2") nếu truyền thẳng. Lệch 1px là không đáng kể.
+/// Làm tròn XUỐNG số chẵn gần nhất — `yuv420p` bắt buộc width/height chẵn.
 fn even_floor(v: u32) -> u32 {
     v & !1
 }
 
 struct CapturerFlags {
-    /// Nội dung frame MỚI NHẤT WGC đã gửi — `on_frame_arrived` chỉ cập nhật
-    /// chỗ này, KHÔNG tự đẩy vào channel (xem doc-comment đầu file).
-    /// Bọc `Arc<Frame>` để `spawn_ticker` lặp lại frame cũ chỉ tốn chi phí clone
-    /// con trỏ Arc (8 bytes) thay vì deep-copy mảng byte lớn.
-    latest: Arc<Mutex<Option<Arc<Frame>>>>,
+    latest: LatestFrame,
     stopped_externally: Arc<AtomicBool>,
-    /// Kích thước ĐÃ làm tròn chẵn, khớp đúng `-s WxH` đã khai với `Encoder`
-    /// lúc `start()` — MỌI frame gửi đi phải đúng kích thước này (không phải
-    /// kích thước WGC thực báo qua `frame.width()/height()`), nếu không
-    /// `record/mod.rs` sẽ coi là "sai kích thước" và bỏ hết frame.
+    /// Kích thước ĐÃ làm tròn chẵn, khớp đúng `-s WxH` đã khai với `Encoder` —
+    /// MỌI frame gửi đi phải đúng kích thước này.
     target_width: u32,
     target_height: u32,
-    /// Toạ độ góc trên-trái của vùng cần crop trong frame WGC trả về (pixel
-    /// vật lý). `(0, 0)` cho `Display`/`Window` (lấy nguyên góc trái); khác 0
-    /// chỉ khi quay `Region` (WGC không có `sourceRect` như SCStream — phải
-    /// quay nguyên màn hình rồi tự crop ở đây, xem `RecordTarget::Region`).
+    /// Góc trên-trái của vùng cần crop trong frame WGC (pixel vật lý) — khác
+    /// 0 chỉ khi quay `Region`.
     crop_x: u32,
     crop_y: u32,
 }
 
 struct Capturer {
-    latest: Arc<Mutex<Option<Arc<Frame>>>>,
+    latest: LatestFrame,
     stopped_externally: Arc<AtomicBool>,
     target_width: u32,
     target_height: u32,
     crop_x: u32,
     crop_y: u32,
-    spare_buf: Vec<u8>,
+    /// Buffer của frame cũ (không còn ai giữ) để tái dùng.
+    spare_buf: Option<Vec<u8>>,
 }
 
 impl GraphicsCaptureApiHandler for Capturer {
@@ -117,7 +83,6 @@ impl GraphicsCaptureApiHandler for Capturer {
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        let needed_len = (ctx.flags.target_width as usize) * 4 * (ctx.flags.target_height as usize);
         Ok(Self {
             latest: ctx.flags.latest,
             stopped_externally: ctx.flags.stopped_externally,
@@ -125,7 +90,7 @@ impl GraphicsCaptureApiHandler for Capturer {
             target_height: ctx.flags.target_height,
             crop_x: ctx.flags.crop_x,
             crop_y: ctx.flags.crop_y,
-            spare_buf: vec![0u8; needed_len],
+            spare_buf: None,
         })
     }
 
@@ -136,31 +101,22 @@ impl GraphicsCaptureApiHandler for Capturer {
     ) -> Result<(), Self::Error> {
         let src_width = frame.width();
         let src_height = frame.height();
-        let mut buffer = frame.buffer()?;
-        // `as_raw_buffer()` trả buffer thô CÓ THỂ pad cuối mỗi hàng (row
-        // pitch của staging texture D3D11 không nhất thiết bằng width*4) —
-        // tự copy đúng row_len mỗi hàng, bỏ phần đệm, giống hệt cách
-        // `mac_stream.rs` xử lý cho IOSurface. Suy ra row_pitch từ
-        // `raw.len() / src_height` vì buffer luôn có đúng `src_height *
-        // row_pitch` byte (không có API đọc row_pitch trực tiếp).
+        // KHÔNG trả lỗi ra ngoài: windows-capture coi lỗi của callback là dừng
+        // hẳn phiên capture mà KHÔNG gọi `on_closed` → video đứng hình âm thầm.
+        // 1 frame đọc lỗi (GPU bận, đổi chế độ hiển thị...) thì bỏ qua frame đó.
+        let Ok(mut buffer) = frame.buffer() else { return Ok(()) };
+        let row_pitch = buffer.row_pitch() as usize;
         let raw = buffer.as_raw_buffer();
-        let row_pitch = if src_height == 0 { (src_width as usize) * 4 } else { raw.len() / src_height as usize };
-        // Guard: `row_pitch` suy ra bằng phép chia SÀN — nếu `raw.len()`
-        // không chia hết cho `src_height` (hoặc WGC báo kích thước lệch với
-        // buffer thật), slice `raw[src_off..]` bên dưới có thể vượt biên →
-        // panic NGAY TRONG callback FFI (unwind qua biên C++ = UB/abort cả
-        // app). Bỏ frame lệch còn hơn sập giữa phiên quay.
-        if row_pitch < (src_width as usize) * 4 || raw.len() < (src_height as usize) * row_pitch {
+        // Guard: buffer lệch với kích thước báo về → bỏ frame (panic trong
+        // callback FFI = unwind qua biên C++ = abort cả app).
+        if row_pitch < (src_width as usize) * 4 || raw.len() < (src_height as usize).saturating_sub(1) * row_pitch + (src_width as usize) * 4 {
             return Ok(());
         }
 
         // Luôn crop/pad về ĐÚNG (target_width, target_height) đã khai với
-        // encoder, bắt đầu từ (crop_x, crop_y) — vừa xử lý việc làm tròn chẵn
-        // ở trên, vừa tự chịu được nếu WGC báo kích thước frame thật lệch vài
-        // pixel so với lúc ước tính ban đầu (`window_capture_size`/
-        // `monitor.width()`), vừa là bước crop THẬT cho `RecordTarget::Region`
-        // (crop_x/crop_y > 0) — thay vì bị `record/mod.rs` bỏ hết frame vì
-        // "sai kích thước".
+        // encoder, bắt đầu từ (crop_x, crop_y): xử lý làm tròn chẵn, frame
+        // thật lệch vài pixel so với ước tính ban đầu, cửa sổ bị resize, và
+        // là bước crop THẬT cho `RecordTarget::Region`.
         let avail_w = src_width.saturating_sub(self.crop_x);
         let avail_h = src_height.saturating_sub(self.crop_y);
         let copy_w = self.target_width.min(avail_w) as usize;
@@ -169,124 +125,39 @@ impl GraphicsCaptureApiHandler for Capturer {
         let copy_row_bytes = copy_w * 4;
         let needed_len = dst_row_len * self.target_height as usize;
 
-        if self.spare_buf.len() != needed_len {
-            self.spare_buf = vec![0u8; needed_len];
-        } else {
-            self.spare_buf.fill(0);
+        let mut bgra = match self.spare_buf.take() {
+            Some(v) if v.len() == needed_len => v,
+            _ => vec![0u8; needed_len],
+        };
+        // Chỉ cần xoá nền khi nguồn KHÔNG phủ kín khung đích (cửa sổ bị thu nhỏ
+        // giữa chừng) — trường hợp thường gặp mọi byte đều bị ghi đè bên dưới.
+        if copy_w < self.target_width as usize || copy_h < self.target_height as usize {
+            bgra.fill(0);
         }
-
-        let mut bgra = std::mem::take(&mut self.spare_buf);
         for y in 0..copy_h {
             let src_off = (y + self.crop_y as usize) * row_pitch + (self.crop_x as usize) * 4;
             let dst_off = y * dst_row_len;
+            if src_off + copy_row_bytes > raw.len() {
+                break;
+            }
             bgra[dst_off..dst_off + copy_row_bytes].copy_from_slice(&raw[src_off..src_off + copy_row_bytes]);
         }
 
-        let new_frame = Arc::new(Frame { bgra, width: self.target_width, height: self.target_height });
-        let old_frame = {
-            let mut guard = self.latest.lock().unwrap_or_else(|p| p.into_inner());
-            guard.replace(new_frame)
-        };
-
-        // Tái sử dụng buffer của frame cũ nếu không còn ai giữ tham chiếu Arc (zero allocation)
-        if let Some(old) = old_frame {
-            if let Ok(frame) = Arc::try_unwrap(old) {
-                if frame.bgra.len() == needed_len {
-                    self.spare_buf = frame.bgra;
-                }
+        let new_frame = Frame { bgra, width: self.target_width, height: self.target_height };
+        if let Some(buf) = publish(&self.latest, new_frame) {
+            if buf.len() == needed_len {
+                self.spare_buf = Some(buf);
             }
         }
-
         Ok(())
     }
 
-    /// WGC gọi khi phiên capture kết thúc NGOÀI Ý MUỐN (màn hình bị ngắt,
-    /// đổi cấu hình hiển thị...) — KHÔNG gọi khi ta tự `stop()` (đường đó đi
-    /// qua `CaptureControl::stop()`, không qua callback này), giống hệt vai
-    /// trò `stream:didStopWithError:` bên macOS.
+    /// WGC gọi khi phiên capture kết thúc NGOÀI Ý MUỐN (màn hình bị ngắt, cửa
+    /// sổ đang quay bị đóng...) — vai trò giống `stream:didStopWithError:` bên macOS.
     fn on_closed(&mut self) -> Result<(), Self::Error> {
         self.stopped_externally.store(true, Ordering::SeqCst);
         Ok(())
     }
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "winmm")]
-extern "system" {
-    fn timeBeginPeriod(u_period: u32) -> u32;
-    fn timeEndPeriod(u_period: u32) -> u32;
-}
-
-/// Thread đếm nhịp đúng `interval` (= 1/fps giây) — MỖI NHỊP lấy frame mới
-/// nhất `Capturer` đã ghi vào `latest` (lặp lại frame cũ nếu WGC chưa gửi gì
-/// mới kể từ nhịp trước) rồi đẩy vào `frame_tx`.
-fn spawn_ticker(
-    frame_tx: mpsc::SyncSender<Arc<Frame>>,
-    latest: Arc<Mutex<Option<Arc<Frame>>>>,
-    dropped: Arc<AtomicBool>,
-    stop: Arc<AtomicBool>,
-    started: Arc<AtomicBool>,
-    interval: Duration,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
-        // 1. Chờ tín hiệu bắt đầu phát frame (sau khi Encoder và writer thread đã sẵn sàng)
-        while !started.load(Ordering::Relaxed) {
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-
-        // 2. Chờ WGC gửi frame đầu tiên vào `latest`
-        while latest.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-
-        // 3. Đặt độ phân giải timer của Windows thành 1ms (khắc phục độ trễ 15.6ms của bản release)
-        #[cfg(target_os = "windows")]
-        unsafe {
-            timeBeginPeriod(1);
-        }
-
-        let start = Instant::now();
-        let mut frame_index: u64 = 0;
-
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let target_time = start + interval.mul_f64(frame_index as f64);
-            let now = Instant::now();
-
-            if target_time > now {
-                let wait = target_time - now;
-                if wait > Duration::from_millis(1) {
-                    std::thread::sleep(wait - Duration::from_millis(1));
-                }
-                while Instant::now() < target_time {
-                    std::hint::spin_loop();
-                }
-            }
-
-            frame_index += 1;
-
-            let frame = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            if let Some(frame) = frame {
-                if frame_tx.try_send(frame).is_err() {
-                    dropped.store(true, Ordering::Relaxed);
-                }
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        unsafe {
-            timeEndPeriod(1);
-        }
-    })
 }
 
 /// Tìm `windows_capture::monitor::Monitor` khớp `display_id` (id từ
@@ -296,13 +167,17 @@ fn spawn_ticker(
 /// trên `EnumDisplayMonitors` của hệ điều hành — CẦN xác minh trên máy thật,
 /// xem mục "Xác định monitor/window" trong plan Phase 5; nếu lệch, đổi sang
 /// đối chiếu theo toạ độ/kích thước màn hình thay vì theo vị trí index).
-fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
+/// Trả `(monitor, không_xác_minh_được)` — `true` khi phải đoán theo thứ tự
+/// liệt kê hoặc rơi về màn hình chính.
+fn resolve_monitor(display_id: u32) -> Result<(WgcMonitor, bool), String> {
     let mut wgc_monitors = WgcMonitor::enumerate().map_err(|e| format!("Không liệt kê được màn hình (WGC): {e}"))?;
     if wgc_monitors.is_empty() {
-        return WgcMonitor::primary().map_err(|e| format!("Không tìm thấy màn hình để quay: {e}"));
+        return WgcMonitor::primary()
+            .map(|m| (m, false))
+            .map_err(|e| format!("Không tìm thấy màn hình để quay: {e}"));
     }
     if wgc_monitors.len() == 1 {
-        return Ok(wgc_monitors.remove(0));
+        return Ok((wgc_monitors.remove(0), false));
     }
 
     // 1. Ưu tiên đối chiếu trực tiếp qua handle HMONITOR của WgcMonitor
@@ -310,14 +185,14 @@ fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
         .iter()
         .position(|m| (m.as_raw_hmonitor() as usize as u32) == display_id)
     {
-        return Ok(wgc_monitors.remove(pos));
+        return Ok((wgc_monitors.remove(pos), false));
     }
 
     // 2. Thử dựng WgcMonitor trực tiếp từ HMONITOR nếu handle hợp lệ
     let raw_hmon = display_id as i32 as isize as *mut std::ffi::c_void;
     let direct = WgcMonitor::from_raw_hmonitor(raw_hmon);
     if direct.device_name().is_ok() {
-        return Ok(direct);
+        return Ok((direct, false));
     }
 
     // 3. Fallback: đối chiếu qua xcap::Monitor (theo index hoặc kích thước)
@@ -349,6 +224,7 @@ fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
             .unwrap_or(false);
         if by_index_ok {
             return wgc_monitors.into_iter().nth(index)
+                .map(|m| (m, false))
                 .ok_or_else(|| format!("Không lấy được monitor theo index {index}"));
         }
         if want_w > 0 {
@@ -360,15 +236,20 @@ fn resolve_monitor(display_id: u32) -> Result<WgcMonitor, String> {
                 .collect();
             if matches.len() == 1 {
                 return wgc_monitors.into_iter().nth(matches[0])
+                    .map(|m| (m, false))
                     .ok_or_else(|| format!("Không lấy được monitor theo index {}", matches[0]));
             }
         }
         if let Some(m) = wgc_monitors.into_iter().nth(index) {
-            return Ok(m);
+            // Chỉ khớp theo thứ tự liệt kê, không xác minh được — có thể nhầm màn hình.
+            return Ok((m, true));
         }
     }
-    // Không khớp được — quay màn hình chính còn hơn báo lỗi hẳn.
-    WgcMonitor::primary().map_err(|e| format!("Không tìm thấy màn hình để quay: {e}"))
+    // Không khớp được — quay màn hình chính còn hơn báo lỗi hẳn, nhưng phải báo
+    // người dùng (trước đây im lặng quay nhầm màn hình).
+    WgcMonitor::primary()
+        .map(|m| (m, true))
+        .map_err(|e| format!("Không tìm thấy màn hình để quay: {e}"))
 }
 
 /// Tìm `windows_capture::window::Window` khớp `window_id` (id từ
@@ -428,65 +309,40 @@ fn window_capture_size(hwnd: *mut std::ffi::c_void) -> Result<(u32, u32), String
     Ok((width, height))
 }
 
-/// Phiên quay đang chạy — giữ `CaptureControl` (thread nền của WGC, xem
-/// `start_free_threaded`) + `ticker_thread` (nhịp đẩy frame ra encoder) cho
-/// tới khi `stop()`. Vai trò tương đương `mac_stream::RecordingHandle`.
-///
-/// `control` bọc `Option` để CẢ `stop()` (đường chủ động) lẫn `Drop` (lưới an
-/// toàn cho nhánh lỗi của `start_with_target` — các bước fallible sau khi
-/// stream đã chạy) đều lấy ra dừng được — không có `Drop`, handle bị bỏ rơi
-/// để lại phiên WGC chạy mồ côi + ticker thread loop vô hạn.
+/// Phiên quay đang chạy — giữ `CaptureControl` (thread nền của WGC) cho tới
+/// khi `stop()`. `control` bọc `Option` để cả `stop()` lẫn `Drop` (lưới an
+/// toàn cho nhánh lỗi lúc khởi động) đều lấy ra dừng được.
 pub struct RecordingHandle {
     control: Option<CaptureControl<Capturer, Box<dyn std::error::Error + Send + Sync>>>,
-    ticker_stop: Arc<AtomicBool>,
-    ticker_started: Arc<AtomicBool>,
-    ticker_thread: Option<JoinHandle<()>>,
-    dropped: Arc<AtomicBool>,
+    latest: LatestFrame,
     stopped_externally: Arc<AtomicBool>,
     pub width: u32,
     pub height: u32,
+    /// Cảnh báo cho người dùng (vd không xác định chắc chắn được màn hình cần quay).
+    pub warning: Option<String>,
 }
 
 impl RecordingHandle {
-    /// Bắt đầu phát nhịp khung hình từ WGC sang encoder — gọi sau khi Encoder
-    /// và writer thread đã sẵn sàng lắng nghe channel, tránh dồn ứ buffer lúc khởi động.
-    pub fn start_ticking(&self) {
-        self.ticker_started.store(true, Ordering::SeqCst);
+    /// Ô frame mới nhất — `record::pacer` đọc theo nhịp fps.
+    pub fn latest(&self) -> LatestFrame {
+        self.latest.clone()
     }
 
-    /// WGC đã tự dừng phiên capture ngoài ý muốn hay chưa — `record::mod`
-    /// poll cờ này để tự dọn dẹp thay vì chờ mãi frame không bao giờ tới.
+    /// WGC đã tự dừng phiên capture ngoài ý muốn hay chưa — kể cả khi thread
+    /// capture của windows-capture tự kết thúc vì lỗi (không qua `on_closed`).
     pub fn is_stopped_externally(&self) -> bool {
         self.stopped_externally.load(Ordering::SeqCst)
+            || self.control.as_ref().map(|c| c.is_finished()).unwrap_or(false)
     }
 
-    /// Cờ "đã có frame bị drop" dùng chung với ticker — caller (`record::mod`)
-    /// clone Arc này TRƯỚC khi `stop()` tiêu thụ handle để còn đọc được sau
-    /// khi dừng mà cảnh báo người dùng.
-    pub fn dropped_flag(&self) -> Arc<AtomicBool> {
-        self.dropped.clone()
-    }
-
-    /// Dừng quay: dừng ticker TRƯỚC (đóng `frame_tx`, kết thúc writer thread
-    /// bên `record/mod.rs`), rồi mới dừng phiên WGC qua `CaptureControl::stop()`.
+    /// Dừng phiên WGC qua `CaptureControl::stop()`.
     pub fn stop(mut self) -> Result<(), String> {
-        self.ticker_stop.store(true, Ordering::SeqCst);
-        if let Some(t) = self.ticker_thread.take() {
-            let _ = t.join();
-        }
-
         let control = self.control.take();
         if self.stopped_externally.load(Ordering::SeqCst) {
-            if self.dropped.load(Ordering::Relaxed) {
-                eprintln!("[SnapDoc][record] Một số frame đã bị drop do encoder/consumer chậm hơn tốc độ quay");
-            }
             return Ok(());
         }
         if let Some(control) = control {
             control.stop().map_err(|e| format!("Lỗi dừng quay: {e}"))?;
-        }
-        if self.dropped.load(Ordering::Relaxed) {
-            eprintln!("[SnapDoc][record] Một số frame đã bị drop do encoder/consumer chậm hơn tốc độ quay");
         }
         Ok(())
     }
@@ -494,12 +350,7 @@ impl RecordingHandle {
 
 impl Drop for RecordingHandle {
     fn drop(&mut self) {
-        // `stop()` đã lấy control ra (`take`) → không còn gì để dọn.
         let Some(control) = self.control.take() else { return };
-        self.ticker_stop.store(true, Ordering::SeqCst);
-        if let Some(t) = self.ticker_thread.take() {
-            let _ = t.join();
-        }
         if !self.stopped_externally.load(Ordering::SeqCst) {
             eprintln!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng WGC khẩn cấp");
             let _ = control.stop();
@@ -507,26 +358,16 @@ impl Drop for RecordingHandle {
     }
 }
 
-/// Bắt đầu quay theo `RecordTarget`. `capture_system_audio` hiện bị bỏ qua
-/// (luôn quay không tiếng trên Windows — audio hệ thống là giai đoạn 5/6 của
-/// plan).
-pub fn start(
-    target: RecordTarget,
-    fps: u32,
-    _capture_system_audio: bool,
-) -> Result<(RecordingHandle, mpsc::Receiver<Arc<Frame>>, Option<mpsc::Receiver<Vec<u8>>>), String> {
-    // Channel có giới hạn dung lượng — nếu encoder xử lý chậm hơn tốc độ quay,
-    // try_send() trong `spawn_ticker` sẽ thất bại (drop) thay vì chặn nó lại.
-    // Bound = 2 giây buffer ở fps yêu cầu (giống mac_stream.rs). Dùng Arc<Frame> để zero-copy.
-    let bound = (fps.max(1) as usize) * 2;
-    let (frame_tx, frame_rx) = mpsc::sync_channel::<Arc<Frame>>(bound);
-    let dropped = Arc::new(AtomicBool::new(false));
+/// Bắt đầu quay theo `RecordTarget` (audio hệ thống trên Windows đi riêng
+/// qua WASAPI loopback, xem `record::audio_wasapi`).
+pub fn start(target: RecordTarget, fps: u32) -> Result<RecordingHandle, String> {
     let stopped_externally = Arc::new(AtomicBool::new(false));
-    let latest: Arc<Mutex<Option<Arc<Frame>>>> = Arc::new(Mutex::new(None));
-    let interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
-    // Default cho setting của CRATE — việc ép nhịp fps thật giờ nằm ở
-    // `spawn_ticker`, không còn phụ thuộc `MinimumUpdateIntervalSettings`.
-    let min_interval = MinimumUpdateIntervalSettings::Default;
+    let latest = super::frame::new_latest();
+    let min_interval = if GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false) {
+        MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / fps.max(1) as f64))
+    } else {
+        MinimumUpdateIntervalSettings::Default
+    };
 
     // Tắt viền vàng mặc định của Windows (WGC) nếu hệ thống hỗ trợ (Windows 10 2004+ / Windows 11),
     // vì SnapDoc đã có khung viền riêng (RecordBorder / overlay).
@@ -535,17 +376,32 @@ pub fn start(
     } else {
         DrawBorderSettings::Default
     };
+    // WGC luôn trả đủ độ phân giải (khung > 4K do encoder thu nhỏ, xem
+    // `record::encoder`) — ở đây chỉ cần làm tròn chẵn.
+    let max = |w: u32, h: u32| (even_floor(w).max(2), even_floor(h).max(2));
+    let flags = |w: u32, h: u32, crop_x: u32, crop_y: u32| CapturerFlags {
+        latest: latest.clone(),
+        stopped_externally: stopped_externally.clone(),
+        target_width: w,
+        target_height: h,
+        crop_x,
+        crop_y,
+    };
 
     // `Settings<Flags, T>` khác kiểu cụ thể giữa `Monitor` và `Window` (T khác
-    // nhau) nên không thể dùng chung 1 biến `settings` — mỗi nhánh tự dựng
-    // settings + gọi `start_free_threaded` + trả `RecordingHandle` riêng,
-    // `CaptureControl<Capturer, _>` trả về có cùng kiểu bất kể T là gì.
+    // nhau) nên mỗi nhánh tự dựng settings + gọi `start_free_threaded`.
+    let mut warning = None;
+    let fallback_msg = "Không xác định chắc chắn được màn hình đã chọn — có thể đang quay nhầm màn hình (đã dùng màn hình chính/khớp theo thứ tự).";
     let (control, width, height) = match target {
         RecordTarget::Display(display_id) => {
-            let monitor = resolve_monitor(display_id)?;
-            let width = even_floor(monitor.width().map_err(|e| format!("Không đọc được kích thước màn hình: {e}"))?);
-            let height =
-                even_floor(monitor.height().map_err(|e| format!("Không đọc được kích thước màn hình: {e}"))?);
+            let (monitor, fallback) = resolve_monitor(display_id)?;
+            if fallback {
+                warning = Some(fallback_msg.to_string());
+            }
+            let (width, height) = max(
+                monitor.width().map_err(|e| format!("Không đọc được kích thước màn hình: {e}"))?,
+                monitor.height().map_err(|e| format!("Không đọc được kích thước màn hình: {e}"))?,
+            );
             let settings = Settings::new(
                 monitor,
                 CursorCaptureSettings::Default,
@@ -554,14 +410,7 @@ pub fn start(
                 min_interval,
                 DirtyRegionSettings::Default,
                 ColorFormat::Bgra8,
-                CapturerFlags {
-                    latest: latest.clone(),
-                    stopped_externally: stopped_externally.clone(),
-                    target_width: width,
-                    target_height: height,
-                    crop_x: 0,
-                    crop_y: 0,
-                },
+                flags(width, height, 0, 0),
             );
             let control = Capturer::start_free_threaded(settings)
                 .map_err(|e| format!("Không bắt đầu quay (Windows.Graphics.Capture): {e}"))?;
@@ -570,7 +419,7 @@ pub fn start(
         RecordTarget::Window(window_id) => {
             let window = resolve_window(window_id)?;
             let (raw_width, raw_height) = window_capture_size(window.as_raw_hwnd())?;
-            let (width, height) = (even_floor(raw_width), even_floor(raw_height));
+            let (width, height) = max(raw_width, raw_height);
             let settings = Settings::new(
                 window,
                 CursorCaptureSettings::Default,
@@ -579,31 +428,25 @@ pub fn start(
                 min_interval,
                 DirtyRegionSettings::Default,
                 ColorFormat::Bgra8,
-                CapturerFlags {
-                    latest: latest.clone(),
-                    stopped_externally: stopped_externally.clone(),
-                    target_width: width,
-                    target_height: height,
-                    crop_x: 0,
-                    crop_y: 0,
-                },
+                flags(width, height, 0, 0),
             );
             let control = Capturer::start_free_threaded(settings)
                 .map_err(|e| format!("Không bắt đầu quay (Windows.Graphics.Capture): {e}"))?;
             (control, width, height)
         }
         RecordTarget::Region { display_id, x, y, w, h } => {
-            // WGC không có `sourceRect` như SCStream — quay NGUYÊN màn hình
-            // rồi crop trong `on_frame_arrived` (qua `crop_x`/`crop_y`/
-            // `target_width`/`target_height`), xem doc-comment `CapturerFlags`.
-            let monitor = resolve_monitor(display_id)?;
+            // WGC không có `sourceRect` — quay NGUYÊN màn hình rồi crop trong `on_frame_arrived`.
+            let (monitor, fallback) = resolve_monitor(display_id)?;
+            if fallback {
+                warning = Some(fallback_msg.to_string());
+            }
             let full_width = monitor.width().map_err(|e| format!("Không đọc được kích thước màn hình: {e}"))?;
             let full_height = monitor.height().map_err(|e| format!("Không đọc được kích thước màn hình: {e}"))?;
             let crop_x = x.max(0.0).round() as u32;
             let crop_y = y.max(0.0).round() as u32;
             let width = even_floor(w.max(0.0).round() as u32).min(even_floor(full_width.saturating_sub(crop_x)));
             let height = even_floor(h.max(0.0).round() as u32).min(even_floor(full_height.saturating_sub(crop_y)));
-            if width == 0 || height == 0 {
+            if width < 2 || height < 2 {
                 return Err("Vùng chọn không hợp lệ để quay".to_string());
             }
             let settings = Settings::new(
@@ -614,14 +457,7 @@ pub fn start(
                 min_interval,
                 DirtyRegionSettings::Default,
                 ColorFormat::Bgra8,
-                CapturerFlags {
-                    latest: latest.clone(),
-                    stopped_externally: stopped_externally.clone(),
-                    target_width: width,
-                    target_height: height,
-                    crop_x,
-                    crop_y,
-                },
+                flags(width, height, crop_x, crop_y),
             );
             let control = Capturer::start_free_threaded(settings)
                 .map_err(|e| format!("Không bắt đầu quay (Windows.Graphics.Capture): {e}"))?;
@@ -629,98 +465,5 @@ pub fn start(
         }
     };
 
-    let ticker_stop = Arc::new(AtomicBool::new(false));
-    let ticker_started = Arc::new(AtomicBool::new(false));
-    let ticker_thread = spawn_ticker(
-        frame_tx,
-        latest,
-        dropped.clone(),
-        ticker_stop.clone(),
-        ticker_started.clone(),
-        interval,
-    );
-
-    Ok((
-        RecordingHandle {
-            control: Some(control),
-            ticker_stop,
-            ticker_started,
-            ticker_thread: Some(ticker_thread),
-            dropped,
-            stopped_externally,
-            width,
-            height,
-        },
-        frame_rx,
-        None,
-    ))
+    Ok(RecordingHandle { control: Some(control), latest, stopped_externally, width, height, warning })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_spawn_ticker_accuracy() {
-        let fps = 30u32;
-        let interval = Duration::from_secs_f64(1.0 / fps as f64);
-        let bound = (fps as usize) * 2;
-        let (tx, rx) = mpsc::sync_channel::<Arc<Frame>>(bound);
-        let latest = Arc::new(Mutex::new(Some(Arc::new(Frame {
-            bgra: vec![0; 100],
-            width: 10,
-            height: 10,
-        }))));
-        let dropped = Arc::new(AtomicBool::new(false));
-        let stop = Arc::new(AtomicBool::new(false));
-        let started = Arc::new(AtomicBool::new(false));
-
-        let ticker = spawn_ticker(
-            tx,
-            latest,
-            dropped.clone(),
-            stop.clone(),
-            started.clone(),
-            interval,
-        );
-
-        // Verify that before started is set, no frames are emitted
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(rx.try_recv().is_err(), "Ticker emitted frames before being started!");
-
-        // Consumer thread draining rx
-        let stop_consumer = Arc::new(AtomicBool::new(false));
-        let sc = stop_consumer.clone();
-        let consumer = std::thread::spawn(move || {
-            let mut count = 0;
-            while !sc.load(Ordering::Relaxed) {
-                if let Ok(_) = rx.recv_timeout(Duration::from_millis(50)) {
-                    count += 1;
-                }
-            }
-            while let Ok(_) = rx.try_recv() {
-                count += 1;
-            }
-            count
-        });
-
-        // Start ticking
-        started.store(true, Ordering::SeqCst);
-        let test_duration = Duration::from_secs(3);
-        std::thread::sleep(test_duration);
-
-        stop.store(true, Ordering::SeqCst);
-        let _ = ticker.join();
-        stop_consumer.store(true, Ordering::SeqCst);
-        let total_frames = consumer.join().unwrap();
-
-        eprintln!("[test] ticker in 3.0s produced: {total_frames} frames (expected 90, fps={:.1})", total_frames as f64 / 3.0);
-        assert!(!dropped.load(Ordering::Relaxed), "Dropped flag should be false!");
-        // In 3.0 seconds at 30 fps, we expect 90-91 frames (due to rounding/first tick)
-        assert!(
-            total_frames >= 89 && total_frames <= 92,
-            "Expected ~90 frames in 3s, got {total_frames}"
-        );
-    }
-}
-

@@ -113,11 +113,23 @@ fn run_action(app: &AppHandle, action: &str) {
         "record" => {
             let app = app.clone();
             std::thread::spawn(move || {
-                if crate::record::status(&app).is_some() {
-                    if let Err(e) = crate::record::stop_recording(&app) {
-                        eprintln!("[SnapDoc] Dừng quay (phím tắt) thất bại: {e}");
+                // Bật/tắt theo PHA của phiên quay — bản cũ dựa vào `status()`
+                // (None cả lúc đang khởi động lẫn lúc đang lưu) nên bấm 2 lần
+                // để dừng lại bắt đầu 1 phiên quay MỚI trong lúc phiên cũ còn
+                // đang lưu.
+                match crate::record::phase(&app) {
+                    crate::record::Phase::Recording => {
+                        // Lỗi lưu file đã được `stop_recording` tự báo cho người dùng.
+                        if let Err(e) = crate::record::stop_recording(&app) {
+                            eprintln!("[SnapDoc] Dừng quay (phím tắt) thất bại: {e}");
+                        }
+                        return;
                     }
-                    return;
+                    crate::record::Phase::Starting | crate::record::Phase::Stopping => {
+                        eprintln!("[SnapDoc] Bỏ qua phím tắt quay: phiên quay đang khởi động/đang lưu");
+                        return;
+                    }
+                    crate::record::Phase::Idle => {}
                 }
                 // Nhiều màn hình: mở overlay chọn quay màn hình nào (đúng
                 // hành vi mode "full" của nút "Quay" trong CaptureBar, xem
@@ -134,9 +146,10 @@ fn run_action(app: &AppHandle, action: &str) {
                     // video.
                     flow::hide_editor_for_freeze(&app);
                     if let Err(e) = crate::record::start_recording(&app) {
-                        eprintln!("[SnapDoc] Bắt đầu quay (phím tắt) thất bại: {e}");
-                        // Quay không khởi động được → không có gì mở lại editor.
+                        // Quay không khởi động được → mở lại editor + báo lỗi
+                        // (trước đây chỉ eprintln — vô hình với người dùng).
                         windows::show_editor_if_hidden_for_capture(&app);
+                        crate::notify::error(&app, &format!("Không bắt đầu quay được: {e}"));
                     }
                 }
             });

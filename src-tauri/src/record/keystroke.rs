@@ -19,6 +19,8 @@ pub use macos::KeystrokeListener;
 
 #[cfg(target_os = "windows")]
 pub use windows::KeystrokeListener;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::post_quit;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use fallback::KeystrokeListener;
@@ -30,7 +32,7 @@ mod macos {
     use super::KeystrokePayload;
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::thread::{self, JoinHandle};
     use tauri::{AppHandle, Emitter};
 
@@ -40,7 +42,6 @@ mod macos {
     }
 
     pub struct KeystrokeListener {
-        run_loop: Arc<Mutex<Option<usize>>>,
         stopped: Arc<AtomicBool>,
         thread_handle: Option<JoinHandle<()>>,
     }
@@ -73,19 +74,23 @@ mod macos {
             port: *mut c_void,
             order: isize,
         ) -> *mut c_void;
+        fn CFMachPortInvalidate(port: *mut c_void);
         fn CFRunLoopGetCurrent() -> *mut c_void;
         fn CFRunLoopAddSource(rl: *mut c_void, source: *mut c_void, mode: *const c_void);
         fn CFRunLoopRemoveSource(rl: *mut c_void, source: *mut c_void, mode: *const c_void);
-        fn CFRunLoopRun();
-        fn CFRunLoopStop(rl: *mut c_void);
+        fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source_handled: u8) -> i32;
         fn CFRelease(cf: *const c_void);
     }
 
     const KEY_DOWN_EVENT: u32 = 10;
     const FLAGS_CHANGED_EVENT: u32 = 12;
     const TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFFFFFE;
-    // kCGKeyboardEventKeycode trong CoreGraphics là 9
+    const TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFFFFFF;
+    // kCGKeyboardEventAutorepeat = 8, kCGKeyboardEventKeycode = 9
+    const KEYBOARD_AUTOREPEAT_FIELD: u32 = 8;
     const KEYBOARD_KEYCODE_FIELD: u32 = 9;
+    /// `kCFRunLoopRunFinished` — run loop không còn source nào.
+    const RUN_FINISHED: i32 = 1;
 
     const COMMAND_BIT: u64 = 0x00100000;
     const ALTERNATE_BIT: u64 = 0x00080000;
@@ -123,10 +128,12 @@ mod macos {
         let mut buf = [0u16; 8];
         let mut actual_len: u32 = 0;
         unsafe {
-            CGEventKeyboardGetUnicodeString(event, 8, &mut actual_len, buf.as_mut_ptr());
+            CGEventKeyboardGetUnicodeString(event, buf.len() as u32, &mut actual_len, buf.as_mut_ptr());
         }
-        if actual_len > 0 {
-            let s = String::from_utf16(&buf[..actual_len as usize]).ok()?;
+        // Kẹp độ dài: cắt slice vượt biên trong callback `extern "C"` = abort cả app.
+        let len = (actual_len as usize).min(buf.len());
+        if len > 0 {
+            let s = String::from_utf16(&buf[..len]).ok()?;
             // Lọc bỏ triệt để các ký tự điều khiển non-printable (như 0x1B cho Esc, 0x18 cho Ctrl+X...)
             let printable: String = s.chars().filter(|c| !c.is_control()).collect();
             let trimmed = printable.trim();
@@ -149,10 +156,15 @@ mod macos {
 
         let ctx = unsafe { &*(refcon as *const TapContext) };
 
-        if event_type == TAP_DISABLED_BY_TIMEOUT {
+        if event_type == TAP_DISABLED_BY_TIMEOUT || event_type == TAP_DISABLED_BY_USER_INPUT {
             if !ctx.mach_port.is_null() {
                 unsafe { CGEventTapEnable(ctx.mach_port, true) };
             }
+            return event;
+        }
+
+        // Giữ phím → hệ điều hành bắn keydown lặp liên tục: chỉ hiển thị lần nhấn đầu.
+        if event_type == KEY_DOWN_EVENT && unsafe { CGEventGetIntegerValueField(event, KEYBOARD_AUTOREPEAT_FIELD) } != 0 {
             return event;
         }
 
@@ -174,16 +186,24 @@ mod macos {
                 modifiers.push("Cmd".to_string());
             }
 
-            let key_opt = keycode_to_string(kc)
-                .map(|s| s.to_string())
+            // Bảng keycode là vị trí phím trên bàn phím ANSI-US — sai chữ với
+            // AZERTY/Dvorak... Chữ cái lấy theo ký tự THẬT layout hiện tại sinh
+            // ra; phím đặc biệt/số/dấu (và tổ hợp Ctrl, nơi ký tự Unicode là mã
+            // điều khiển) vẫn theo bảng keycode như cũ.
+            let unicode_letter = unicode_from_event(event).filter(|u| {
+                let mut chars = u.chars();
+                matches!((chars.next(), chars.next()), (Some(c), None) if c.is_alphabetic())
+            });
+            let key_opt = unicode_letter
+                .or_else(|| keycode_to_string(kc).map(|s| s.to_string()))
                 .or_else(|| unicode_from_event(event));
 
             if let Some(key_name) = key_opt {
                 let mut parts = modifiers.clone();
                 parts.push(key_name.clone());
                 let label = parts.join(" + ");
-
-                eprintln!("[SnapDoc][keystroke] Bắt được phím: {label}");
+                // KHÔNG log phím gõ ra stderr: bản debug chuyển stderr vào file
+                // log trên đĩa — nội dung gõ (mật khẩu...) không được lưu lại.
 
                 let payload = KeystrokePayload {
                     key: key_name,
@@ -205,12 +225,10 @@ mod macos {
                 crate::permissions::request_accessibility();
             }
 
-            let run_loop: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
             let stopped = Arc::new(AtomicBool::new(false));
 
             let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
-            let rl_clone = run_loop.clone();
             let stopped_clone = stopped.clone();
 
             let thread_handle = thread::Builder::new()
@@ -245,37 +263,38 @@ mod macos {
 
                     let source = CFMachPortCreateRunLoopSource(std::ptr::null(), mach_port, 0);
                     if source.is_null() {
+                        CFMachPortInvalidate(mach_port);
                         CFRelease(mach_port);
                         let _ = init_tx.send(Err("Không tạo được RunLoopSource cho EventTap".to_string()));
                         return;
                     }
 
                     let cur_rl = CFRunLoopGetCurrent();
-                    if let Ok(mut g) = rl_clone.lock() {
-                        *g = Some(cur_rl as usize);
-                    }
-
-                    CFRunLoopAddSource(cur_rl, source, core_foundation_sys::runloop::kCFRunLoopCommonModes as *const c_void);
+                    let mode = core_foundation_sys::runloop::kCFRunLoopDefaultMode as *const c_void;
+                    CFRunLoopAddSource(cur_rl, source, mode);
                     CGEventTapEnable(mach_port, true);
-
-                    eprintln!("[SnapDoc][keystroke] CGEventTap đã bật thành công trên CFRunLoop!");
                     let _ = init_tx.send(Ok(()));
 
-                    while !stopped_clone.load(Ordering::Relaxed) {
-                        CFRunLoopRun();
-                        break;
+                    // Chạy run loop từng lát 100ms rồi kiểm tra cờ dừng — bản cũ
+                    // `CFRunLoopRun` + `CFRunLoopStop` từ thread khác có race (dừng
+                    // trước khi run loop chạy → treo vĩnh viễn) và dùng con trỏ run
+                    // loop của 1 thread có thể đã kết thúc.
+                    while !stopped_clone.load(Ordering::SeqCst) {
+                        if CFRunLoopRunInMode(mode, 0.1, 0) == RUN_FINISHED {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
                     }
 
-                    CFRunLoopRemoveSource(cur_rl, source, core_foundation_sys::runloop::kCFRunLoopCommonModes as *const c_void);
+                    CGEventTapEnable(mach_port, false);
+                    CFRunLoopRemoveSource(cur_rl, source, mode);
+                    CFMachPortInvalidate(mach_port);
                     CFRelease(source);
                     CFRelease(mach_port);
-                    eprintln!("[SnapDoc][keystroke] CGEventTap đã giải phóng sạch sẽ.");
                 })
                 .map_err(|e| format!("Không khởi động được thread nghe phím: {e}"))?;
 
             match init_rx.recv() {
                 Ok(Ok(())) => Ok(KeystrokeListener {
-                    run_loop,
                     stopped,
                     thread_handle: Some(thread_handle),
                 }),
@@ -292,13 +311,6 @@ mod macos {
 
         pub fn stop(&mut self) {
             self.stopped.store(true, Ordering::SeqCst);
-            if let Ok(mut g) = self.run_loop.lock() {
-                if let Some(rl_usize) = g.take() {
-                    unsafe {
-                        CFRunLoopStop(rl_usize as *mut c_void);
-                    }
-                }
-            }
             if let Some(handle) = self.thread_handle.take() {
                 let _ = handle.join();
             }
@@ -325,8 +337,19 @@ mod windows {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-    static APP_HANDLE_FOR_HOOK: Mutex<Option<AppHandle>> = Mutex::new(None);
-    static mut HOOK_HANDLE: HHOOK = std::ptr::null_mut();
+    /// (thế hệ listener, app) — thread hook cũ không dừng kịp không được xoá
+    /// app của listener mới.
+    static APP_HANDLE_FOR_HOOK: Mutex<Option<(u64, AppHandle)>> = Mutex::new(None);
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn clear_app_if(gen: u64) {
+        let mut g = APP_HANDLE_FOR_HOOK.lock().unwrap_or_else(|p| p.into_inner());
+        if g.as_ref().map(|(g0, _)| *g0 == gen).unwrap_or(false) {
+            *g = None;
+        }
+    }
+    /// Phím đang được giữ — chỉ hiển thị lần nhấn đầu, bỏ keydown lặp (auto-repeat).
+    static mut KEYS_DOWN: [bool; 256] = [false; 256];
 
     pub struct KeystrokeListener {
         thread_id: u32,
@@ -370,9 +393,21 @@ mod windows {
         w_param: WPARAM,
         l_param: LPARAM,
     ) -> LRESULT {
+        if n_code >= 0 && (w_param == WM_KEYUP as usize || w_param == WM_SYSKEYUP as usize) {
+            let vk = (*(l_param as *const KBDLLHOOKSTRUCT)).vkCode as usize;
+            if vk < 256 {
+                KEYS_DOWN[vk] = false;
+            }
+        }
         if n_code >= 0 && (w_param == WM_KEYDOWN as usize || w_param == WM_SYSKEYDOWN as usize) {
             let kbd = *(l_param as *const KBDLLHOOKSTRUCT);
             let vk = kbd.vkCode;
+            if (vk as usize) < 256 {
+                if KEYS_DOWN[vk as usize] {
+                    return CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param);
+                }
+                KEYS_DOWN[vk as usize] = true;
+            }
 
             let mut modifiers = Vec::new();
             if (GetAsyncKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0 {
@@ -396,7 +431,7 @@ mod windows {
                 let label = parts.join(" + ");
 
                 if let Ok(guard) = APP_HANDLE_FOR_HOOK.lock() {
-                    if let Some(app) = guard.as_ref() {
+                    if let Some((_, app)) = guard.as_ref() {
                         let payload = KeystrokePayload {
                             key: key_name.to_string(),
                             modifiers,
@@ -408,7 +443,8 @@ mod windows {
             }
         }
 
-        CallNextHookEx(HOOK_HANDLE, n_code, w_param, l_param)
+        // Tham số hook đầu tiên bị bỏ qua từ Windows NT — không cần handle toàn cục.
+        CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
     }
 
     impl KeystrokeListener {
@@ -416,12 +452,14 @@ mod windows {
             let (tx, rx) = std::sync::mpsc::channel::<Result<u32, String>>();
             let stopped = Arc::new(AtomicBool::new(false));
 
+            let gen = GEN.fetch_add(1, Ordering::SeqCst) + 1;
             let thread_handle = thread::Builder::new()
                 .name("snapdoc-win-keystroke".to_string())
                 .spawn(move || unsafe {
                     if let Ok(mut g) = APP_HANDLE_FOR_HOOK.lock() {
-                        *g = Some(app);
+                        *g = Some((gen, app));
                     }
+                    KEYS_DOWN = [false; 256];
                     let hook = SetWindowsHookExW(
                         WH_KEYBOARD_LL,
                         Some(low_level_keyboard_proc),
@@ -430,11 +468,11 @@ mod windows {
                     );
 
                     if hook.is_null() {
+                        clear_app_if(gen);
                         let _ = tx.send(Err("Không thiết lập được Windows Keyboard Hook".to_string()));
                         return;
                     }
 
-                    HOOK_HANDLE = hook;
                     let thread_id = windows_sys::Win32::System::Threading::GetCurrentThreadId();
                     let _ = tx.send(Ok(thread_id));
 
@@ -444,11 +482,8 @@ mod windows {
                         DispatchMessageW(&msg);
                     }
 
-                    UnhookWindowsHookEx(HOOK_HANDLE);
-                    HOOK_HANDLE = std::ptr::null_mut();
-                    if let Ok(mut g) = APP_HANDLE_FOR_HOOK.lock() {
-                        *g = None;
-                    }
+                    UnhookWindowsHookEx(hook);
+                    clear_app_if(gen);
                 })
                 .map_err(|e| format!("Không khởi động được thread nghe phím: {e}"))?;
 
@@ -465,14 +500,33 @@ mod windows {
 
         pub fn stop(&mut self) {
             if !self.stopped.swap(true, Ordering::SeqCst) {
-                unsafe {
-                    PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0);
-                }
+                let posted = post_quit(self.thread_id);
                 if let Some(handle) = self.thread_handle.take() {
-                    let _ = handle.join();
+                    if posted {
+                        let _ = handle.join();
+                    } else {
+                        // Không gửi được WM_QUIT — không join (tránh treo cả luồng dừng quay).
+                        eprintln!("[SnapDoc][keystroke] Không dừng được thread hook bàn phím");
+                    }
                 }
             }
         }
+    }
+
+    /// Gửi `WM_QUIT` tới thread hook (có thử lại: hàng đợi message của thread
+    /// có thể chưa sẵn sàng ngay). `false` nếu không gửi được — caller KHÔNG
+    /// được `join()` (sẽ chờ vô hạn).
+    pub(crate) fn post_quit(thread_id: u32) -> bool {
+        if thread_id == 0 {
+            return false;
+        }
+        for _ in 0..50 {
+            if unsafe { PostThreadMessageW(thread_id, WM_QUIT, 0, 0) } != 0 {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
     }
 
     impl Drop for KeystrokeListener {

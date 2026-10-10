@@ -94,13 +94,23 @@ pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
     };
     let version = update.version.clone();
     eprintln!("[SnapDoc][update] silent download+install started for v{version}");
-    update
-        .download_and_install(
+    let bytes = update
+        .download(
             |_chunk, _total| {},
             || { eprintln!("[SnapDoc][update] download finished, installing…"); },
         )
         .await
         .map_err(|e| {
+            eprintln!("[SnapDoc][update] silent download failed: {e}");
+            e.to_string()
+        })?;
+    // Trên Windows, `install` chạy installer rồi `std::process::exit(0)` NGAY
+    // LẬP TỨC — cài giữa lúc đang quay là mất bản quay. Chờ phiên quay (nếu có)
+    // kết thúc hẳn rồi mới cài.
+    while crate::record::is_busy(&app) {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    update.install(bytes).map_err(|e| {
             eprintln!("[SnapDoc][update] silent install failed: {e}");
             e.to_string()
         })?;
@@ -118,7 +128,15 @@ pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
 }
 
 async fn fetch(app: &AppHandle) -> tauri_plugin_updater::Result<Option<Update>> {
-    app.updater()?.check().await
+    // Windows: installer thoát app bằng `std::process::exit(0)` — không qua
+    // `ExitRequested`/`Exit` của Tauri. Hook này là cơ hội cuối để chốt bản
+    // quay đang chạy/đang lưu dở (no-op nếu không quay).
+    let handle = app.clone();
+    app.updater_builder()
+        .on_before_exit(move || crate::record::finalize_on_exit(&handle))
+        .build()?
+        .check()
+        .await
 }
 
 /// Summary of the currently cached pending update, if any. Lets the update

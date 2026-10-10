@@ -109,6 +109,20 @@ pub fn find_history_item_by_asset_path_sync(app: &AppHandle, asset_path: &str) -
     }
 }
 
+/// Trỏ MỌI bản ghi (kể cả đang ở Trash) đang dùng file `old_path` sang
+/// `new_path` — dùng khi chuyển video khỏi thư mục tạm cũ (xem
+/// `record::session::migrate_legacy_temp`). Trả số bản ghi đã cập nhật.
+pub fn relink_video_asset_sync(app: &AppHandle, old_path: &str, new_path: &str) -> Result<usize, String> {
+    let file_size = std::fs::metadata(new_path).ok().map(|m| m.len() as i64);
+    let st = state(app)?;
+    let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+    conn.execute(
+        "UPDATE history SET asset_path = ?1, file_size = ?2, updated_at = ?3 WHERE asset_path = ?4",
+        rusqlite::params![new_path, file_size, now_ms(), old_path],
+    )
+    .map_err(|e| format!("Cập nhật đường dẫn video thất bại: {e}"))
+}
+
 fn delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let st = state(app)?;
     let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
@@ -140,8 +154,9 @@ fn permanently_delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(),
             }
         }
     }
-    let telem_path = crate::record::mouse_click::telemetry_path_for_video(app, std::path::Path::new(&rec.asset_path));
-    if telem_path.exists() {
+    // Dò CHẶT (không quét theo tiền tên): `Recording_T` không được xoá nhầm
+    // telemetry của `Recording_T_1`.
+    if let Some(telem_path) = crate::record::mouse_click::telemetry_path_strict(app, std::path::Path::new(&rec.asset_path)) {
         let _ = std::fs::remove_file(&telem_path);
     }
     let legacy_telem = std::path::Path::new(&rec.asset_path).with_extension("mouse.json");
