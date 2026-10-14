@@ -827,12 +827,18 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
 
 /// Restart the app immediately — used after a silent background update has been
 /// installed and the user confirms via Settings or tray.
+/// `async` + thread nền: `finalize_on_exit` có thể phải lưu xong 1 bản quay
+/// (vài giây tới vài chục giây) — command `fn` thường chạy trên MAIN THREAD
+/// sẽ đứng hình toàn app trong lúc đó.
 #[tauri::command]
-pub fn restart_app(app: AppHandle) {
-    // Cùng lý do với tray "Quit": nếu đang quay, dừng sạch trước để không
-    // giết ffmpeg giữa chừng (mp4 hỏng) — xem `record::finalize_on_exit`.
-    crate::record::finalize_on_exit(&app);
-    app.restart();
+pub async fn restart_app(app: AppHandle) {
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        // Cùng lý do với tray "Quit": nếu đang quay, dừng sạch trước để không
+        // giết ffmpeg giữa chừng — xem `record::finalize_on_exit`.
+        crate::record::finalize_on_exit(&app);
+        app.restart();
+    })
+    .await;
 }
 
 #[tauri::command]
@@ -1293,9 +1299,14 @@ pub fn open_video_file_path_sync(app: &AppHandle, path: String) -> Result<(), St
 }
 
 /// Command mở file video từ frontend (khi kéo thả Drag & Drop vào Editor).
+/// `async` + `spawn_blocking`: file .mkv/.avi phải remux/transcode bằng ffmpeg
+/// (có thể mất vài phút) — command `fn` thường chạy trên MAIN THREAD, đứng
+/// hình toàn app trong suốt thời gian đó.
 #[tauri::command]
-pub fn open_video_file_path(app: AppHandle, path: String) -> Result<(), String> {
-    open_video_file_path_sync(&app, path)
+pub async fn open_video_file_path(app: AppHandle, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_video_file_path_sync(&app, path))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// macOS: cửa sổ editor "Open with" tự kéo PendingVideo của nó lúc mount.

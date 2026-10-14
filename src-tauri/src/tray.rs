@@ -5,7 +5,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{TrayIcon, TrayIconBuilder},
-    AppHandle, Emitter, Manager,
+    AppHandle, Manager,
 };
 
 /// Track whether the "restart to update" item should be shown in tray menu.
@@ -266,32 +266,51 @@ fn build_recording_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, tauri::Erro
     Menu::with_items(app, &[&pause_item, &stop_item])
 }
 
+// ── Đồng bộ hoá icon "đang quay" ──────────────────────────────────────────
+//
+// MỌI thao tác với `RECORDING_TRAY` (tạo, đổi title/menu, gỡ) đều chạy TRÊN
+// MAIN THREAD qua `run_on_main_thread` (gửi đi, không chờ). Bản cũ giữ mutex
+// này ở thread nền trong lúc gọi các API tray của Tauri — vốn CHẶN chờ main
+// thread (`run_item_main_thread!`, `TrayIconBuilder::build`) — trong khi
+// `hide_recording_tray` lại chạy trên main thread và lock cùng mutex →
+// deadlock vĩnh viễn (app đứng hình, phải force quit) nếu bấm Dừng đúng lúc
+// tray đang được dựng (Windows ~760ms) hoặc đúng nhịp cập nhật đồng hồ.
+// Chạy tuần tự trên main thread còn đảm bảo: bản clone CUỐI của `TrayIcon`
+// luôn bị drop trên main thread (AppKit yêu cầu khi gỡ NSStatusItem).
+
 /// Cập nhật menu recording tray (sau khi pause/resume) để đổi label.
-fn update_recording_tray_menu(app: &AppHandle) {
-    if let Ok(guard) = RECORDING_TRAY.lock() {
+pub fn update_recording_tray_menu(app: &AppHandle) {
+    let app_c = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let guard = RECORDING_TRAY.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tray) = guard.as_ref() {
-            if let Ok(menu) = build_recording_menu(app) {
+            if let Ok(menu) = build_recording_menu(&app_c) {
                 let _ = tray.set_menu(Some(menu));
             }
         }
-    }
+    });
 }
 
-/// Hiện icon "đang quay" riêng biệt trên menu bar — gọi từ
-/// `record::start_recording` ngay sau khi phiên quay khởi động thành công.
-/// Menu có 2 item: Pause/Resume (toggle) và Stop Recording.
+/// Hiện icon "đang quay" riêng biệt trên menu bar — gọi sau khi phiên quay
+/// khởi động thành công. Menu có 2 item: Pause/Resume (toggle) và Stop Recording.
 pub fn show_recording_tray(app: &AppHandle) {
-    let mut guard = match RECORDING_TRAY.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
+    let app_c = app.clone();
+    let _ = app.run_on_main_thread(move || show_recording_tray_on_main(&app_c));
+}
+
+fn show_recording_tray_on_main(app: &AppHandle) {
+    let mut guard = RECORDING_TRAY.lock().unwrap_or_else(|p| p.into_inner());
     if guard.is_some() {
-        return; // đã hiện rồi (phòng gọi start 2 lần)
+        return; // đã hiện rồi
+    }
+    // Phiên quay đã dừng trước khi tới lượt (hide chạy trước) → không tạo nữa.
+    if crate::record::phase(app) != crate::record::Phase::Recording {
+        return;
     }
     let lang = current_lang(app);
     let rgba = recording_dot_rgba();
     let icon = Image::new(&rgba, DOT_SIZE, DOT_SIZE);
-    
+
     // Tạo menu cho recording tray: Pause/Resume + Stop
     let menu = match build_recording_menu(app) {
         Ok(m) => Some(m),
@@ -300,81 +319,66 @@ pub fn show_recording_tray(app: &AppHandle) {
             None
         }
     };
-    
+
     let mut builder = TrayIconBuilder::with_id("recording-tray")
         .icon(icon)
         .icon_as_template(false)
         .tooltip(tr(&lang, "recordingTooltip"));
-    
+
     if let Some(ref m) = menu {
         builder = builder.menu(m);
     }
-    
+
     let result = builder
-        .on_menu_event(|app, event| {
-            match event.id().as_ref() {
-                "pause-resume-recording" => {
-                    let app_clone = app.clone();
-                    std::thread::spawn(move || {
-                        let paused = crate::record::paused_state(&app_clone).unwrap_or(false);
-                        let result = if paused {
-                            crate::record::resume_recording(&app_clone)
-                        } else {
-                            crate::record::pause_recording(&app_clone)
-                        };
-                        if let Err(e) = result {
-                            eprintln!("[SnapDoc][record] Pause/resume từ tray thất bại: {e}");
-                        }
-                        // Rebuild menu để cập nhật label "Pause" <-> "Resume"
-                        update_recording_tray_menu(&app_clone);
-                    });
-                }
-                "stop-recording-tray" => {
-                    let app_clone = app.clone();
-                    std::thread::spawn(move || {
-                        if let Err(e) = crate::record::stop_recording(&app_clone) {
-                            eprintln!("[SnapDoc][record] Dừng quay từ tray menu thất bại: {e}");
-                            let lang = current_lang(&app_clone);
-                            let vi = lang != "en";
-                            let msg = if vi { format!("Dừng quay thất bại: {e}") } else { format!("Stop recording failed: {e}") };
-                            let _ = app_clone.emit("snapdoc-error", msg);
-                        }
-                    });
-                }
-                _ => {}
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "pause-resume-recording" => {
+                let app_clone = app.clone();
+                std::thread::spawn(move || {
+                    let paused = crate::record::paused_state(&app_clone).unwrap_or(false);
+                    let result = if paused {
+                        crate::record::resume_recording(&app_clone)
+                    } else {
+                        crate::record::pause_recording(&app_clone)
+                    };
+                    if let Err(e) = result {
+                        eprintln!("[SnapDoc][record] Pause/resume từ tray thất bại: {e}");
+                    }
+                });
             }
+            "stop-recording-tray" => {
+                let app_clone = app.clone();
+                // `stop_recording` tự báo lỗi cho người dùng nếu lưu thất bại.
+                std::thread::spawn(move || {
+                    if let Err(e) = crate::record::stop_recording(&app_clone) {
+                        eprintln!("[SnapDoc][record] Dừng quay từ tray menu thất bại: {e}");
+                    }
+                });
+            }
+            _ => {}
         })
         .build(app);
     match result {
-        Ok(tray) => {
-            // Kiểm tra an toàn: nếu phiên quay đã bị dừng trong lúc build tray, dọn dẹp ngay lập tức
-            if crate::record::status(app).is_none() {
-                drop(tray);
-                let _ = app.remove_tray_by_id("recording-tray");
-            } else {
-                *guard = Some(tray);
-            }
-        }
+        Ok(tray) => *guard = Some(tray),
         Err(e) => {
-            // Trước đây chỉ `eprintln!` (vô hình trong bản đóng gói, không có
-            // console đính kèm) — quay vẫn chạy (file vẫn ghi) nhưng người
-            // dùng không thấy DẤU HIỆU nào là đang quay. Emit qua kênh lỗi
-            // chung (CaptureBar.tsx lắng `snapdoc-error`) để ít nhất còn 1
-            // thông báo hiện ra thay vì im lặng hoàn toàn.
-            eprintln!("[SnapDoc][record] Không tạo được tray icon quay: {e}");
+            drop(guard);
             let vi = lang != "en";
-            let msg = if vi { format!("Đang quay nhưng không hiện được icon trên tray: {e}") } else { format!("Recording but couldn't show tray icon: {e}") };
-            let _ = app.emit("snapdoc-error", msg);
+            let msg = if vi {
+                format!("Đang quay nhưng không hiện được icon trên tray: {e}")
+            } else {
+                format!("Recording but couldn't show tray icon: {e}")
+            };
+            crate::notify::warning(app, &msg);
         }
     }
 }
 
-/// Cập nhật đồng hồ đếm cạnh icon "đang quay" — gọi mỗi giây từ ticker trong
-/// `record::start_recording`. No-op nếu icon chưa/không còn hiện.
+/// Cập nhật đồng hồ đếm cạnh icon "đang quay" — gọi mỗi giây từ ticker của
+/// phiên quay. No-op nếu icon chưa/không còn hiện.
 /// Trên macOS cập nhật text title cạnh icon menu bar.
 /// Trên Windows cập nhật tooltip khi hover chuột vào tray icon.
-pub fn update_recording_time(elapsed_ms: u64) {
-    if let Ok(guard) = RECORDING_TRAY.lock() {
+pub fn update_recording_time(app: &AppHandle, elapsed_ms: u64) {
+    let _ = app.run_on_main_thread(move || {
+        let guard = RECORDING_TRAY.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tray) = guard.as_ref() {
             let elapsed = format_elapsed(elapsed_ms);
             #[cfg(target_os = "macos")]
@@ -382,42 +386,41 @@ pub fn update_recording_time(elapsed_ms: u64) {
             #[cfg(not(target_os = "macos"))]
             let _ = tray.set_tooltip(Some(format!("SnapDoc — {elapsed}")));
         }
-    }
+    });
 }
 
-/// Ẩn icon "đang quay" NGAY LẬP TỨC — gọi từ `record::stop_recording`.
+/// Chuyển icon "đang quay" sang trạng thái "Đang lưu…" trong lúc hoàn tất file
+/// (ghép audio, remux) — có thể mất vài giây với bản quay dài; không có phản
+/// hồi này người dùng tưởng chưa dừng và bấm quay lại. Bỏ menu (không còn gì
+/// để pause/dừng). Icon được gỡ hẳn bằng `hide_recording_tray` khi lưu xong.
+pub fn set_recording_tray_saving(app: &AppHandle) {
+    let lang = current_lang(app);
+    let _ = app.run_on_main_thread(move || {
+        let guard = RECORDING_TRAY.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(tray) = guard.as_ref() {
+            let vi = lang != "en";
+            let label = if vi { "Đang lưu bản quay…" } else { "Saving recording…" };
+            let _ = tray.set_menu(None::<Menu<tauri::Wry>>);
+            #[cfg(target_os = "macos")]
+            let _ = tray.set_title(Some(if vi { "Đang lưu…" } else { "Saving…" }));
+            let _ = tray.set_tooltip(Some(format!("SnapDoc — {label}")));
+        }
+    });
+}
+
+/// Ẩn icon "đang quay" — gọi từ `record::stop_recording`.
 ///
-/// GỐC RỄ thật sự (2 lớp, phải xử lý cả 2):
-///
-/// 1) `tray_icon::TrayIcon` bên trong chỉ là 1 handle đếm tham chiếu
-///    (`Rc<RefCell<..>>`) — icon chỉ thật sự bị gỡ khỏi menu bar khi CLONE
-///    CUỐI CÙNG bị drop. Nhưng `TrayIconBuilder::build()` của Tauri tự giữ
-///    thêm 1 bản clone trong `resources_table` nội bộ (để `app.tray_by_id()`
-///    tra cứu được sau này) — bản clone đó KHÔNG do ta nắm giữ. Vì vậy chỉ
-///    `.take()` bản trong `RECORDING_TRAY` static (bản clone của TA) không
-///    bao giờ đưa refcount về 0 → `Drop` (và do đó
-///    `NSStatusBar.removeStatusItem`) không bao giờ chạy → icon kẹt vĩnh
-///    viễn trên menu bar bất kể gọi từ thread nào. Phải gọi
-///    `app.remove_tray_by_id(...)` để Tauri tự rút bản clone của NÓ ra khỏi
-///    resources_table trước, thì tổng refcount mới có thể về 0.
-///
-/// 2) Trên macOS, `Drop` của `TrayIcon` gọi thẳng
-///    `NSStatusBar.removeStatusItem` KHÔNG qua main-thread dispatch (khác
-///    với các method khác như `set_title`/`set_icon` — Tauri tự marshal qua
-///    `run_on_main_thread` nội bộ cho các method đó). `stop_recording` luôn
-///    chạy trên 1 thread nền (tray click handler / hotkey đều
-///    `std::thread::spawn`), nên vẫn phải ép toàn bộ việc gỡ (cả bước 1 lẫn
-///    việc drop clone cuối) chạy trên main thread.
+/// `tray_icon::TrayIcon` chỉ thật sự bị gỡ khỏi menu bar khi CLONE CUỐI CÙNG
+/// bị drop, mà `TrayIconBuilder::build()` của Tauri tự giữ thêm 1 bản clone
+/// trong `resources_table` — phải `remove_tray_by_id` để rút bản đó ra rồi
+/// mới drop bản của ta (đều trên main thread, xem ghi chú đầu mục).
 pub fn hide_recording_tray(app: &AppHandle) {
     let app_for_closure = app.clone();
     let _ = app.run_on_main_thread(move || {
         let app = app_for_closure;
-        // Rút bản clone Tauri tự giữ trong resources_table ra trước (và drop
-        // luôn — không gán biến) — thiếu bước này thì bước bên dưới vô nghĩa.
         app.remove_tray_by_id("recording-tray");
-        if let Ok(mut guard) = RECORDING_TRAY.lock() {
-            guard.take();
-        }
+        let tray = RECORDING_TRAY.lock().unwrap_or_else(|p| p.into_inner()).take();
+        drop(tray);
     });
 }
 

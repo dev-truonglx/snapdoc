@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
+import { showError } from "../../lib/notify";
 
 /** Payload của event `recording-tick` từ Rust — cùng struct `RecordingTick`. */
 interface RecordingTick {
@@ -63,8 +64,9 @@ export default function RecordStopControl() {
     try {
       await ipc.stopRecording();
     } catch (e) {
+      // Lỗi lưu bản quay đã được Rust báo bằng hộp thoại native — chỉ log ở đây.
       setBusy(false);
-      alert(String(e));
+      console.error("[SnapDoc] stop_recording:", e);
     }
   };
 
@@ -79,7 +81,7 @@ export default function RecordStopControl() {
       }
       // Trạng thái sẽ được cập nhật qua recording-tick, không cần set ở đây.
     } catch (e) {
-      alert(String(e));
+      showError(e);
     } finally {
       setPauseBusy(false);
     }

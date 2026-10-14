@@ -2,6 +2,7 @@ import { Component, ReactNode, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
+import { showError } from "../../lib/notify";
 
 /** `93500` → `"01:33"` — mm:ss, luôn 2 chữ số. */
 function fmt(ms: number): string {
@@ -59,7 +60,7 @@ class IndicatorErrorBoundary extends Component<{ children: ReactNode }, ErrorBou
 /** Popup nổi "đang quay" trên Windows (xem `windows::open_recording_indicator`)
  * — thay cho vai trò của `NSStatusItem.title` bên macOS (hiện đồng hồ đếm
  * ngay cạnh icon tray), vì tray icon Win32 không có API tương đương. Lắng
- * nghe event `recording-tick` (do `record::spawn_tray_ticker` bắn mỗi giây)
+ * nghe event `recording-tick` (do ticker trạng thái trong `record::mod` bắn mỗi giây)
  * thay vì tự poll `recording_status` riêng 1 vòng lặp khác.
  *
  * Layout: [⠿ Grip] [⏸/▶ Pause] [divider] [● 00:00] [divider] [■ Stop] [spacer]
@@ -91,6 +92,12 @@ function RecordingIndicatorContent() {
       }
     });
 
+    // Đổi trạng thái pause từ BẤT KỲ đâu (tray, nút ở đây...) phản ánh ngay —
+    // không phải chờ tick 1 giây (bấm 2 lần nhanh trước đây lặp lại cùng 1 lệnh).
+    const unlistenPaused = listen<boolean>("recording-paused", (e) => {
+      if (!cancelled) setPaused(e.payload);
+    });
+
     const unlistenReset = listen("recording-indicator-reset", () => {
       if (!cancelled) {
         setElapsedMs(0);
@@ -109,6 +116,7 @@ function RecordingIndicatorContent() {
     return () => {
       cancelled = true;
       unlistenTick.then((f) => f());
+      unlistenPaused.then((f) => f());
       unlistenReset.then((f) => f());
     };
   }, []);
@@ -116,16 +124,21 @@ function RecordingIndicatorContent() {
   const togglePause = () => {
     if (pauseBusy || stopping) return;
     setPauseBusy(true);
+    const next = !paused;
     const action = paused ? ipc.resumeRecording() : ipc.pauseRecording();
-    action.catch((e) => { alert(String(e)); }).finally(() => setPauseBusy(false));
+    action
+      .then(() => setPaused(next))
+      .catch((e) => showError(e))
+      .finally(() => setPauseBusy(false));
   };
 
   const stop = () => {
     if (stopping) return;
     setStopping(true);
+    // Lỗi lưu bản quay đã được Rust báo bằng hộp thoại native — chỉ log ở đây.
     ipc.stopRecording()
       .catch((e) => {
-        alert(String(e));
+        console.error("[SnapDoc] stop_recording:", e);
         setStopping(false);
       });
   };

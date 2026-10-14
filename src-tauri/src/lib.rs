@@ -5,6 +5,7 @@ mod flow;
 mod history;
 mod hotkey;
 mod input;
+mod notify;
 mod permissions;
 mod record;
 mod snapdoc_file;
@@ -218,6 +219,10 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
+            // Mọi `emit("snapdoc-error", ...)` (Rust lẫn webview) → hộp thoại
+            // native. Trước đây CaptureBar `alert()` — không hiện gì trên macOS.
+            notify::install_error_bridge(&handle);
+
             // Windows: phát hiện khởi chạy qua "Open with" (argv[1] là ảnh).
             // macOS dùng RunEvent::Opened trên instance đang chạy → không qua đây.
             #[cfg(target_os = "windows")]
@@ -332,9 +337,6 @@ pub fn run() {
             }
             // Pre-warm thumbnail (ẩn) → hiển thị tức thì sau khi chụp.
             let _ = windows::prewarm_thumbnail(&handle);
-            // Pre-warm thanh "Dừng quay" (ẩn) → lần bắt đầu quay vùng chọn đầu
-            // tiên hiện tức thì, không chờ tải webview mới.
-            let _ = windows::prewarm_stop_control(&handle);
             // Pre-warm popup "đang quay" (ẩn) trên Windows → popup điều khiển thời gian hiện tức thì.
             let _ = windows::prewarm_recording_indicator(&handle);
 
@@ -486,6 +488,14 @@ pub fn run() {
                         api.prevent_exit();
                     }
                 }
+                // Process sắp kết thúc. macOS: Cmd+Q (menu app mặc định), Dock →
+                // Quit, đăng xuất/tắt máy đi thẳng `applicationWillTerminate` →
+                // `Exit`, KHÔNG qua `ExitRequested` hay menu tray "Quit" — nên
+                // phải chốt bản quay đang chạy/đang lưu dở ngay tại đây, không
+                // thì mất (no-op nếu không quay hoặc đã chốt ở "Quit").
+                tauri::RunEvent::Exit => {
+                    record::finalize_on_exit(_app);
+                }
                 // macOS: click dock icon / Spotlight search khi app đang chạy.
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen { has_visible_windows, .. } => {
@@ -528,7 +538,11 @@ pub fn run() {
                                         eprintln!("[SnapDoc] Pre-adding asset scope for video: {}", parent.display());
                                         let _ = _app.asset_protocol_scope().allow_directory(parent, true);
                                     }
-                                    let _ = commands::open_video_file_path_sync(_app, path_str);
+                                    // Remux/transcode có thể mất vài phút — không chặn main thread.
+                                    let h = _app.clone();
+                                    std::thread::spawn(move || {
+                                        let _ = commands::open_video_file_path_sync(&h, path_str);
+                                    });
                                 }
                             }
                         }

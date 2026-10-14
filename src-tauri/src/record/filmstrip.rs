@@ -15,19 +15,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Mutex;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-fn configure_no_window(#[allow(unused_variables)] cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-}
 
 /// Trích xuất 1 frame bằng Fast Seeking (`-ss` trước `-i`), xuất trực tiếp ảnh
 /// JPEG qua stdout pipe (zero disk I/O, không tạo file tạm).
@@ -51,25 +40,20 @@ fn extract_one_frame(ffmpeg: &Path, mp4_path: &Path, timestamp_ms: i64, scale_w:
             "-q:v",
             "3",
             "pipe:1",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    configure_no_window(&mut cmd);
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        ]);
+    // Có timeout: 1 lần ffmpeg treo (file trên ổ mạng mất kết nối...) từng
+    // làm filmstrip đứng mãi vì VideoTrimmer chỉ gửi 1 yêu cầu mỗi lúc.
+    let (status, stdout, stderr) = super::proc::run_raw(&mut cmd, std::time::Duration::from_secs(20))
+        .map_err(|e| format!("ffmpeg trích frame @{timestamp_ms}ms: {e}"))?;
+    if !status.success() {
         return Err(format!("ffmpeg trích frame @{timestamp_ms}ms thất bại: {stderr}"));
     }
 
-    if output.stdout.is_empty() {
+    if stdout.is_empty() {
         return Err(format!("ffmpeg không xuất được dữ liệu frame @{timestamp_ms}ms"));
     }
 
-    Ok(output.stdout)
+    Ok(stdout)
 }
 
 /// Trích 1 frame JPEG gần mỗi mốc trong `timestamps_ms` nhất có thể.

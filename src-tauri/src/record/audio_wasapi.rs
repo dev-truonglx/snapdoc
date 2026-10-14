@@ -20,8 +20,12 @@
 //! drop) — bên ngoài chỉ cầm `JoinHandle` + `Sender<()>` để báo dừng.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread::JoinHandle;
+
+use super::pcm_writer::PcmChunk;
 
 /// Tay cầm 1 phiên ghi audio hệ thống đang chạy — gọi `stop()` để dừng, cùng
 /// vai trò `MicCapture::stop()` bên `audio_mic.rs`.
@@ -38,11 +42,12 @@ impl SystemAudioCapture {
 }
 
 /// Bắt đầu ghi audio hệ thống (loopback trên thiết bị phát mặc định). Trả về
-/// tay cầm điều khiển + `Receiver<Vec<u8>>` PCM i16 interleaved + sample
-/// rate/số kênh THẬT của thiết bị (không cố định như audio hệ thống bên
-/// macOS — Windows không có API cấu hình cứng format như
-/// `SCStreamConfiguration`, `encoder::mux_audio` đã nhận tham số này động).
-pub fn start() -> Result<(SystemAudioCapture, mpsc::Receiver<Vec<u8>>, u32, u16), String> {
+/// tay cầm + `Receiver<PcmChunk>` (thời điểm thu + PCM s16le) + sample rate/số kênh THẬT
+/// + cờ "thiết bị lỗi giữa chừng".
+///
+/// LƯU Ý: WASAPI loopback KHÔNG gửi gói nào khi không có âm thanh đang phát —
+/// `record::pcm_writer` bám đồng hồ của phiên quay để chèn lặng đúng chỗ đó.
+pub fn start() -> Result<(SystemAudioCapture, mpsc::Receiver<PcmChunk>, u32, u16, Arc<AtomicBool>), String> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -53,81 +58,39 @@ pub fn start() -> Result<(SystemAudioCapture, mpsc::Receiver<Vec<u8>>, u32, u16)
 
     let sample_rate = config.sample_rate();
     let channels = config.channels();
-    let sample_format = config.sample_format();
 
-    // Đợi thread dựng xong stream rồi mới trả `start()` về cho caller — nếu
-    // build lỗi (vd cpal không hỗ trợ loopback trên thiết bị/driver này), báo
-    // lỗi NGAY thay vì để caller tưởng đã chạy trong khi thread nền đã chết.
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
-    let (pcm_tx, pcm_rx) = mpsc::sync_channel::<Vec<u8>>(200);
+    let (pcm_tx, pcm_rx) = mpsc::sync_channel::<PcmChunk>(200);
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let device_error = Arc::new(AtomicBool::new(false));
+    let err_flag = device_error.clone();
 
-    let thread = std::thread::spawn(move || {
-        let err_fn = |e: cpal::Error| {
-            eprintln!("[SnapDoc][record] Lỗi luồng audio hệ thống: {e}");
-        };
-        let stream_config: cpal::StreamConfig = config.into();
-
-        // Gọi `build_input_stream` trên thiết bị OUTPUT — chính là "mẹo"
-        // loopback của cpal (xem doc-comment đầu file).
-        let stream_result = match sample_format {
-            cpal::SampleFormat::F32 => device.build_input_stream(
-                stream_config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    let mut bytes = Vec::with_capacity(data.len() * 2);
-                    for &s in data {
-                        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                        bytes.extend_from_slice(&v.to_le_bytes());
-                    }
-                    let _ = pcm_tx.try_send(bytes);
-                },
-                err_fn,
-                None,
-            ),
-            cpal::SampleFormat::I16 => device.build_input_stream(
-                stream_config,
-                move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    let mut bytes = Vec::with_capacity(data.len() * 2);
-                    for &s in data {
-                        bytes.extend_from_slice(&s.to_le_bytes());
-                    }
-                    let _ = pcm_tx.try_send(bytes);
-                },
-                err_fn,
-                None,
-            ),
-            other => {
-                let _ = ready_tx.send(Err(format!("Định dạng audio hệ thống không hỗ trợ: {other:?}")));
+    let thread = std::thread::Builder::new()
+        .name("snapdoc-system-audio".into())
+        .spawn(move || {
+            // Gọi `build_input_stream` trên thiết bị OUTPUT — chính là "mẹo"
+            // loopback của cpal (xem doc-comment đầu file).
+            let stream = match super::audio_mic::build_pcm_input_stream(&device, config, pcm_tx, err_flag, "âm thanh hệ thống") {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("{e} (loopback)")));
+                    return;
+                }
+            };
+            if let Err(e) = stream.play() {
+                let _ = ready_tx.send(Err(format!("Không bắt đầu ghi audio hệ thống: {e}")));
                 return;
             }
-        };
-
-        let stream = match stream_result {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = ready_tx.send(Err(format!(
-                    "Không tạo được luồng ghi audio hệ thống (loopback): {e}"
-                )));
-                return;
-            }
-        };
-
-        if let Err(e) = stream.play() {
-            let _ = ready_tx.send(Err(format!("Không bắt đầu ghi audio hệ thống: {e}")));
-            return;
-        }
-
-        let _ = ready_tx.send(Ok(()));
-
-        // Giữ `stream` sống tới khi có tín hiệu dừng — drop ở cuối scope này
-        // tự dừng WASAPI capture client.
-        let _ = stop_rx.recv();
-        drop(stream);
-    });
+            let _ = ready_tx.send(Ok(()));
+            // Giữ `stream` sống tới khi có tín hiệu dừng — drop tự dừng WASAPI capture client.
+            let _ = stop_rx.recv();
+            drop(stream);
+        })
+        .map_err(|e| format!("Không tạo được thread ghi audio hệ thống: {e}"))?;
 
     ready_rx
         .recv()
         .map_err(|_| "Luồng ghi audio hệ thống bị panic lúc khởi động".to_string())??;
 
-    Ok((SystemAudioCapture { stop_tx, thread }, pcm_rx, sample_rate, channels))
+    Ok((SystemAudioCapture { stop_tx, thread }, pcm_rx, sample_rate, channels, device_error))
 }

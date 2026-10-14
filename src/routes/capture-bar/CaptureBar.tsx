@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
 import { ipc, type CaptureMode, type OutputMode } from "../../lib/ipc";
+import { showError } from "../../lib/notify";
 
 type RecordMode = "full" | "window" | "region";
 type ActiveGroup = "photo" | "video";
@@ -92,9 +93,8 @@ export default function CaptureBar() {
       selectVideoMode(e.payload.mode as RecordMode);
     });
 
-    const unlistenError = listen<string>("snapdoc-error", (e) => {
-      alert(e.payload);
-    });
+    // `snapdoc-error` giờ được Rust hiển thị bằng hộp thoại native
+    // (`notify::install_error_bridge`) — không nghe ở đây nữa để khỏi hiện 2 lần.
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -105,14 +105,14 @@ export default function CaptureBar() {
         ipc.hideCaptureBarPopover().catch(() => {});
         if (activeGroupRef.current === "video") {
           if (videoModeRef.current === "region") {
-            ipc.confirmRegionRecordStart().catch((err) => alert(String(err)));
+            ipc.confirmRegionRecordStart().catch((err) => showError(err));
           } else {
-            ipc.startRecordPicker(videoModeRef.current).catch((err) => alert(String(err)));
+            ipc.startRecordPicker(videoModeRef.current).catch((err) => showError(err));
           }
         } else if (photoModeRef.current === "all") {
-          ipc.captureAllScreens(outputRef.current).catch((err) => alert(String(err)));
+          ipc.captureAllScreens(outputRef.current).catch((err) => showError(err));
         } else {
-          ipc.captureNow(photoModeRef.current, outputRef.current).catch((err) => alert(String(err)));
+          ipc.captureNow(photoModeRef.current, outputRef.current).catch((err) => showError(err));
         }
       }
     };
@@ -122,7 +122,6 @@ export default function CaptureBar() {
       window.removeEventListener("keydown", onKey);
       unlistenRecordMode.then((fn) => fn());
       unlistenSettings.then((fn) => fn());
-      unlistenError.then((fn) => fn());
     };
   }, []);
 
@@ -131,9 +130,9 @@ export default function CaptureBar() {
     setPhotoMode(m);
     setActiveGroup("photo");
     if (m === "all") {
-      ipc.captureAllScreens(output).catch((e) => alert(String(e)));
+      ipc.captureAllScreens(output).catch((e) => showError(e));
     } else {
-      ipc.captureNow(m, output).catch((e) => alert(String(e)));
+      ipc.captureNow(m, output).catch((e) => showError(e));
     }
   };
 
@@ -141,7 +140,7 @@ export default function CaptureBar() {
     ipc.hideCaptureBarPopover().catch(() => {});
     setVideoMode(m);
     setActiveGroup("video");
-    ipc.startRecordPicker(m).catch((e) => alert(String(e)));
+    ipc.startRecordPicker(m).catch((e) => showError(e));
   };
 
   const toggleOptions = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -168,7 +167,7 @@ export default function CaptureBar() {
           <button
             onClick={() => {
               ipc.hideCaptureBarPopover().catch(() => {});
-              ipc.startQuick().catch((e) => alert(String(e)));
+              ipc.startQuick().catch((e) => showError(e));
             }}
             style={quickModeBtn}
             title={t("captureBar.quickCaptureHint")}

@@ -1,22 +1,42 @@
 //! Encode video quay màn hình: chạy `ffmpeg` như sidecar binary (đóng gói
 //! cùng app qua `tauri.conf.json` → `bundle.externalBin`), nhận raw frame
-//! BGRA qua stdin, xuất H.264/mp4.
+//! BGRA qua stdin, xuất H.264.
 //!
 //! KHÔNG dùng `tauri-plugin-shell` cho việc này: API sidecar cấp cao của
 //! plugin (`CommandChild`) không cho đóng RIÊNG stdin (chỉ có `write()` và
-//! `kill()`) — mà ffmpeg cần thấy EOF trên stdin để flush encoder + ghi
-//! moov atom rồi tự thoát (kill giữa chừng sẽ ra file mp4 hỏng, không phát
-//! được). Dùng thẳng `std::process::Command` để ta tự kiểm soát vòng đời:
+//! `kill()`) — mà ffmpeg cần thấy EOF trên stdin để flush encoder rồi tự
+//! thoát. Dùng thẳng `std::process::Command` để ta tự kiểm soát vòng đời:
 //! đóng `ChildStdin` (drop) → ffmpeg tự kết thúc sạch → `wait()` lấy exit
 //! code. Việc tìm binary vẫn theo đúng quy ước sidecar của Tauri (nằm cạnh
 //! executable chính sau khi CLI copy theo `externalBin`).
+//!
+//! File ghi TRONG LÚC QUAY là MP4 PHÂN MẢNH (`frag_keyframe+empty_moov`,
+//! keyframe mỗi 2 giây, `-flush_packets 1` để mỗi fragment xuống đĩa ngay —
+//! thiếu cờ này, nội dung ít chuyển động nằm hết trong bộ đệm của ffmpeg và
+//! file chỉ có vài chục byte tới tận lúc dừng): mỗi fragment tự chứa đủ thông
+//! tin để phát, nên nếu app bị crash/kill/mất điện giữa chừng, phần đã ghi
+//! vẫn khôi phục được (xem `record::session::recover_orphans`). MP4 thường chỉ ghi `moov` lúc kết
+//! thúc — chết giữa chừng là mất trắng cả bản quay. Bước hoàn tất sau khi
+//! dừng (`record::finalize`) remux lại thành MP4 thường + `faststart`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Tham số muxer của file ghi trong lúc quay (xem doc-comment đầu module).
+const LIVE_MUX_ARGS: [&str; 6] =
+    ["-flush_packets", "1", "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4"];
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Kích thước tối đa encode (cạnh dài × cạnh ngắn). Lớn hơn (màn 5K/6K,
+/// ultrawide 5120×1440...) vượt giới hạn H.264 của nhiều encoder phần cứng và
+/// đẩy hàng GB/s qua pipe — thu nhỏ về trong khung này (giữ tỉ lệ).
+pub const MAX_LONG_EDGE: u32 = 3840;
+pub const MAX_SHORT_EDGE: u32 = 2160;
 
 /// Tìm binary sidecar cạnh executable hiện tại — cùng quy ước
 /// `tauri-plugin-shell` dùng cho `externalBin`: lúc `tauri dev`/`tauri build`,
@@ -48,217 +68,281 @@ pub(crate) fn sidecar_path(name: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Các encoder H.264 có thể dùng, theo thứ tự ưu tiên.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum H264Kind {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    Nvenc,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    Qsv,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    Amf,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    MediaFoundation,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    VideoToolbox,
+    X264,
+}
+
+/// Bitrate mục tiêu cho các encoder chỉ hỗ trợ bitrate (không có chế độ chất
+/// lượng cố định): ~0.08 bit/pixel/frame, kẹp trong [4, 40] Mbps.
+fn target_bitrate(w: u32, h: u32, fps: u32) -> String {
+    let (w, h) = if w == 0 || h == 0 { (1920, 1080) } else { (w, h) };
+    let bps = (w as f64 * h as f64 * fps.max(1) as f64 * 0.08).clamp(4.0e6, 40.0e6);
+    format!("{}k", (bps / 1000.0).round() as u64)
+}
+
+fn s(v: &[&str]) -> Vec<String> {
+    v.iter().map(|x| x.to_string()).collect()
+}
+
+/// Tham số encode cho 1 loại encoder ở kích thước `w×h` (`0×0` = không rõ).
+fn kind_args(kind: H264Kind, w: u32, h: u32, fps: u32) -> Vec<String> {
+    let br = target_bitrate(w, h, fps);
+    let large = (w as u64) * (h as u64) > 1920 * 1200;
+    match kind {
+        H264Kind::Nvenc => s(&["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-pix_fmt", "yuv420p"]),
+        H264Kind::Qsv => s(&["-c:v", "h264_qsv", "-global_quality", "23", "-pix_fmt", "nv12"]),
+        H264Kind::Amf => s(&[
+            "-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23", "-pix_fmt", "yuv420p",
+        ]),
+        H264Kind::MediaFoundation => {
+            let mut a = s(&["-c:v", "h264_mf", "-b:v"]);
+            a.push(br);
+            a.extend(s(&["-pix_fmt", "yuv420p"]));
+            a
+        }
+        H264Kind::VideoToolbox => {
+            // `-q:v` (chất lượng cố định) CHỈ được ffmpeg bật cho VideoToolbox
+            // trên Apple Silicon — Mac Intel báo lỗi "-q:v qscale not
+            // available", khiến bản cũ luôn rơi về libx264 (không theo kịp ở
+            // độ phân giải Retina). Mac Intel dùng bitrate.
+            let mut a = s(&["-c:v", "h264_videotoolbox", "-realtime", "1"]);
+            if cfg!(target_arch = "aarch64") {
+                a.extend(s(&["-q:v", "60"]));
+            } else {
+                a.push("-b:v".into());
+                a.push(br);
+            }
+            a.extend(s(&["-pix_fmt", "yuv420p"]));
+            a
+        }
+        H264Kind::X264 => {
+            // Khung hình lớn (Retina/2K+) với veryfast không encode kịp 30fps
+            // trên CPU — dùng ultrafast, chấp nhận file lớn hơn.
+            if cfg!(target_os = "windows") || large {
+                s(&["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "24", "-pix_fmt", "yuv420p"])
+            } else {
+                s(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"])
+            }
+        }
+    }
+}
+
+fn candidates() -> &'static [H264Kind] {
+    #[cfg(target_os = "windows")]
+    {
+        &[H264Kind::Nvenc, H264Kind::Qsv, H264Kind::Amf, H264Kind::MediaFoundation, H264Kind::X264]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        &[H264Kind::VideoToolbox, H264Kind::X264]
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        &[H264Kind::X264]
+    }
+}
+
+/// Encode thử vài frame đen `w×h` bằng `kind`, ghi ra ĐÚNG muxer MP4 phân
+/// mảnh như lúc quay thật (vài encoder chỉ lỗi khi muxer cần global header) —
+/// có timeout (driver lỗi có thể treo vô hạn).
+fn test_encoder(ffmpeg: &Path, kind: H264Kind, w: u32, h: u32, fps: u32) -> bool {
+    let out = std::env::temp_dir().join(format!("snapdoc-enc-test-{}.mp4", uuid::Uuid::new_v4()));
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(format!("color=c=black:s={w}x{h}:r={fps}"))
+        .args(["-frames:v", "3"])
+        .args(kind_args(kind, w, h, fps))
+        .args(["-g", &(fps.max(1) * 2).to_string()])
+        .args(LIVE_MUX_ARGS)
+        .arg(&out);
+    let ok = match super::proc::run(&mut cmd, Duration::from_secs(15)) {
+        Ok(r) => r.status.success() && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false),
+        Err(e) => {
+            eprintln!("[SnapDoc][record] Thử encoder {kind:?} {w}x{h} lỗi: {e}");
+            false
+        }
+    };
+    let _ = std::fs::remove_file(&out);
+    ok
+}
+
+/// Encoder dùng được trên máy này (thử ở kích thước nhỏ, cache cả phiên app).
+static DETECTED: std::sync::OnceLock<Vec<H264Kind>> = std::sync::OnceLock::new();
+/// Kết quả thử encoder ở ĐÚNG kích thước quay (encoder phần cứng có giới hạn
+/// kích thước riêng, chạy được 320×240 chưa chắc chạy được 5120×1440). Kết quả
+/// THẤT BẠI chỉ giữ 10 phút — có thể chỉ là tạm thời (vd NVENC hết phiên do
+/// app khác đang dùng), không được khoá encoder phần cứng cả phiên app.
+static VALIDATED: Mutex<Vec<(H264Kind, u32, u32, bool, Instant)>> = Mutex::new(Vec::new());
+const FAILED_RETRY_AFTER: Duration = Duration::from_secs(600);
+
+fn detected(ffmpeg: &Path) -> &'static [H264Kind] {
+    DETECTED.get_or_init(|| {
+        let mut ok: Vec<H264Kind> = candidates()
+            .iter()
+            .copied()
+            .filter(|&k| k == H264Kind::X264 || test_encoder(ffmpeg, k, 320, 240, 30))
+            .collect();
+        if !ok.contains(&H264Kind::X264) {
+            ok.push(H264Kind::X264);
+        }
+        eprintln!("[SnapDoc][record] Encoder H.264 khả dụng: {ok:?}");
+        ok
+    })
+}
+
+fn validated_at(ffmpeg: &Path, kind: H264Kind, w: u32, h: u32, fps: u32) -> bool {
+    if kind == H264Kind::X264 {
+        return true;
+    }
+    {
+        let mut g = VALIDATED.lock().unwrap_or_else(|p| p.into_inner());
+        g.retain(|&(_, _, _, ok, at)| ok || at.elapsed() < FAILED_RETRY_AFTER);
+        if let Some(&(_, _, _, ok, _)) = g.iter().find(|(k, kw, kh, _, _)| *k == kind && *kw == w && *kh == h) {
+            return ok;
+        }
+    }
+    let ok = test_encoder(ffmpeg, kind, w, h, fps);
+    VALIDATED.lock().unwrap_or_else(|p| p.into_inner()).push((kind, w, h, ok, Instant::now()));
+    if !ok {
+        eprintln!("[SnapDoc][record] Encoder {kind:?} không chạy được ở {w}x{h}, thử encoder kế tiếp");
+    }
+    ok
+}
+
+/// Pre-warm dò encoder ở nền lúc khởi động app — lần quay đầu không phải chờ.
+pub fn prewarm_encoder() {
+    std::thread::Builder::new()
+        .name("snapdoc-encoder-prewarm".into())
+        .spawn(|| {
+            if let Ok(ffmpeg) = sidecar_path("ffmpeg") {
+                let _ = detected(&ffmpeg);
+            }
+        })
+        .ok();
+}
+
+/// Tham số encoder tốt nhất cho các tác vụ KHÔNG phải quay trực tiếp (cắt
+/// video, áp hiệu ứng...) — kích thước tuỳ ý nên dùng tham số mặc định.
+fn best_h264_encoder_args(ffmpeg: &Path) -> &'static [String] {
+    static ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    ARGS.get_or_init(|| kind_args(detected(ffmpeg)[0], 0, 0, 30))
+}
+
 /// Tiến trình ffmpeg đang encode — ghi frame qua `write_frame`, kết thúc
-/// bằng `finish()` (đóng stdin, đợi ffmpeg mux xong).
+/// bằng `finish()` (đóng stdin, đợi ffmpeg ghi xong).
 ///
 /// `stderr_thread` bọc `Option` để cả `finish()` lẫn `Drop` đều join được —
-/// `Drop` là lưới an toàn cho nhánh LỖI (vd `write_frame` gặp broken pipe và
-/// closure của writer thread return sớm bằng `?`): không có nó, `Child` bị
-/// drop mà không `kill()`/`wait()` → tiến trình ffmpeg thành zombie (Unix
-/// không tự reap con), mỗi lần quay lỗi rò thêm 1 process.
+/// `Drop` là lưới an toàn cho nhánh LỖI (vd `write_frame` gặp broken pipe):
+/// không có nó, `Child` bị drop mà không `kill()`/`wait()` → tiến trình
+/// ffmpeg thành zombie (Unix không tự reap con).
 pub struct Encoder {
-    child: Child,
+    /// Dùng chung với `EncoderKiller` — watchdog ở thread khác kill được
+    /// ffmpeg bị treo (writer đang kẹt trong `write_all` không tự thoát được).
+    child: Arc<Mutex<Child>>,
+    stdin: Option<ChildStdin>,
     stderr_thread: Option<std::thread::JoinHandle<()>>,
+    in_size: (u32, u32),
+    out_size: (u32, u32),
+    finished: bool,
+}
+
+/// Tay cầm kill tiến trình ffmpeg từ thread khác (watchdog của phiên quay).
+#[derive(Clone)]
+pub struct EncoderKiller(Arc<Mutex<Child>>);
+
+impl EncoderKiller {
+    pub fn kill(&self) {
+        let _ = self.0.lock().unwrap_or_else(|p| p.into_inner()).kill();
+    }
+}
+
+/// Chờ tiến trình kết thúc tối đa `timeout` (quá hạn thì kill) — chỉ giữ lock
+/// trong từng lần `try_wait` để `EncoderKiller` vẫn kill được song song.
+fn wait_shared(child: &Mutex<Child>, timeout: Duration) -> Result<ExitStatus, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        {
+            let mut c = child.lock().unwrap_or_else(|p| p.into_inner());
+            match c.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                    return Err(format!("quá thời gian chờ ({}s)", timeout.as_secs()));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                    return Err(format!("lỗi chờ tiến trình: {e}"));
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 impl Drop for Encoder {
     fn drop(&mut self) {
-        // `finish()` đã chạy trọn vẹn (stdin + stderr_thread đều đã take) →
-        // không còn gì để dọn.
-        if self.child.stdin.is_none() && self.stderr_thread.is_none() {
+        if self.finished {
             return;
         }
-        // Đóng stdin để ffmpeg thấy EOF → flush encoder + ghi moov atom; chờ
-        // tối đa 3s cho nó tự thoát sạch (file mp4 có thể vẫn phát được),
-        // quá hạn thì kill để không rò process.
-        drop(self.child.stdin.take());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                _ => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    break;
-                }
-            }
-        }
+        // Đóng stdin để ffmpeg thấy EOF → flush; chờ tối đa 3s cho nó tự thoát
+        // sạch, quá hạn thì kill để không rò process. File phân mảnh vẫn giữ
+        // được mọi fragment đã ghi xong.
+        drop(self.stdin.take());
+        let _ = wait_shared(&self.child, Duration::from_secs(3));
         if let Some(t) = self.stderr_thread.take() {
             let _ = t.join();
         }
     }
 }
 
-static DETECTED_ENCODER_ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-
-fn test_encoder(ffmpeg: &Path, encoder_name: &str, extra_args: &[&str]) -> bool {
-    let mut cmd = Command::new(ffmpeg);
-    cmd.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "color=c=black:s=64x64:d=0.04",
-        "-c:v",
-        encoder_name,
-    ]);
-    cmd.args(extra_args);
-    cmd.args(["-f", "null", "-"]);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    match cmd.status() {
-        Ok(status) => status.success(),
-        Err(_) => false,
-    }
-}
-
-/// Pre-warm detection of best H.264 encoder in background during startup,
-/// avoiding ~1s delay when user starts their first recording.
-pub fn prewarm_encoder() {
-    std::thread::Builder::new()
-        .name("snapdoc-encoder-prewarm".into())
-        .spawn(|| {
-            if let Ok(ffmpeg) = sidecar_path("ffmpeg") {
-                let _ = best_h264_encoder_args(&ffmpeg);
-            }
-        })
-        .ok();
-}
-
-fn best_h264_encoder_args(ffmpeg: &Path) -> &'static [String] {
-    DETECTED_ENCODER_ARGS.get_or_init(|| {
-        #[cfg(target_os = "windows")]
-        {
-            // 1. Thử NVIDIA NVENC (card rời NVIDIA)
-            if test_encoder(ffmpeg, "h264_nvenc", &["-preset", "p4", "-cq", "23", "-pix_fmt", "yuv420p"]) {
-                eprintln!("[SnapDoc][record] Dùng hardware encoder: h264_nvenc (NVIDIA)");
-                return vec![
-                    "-c:v".to_string(), "h264_nvenc".to_string(),
-                    "-preset".to_string(), "p4".to_string(),
-                    "-cq".to_string(), "23".to_string(),
-                    "-pix_fmt".to_string(), "yuv420p".to_string(),
-                ];
-            }
-            // 2. Thử Intel QuickSync (card onboard hoặc rời Intel)
-            if test_encoder(ffmpeg, "h264_qsv", &["-global_quality", "23", "-pix_fmt", "nv12"]) {
-                eprintln!("[SnapDoc][record] Dùng hardware encoder: h264_qsv (Intel QuickSync)");
-                return vec![
-                    "-c:v".to_string(), "h264_qsv".to_string(),
-                    "-global_quality".to_string(), "23".to_string(),
-                    "-pix_fmt".to_string(), "nv12".to_string(),
-                ];
-            }
-            // 3. Thử AMD AMF (card rời AMD)
-            if test_encoder(ffmpeg, "h264_amf", &["-quality", "speed", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23", "-pix_fmt", "yuv420p"]) {
-                eprintln!("[SnapDoc][record] Dùng hardware encoder: h264_amf (AMD)");
-                return vec![
-                    "-c:v".to_string(), "h264_amf".to_string(),
-                    "-quality".to_string(), "speed".to_string(),
-                    "-rc".to_string(), "cqp".to_string(),
-                    "-qp_i".to_string(), "23".to_string(),
-                    "-qp_p".to_string(), "23".to_string(),
-                    "-pix_fmt".to_string(), "yuv420p".to_string(),
-                ];
-            }
-            // 4. Thử Windows Media Foundation (tích hợp sẵn trên Windows 10/11)
-            if test_encoder(ffmpeg, "h264_mf", &["-b:v", "5M", "-pix_fmt", "yuv420p"]) {
-                eprintln!("[SnapDoc][record] Dùng hardware encoder: h264_mf (Windows Media Foundation)");
-                return vec![
-                    "-c:v".to_string(), "h264_mf".to_string(),
-                    "-b:v".to_string(), "5M".to_string(),
-                    "-pix_fmt".to_string(), "yuv420p".to_string(),
-                ];
-            }
-            // 5. Fallback: libx264 siêu nhẹ (ultrafast + zerolatency) cho máy Windows yếu
-            eprintln!("[SnapDoc][record] Không có hardware encoder, fallback libx264 ultrafast cho máy yếu");
-            vec![
-                "-c:v".to_string(), "libx264".to_string(),
-                "-preset".to_string(), "ultrafast".to_string(),
-                "-tune".to_string(), "zerolatency".to_string(),
-                "-crf".to_string(), "26".to_string(),
-                "-pix_fmt".to_string(), "yuv420p".to_string(),
-            ]
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            if test_encoder(ffmpeg, "h264_videotoolbox", &["-q:v", "60", "-pix_fmt", "yuv420p"]) {
-                eprintln!("[SnapDoc][record] Dùng hardware encoder: h264_videotoolbox (Apple Silicon / Intel Mac)");
-                return vec![
-                    "-c:v".to_string(), "h264_videotoolbox".to_string(),
-                    "-q:v".to_string(), "60".to_string(),
-                    "-pix_fmt".to_string(), "yuv420p".to_string(),
-                ];
-            }
-            eprintln!("[SnapDoc][record] Dùng fallback libx264 veryfast");
-            vec![
-                "-c:v".to_string(), "libx264".to_string(),
-                "-preset".to_string(), "veryfast".to_string(),
-                "-crf".to_string(), "20".to_string(),
-                "-pix_fmt".to_string(), "yuv420p".to_string(),
-            ]
-        }
-
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            vec![
-                "-c:v".to_string(), "libx264".to_string(),
-                "-preset".to_string(), "veryfast".to_string(),
-                "-crf".to_string(), "20".to_string(),
-                "-pix_fmt".to_string(), "yuv420p".to_string(),
-            ]
-        }
-    })
-}
-
 impl Encoder {
-    /// Bắt đầu 1 tiến trình ffmpeg nhận rawvideo BGRA (`width`x`height`,
-    /// `fps` khung/giây) qua stdin, encode H.264 (hardware nếu có, fallback libx264),
-    /// ghi mp4 tại `output_path`. `-movflags +faststart` để file phát ngay khi mở
-    /// (moov atom ở đầu file thay vì cuối).
+    /// Bắt đầu 1 tiến trình ffmpeg nhận rawvideo BGRA (`width`×`height`, `fps`
+    /// khung/giây) qua stdin, encode H.264 (phần cứng nếu chạy được ở đúng
+    /// kích thước này, không thì libx264), ghi MP4 PHÂN MẢNH tại `output_path`.
+    /// Khung lớn hơn `MAX_LONG_EDGE×MAX_SHORT_EDGE` được ffmpeg thu nhỏ — xem
+    /// `out_size()` để biết kích thước thật của video.
     pub fn start(output_path: &Path, width: u32, height: u32, fps: u32) -> Result<Self, String> {
         let ffmpeg = sidecar_path("ffmpeg")?;
-        let enc_args = best_h264_encoder_args(&ffmpeg);
+        let (ow, oh) = crate::capture::frame::fit_even(width, height, MAX_LONG_EDGE, MAX_SHORT_EDGE);
+        let kind = detected(&ffmpeg)
+            .iter()
+            .copied()
+            .find(|&k| validated_at(&ffmpeg, k, ow, oh, fps))
+            .unwrap_or(H264Kind::X264);
 
         let mut cmd = Command::new(&ffmpeg);
-        cmd.args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "bgra",
-            "-s",
-            &format!("{width}x{height}"),
-            "-r",
-            &fps.to_string(),
-            "-i",
-            "pipe:0",
-        ]);
-        cmd.args(enc_args);
-        cmd.args([
-            "-movflags",
-            "+faststart",
-        ])
-        .arg(output_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgra", "-s"])
+            .arg(format!("{width}x{height}"))
+            .arg("-r")
+            .arg(fps.to_string())
+            .args(["-i", "pipe:0"]);
+        if (ow, oh) != (width, height) {
+            cmd.args(["-vf", &format!("scale={ow}:{oh}:flags=bilinear")]);
+        }
+        cmd.args(kind_args(kind, ow, oh, fps))
+            // Keyframe mỗi 2 giây: mỗi keyframe mở 1 fragment mới (giới hạn
+            // phần mất khi crash ~2s) và giúp cắt/tua chính xác hơn.
+            .args(["-g", &(fps.max(1) * 2).to_string()])
+            .args(LIVE_MUX_ARGS)
+            .arg(output_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
 
         #[cfg(windows)]
         {
@@ -269,6 +353,7 @@ impl Encoder {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
+        eprintln!("[SnapDoc][record] Encoder {kind:?}, vào {width}x{height}, ra {ow}x{oh} @{fps}fps");
 
         // Phải đọc liên tục stderr — pipe đầy (thường 64KB) sẽ làm ffmpeg
         // treo khi ghi log lỗi, kéo theo cả write_frame() bị chặn.
@@ -280,32 +365,50 @@ impl Encoder {
             }
         });
 
-        Ok(Self { child, stderr_thread: Some(stderr_thread) })
+        let stdin = child.stdin.take();
+        Ok(Self {
+            child: Arc::new(Mutex::new(child)),
+            stdin,
+            stderr_thread: Some(stderr_thread),
+            in_size: (width, height),
+            out_size: (ow, oh),
+            finished: false,
+        })
+    }
+
+    pub fn killer(&self) -> EncoderKiller {
+        EncoderKiller(self.child.clone())
+    }
+
+    /// Kích thước frame đầu vào (đúng `-s` đã khai với ffmpeg).
+    pub fn in_size(&self) -> (u32, u32) {
+        self.in_size
+    }
+
+    /// Kích thước thật của video ghi ra (đã thu nhỏ nếu vượt giới hạn).
+    pub fn out_size(&self) -> (u32, u32) {
+        self.out_size
     }
 
     /// Ghi 1 frame BGRA thô (đúng `width*height*4` byte) vào stdin ffmpeg.
     pub fn write_frame(&mut self, data: &[u8]) -> Result<(), String> {
-        let stdin = self
-            .child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "ffmpeg đã đóng stdin".to_string())?;
+        let stdin = self.stdin.as_mut().ok_or_else(|| "ffmpeg đã đóng stdin".to_string())?;
         stdin
             .write_all(data)
             .map_err(|e| format!("Lỗi ghi frame vào ffmpeg: {e}"))
     }
 
-    /// Đóng stdin (ffmpeg thấy EOF → flush + ghi moov atom + tự thoát),
-    /// đợi tiến trình kết thúc và kiểm tra exit code.
+    /// Đóng stdin (ffmpeg thấy EOF → flush fragment cuối + tự thoát), đợi
+    /// tiến trình kết thúc (tối đa 2 phút — hết hạn thì kill: mọi fragment đã
+    /// ghi trước đó vẫn dùng được) và kiểm tra exit code.
     pub fn finish(mut self) -> Result<(), String> {
-        drop(self.child.stdin.take());
-        let status = self
-            .child
-            .wait()
-            .map_err(|e| format!("Lỗi đợi ffmpeg kết thúc: {e}"))?;
+        drop(self.stdin.take());
+        let status = wait_shared(&self.child, Duration::from_secs(120)).map_err(|e| format!("ffmpeg không kết thúc: {e}"));
+        self.finished = true;
         if let Some(t) = self.stderr_thread.take() {
             let _ = t.join();
         }
+        let status = status?;
         if !status.success() {
             return Err(format!("ffmpeg thoát với lỗi: {status}"));
         }
@@ -313,130 +416,15 @@ impl Encoder {
     }
 }
 
-/// Ghép audio thô (PCM s16le, ghi trực tiếp ra file trong lúc quay — xem
-/// `record/mod.rs`) vào video ĐÃ QUAY XONG, chạy 1 LẦN sau khi dừng quay.
-/// Khác `Encoder::start`: cả 2 input ở đây đều là FILE TĨNH (không phải
-/// pipe/fifo sống), nên không có rủi ro ffmpeg đồng bộ-rồi-treo giữa 2 input
-/// như hướng live-mux cũ. `-c:v copy`: giữ nguyên video đã encode, không mã
-/// hoá lại (nhanh, không mất chất lượng) — chỉ ghép thêm audio track AAC.
-/// Khi `is_mic = true`, áp dụng `dynaudnorm` để tự động khuếch đại giọng nói
-/// lên mức to rõ chuẩn phòng thu (peak 0.95) và chống vỡ tiếng.
-pub fn mux_audio(
-    video_path: &Path,
-    audio_path: &Path,
-    sample_rate: u32,
-    channels: u16,
-    is_mic: bool,
-    output_path: &Path,
-) -> Result<(), String> {
+/// Stream copy video nhanh mà không cần re-encode, chỉ loại bỏ audio stream (-an).
+pub fn copy_without_audio(input_path: &Path, output_path: &Path) -> Result<(), String> {
     let ffmpeg = sidecar_path("ffmpeg")?;
-
-    let filter_arg = if is_mic {
-        "aresample=async=1000:first_pts=0,dynaudnorm=f=150:g=15:p=0.95:m=10.0"
-    } else {
-        "aresample=async=1000:first_pts=0"
-    };
-
     let mut cmd = Command::new(&ffmpeg);
-    cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
-        .arg("-i")
-        .arg(video_path)
-        .args(["-f", "s16le", "-ar", &sample_rate.to_string(), "-ac", &channels.to_string()])
-        .arg("-i")
-        .arg(audio_path)
-        // -map tường minh: input 0 (mp4) chỉ có video, input 1 (raw PCM) chỉ
-        // có audio — không dựa vào auto-mapping mặc định của ffmpeg để loại
-        // hẳn khả năng nó chọn nhầm/bỏ sót stream. Thêm aresample async=1000
-        // và -shortest để đồng bộ thời lượng tuyệt đối giữa audio và video,
-        // chống lệch tiếng sau khi pause/resume nhiều lần.
-        .args([
-            "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
-            "-af", filter_arg,
-            "-shortest",
-            "-movflags", "+faststart",
-        ])
-        .arg(output_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg ghép audio thất bại: {} — {stderr}", output.status));
-    }
-    Ok(())
-}
-
-/// Ghép và trộn 2 nguồn audio thô (PCM s16le, Microphone + Âm thanh hệ thống)
-/// vào video ĐÃ QUAY XONG bằng 1 lần chạy ffmpeg TĨNH.
-///
-/// Xử lý cân bằng âm thanh chuyên nghiệp:
-/// 1. `mic`: Áp dụng `dynaudnorm` (Dynamic Audio Normalizer) tự động khuếch đại
-///    thông minh tiếng micro lên mức to rõ (peak 0.95) mà không bị vỡ tiếng.
-/// 2. `sys`: Âm thanh hệ thống (vốn đã ở mức cực đại 0 dBFS) được cân chỉnh về 0.45×
-///    để làm nền hài hòa, không lấn át tiếng nói thuyết minh của người dùng.
-/// 3. `aresample=async=1000:first_pts=0` độc lập trên từng nguồn để căn chuẩn
-///    tuyệt đối mốc thời gian sau các lần Tạm dừng (Pause) & Tiếp tục (Resume).
-pub fn mux_dual_audio(
-    video_path: &Path,
-    mic_path: &Path,
-    mic_sample_rate: u32,
-    mic_channels: u16,
-    sys_path: &Path,
-    sys_sample_rate: u32,
-    sys_channels: u16,
-    output_path: &Path,
-) -> Result<(), String> {
-    let ffmpeg = sidecar_path("ffmpeg")?;
-
-    let mut cmd = Command::new(&ffmpeg);
-    cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
-        .arg("-i")
-        .arg(video_path)
-        .args(["-f", "s16le", "-ar", &mic_sample_rate.to_string(), "-ac", &mic_channels.to_string()])
-        .arg("-i")
-        .arg(mic_path)
-        .args(["-f", "s16le", "-ar", &sys_sample_rate.to_string(), "-ac", &sys_channels.to_string()])
-        .arg("-i")
-        .arg(sys_path)
-        .args([
-            "-filter_complex",
-            "[1:a]aresample=async=1000:first_pts=0,dynaudnorm=f=150:g=15:p=0.95:m=10.0[mic];[2:a]aresample=async=1000:first_pts=0,volume=0.45[sys];[mic][sys]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,aresample=async=1000:first_pts=0,alimiter=limit=0.95[aout]",
-            "-map", "0:v:0", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            "-shortest",
-            "-movflags", "+faststart",
-        ])
-        .arg(output_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg ghép dual audio thất bại: {} — {stderr}", output.status));
-    }
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(input_path)
+        .args(["-c:v", "copy", "-an", "-movflags", "+faststart"])
+        .arg(output_path);
+    super::proc::run_ok(&mut cmd, super::proc::timeout_for_file(input_path), "ffmpeg tách âm thanh")?;
     Ok(())
 }
 
@@ -773,46 +761,6 @@ pub fn build_overlay_filter_graph(
     }
 
     Some(fg)
-}
-
-/// Stream copy video nhanh mà không cần re-encode, chỉ loại bỏ audio stream (-an).
-pub fn copy_without_audio(input_path: &Path, output_path: &Path) -> Result<(), String> {
-    let ffmpeg = sidecar_path("ffmpeg")?;
-    let mut cmd = Command::new(&ffmpeg);
-    cmd.args([
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-    ])
-    .arg(input_path)
-    .args([
-        "-c:v",
-        "copy",
-        "-an",
-        "-movflags",
-        "+faststart",
-    ])
-    .arg(output_path)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffmpeg tách âm thanh thất bại: {stderr}"));
-    }
-    Ok(())
 }
 
 pub fn trim(
@@ -1315,52 +1263,6 @@ mod tests {
         );
     }
 
-    /// Ghép audio thô (PCM s16le TỔNG HỢP, ghi thẳng ra file — không qua
-    /// pipe/fifo sống) vào 1 video đã quay xong — xác nhận `mux_audio` chạy
-    /// đúng cú pháp ffmpeg, không phụ thuộc timing/threading như cách live-mux
-    /// cũ (xem lý do đổi kiến trúc ở doc-comment của `Encoder::start`).
-    #[test]
-    fn muxes_audio_into_completed_video() {
-        let width = 160u32;
-        let height = 120u32;
-        let fps = 10u32;
-        let frame_count = 20u32;
-
-        let tmp_dir = std::env::temp_dir().join("snapdoc_encoder_mux_test");
-        std::fs::create_dir_all(&tmp_dir).unwrap();
-
-        let video_path = tmp_dir.join("video_only.mp4");
-        let mut encoder =
-            Encoder::start(&video_path, width, height, fps).expect("Encoder::start thất bại");
-        for i in 0..frame_count {
-            let level = ((i * 255) / frame_count) as u8;
-            let mut frame = vec![0u8; (width * height * 4) as usize];
-            for px in frame.chunks_exact_mut(4) {
-                px[0] = level;
-                px[1] = 255 - level;
-                px[2] = 128;
-                px[3] = 255;
-            }
-            encoder.write_frame(&frame).expect("write_frame thất bại");
-        }
-        encoder.finish().expect("finish thất bại");
-
-        // Audio thô: 2 giây PCM s16le mono 44100Hz im lặng — chỉ cần đúng
-        // định dạng khai báo, nội dung không quan trọng cho test cú pháp.
-        let audio_path = tmp_dir.join("audio.pcm");
-        std::fs::write(&audio_path, vec![0u8; 44_100 * 2 * 2]).unwrap();
-
-        let out = tmp_dir.join("final.mp4");
-        mux_audio(&video_path, &audio_path, 44_100, 1, false, &out)
-            .expect("mux_audio thất bại — kiểm tra lại cú pháp lệnh ffmpeg");
-
-        let meta = std::fs::metadata(&out).expect("không đọc được file output");
-        assert!(meta.len() > 1000, "file mp4 quá nhỏ ({} byte)", meta.len());
-        eprintln!("[test] đã ghép audio -> {} ({} byte)", out.display(), meta.len());
-
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-    }
-
     /// Encode 1 video 5s (10fps × 50 frame) rồi cắt giữ lại 2 đoạn
     /// (0–1.5s và 3.5–5s), mô phỏng đúng thao tác "xoá đoạn giữa" — xác nhận
     /// `trim()` chạy đúng cú pháp ffmpeg (cả bước re-encode từng đoạn lẫn
@@ -1415,6 +1317,30 @@ mod tests {
         eprintln!("[test] đã cắt video -> {} ({} byte)", out.display(), meta.len());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// File đang ghi dở (CHƯA finish — mô phỏng app bị crash) với nội dung
+    /// tĩnh vẫn phải đọc được phần đã ghi: cần `-flush_packets 1`.
+    #[test]
+    fn unfinished_recording_is_readable() {
+        let (w, h, fps) = (640u32, 360u32, 30u32);
+        let dir = std::env::temp_dir().join(format!("snapdoc_frag_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("video.mp4");
+        let mut enc = Encoder::start(&out, w, h, fps).expect("Encoder::start");
+        let frame = vec![90u8; (w * h * 4) as usize];
+        for _ in 0..(fps * 5) {
+            enc.write_frame(&frame).unwrap();
+        }
+        // Chờ ffmpeg xử lý hết các frame đã nhận rồi chụp lại file như lúc crash.
+        std::thread::sleep(Duration::from_millis(1500));
+        let snap = dir.join("snap.mp4");
+        std::fs::copy(&out, &snap).unwrap();
+        let meta = crate::record::probe::probe_video_metadata(&snap).expect("phần đã ghi phải đọc được");
+        assert!(meta.duration_ms >= 2000, "phải còn ít nhất vài giây: {}ms", meta.duration_ms);
+        enc.killer().kill();
+        drop(enc);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

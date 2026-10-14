@@ -1,99 +1,208 @@
-//! Điều phối 1 phiên quay màn hình: nối `capture::mac_stream` (frame BGRA
-//! thật từ ScreenCaptureKit) với `encoder` (ffmpeg) + quản lý vòng đời qua
-//! `RecordingState` (managed trong Tauri) và tray icon "đang quay" (`tray.rs`).
+//! Điều phối 1 phiên quay màn hình — macOS (ScreenCaptureKit, xem
+//! `capture::mac_stream`) và Windows (Windows.Graphics.Capture, xem
+//! `capture::windows_stream`).
 //!
-//! v1: chỉ macOS, không audio, fps cố định. Phase 3 thêm chọn PHẠM VI quay
-//! (màn hình cụ thể / vùng chọn / cửa sổ) qua overlay chọn vùng có sẵn của
-//! tính năng chụp ảnh (xem `flow::run_record_picker` +
-//! `flow::finalize_region/finalize_window/finalize_monitor`).
+//! Kiến trúc 1 phiên quay:
+//! - `RecordingClock` (`clock.rs`): đồng hồ CHUNG (đã trừ thời gian pause) —
+//!   video, audio, telemetry chuột và đồng hồ hiển thị đều bám theo nó.
+//! - Nguồn quay chỉ cập nhật "frame mới nhất"; `Pacer` (`pacer.rs`) đẩy frame
+//!   vào encoder đúng số lượng theo đồng hồ (lặp frame khi encoder bận) nên
+//!   thời lượng video luôn đúng.
+//! - Encoder ghi MP4 PHÂN MẢNH vào thư mục phiên (`session.rs`) — crash giữa
+//!   chừng vẫn khôi phục được ở lần mở app sau.
+//! - Audio (mic / hệ thống) ghi PCM thô ra file, bám đồng hồ (`pcm_writer.rs`:
+//!   chèn lặng vào chỗ hổng, bỏ pre-roll), rồi GHÉP vào video SAU khi dừng
+//!   bằng 1 lần chạy ffmpeg tĩnh (`finalize.rs`). Không nạp audio "sống" vào
+//!   cùng tiến trình ffmpeg với video: ffmpeg đồng bộ nhiều input sống với
+//!   nhau, hễ audio khựng là ngừng đọc cả video → kênh đầy → mất frame.
+//! - Vòng đời có trạng thái tường minh `Idle → Starting → Recording →
+//!   Stopping → Idle` (`Phase`) — chống mọi race giữa hotkey/tray/indicator/
+//!   thoát app (bấm dừng lúc đang khởi động, bấm quay lúc đang lưu...).
 //!
-//! Phase 4 thêm âm thanh — CHỈ 1 nguồn tại 1 thời điểm (mic HOẶC audio hệ
-//! thống, xem `AudioSource`, cấu hình ở Settings/CaptureBar qua khoá
-//! `recordAudioSource`). Trong lúc quay, audio KHÔNG đi qua ffmpeg cùng lúc
-//! với video — chỉ ghi PCM thô ra 1 file thường (`spawn_pcm_file_writer`),
-//! rồi GHÉP vào video sau khi dừng quay bằng 1 lần chạy ffmpeg tĩnh
-//! (`encoder::mux_audio`). Bản đầu tiên thử nạp cả video (qua stdin) lẫn
-//! audio (qua fifo) SỐNG vào cùng 1 tiến trình ffmpeg — gặp bug: ffmpeg
-//! (scheduler đa luồng bản mới) đồng bộ nhiều input sống với nhau, hễ audio
-//! khựng lại vì bất kỳ lý do gì thì ffmpeg tạm dừng đọc luôn video để tránh
-//! 2 stream lệch xa nhau, kéo theo kênh buffer riêng của app đầy sau đúng
-//! vài giây rồi âm thầm drop frame — video luôn bị cắt cụt bất kể quay bao
-//! lâu. Ghép audio SAU (2 file tĩnh, không còn "sống") loại bỏ hẳn lớp bug
-//! này.
+//! Âm thanh: chọn 1 trong `off | mic | system | both` (setting `recordAudioSource`).
 
-pub mod encoder;
-pub mod filmstrip;
-pub mod keystroke;
-pub mod mouse_click;
 pub mod audio_mic;
-pub mod probe;
 #[cfg(target_os = "windows")]
 mod audio_wasapi;
+pub mod clock;
+pub mod encoder;
+pub mod filmstrip;
+mod finalize;
+pub mod keystroke;
+pub mod mouse_click;
+mod pacer;
+pub(crate) mod pcm_writer;
+pub mod probe;
+pub mod proc;
+pub mod session;
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use tauri::{AppHandle, Manager};
+use crate::capture::frame::Frame;
 use crate::state::{AppState, PendingVideo};
+use clock::RecordingClock;
+use pacer::{PacedFrame, Pacer};
+use session::Session;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager};
 
-/// Payload của event `recording-tick` — emit mỗi giây từ `spawn_tray_ticker`.
-/// `ms`: thời gian ghi thật (không kể thời gian paused). `paused`: trạng thái
-/// tạm dừng hiện tại — UI dùng để hiện/ẩn icon pause và đóng băng đồng hồ.
+#[cfg(target_os = "macos")]
+use crate::capture::mac_stream as stream_impl;
+#[cfg(target_os = "windows")]
+use crate::capture::windows_stream as stream_impl;
+
+/// fps cố định — đủ mượt cho demo/hướng dẫn, giữ CPU/dung lượng thấp.
+pub const FPS: u32 = 30;
+
+/// Số frame tối đa chờ trong kênh pacer → writer. Nhỏ để giới hạn RAM (mỗi
+/// frame Retina ~20MB, 5K ~59MB — bound cũ 60 frame có thể ngốn vài GB đúng
+/// lúc máy đang quá tải); pacer gửi kèm số lần lặp nên kênh đầy KHÔNG làm
+/// mất thời lượng video.
+const FRAME_CHANNEL_BOUND: usize = 4;
+
+/// Payload của event `recording-tick` — emit mỗi giây từ ticker trạng thái.
+/// `ms`: thời gian ghi thật (không kể thời gian paused).
 #[derive(Clone, serde::Serialize)]
 pub struct RecordingTick {
     pub ms: u64,
     pub paused: bool,
 }
 
-/// Cảnh báo người dùng về sự cố KHÔNG làm hỏng cả phiên quay (mic lỗi, drop
-/// frame, ghép audio thất bại...) — trước đây chỉ `eprintln!` (vô hình trong
-/// bản đóng gói), giờ emit thêm qua kênh lỗi chung (`CaptureBar.tsx` lắng
-/// `snapdoc-error`) để người dùng biết bản quay của mình có vấn đề gì.
-fn notify_warning(app: &AppHandle, msg: &str) {
-    use tauri::Emitter;
-    eprintln!("[SnapDoc][record] {msg}");
-    let _ = app.emit("snapdoc-error", msg.to_string());
+// ── Vòng đời phiên quay ───────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Phase {
+    Idle,
+    Starting,
+    Recording,
+    Stopping,
 }
 
-/// Cổng chống 2 lệnh bắt đầu quay chạy ĐUA nhau (vd hotkey + nút bấm gần như
-/// đồng thời — mỗi command spawn thread riêng, xem `commands.rs`).
-/// `guard_can_start_recording` check xong thì NHẢ lock, còn việc ghi
-/// `RecordingState` chỉ xảy ra SAU khi stream/encoder đã dựng xong (vài trăm
-/// ms) — không có gate, 2 lệnh cùng lọt qua guard sẽ tạo 2 phiên capture,
-/// phiên sau ghi đè phiên trước mà không `stop()` (rò stream OS + ffmpeg).
-/// Gate giữ từ TRƯỚC lúc check tới SAU khi ghi state, tự nhả cả trên đường
-/// lỗi (RAII qua `Drop`).
-static START_GATE: AtomicBool = AtomicBool::new(false);
+struct PhaseInfo {
+    phase: Phase,
+    /// Người dùng bấm dừng trong lúc đang khởi động — dừng ngay khi khởi động xong.
+    stop_requested: bool,
+    /// Pha `Stopping`: file đã được lưu (và đưa vào Thư viện) — phần còn lại
+    /// (mở Editor) không còn liên quan tới an toàn dữ liệu.
+    saved: bool,
+    /// Tăng mỗi phiên — ticker trạng thái của phiên cũ tự thoát khi thấy đổi.
+    generation: u64,
+}
 
-struct StartGate;
+pub struct RecordingState {
+    active: Mutex<Option<ActiveRecording>>,
+    phase: Mutex<PhaseInfo>,
+    phase_cv: Condvar,
+}
 
-impl StartGate {
-    fn acquire() -> Result<Self, String> {
-        if START_GATE
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            Ok(StartGate)
-        } else {
-            Err("Đang khởi động 1 phiên quay khác — thử lại sau giây lát".to_string())
+impl Default for RecordingState {
+    fn default() -> Self {
+        RecordingState {
+            active: Mutex::new(None),
+            phase: Mutex::new(PhaseInfo { phase: Phase::Idle, stop_requested: false, saved: false, generation: 0 }),
+            phase_cv: Condvar::new(),
         }
     }
 }
 
-impl Drop for StartGate {
-    fn drop(&mut self) {
-        START_GATE.store(false, Ordering::SeqCst);
+fn lock_phase(st: &RecordingState) -> MutexGuard<'_, PhaseInfo> {
+    st.phase.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn lock_active(st: &RecordingState) -> MutexGuard<'_, Option<ActiveRecording>> {
+    st.active.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+pub fn phase(app: &AppHandle) -> Phase {
+    match app.try_state::<RecordingState>() {
+        Some(st) => lock_phase(&st).phase,
+        None => Phase::Idle,
     }
 }
 
-/// fps cố định cho v1 — đủ mượt cho demo/hướng dẫn, giữ CPU/dung lượng thấp.
-pub const FPS: u32 = 30;
+/// Đang có phiên quay ở BẤT KỲ pha nào (khởi động / quay / đang lưu).
+pub fn is_busy(app: &AppHandle) -> bool {
+    phase(app) != Phase::Idle
+}
 
-/// Nguồn audio ghi kèm khi quay — CHỈ được chọn 1 trong 3, không trộn (xem
-/// doc-comment đầu file để hiểu vì sao). Đọc từ setting `recordAudioSource`
-/// (`"off" | "mic" | "system"`, mặc định `"off"` — xem `storage::settings`).
+/// App đang thoát (`finalize_on_exit`) — bỏ mọi việc cần main thread (mở
+/// Editor, dựng lại overlay, hộp thoại): ở đường Cmd+Q, `finalize_on_exit` chạy
+/// NGAY TRÊN main thread nên các việc đó sẽ chặn chờ chính nó.
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+fn exiting() -> bool {
+    EXITING.load(Ordering::SeqCst)
+}
+
+/// Trở về `Idle` + báo mọi bên đang chờ + hiện các thông báo đã hoãn.
+fn set_idle(app: &AppHandle) {
+    if let Some(st) = app.try_state::<RecordingState>() {
+        let mut g = lock_phase(&st);
+        g.phase = Phase::Idle;
+        g.stop_requested = false;
+        drop(g);
+        st.phase_cv.notify_all();
+    }
+    if !exiting() {
+        crate::notify::flush_deferred(app);
+    }
+}
+
+/// Vé "đang khởi động": giữ pha `Starting` tới khi `commit` (→ `Recording`);
+/// bị drop mà chưa commit (mọi đường lỗi, kể cả panic) thì tự trả về `Idle`.
+struct StartTicket<'a> {
+    app: &'a AppHandle,
+    committed: bool,
+}
+
+fn begin_start(app: &AppHandle) -> Result<StartTicket<'_>, String> {
+    let st = app.state::<RecordingState>();
+    let mut g = lock_phase(&st);
+    match g.phase {
+        Phase::Idle => {
+            g.phase = Phase::Starting;
+            g.stop_requested = false;
+            Ok(StartTicket { app, committed: false })
+        }
+        Phase::Starting => Err("Đang khởi động 1 phiên quay khác — thử lại sau giây lát".to_string()),
+        Phase::Recording => Err("Đã có phiên quay đang chạy".to_string()),
+        Phase::Stopping => Err("Đang lưu bản quay trước — vui lòng chờ trong giây lát".to_string()),
+    }
+}
+
+impl StartTicket<'_> {
+    /// → `Recording`. Trả (có yêu cầu dừng trong lúc khởi động không, generation).
+    fn commit(mut self, active: ActiveRecording) -> (bool, u64) {
+        let st = self.app.state::<RecordingState>();
+        let mut active = active;
+        let mut g = lock_phase(&st);
+        g.generation += 1;
+        active.generation = g.generation;
+        *lock_active(&st) = Some(active);
+        g.phase = Phase::Recording;
+        let stop = std::mem::take(&mut g.stop_requested);
+        let generation = g.generation;
+        drop(g);
+        st.phase_cv.notify_all();
+        self.committed = true;
+        (stop, generation)
+    }
+}
+
+impl Drop for StartTicket<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            set_idle(self.app);
+        }
+    }
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────
+
+/// Nguồn audio ghi kèm khi quay (setting `recordAudioSource`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AudioSource {
     Off,
@@ -102,10 +211,13 @@ enum AudioSource {
     Both,
 }
 
-fn audio_source_setting(app: &AppHandle) -> AudioSource {
+fn settings(app: &AppHandle) -> serde_json::Value {
     let config_dir = app.path().app_config_dir().unwrap_or_default();
-    let settings = crate::storage::settings::load(&config_dir);
-    match settings.get("recordAudioSource").and_then(|v| v.as_str()) {
+    crate::storage::settings::load(&config_dir)
+}
+
+fn audio_source_setting(s: &serde_json::Value) -> AudioSource {
+    match s.get("recordAudioSource").and_then(|v| v.as_str()) {
         Some("mic") => AudioSource::Mic,
         Some("system") => AudioSource::System,
         Some("both") => AudioSource::Both,
@@ -113,347 +225,12 @@ fn audio_source_setting(app: &AppHandle) -> AudioSource {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn record_self_setting(app: &AppHandle) -> bool {
-    crate::storage::settings::is_record_self(app)
-}
-
-fn keystroke_overlay_setting(app: &AppHandle) -> bool {
-    let config_dir = app.path().app_config_dir().unwrap_or_default();
-    let settings = crate::storage::settings::load(&config_dir);
-    settings.get("recordShowKeystrokes").and_then(|v| v.as_bool()).unwrap_or(false)
-}
-
-fn click_overlay_setting(app: &AppHandle) -> bool {
-    let config_dir = app.path().app_config_dir().unwrap_or_default();
-    let settings = crate::storage::settings::load(&config_dir);
-    settings.get("recordShowClicks").and_then(|v| v.as_bool()).unwrap_or(true)
-}
-
-/// 1 track audio ghi PCM thô nhận từ `mac_stream`/`audio_mic`/`audio_wasapi`.
-struct AudioTrack {
-    stop_signal: Arc<AtomicBool>,
-    writer: std::thread::JoinHandle<()>,
-    raw_path: PathBuf,
-    sample_rate: u32,
-    channels: u16,
-}
-
-/// 1 phiên ghi audio đang chạy song song với video — lưu riêng từng nguồn (mic / audio hệ thống)
-/// để căn chỉnh gain boost và balance âm lượng chính xác khi mux.
-#[cfg(target_os = "macos")]
-struct ActiveAudio {
-    mic: Option<audio_mic::MicCapture>,
-    mic_track: Option<AudioTrack>,
-    system_track: Option<AudioTrack>,
-    tmp_dir: PathBuf,
-}
-
-#[cfg(target_os = "macos")]
-impl ActiveAudio {
-    fn stop_and_collect(mut self) -> (Option<(PathBuf, u32, u16)>, Option<(PathBuf, u32, u16)>, PathBuf) {
-        if let Some(mic) = self.mic.take() {
-            mic.stop();
-        }
-        let mic_meta = self.mic_track.take().map(|t| {
-            t.stop_signal.store(true, Ordering::SeqCst);
-            let _ = t.writer.join();
-            (t.raw_path, t.sample_rate, t.channels)
-        });
-        let sys_meta = self.system_track.take().map(|t| {
-            t.stop_signal.store(true, Ordering::SeqCst);
-            let _ = t.writer.join();
-            (t.raw_path, t.sample_rate, t.channels)
-        });
-        (mic_meta, sys_meta, self.tmp_dir)
-    }
-}
-
-#[cfg(target_os = "windows")]
-struct ActiveAudio {
-    mic: Arc<Mutex<Option<audio_mic::MicCapture>>>,
-    system_audio: Arc<Mutex<Option<audio_wasapi::SystemAudioCapture>>>,
-    mic_track: Arc<Mutex<Option<AudioTrack>>>,
-    system_track: Arc<Mutex<Option<AudioTrack>>>,
-    init_thread: Option<std::thread::JoinHandle<()>>,
-    stop_signal: Arc<AtomicBool>,
-    tmp_dir: PathBuf,
-}
-
-#[cfg(target_os = "windows")]
-impl ActiveAudio {
-    fn start_async(
-        app: AppHandle,
-        want_mic: bool,
-        want_system_audio: bool,
-        tmp_dir: PathBuf,
-        paused: Arc<AtomicBool>,
-        recording_start: Arc<Mutex<Option<Instant>>>,
-    ) -> Result<Self, String> {
-        let mic = Arc::new(Mutex::new(None));
-        let system_audio = Arc::new(Mutex::new(None));
-        let mic_track = Arc::new(Mutex::new(None));
-        let system_track = Arc::new(Mutex::new(None));
-        let stop_signal = Arc::new(AtomicBool::new(false));
-
-        let mic_clone = mic.clone();
-        let sys_clone = system_audio.clone();
-        let mic_track_clone = mic_track.clone();
-        let sys_track_clone = system_track.clone();
-        let stop_signal_clone = stop_signal.clone();
-        let tmp_dir_clone = tmp_dir.clone();
-        let paused_clone = paused.clone();
-        let recording_start_mic = recording_start.clone();
-        let recording_start_sys = recording_start;
-
-        let init_thread = std::thread::Builder::new()
-            .name("snapdoc-audio-init".into())
-            .spawn(move || {
-                std::thread::scope(|s| {
-                    if want_mic {
-                        let mic_target = mic_clone.clone();
-                        let mic_track_target = mic_track_clone.clone();
-                        let stop_sig = stop_signal_clone.clone();
-                        let dir = tmp_dir_clone.clone();
-                        let p = paused_clone.clone();
-                        let app_ref = app.clone();
-                        let rec_start = recording_start_mic;
-
-                        s.spawn(move || {
-                            if stop_sig.load(Ordering::SeqCst) {
-                                return;
-                            }
-                            let mic_res = audio_mic::start();
-
-                            if stop_sig.load(Ordering::SeqCst) {
-                                if let Ok((mic_cap, _, _, _)) = mic_res {
-                                    mic_cap.stop();
-                                }
-                                return;
-                            }
-
-                            match mic_res {
-                                Ok((mic_cap, rx, sample_rate, channels)) => {
-                                    // Chờ mốc bắt đầu quay chính thức (sau khi Encoder và writer sẵn sàng)
-                                    let start_time = loop {
-                                        if stop_sig.load(Ordering::SeqCst) {
-                                            return;
-                                        }
-                                        if let Some(t) = *rec_start.lock().unwrap_or_else(|p| p.into_inner()) {
-                                            break t;
-                                        }
-                                        // Xả các chunk pre-roll trong lúc chờ encoder khởi động
-                                        while let Ok(_) = rx.try_recv() {}
-                                        std::thread::sleep(std::time::Duration::from_millis(2));
-                                    };
-
-                                    let delta_ms = Instant::now().saturating_duration_since(start_time).as_millis() as usize;
-                                    let frame_size = channels as usize * 2;
-                                    let num_frames = (sample_rate as usize * delta_ms) / 1000;
-                                    let silence_bytes = num_frames * frame_size;
-
-                                    let raw_path = dir.join("mic.pcm");
-                                    let writer = spawn_pcm_file_writer(raw_path.clone(), rx, p, stop_sig.clone(), silence_bytes);
-
-                                    if let Ok(mut g) = mic_target.lock() {
-                                        *g = Some(mic_cap);
-                                    }
-                                    if let Ok(mut g) = mic_track_target.lock() {
-                                        *g = Some(AudioTrack {
-                                            stop_signal: stop_sig,
-                                            writer,
-                                            raw_path,
-                                            sample_rate,
-                                            channels,
-                                        });
-                                    }
-                                }
-                                Err(e) => {
-                                    notify_warning(&app_ref, &format!("Không ghi được mic — vẫn tiếp tục quay: {e}"));
-                                }
-                            }
-                        });
-                    }
-
-                    if want_system_audio {
-                        let sys_target = sys_clone.clone();
-                        let sys_track_target = sys_track_clone.clone();
-                        let stop_sig = stop_signal_clone.clone();
-                        let dir = tmp_dir_clone.clone();
-                        let p = paused_clone.clone();
-                        let app_ref = app.clone();
-                        let rec_start = recording_start_sys;
-
-                        s.spawn(move || {
-                            if stop_sig.load(Ordering::SeqCst) {
-                                return;
-                            }
-                            let sys_res = audio_wasapi::start();
-
-                            if stop_sig.load(Ordering::SeqCst) {
-                                if let Ok((sys_cap, _, _, _)) = sys_res {
-                                    sys_cap.stop();
-                                }
-                                return;
-                            }
-
-                            match sys_res {
-                                Ok((sys_cap, rx, sample_rate, channels)) => {
-                                    // Chờ mốc bắt đầu quay chính thức (sau khi Encoder và writer sẵn sàng)
-                                    let start_time = loop {
-                                        if stop_sig.load(Ordering::SeqCst) {
-                                            return;
-                                        }
-                                        if let Some(t) = *rec_start.lock().unwrap_or_else(|p| p.into_inner()) {
-                                            break t;
-                                        }
-                                        // Xả các chunk pre-roll trong lúc chờ encoder khởi động
-                                        while let Ok(_) = rx.try_recv() {}
-                                        std::thread::sleep(std::time::Duration::from_millis(2));
-                                    };
-
-                                    let delta_ms = Instant::now().saturating_duration_since(start_time).as_millis() as usize;
-                                    let frame_size = channels as usize * 2;
-                                    let num_frames = (sample_rate as usize * delta_ms) / 1000;
-                                    let silence_bytes = num_frames * frame_size;
-
-                                    let raw_path = dir.join("system.pcm");
-                                    let writer = spawn_pcm_file_writer(raw_path.clone(), rx, p, stop_sig.clone(), silence_bytes);
-
-                                    if let Ok(mut g) = sys_target.lock() {
-                                        *g = Some(sys_cap);
-                                    }
-                                    if let Ok(mut g) = sys_track_target.lock() {
-                                        *g = Some(AudioTrack {
-                                            stop_signal: stop_sig,
-                                            writer,
-                                            raw_path,
-                                            sample_rate,
-                                            channels,
-                                        });
-                                    }
-                                }
-                                Err(e) => {
-                                    notify_warning(&app_ref, &format!("Không ghi được audio hệ thống — vẫn tiếp tục quay: {e}"));
-                                }
-                            }
-                        });
-                    }
-                });
-            })
-            .map_err(|e| format!("Không tạo được luồng khởi tạo audio: {e}"))?;
-
-        Ok(ActiveAudio {
-            mic,
-            system_audio,
-            mic_track,
-            system_track,
-            init_thread: Some(init_thread),
-            stop_signal,
-            tmp_dir,
-        })
-    }
-
-    fn stop_and_collect(mut self) -> (Option<(PathBuf, u32, u16)>, Option<(PathBuf, u32, u16)>, PathBuf) {
-        self.stop_signal.store(true, Ordering::SeqCst);
-        if let Some(t) = self.init_thread.take() {
-            let _ = t.join();
-        }
-
-        if let Ok(mut g) = self.mic.lock() {
-            if let Some(mic) = g.take() {
-                mic.stop();
-            }
-        }
-        if let Ok(mut g) = self.system_audio.lock() {
-            if let Some(sys) = g.take() {
-                sys.stop();
-            }
-        }
-
-        let mic_meta = self.mic_track.lock().ok().and_then(|mut g| g.take()).map(|t| {
-            t.stop_signal.store(true, Ordering::SeqCst);
-            let _ = t.writer.join();
-            (t.raw_path, t.sample_rate, t.channels)
-        });
-        let sys_meta = self.system_track.lock().ok().and_then(|mut g| g.take()).map(|t| {
-            t.stop_signal.store(true, Ordering::SeqCst);
-            let _ = t.writer.join();
-            (t.raw_path, t.sample_rate, t.channels)
-        });
-
-        (mic_meta, sys_meta, self.tmp_dir.clone())
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for ActiveAudio {
-    fn drop(&mut self) {
-        self.stop_signal.store(true, Ordering::SeqCst);
-        if let Ok(mut g) = self.mic.lock() {
-            if let Some(mic) = g.take() {
-                mic.stop();
-            }
-        }
-        if let Ok(mut g) = self.system_audio.lock() {
-            if let Some(sys) = g.take() {
-                sys.stop();
-            }
-        }
-    }
-}
-
-/// 1 phiên quay đang chạy. Field `stream` chỉ tồn tại trên macOS (nguồn frame
-/// duy nhất hiện có); `writer` sở hữu cả `Receiver<Frame>` lẫn `Encoder`, tự
-/// gọi `encoder.finish()` khi kênh đóng (xem `stop_recording`).
-pub struct ActiveRecording {
-    #[cfg(target_os = "macos")]
-    stream: crate::capture::mac_stream::RecordingHandle,
-    #[cfg(target_os = "windows")]
-    stream: crate::capture::windows_stream::RecordingHandle,
-    writer: std::thread::JoinHandle<Result<(), String>>,
-    audio: Option<ActiveAudio>,
-    /// Nơi `Encoder` ghi video lúc quay — TRÙNG `output_path` nếu không bật
-    /// audio; là 1 file TẠM (trong `audio.tmp_dir`) nếu có audio, vì còn phải
-    /// ghép audio vào rồi mới ra `output_path` thật (xem `stop_recording`).
-    video_path: PathBuf,
-    pub output_path: PathBuf,
-    pub started_at: Instant,
-    /// Kích thước pixel thật của video (khớp `RecordingHandle::width/height`
-    /// lúc `start()`) — cần lại ở `stop_recording` để ingest vào History,
-    /// nhưng `stream` đã bị tiêu thụ (move) bởi `stream.stop()` lúc đó nên
-    /// phải lưu riêng ở đây từ trước.
-    width: u32,
-    height: u32,
-    /// "full" | "window" | "region" — khớp đúng `CaptureMode` phía chụp ảnh
-    /// (xem `flow::run_record_picker`), để History coi quay và chụp cùng 1
-    /// khái niệm "phạm vi" thay vì tạo thêm 1 tập giá trị capture_mode riêng.
-    capture_mode: &'static str,
-    // ── Pause / Resume ────────────────────────────────────────────────────
-    /// `true` khi phiên quay đang tạm dừng — writer thread video và writer
-    /// thread audio đều kiểm tra cờ này để skip frame/chunk.
-    pub paused: Arc<AtomicBool>,
-    /// Tổng số millisecond đã ở trạng thái paused (tích luỹ qua nhiều lần
-    /// pause) — `status()` trừ giá trị này ra khỏi `started_at.elapsed()`
-    /// để đồng hồ không chạy trong lúc tạm dừng.
-    paused_accumulated_ms: Arc<AtomicU64>,
-    /// Thời điểm bắt đầu đoạn pause HIỆN TẠI — `Some` khi đang paused,
-    /// `None` khi đang chạy. Dùng để tính thêm khoảng ms cho
-    /// `paused_accumulated_ms` khi resume (xem `resume_recording`).
-    pause_started_at: Arc<Mutex<Option<Instant>>>,
-    keystroke_listener: Option<keystroke::KeystrokeListener>,
-    mouse_click_listener: Option<mouse_click::MouseClickListener>,
-}
-
-#[derive(Default)]
-pub struct RecordingState(pub Mutex<Option<ActiveRecording>>);
+// ── Đường dẫn / dọn dẹp ───────────────────────────────────────────────────
 
 /// Thư mục lưu video: `saveDir` đã cấu hình trong Settings, hoặc
 /// `Pictures/SnapDoc` mặc định — cùng quy tắc với ảnh chụp.
 fn resolve_save_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let config_dir = app.path().app_config_dir().unwrap_or_default();
-    let settings = crate::storage::settings::load(&config_dir);
-    let custom_dir = settings
+    let custom_dir = settings(app)
         .get("saveDir")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -468,29 +245,21 @@ fn resolve_save_dir(app: &AppHandle) -> Result<PathBuf, String> {
     }
 }
 
-/// Đường dẫn file mp4 mới: `{saveDir hoặc Pictures/SnapDoc}/Recording_<timestamp>.mp4`
-/// — cùng thư mục lưu với ảnh chụp (tôn trọng `saveDir` đã cấu hình trong Settings).
+/// Đường dẫn file mp4 mới: `{saveDir hoặc Pictures/SnapDoc}/Recording_<timestamp>.mp4`.
 pub(crate) fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = resolve_save_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Không tạo được thư mục lưu: {e}"))?;
-    // mp4 nằm NGOÀI `$APPDATA/SnapDoc/library` (scope tĩnh khai trong
-    // tauri.conf.json chỉ cho phép thư mục đó) — khác ảnh chụp, video không
-    // copy vào Library nội bộ (xem `history::ingest_video`), nên phải tự mở
-    // thêm scope asset-protocol cho ĐÚNG thư mục này thì `convertFileSrc`
-    // (Editor chế độ video + History video player) mới đọc được, nếu không trình
-    // duyệt sẽ chặn request và video không tài phát được (404/blocked).
+    // mp4 nằm NGOÀI `$APPDATA/SnapDoc/library` (scope tĩnh trong
+    // tauri.conf.json) — phải mở thêm scope asset-protocol cho đúng thư mục
+    // này thì Editor/History mới phát được video.
     allow_asset_scope(app, &dir);
-    // dedupe: 2 bản quay bắt đầu trong cùng 1 giây (timestamp trùng) không
-    // được ghi đè nhau — thêm hậu tố `_1`, `_2`... như luồng auto-save ảnh.
+    // dedupe: 2 bản quay bắt đầu trong cùng 1 giây không được ghi đè nhau.
     Ok(crate::storage::save::dedupe(
         dir.join(format!("{}.mp4", crate::flow::stamp_filename("Recording"))),
     ))
 }
 
-/// Mở scope asset-protocol cho 1 thư mục lưu video — gọi lúc quay (phòng
-/// `saveDir` vừa đổi trong Settings) VÀ lúc khởi động app (phòng người dùng
-/// mở lại History để xem video đã quay ở phiên trước, khi scope runtime của
-/// phiên cũ không còn — xem `allow_asset_scope_at_startup`).
+/// Mở scope asset-protocol cho 1 thư mục chứa video.
 pub(crate) fn allow_asset_scope(app: &AppHandle, dir: &std::path::Path) {
     if let Err(e) = app.asset_protocol_scope().allow_directory(dir, true) {
         eprintln!("[SnapDoc][record] Không mở được asset scope cho {}: {e}", dir.display());
@@ -504,33 +273,55 @@ pub fn allow_asset_scope_at_startup(app: &AppHandle) {
     }
 }
 
-/// Dọn rác tạm của các phiên TRƯỚC bị bỏ lại do crash/quit giữa chừng — gọi
-/// 1 lần lúc khởi động (app là single-instance nên không phiên nào khác đang
-/// dùng các file này): thư mục `snapdoc-rec-audio-*` (audio PCM + video tạm,
-/// bình thường dọn sau khi mux; bị bỏ lại khi mux lỗi/discard/crash),
-/// `snapdoc-trim-*` (segment tạm của trim, bị bỏ lại khi crash giữa trim)
-/// trong temp dir, và `*.trimtmp.mp4` trong saveDir (file trung gian giữa
-/// bước encode và bước rename đè của `history::commands::overwrite_history_video_sync`).
+/// Gọi 1 lần lúc khởi động (thread nền): khôi phục các bản quay bị gián đoạn
+/// (`session::recover_orphans`), chuyển video còn kẹt trong thư mục tạm của
+/// bản cũ ra thư mục lưu, rồi mới dọn rác tạm của trim/filmstrip.
 pub fn cleanup_stale_temp(app: &AppHandle) {
+    // Chỉ dọn thứ có TRƯỚC thời điểm này — file/thư mục do chính process này
+    // đang tạo (người dùng quay/mở video ngay khi app vừa mở) không bị đụng tới.
+    let scan_started = std::time::SystemTime::now();
+    let older = |entry: &std::fs::DirEntry| {
+        entry.metadata().and_then(|m| m.modified()).map(|t| t < scan_started).unwrap_or(false)
+    };
+    session::recover_orphans(app, scan_started);
+
     let tmp = std::env::temp_dir();
+    let mut migrated = 0usize;
     if let Ok(entries) = std::fs::read_dir(&tmp) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("snapdoc-rec-audio-")
-                || name.starts_with("snapdoc-trim-")
-                || name.starts_with("snapdoc-filmstrip-")
-            {
+            if name.starts_with("snapdoc-rec-audio-") {
+                if session::migrate_legacy_temp(app, &entry.path()) {
+                    migrated += 1;
+                }
+            } else if name.starts_with("snapdoc-trim-") || name.starts_with("snapdoc-filmstrip-") {
                 let _ = std::fs::remove_dir_all(entry.path());
             } else if name.starts_with("snapdoc-frame-") && name.ends_with(".jpg") {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
     }
+    if migrated > 0 {
+        crate::notify::info(
+            app,
+            &format!("Đã chuyển {migrated} bản quay từ thư mục tạm cũ về thư mục lưu (tên có hậu tố _recovered)."),
+        );
+    }
     if let Ok(dir) = resolve_save_dir(app) {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".trimtmp.mp4") {
+                // File trung gian của trim / bước hoàn tất bản quay bị bỏ dở.
+                if (name.ends_with(".trimtmp.mp4") || name.ends_with(".snapdoc-part.mp4")) && older(&entry) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    if let Ok(remux) = crate::history::assets::root_dir(app).map(|r| r.join("library").join("remux")) {
+        if let Ok(entries) = std::fs::read_dir(&remux) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().ends_with(".part.mp4") && older(&entry) {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
@@ -538,16 +329,9 @@ pub fn cleanup_stale_temp(app: &AppHandle) {
     }
 }
 
-/// Khớp kích thước frame về đúng (dst_w, dst_h) đã khai với encoder khi bắt đầu quay.
-/// Nếu cửa sổ đang quay bị co giãn (resize) giữa chừng, hàm này tự động crop hoặc
-/// pad viền đen thay vì bỏ qua frame khiến video bị đứng hình (dùng chung cho cả macOS và Windows).
-fn fit_frame_to_target(
-    src_bgra: &[u8],
-    src_w: u32,
-    src_h: u32,
-    dst_w: u32,
-    dst_h: u32,
-) -> Vec<u8> {
+/// Khớp kích thước frame về đúng (dst_w, dst_h) đã khai với encoder khi bắt
+/// đầu quay — cửa sổ bị resize giữa chừng thì crop/pad viền đen thay vì bỏ frame.
+fn fit_frame_to_target(src_bgra: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
     let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
     let copy_w = src_w.min(dst_w) as usize;
     let copy_h = src_h.min(dst_h) as usize;
@@ -564,150 +348,393 @@ fn fit_frame_to_target(
     dst
 }
 
-/// Ghi liên tục PCM thô (mic hoặc audio hệ thống — cùng dạng `Vec<u8>` s16le)
-/// ra 1 FILE THƯỜNG trong lúc quay. KHÔNG phải fifo — không có gì đọc trực
-/// tiếp trong lúc quay nên `file.write_all` không bao giờ bị chặn bởi ffmpeg
-/// hay bất kỳ ai khác (khác hẳn hướng fifo cũ). Ghép vào video xảy ra SAU
-/// khi dừng quay (xem `encoder::mux_audio`, `stop_recording`).
-///
-/// `paused`: cờ dùng chung với `pause_recording`/`resume_recording` — khi
-/// `true`, chunk được DROP thay vì ghi ra file, giữ audio đồng bộ với video
-/// (video cũng drop frame trong cùng khoảng thời gian đó, xem writer thread
-/// trong `start_with_target`). Dùng `Arc<AtomicBool>` để đọc không cần lock.
-fn spawn_pcm_file_writer(
-    path: PathBuf,
-    rx: Receiver<Vec<u8>>,
-    paused: Arc<AtomicBool>,
-    stop_signal: Arc<AtomicBool>,
-    initial_silence_bytes: usize,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        use std::io::Write;
-        let mut file = match std::fs::File::create(&path) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("[SnapDoc][record] Không tạo được file audio tạm {}: {e}", path.display());
-                return;
-            }
-        };
+// ── Audio ─────────────────────────────────────────────────────────────────
 
-        if initial_silence_bytes > 0 {
-            // Đệm khoảng lặng (zeros) lúc đầu để bù thời gian khởi động driver audio,
-            // bảo đảm audio timeline khớp chính xác 100% với video frame từ frame 0.
-            let silence_chunk_size = 4096.min(initial_silence_bytes);
-            let silence = vec![0u8; silence_chunk_size];
-            let mut remaining = initial_silence_bytes;
-            while remaining > 0 {
-                let to_write = remaining.min(silence.len());
-                if file.write_all(&silence[..to_write]).is_err() {
-                    break;
-                }
-                remaining -= to_write;
-            }
-        }
-
-        while !stop_signal.load(Ordering::SeqCst) {
-            match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                Ok(chunk) => {
-                    // Khi đang paused: drop chunk âm thanh — không ghi vào file,
-                    // giữ đồng bộ với video (video cũng bị drop cùng khoảng thời
-                    // gian này trong writer thread). ffmpeg mux_audio / mux_dual_audio
-                    // sau này nhận các file có cùng "khoảng trắng" nên timeline khớp tuyệt đối.
-                    if paused.load(Ordering::SeqCst) {
-                        continue;
-                    }
-                    if let Err(e) = file.write_all(&chunk) {
-                        eprintln!("[SnapDoc][record] Lỗi ghi file audio tạm {}: {e}", path.display());
-                        break;
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-
-        // Đọc hết các chunk còn lại trong kênh (nếu có) trước khi thoát
-        while let Ok(chunk) = rx.try_recv() {
-            if !paused.load(Ordering::SeqCst) {
-                let _ = file.write_all(&chunk);
-            }
-        }
-    })
+/// Nguồn audio có thể dừng (mic / WASAPI loopback) — sở hữu `cpal::Stream`
+/// trên thread riêng, `stop()` đóng sender để writer thấy EOF.
+trait AudioCapture: Send {
+    fn stop_capture(self: Box<Self>);
 }
 
-/// Quay toàn màn hình CHÍNH (hành vi v1, dùng cho nút "Quay" mặc định + hotkey).
-#[cfg(target_os = "macos")]
-pub fn start_recording(app: &AppHandle) -> Result<(), String> {
-    let monitor = crate::capture::monitor::primary()?;
-    let display_id = monitor
-        .id()
-        .map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
-    start_with_target(app, crate::capture::mac_stream::RecordTarget::Display(display_id))
-}
-
-/// Quay toàn bộ 1 màn hình CỤ THỂ (người dùng chọn qua overlay — Phase 3).
-#[cfg(target_os = "macos")]
-pub fn start_recording_monitor(app: &AppHandle, display_id: u32) -> Result<(), String> {
-    start_with_target(app, crate::capture::mac_stream::RecordTarget::Display(display_id))
-}
-
-/// Quay 1 VÙNG đã chọn qua overlay. `x,y,w,h` là points, LOCAL theo gốc màn
-/// hình `display_id` (cùng hệ toạ độ `flow::finalize_region` đã tính sẵn cho
-/// chụp ảnh vùng — xem đó để hiểu vì sao không cần cộng thêm gốc màn hình).
-#[cfg(target_os = "macos")]
-pub fn start_recording_region(
-    app: &AppHandle,
-    display_id: u32,
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-) -> Result<(), String> {
-    start_with_target(
-        app,
-        crate::capture::mac_stream::RecordTarget::Region { display_id, x, y, w, h },
-    )
-    // KHÔNG tự mở khung viền ở đây nữa — caller duy nhất (`flow::finalize_region`)
-    // đã có sẵn overlay đang hiển thị đúng khung này (từ lúc chọn/chỉnh vùng)
-    // và tự chuyển nó thành lớp click-through cho khung viền, tránh nháy hình
-    // do phải tạo/ẩn 1 cửa sổ khung viền RIÊNG (xem comment ở đó).
-}
-
-/// Quay 1 cửa sổ đã chọn qua overlay.
-#[cfg(target_os = "macos")]
-pub fn start_recording_window(app: &AppHandle, window_id: u32) -> Result<(), String> {
-    start_with_target(app, crate::capture::mac_stream::RecordTarget::Window(window_id))
-}
-
-/// Vùng (x, y, w, h) LOGICAL/points, toạ độ GLOBAL desktop, để vẽ khung viền
-/// "đang quay" (xem `windows::open_record_border`) cho quay TOÀN màn hình
-/// hoặc quay 1 CỬA SỔ — quay VÙNG trả `None` vì đã có khung riêng (chính
-/// overlay chọn vùng, xem `flow::finalize_region`). Phải gọi TRƯỚC khi
-/// `target` bị tiêu thụ (move) vào `mac_stream::start`/`windows_stream::start`.
-#[cfg(target_os = "macos")]
-fn record_border_rect(target: &crate::capture::mac_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
-    use crate::capture::mac_stream::RecordTarget;
-    use xcap::Monitor;
-    match target {
-        RecordTarget::Display(display_id) => {
-            let m = Monitor::all()
-                .ok()?
-                .into_iter()
-                .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
-            Some((m.x().ok()? as f64, m.y().ok()? as f64, m.width().ok()? as f64, m.height().ok()? as f64))
-        }
-        RecordTarget::Window(window_id) => {
-            let list = crate::capture::window::list(0.0, 0.0, 1.0).ok()?;
-            let w = list.into_iter().find(|w| w.id == *window_id)?;
-            Some((w.x, w.y, w.width, w.height))
-        }
-        RecordTarget::Region { .. } => None,
+impl AudioCapture for audio_mic::MicCapture {
+    fn stop_capture(self: Box<Self>) {
+        (*self).stop();
     }
 }
 
+#[cfg(target_os = "windows")]
+impl AudioCapture for audio_wasapi::SystemAudioCapture {
+    fn stop_capture(self: Box<Self>) {
+        (*self).stop();
+    }
+}
+
+/// Kết quả mở 1 nguồn audio: tay cầm, kênh PCM s16le, sample rate, số kênh,
+/// cờ "thiết bị lỗi giữa chừng" (rút mic, AirPods mất kết nối...).
+type AudioOpen = (Box<dyn AudioCapture>, Receiver<pcm_writer::PcmChunk>, u32, u16, Arc<AtomicBool>);
+
+struct RunningTrack {
+    label: &'static str,
+    capture: Option<Box<dyn AudioCapture>>,
+    writer: JoinHandle<pcm_writer::PcmStats>,
+    writer_stop: Arc<AtomicBool>,
+    device_error: Option<Arc<AtomicBool>>,
+}
+
+/// Mọi track audio của 1 phiên. Nguồn mở chậm (mic Bluetooth có thể mất
+/// 1–2s) được mở ở THREAD NỀN — quay bắt đầu ngay, phần đầu của track đó tự
+/// được đệm lặng nhờ `pcm_writer` bám đồng hồ.
+struct AudioSet {
+    tracks: Arc<Mutex<Vec<RunningTrack>>>,
+    init_threads: Vec<JoinHandle<()>>,
+    aborted: Arc<AtomicBool>,
+}
+
+impl AudioSet {
+    fn new() -> Self {
+        AudioSet { tracks: Arc::new(Mutex::new(Vec::new())), init_threads: Vec::new(), aborted: Arc::new(AtomicBool::new(false)) }
+    }
+
+    fn spawn_writer(
+        session: &Session,
+        name: &'static str,
+        is_mic: bool,
+        rx: Receiver<pcm_writer::PcmChunk>,
+        sample_rate: u32,
+        channels: u16,
+        clock: &Arc<RecordingClock>,
+    ) -> (JoinHandle<pcm_writer::PcmStats>, Arc<AtomicBool>) {
+        session.register_track(name, sample_rate, channels, is_mic);
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = pcm_writer::spawn(
+            session.track_path(name),
+            rx,
+            pcm_writer::PcmFormat { sample_rate, channels },
+            clock.clone(),
+            stop.clone(),
+        );
+        (writer, stop)
+    }
+
+    /// Track mà kênh PCM đã có sẵn (audio hệ thống từ SCStream trên macOS).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn add_ready(
+        &mut self,
+        session: &Session,
+        name: &'static str,
+        rx: Receiver<pcm_writer::PcmChunk>,
+        sample_rate: u32,
+        channels: u16,
+        clock: &Arc<RecordingClock>,
+    ) {
+        let (writer, writer_stop) = Self::spawn_writer(session, name, false, rx, sample_rate, channels, clock);
+        self.tracks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(RunningTrack { label: "Âm thanh hệ thống", capture: None, writer, writer_stop, device_error: None });
+    }
+
+    /// Mở nguồn bằng `open` ở thread nền rồi gắn writer.
+    fn add_async(
+        &mut self,
+        app: &AppHandle,
+        session: &Session,
+        name: &'static str,
+        is_mic: bool,
+        clock: &Arc<RecordingClock>,
+        open: fn() -> Result<AudioOpen, String>,
+    ) {
+        let tracks = self.tracks.clone();
+        let aborted = self.aborted.clone();
+        let clock = clock.clone();
+        let app_c = app.clone();
+        let session = Session { dir: session.dir.clone() };
+        let label = if is_mic { "mic" } else { "âm thanh hệ thống" };
+        let spawned = std::thread::Builder::new().name(format!("snapdoc-audio-init-{name}")).spawn(move || {
+            let opened = open();
+            if aborted.load(Ordering::SeqCst) {
+                if let Ok((cap, ..)) = opened {
+                    cap.stop_capture();
+                }
+                return;
+            }
+            match opened {
+                Ok((cap, rx, sample_rate, channels, err_flag)) => {
+                    let (writer, writer_stop) = Self::spawn_writer(&session, name, is_mic, rx, sample_rate, channels, &clock);
+                    tracks.lock().unwrap_or_else(|p| p.into_inner()).push(RunningTrack {
+                        label: if is_mic { "Mic" } else { "Âm thanh hệ thống" },
+                        capture: Some(cap),
+                        writer,
+                        writer_stop,
+                        device_error: Some(err_flag),
+                    });
+                }
+                // Báo NGAY (không đợi quay xong): quay cả tiếng rồi mới biết mất tiếng thì quá muộn.
+                Err(e) => crate::notify::warning_now(&app_c, &format!("Không ghi được {label} — bản quay vẫn tiếp tục: {e}")),
+            }
+        });
+        match spawned {
+            Ok(t) => self.init_threads.push(t),
+            Err(e) => crate::notify::warning(app, &format!("Không khởi tạo được {label}: {e}")),
+        }
+    }
+
+    /// Dừng mọi nguồn, chờ writer ghi xong. Trả cảnh báo cho người dùng.
+    fn stop_and_collect(mut self) -> Vec<String> {
+        self.aborted.store(true, Ordering::SeqCst);
+        for t in self.init_threads.drain(..) {
+            let _ = t.join();
+        }
+        let tracks = std::mem::take(&mut *self.tracks.lock().unwrap_or_else(|p| p.into_inner()));
+        let mut warnings = Vec::new();
+        for mut t in tracks {
+            if let Some(cap) = t.capture.take() {
+                cap.stop_capture();
+            }
+            t.writer_stop.store(true, Ordering::SeqCst);
+            let stats = t.writer.join().unwrap_or(pcm_writer::PcmStats { io_error: true, ..Default::default() });
+            if stats.io_error {
+                warnings.push(format!("{}: lỗi ghi file âm thanh tạm — phần tiếng có thể bị thiếu.", t.label));
+            }
+            if t.device_error.map(|f| f.load(Ordering::SeqCst)).unwrap_or(false) {
+                warnings.push(format!(
+                    "{}: thiết bị âm thanh bị ngắt/đổi giữa lúc quay — đoạn bị mất được thay bằng khoảng lặng.",
+                    t.label
+                ));
+            }
+        }
+        warnings
+    }
+}
+
+impl Drop for AudioSet {
+    /// Đường lỗi lúc khởi động: dừng mọi thứ đã mở (không cần kết quả).
+    fn drop(&mut self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        for t in self.init_threads.drain(..) {
+            let _ = t.join();
+        }
+        let tracks = std::mem::take(&mut *self.tracks.lock().unwrap_or_else(|p| p.into_inner()));
+        for mut t in tracks {
+            if let Some(cap) = t.capture.take() {
+                cap.stop_capture();
+            }
+            t.writer_stop.store(true, Ordering::SeqCst);
+            let _ = t.writer.join();
+        }
+    }
+}
+
+fn open_mic() -> Result<AudioOpen, String> {
+    let (cap, rx, sr, ch, err) = audio_mic::start()?;
+    Ok((Box::new(cap), rx, sr, ch, err))
+}
+
+#[cfg(target_os = "windows")]
+fn open_system_audio() -> Result<AudioOpen, String> {
+    let (cap, rx, sr, ch, err) = audio_wasapi::start()?;
+    Ok((Box::new(cap), rx, sr, ch, err))
+}
+
+// ── Video writer ──────────────────────────────────────────────────────────
+
+struct WriterOutcome {
+    frames: u64,
+    error: Option<String>,
+}
+
+/// Kéo `PacedFrame` từ pacer, ghi đủ `repeat` lần vào encoder; kênh đóng
+/// (pacer xong) thì `finish()` encoder. `progress` đếm số frame đã ghi (cho
+/// watchdog phát hiện ffmpeg bị treo).
+fn spawn_video_writer(
+    rx: Receiver<PacedFrame>,
+    mut encoder: encoder::Encoder,
+    progress: Arc<std::sync::atomic::AtomicU64>,
+) -> JoinHandle<WriterOutcome> {
+    std::thread::Builder::new()
+        .name("snapdoc-record-writer".into())
+        .spawn(move || {
+            let (w, h) = encoder.in_size();
+            let expected_len = (w as usize) * (h as usize) * 4;
+            let mut frames = 0u64;
+            let mut error = None;
+            // Frame lệch kích thước (cửa sổ bị resize) → fit 1 lần cho mỗi frame
+            // nguồn, giữ Arc để so sánh danh tính an toàn.
+            let mut fitted: Option<(Arc<Frame>, Vec<u8>)> = None;
+            'outer: while let Ok(msg) = rx.recv() {
+                let data: &[u8] = if msg.frame.width == w && msg.frame.height == h && msg.frame.bgra.len() == expected_len {
+                    &msg.frame.bgra
+                } else {
+                    if !fitted.as_ref().map(|(f, _)| Arc::ptr_eq(f, &msg.frame)).unwrap_or(false) {
+                        let buf = fit_frame_to_target(&msg.frame.bgra, msg.frame.width, msg.frame.height, w, h);
+                        fitted = Some((msg.frame.clone(), buf));
+                    }
+                    &fitted.as_ref().expect("vừa gán ở trên").1
+                };
+                for _ in 0..msg.repeat {
+                    if let Err(e) = encoder.write_frame(data) {
+                        error = Some(e);
+                        break 'outer;
+                    }
+                    frames += 1;
+                    progress.store(frames, Ordering::Relaxed);
+                }
+            }
+            // Đóng kênh trước (pacer thấy Disconnected thay vì chờ mãi), rồi kết thúc encoder.
+            drop(rx);
+            drop(fitted);
+            if error.is_none() {
+                if let Err(e) = encoder.finish() {
+                    error = Some(e);
+                }
+            } else {
+                drop(encoder); // Drop: đóng stdin, chờ tối đa 3s rồi kill.
+            }
+            WriterOutcome { frames, error }
+        })
+        .expect("không tạo được thread ghi video")
+}
+
+/// Watchdog encoder: pacer có frame chờ gửi mà writer KHÔNG ghi thêm được
+/// frame nào suốt `STALL_LIMIT` → ffmpeg đã treo (driver encoder phần cứng
+/// kẹt...). Kill ffmpeg để writer thoát khỏi `write_all` đang chặn — ticker
+/// thấy writer chết sẽ tự dừng + lưu phần đã ghi; đang dừng thì luồng dừng
+/// không bị kẹt mãi ở "Đang lưu…".
+const STALL_LIMIT: Duration = Duration::from_secs(30);
+
+fn spawn_encoder_watchdog(
+    killer: encoder::EncoderKiller,
+    progress: Arc<std::sync::atomic::AtomicU64>,
+    backlog: Arc<std::sync::atomic::AtomicU64>,
+    writer_done: Arc<AtomicBool>,
+) {
+    let _ = std::thread::Builder::new().name("snapdoc-encoder-watchdog".into()).spawn(move || {
+        let mut last = progress.load(Ordering::Relaxed);
+        let mut since = Instant::now();
+        while !writer_done.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(500));
+            let p = progress.load(Ordering::Relaxed);
+            if p != last || backlog.load(Ordering::Relaxed) == 0 {
+                last = p;
+                since = Instant::now();
+                continue;
+            }
+            if since.elapsed() >= STALL_LIMIT {
+                eprintln!("[SnapDoc][record] ffmpeg không nhận frame suốt {}s — dừng encoder", STALL_LIMIT.as_secs());
+                killer.kill();
+                return;
+            }
+        }
+    });
+}
+
+// ── Theo dõi vị trí cửa sổ đang quay (cho telemetry chuột) ──────────────────
+
+/// (x, y, w, h) của vùng đang quay theo toạ độ màn hình — chia sẻ với
+/// listener chuột. Khi quay 1 CỬA SỔ, `WindowTracker` cập nhật gốc (x, y)
+/// mỗi khi cửa sổ bị kéo đi (nội dung video luôn bám cửa sổ).
+pub type SharedRect = Arc<Mutex<(f64, f64, f64, f64)>>;
+
+struct WindowTracker {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl WindowTracker {
+    fn spawn(window_id: u32, rect: SharedRect) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("snapdoc-window-tracker".into())
+            .spawn(move || {
+                while !s.load(Ordering::SeqCst) {
+                    for _ in 0..10 {
+                        if s.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    let origin = xcap::Window::all().ok().and_then(|ws| {
+                        ws.into_iter()
+                            .find(|w| w.id().map(|i| i == window_id).unwrap_or(false))
+                            .and_then(|w| Some((w.x().ok()? as f64, w.y().ok()? as f64)))
+                    });
+                    if let Some((x, y)) = origin {
+                        let mut g = rect.lock().unwrap_or_else(|p| p.into_inner());
+                        g.0 = x;
+                        g.1 = y;
+                    }
+                }
+            })
+            .ok();
+        WindowTracker { stop, thread }
+    }
+}
+
+impl Drop for WindowTracker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+// ── Phiên quay đang chạy ──────────────────────────────────────────────────
+
+pub struct ActiveRecording {
+    // Thứ tự field = thứ tự Drop (đường lỗi): dừng nguồn input trước.
+    keystroke_listener: Option<keystroke::KeystrokeListener>,
+    mouse_click_listener: Option<mouse_click::MouseClickListener>,
+    window_tracker: Option<WindowTracker>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    stream: stream_impl::RecordingHandle,
+    pacer: Pacer,
+    writer: JoinHandle<WriterOutcome>,
+    audio: AudioSet,
+    clock: Arc<RecordingClock>,
+    session: Session,
+    output_path: PathBuf,
+    /// "full" | "window" | "region" — khớp `CaptureMode` phía chụp ảnh.
+    capture_mode: &'static str,
+    /// Kích thước thật của video (đã thu nhỏ nếu vượt 4K).
+    out_size: (u32, u32),
+    generation: u64,
+}
+
+/// Cửa sổ phụ cần đóng nếu khởi động thất bại giữa chừng.
+struct StartCleanup<'a> {
+    app: &'a AppHandle,
+    armed: bool,
+}
+
+impl Drop for StartCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            crate::windows::close_record_keystroke(self.app);
+            crate::windows::close_record_clicks(self.app);
+        }
+    }
+}
+
+/// Thư mục phiên bị xoá nếu khởi động thất bại (chưa có dữ liệu gì đáng giữ).
+struct SessionGuard {
+    dir: Option<PathBuf>,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if let Some(d) = self.dir.take() {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+}
+
+// ── Toạ độ khung viền / overlay ───────────────────────────────────────────
+
 #[cfg(target_os = "macos")]
-fn record_target_rect(target: &crate::capture::mac_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
-    use crate::capture::mac_stream::RecordTarget;
+fn record_target_rect(target: &stream_impl::RecordTarget) -> Option<(f64, f64, f64, f64)> {
+    use stream_impl::RecordTarget;
     use xcap::Monitor;
     match target {
         RecordTarget::Display(display_id) => {
@@ -732,30 +759,9 @@ fn record_target_rect(target: &crate::capture::mac_stream::RecordTarget) -> Opti
     }
 }
 
-#[cfg(target_os = "macos")]
-fn record_keystroke_rect(target: &crate::capture::mac_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
-    let (rx, ry, rw, rh) = record_target_rect(target)?;
-    let kw = 780.0_f64.min(rw - 20.0).max(220.0);
-    let kh = 130.0;
-    let kx = rx + (rw - kw) / 2.0;
-    let ky = (ry + rh - kh - 44.0).max(ry);
-    Some((kx, ky, kw, kh))
-}
-
 #[cfg(target_os = "windows")]
-fn record_border_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
-    match target {
-        crate::capture::windows_stream::RecordTarget::Region { .. } => None,
-        _ => {
-            let (x, y, w, h, _) = record_target_rect(target)?;
-            Some((x, y, w, h))
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn record_target_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64, f64)> {
-    use crate::capture::windows_stream::RecordTarget;
+fn record_target_rect_scaled(target: &stream_impl::RecordTarget) -> Option<(f64, f64, f64, f64, f64)> {
+    use stream_impl::RecordTarget;
     use xcap::Monitor;
     match target {
         RecordTarget::Display(display_id) => {
@@ -764,13 +770,7 @@ fn record_target_rect(target: &crate::capture::windows_stream::RecordTarget) -> 
                 .into_iter()
                 .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
             let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
-            Some((
-                m.x().ok()? as f64,
-                m.y().ok()? as f64,
-                m.width().ok()? as f64,
-                m.height().ok()? as f64,
-                scale,
-            ))
+            Some((m.x().ok()? as f64, m.y().ok()? as f64, m.width().ok()? as f64, m.height().ok()? as f64, scale))
         }
         RecordTarget::Window(window_id) => {
             let list = crate::capture::window::list(0.0, 0.0, 1.0).ok()?;
@@ -783,8 +783,8 @@ fn record_target_rect(target: &crate::capture::windows_stream::RecordTarget) -> 
             Some((w.x, w.y, w.width, w.height, scale))
         }
         RecordTarget::Region { display_id, x, y, w, h } => {
-            let monitors = Monitor::all().ok()?;
-            let m = monitors
+            let m = Monitor::all()
+                .ok()?
                 .into_iter()
                 .find(|m| m.id().map(|i| i == *display_id).unwrap_or(false))?;
             let scale = m.scale_factor().unwrap_or(1.0).max(1.0) as f64;
@@ -793,567 +793,51 @@ fn record_target_rect(target: &crate::capture::windows_stream::RecordTarget) -> 
     }
 }
 
-#[cfg(target_os = "windows")]
-fn record_keystroke_rect(target: &crate::capture::windows_stream::RecordTarget) -> Option<(f64, f64, f64, f64)> {
-    let (rx, ry, rw, rh, scale) = record_target_rect(target)?;
+/// Khung viền "đang quay" cho quay TOÀN màn hình / 1 CỬA SỔ — quay VÙNG trả
+/// `None` vì đã có khung riêng (chính overlay chọn vùng, xem `flow::finalize_region`).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn record_border_rect(target: &stream_impl::RecordTarget, rect: Option<(f64, f64, f64, f64)>) -> Option<(f64, f64, f64, f64)> {
+    match target {
+        stream_impl::RecordTarget::Region { .. } => None,
+        _ => rect,
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn record_keystroke_rect(rect: (f64, f64, f64, f64), scale: f64) -> (f64, f64, f64, f64) {
+    let (rx, ry, rw, rh) = rect;
     let kw = (780.0 * scale).min(rw - (20.0 * scale)).max(220.0 * scale);
     let kh = 130.0 * scale;
     let kx = rx + (rw - kw) / 2.0;
     let ky = (ry + rh - kh - (44.0 * scale)).max(ry);
-    Some((kx, ky, kw, kh))
+    (kx, ky, kw, kh)
 }
 
-/// Chặn bắt đầu quay mới khi đã có 1 phiên đang chạy. Dùng chung cho cả 2
-/// nền tảng.
-fn guard_can_start_recording(app: &AppHandle) -> Result<(), String> {
-    let state = app.state::<RecordingState>();
-    let guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
-    if guard.is_some() {
-        return Err("Đã có phiên quay đang chạy".to_string());
-    }
-    Ok(())
-}
+// ── Bắt đầu quay ──────────────────────────────────────────────────────────
 
-#[cfg(target_os = "macos")]
-fn start_with_target(app: &AppHandle, target: crate::capture::mac_stream::RecordTarget) -> Result<(), String> {
-    // Giữ gate suốt hàm (tới sau khi ghi RecordingState) — xem `StartGate`.
-    let _gate = StartGate::acquire()?;
-    guard_can_start_recording(app)?;
-    let state = app.state::<RecordingState>();
-
-    let capture_mode: &'static str = match &target {
-        crate::capture::mac_stream::RecordTarget::Display(_) => "full",
-        crate::capture::mac_stream::RecordTarget::Region { .. } => "region",
-        crate::capture::mac_stream::RecordTarget::Window(_) => "window",
-    };
-
-    // Phải tính TRƯỚC khi `target` bị move vào `mac_stream::start` bên dưới.
-    let border_rect = record_border_rect(&target);
-    let keystroke_rect = record_keystroke_rect(&target);
-    let click_target_rect = record_target_rect(&target);
-
-    let audio_source = audio_source_setting(app);
-    let want_system_audio = audio_source == AudioSource::System || audio_source == AudioSource::Both;
-    let want_mic = audio_source == AudioSource::Mic || audio_source == AudioSource::Both;
-
-    let record_self = record_self_setting(app);
-
-    let show_keystrokes = keystroke_overlay_setting(app);
-    let (keystroke_win_id, keystroke_listener) = if show_keystrokes {
-        let win_id = if let Some((kx, ky, kw, kh)) = keystroke_rect {
-            match crate::windows::open_record_keystroke(app, kx, ky, kw, kh) {
-                Ok(id) => id,
-                Err(e) => {
-                    eprintln!("[SnapDoc][record] Không hiện được overlay phím bấm: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let listener = match keystroke::KeystrokeListener::start(app.clone()) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                notify_warning(app, &format!("Phím bấm: {e}"));
-                None
-            }
-        };
-        (win_id, listener)
-    } else {
-        (None, None)
-    };
-
-    let show_clicks = click_overlay_setting(app);
-    let click_win_id = if show_clicks {
-        if let Some((cx, cy, cw, ch)) = click_target_rect {
-            match crate::windows::open_record_clicks(app, cx, cy, cw, ch) {
-                Ok(id) => id,
-                Err(e) => {
-                    eprintln!("[SnapDoc][record] Không hiện được overlay click chuột: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let mouse_click_listener = if let Some((cx, cy, cw, ch)) = click_target_rect {
-        match mouse_click::MouseClickListener::start(app.clone(), (cx, cy, cw, ch)) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                notify_warning(app, &format!("Click chuột / Telemetry: {e}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let mut excepting_ids = Vec::new();
-    if let Some(id) = keystroke_win_id {
-        excepting_ids.push(id);
-    }
-    if let Some(id) = click_win_id {
-        excepting_ids.push(id);
-    }
-
-    let (stream, frame_rx, system_audio_rx) =
-        match crate::capture::mac_stream::start(target, FPS, want_system_audio, !record_self, &excepting_ids) {
-            Ok(res) => res,
-            Err(e) => {
-                crate::windows::close_record_keystroke(app);
-                crate::windows::close_record_clicks(app);
-                return Err(e);
-            }
-        };
-    let (width, height) = (stream.width, stream.height);
-
-    // Mic là nguồn ĐỘC LẬP với SCStream (xem `audio_mic.rs`) — lỗi ở đây
-    // (vd không có quyền micro) không nên làm hỏng cả phiên quay: log rồi
-    // tiếp tục quay, còn hơn để người dùng mất trắng bản quay.
-    let mic_result = if want_mic {
-        match audio_mic::start() {
-            Ok(m) => Some(m),
-            Err(e) => {
-                notify_warning(app, &format!("Không ghi được mic — vẫn tiếp tục quay: {e}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Cờ pause dùng chung giữa writer thread video, writer thread audio, và
-    // ticker — khởi tạo `false` (đang chạy bình thường).
-    let paused = Arc::new(AtomicBool::new(false));
-    let paused_accumulated_ms = Arc::new(AtomicU64::new(0));
-    let pause_started_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
-
-    let has_any_audio = system_audio_rx.is_some() || mic_result.is_some();
-    let (video_path, output_path, audio) = if has_any_audio {
-        let tmp_dir = std::env::temp_dir().join(format!("snapdoc-rec-audio-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp_dir)
-            .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
-        let video_tmp_path = tmp_dir.join("video.mp4");
-        let final_path = new_output_path(app)?;
-        let system_track = if let Some(sys_rx) = system_audio_rx {
-            let sys_raw_path = tmp_dir.join("system.pcm");
-            let stop_signal = Arc::new(AtomicBool::new(false));
-            let writer = spawn_pcm_file_writer(sys_raw_path.clone(), sys_rx, paused.clone(), stop_signal.clone(), 0);
-            Some(AudioTrack {
-                stop_signal,
-                writer,
-                raw_path: sys_raw_path,
-                sample_rate: crate::capture::mac_stream::AUDIO_SAMPLE_RATE,
-                channels: crate::capture::mac_stream::AUDIO_CHANNELS,
-            })
-        } else {
-            None
-        };
-
-        let (mic_capture, mic_track) = if let Some((mic, mic_rx, sample_rate, channels)) = mic_result {
-            let mic_raw_path = tmp_dir.join("mic.pcm");
-            let stop_signal = Arc::new(AtomicBool::new(false));
-            let writer = spawn_pcm_file_writer(mic_raw_path.clone(), mic_rx, paused.clone(), stop_signal.clone(), 0);
-            (
-                Some(mic),
-                Some(AudioTrack {
-                    stop_signal,
-                    writer,
-                    raw_path: mic_raw_path,
-                    sample_rate,
-                    channels: channels as u16,
-                }),
-            )
-        } else {
-            (None, None)
-        };
-
-        (
-            video_tmp_path,
-            final_path,
-            Some(ActiveAudio {
-                mic: mic_capture,
-                mic_track,
-                system_track,
-                tmp_dir,
-            }),
-        )
-    } else {
-        let final_path = new_output_path(app)?;
-        (final_path.clone(), final_path, None)
-    };
-
-    let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
-    let paused_for_writer = paused.clone();
-
-    // Luồng riêng: kéo frame liên tục cho tới khi channel đóng (xảy ra khi
-    // `stop_recording` gọi `stream.stop()` → drop sender bên trong
-    // `mac_stream`), rồi TỰ gọi `encoder.finish()` để đóng stdin/mux file.
-    let writer = std::thread::spawn(move || -> Result<(), String> {
-        while let Ok(frame) = frame_rx.recv() {
-            // Khi paused: drop frame, không ghi vào encoder — video giữ nguyên
-            // timestamp liên tục (ffmpeg đếm frame theo fps cố định) nên đoạn
-            // paused sẽ bị "đứng hình" hoặc nối liền tuỳ frame cuối cùng trước
-            // pause. Đây là hành vi mong muốn: video output chỉ chứa nội dung
-            // thật sự được ghi, không có khoảng trống thời gian.
-            if paused_for_writer.load(Ordering::Relaxed) {
-                continue;
-            }
-            // ffmpeg nhận rawvideo với -s cố định từ lúc start(). Nếu cửa sổ
-            // hoặc màn hình bị đổi kích thước giữa lúc quay, tự động fit/crop/pad
-            // về đúng (width, height) thay vì bỏ qua frame khiến video đứng hình.
-            if frame.width != width || frame.height != height {
-                let fit_data = fit_frame_to_target(&frame.bgra, frame.width, frame.height, width, height);
-                encoder.write_frame(&fit_data)?;
-            } else {
-                encoder.write_frame(&frame.bgra)?;
-            }
-        }
-        encoder.finish()
-    });
-
-
-    {
-        let mut guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
-        *guard = Some(ActiveRecording {
-            stream,
-            writer,
-            audio,
-            video_path,
-            output_path,
-            started_at: Instant::now(),
-            width,
-            height,
-            capture_mode,
-            paused,
-            paused_accumulated_ms,
-            pause_started_at,
-            keystroke_listener,
-            mouse_click_listener,
-        });
-    }
-
-    crate::tray::show_recording_tray(app);
-    if let Some((bx, by, bw, bh)) = border_rect {
-        if let Err(e) = crate::windows::open_record_border(app, bx, by, bw, bh) {
-            eprintln!("[SnapDoc][record] Không hiện được khung viền đang quay: {e}");
-        }
-    }
-    spawn_tray_ticker(app.clone());
-    Ok(())
-}
-
-/// Cập nhật đồng hồ đếm cạnh icon "đang quay" mỗi giây — tự dừng khi
-/// `status()` trả `None` (đã `stop_recording`). Đồng thời poll
-/// `is_stopped_externally()`: nếu người dùng bấm "Stop" trên icon "Screen
-/// Sharing" của HỆ THỐNG macOS (khác icon riêng của app), `SCStream` tự dừng
-/// mà không ai gọi `stop_recording()` của ta — nếu không phát hiện, phiên
-/// quay coi như "kẹt" mãi ở trạng thái đang chạy: `writer` thread chờ frame
-/// không bao giờ tới nữa, và icon "đang quay" không bao giờ bị ẩn.
-///
-/// Đây vẫn là 1 poll BẮT BUỘC (không có callback OS nào báo "SCStream tự
-/// dừng") — nhưng thay vì để `RecordingIndicator.tsx` tự poll `recording_status`
-/// THÊM 1 lần/giây riêng (IPC round-trip trùng lặp với đúng giá trị `ms` vừa
-/// tính ở đây), emit luôn `recording-tick` cho MỌI cửa sổ đang lắng nghe —
-/// gộp 2 vòng poll độc lập (Rust ticker + JS setInterval) thành 1 nguồn duy
-/// nhất, phản hồi ngay khi tính xong thay vì lệch pha tới 1s giữa 2 timer.
-#[cfg(target_os = "macos")]
-fn spawn_tray_ticker(app: AppHandle) {
-    use tauri::Emitter;
-    std::thread::spawn(move || loop {
-        if stopped_externally(&app) {
-            if let Err(e) = stop_recording(&app) {
-                eprintln!("[SnapDoc][record] Dừng quay (SCStream tự dừng bên ngoài) thất bại: {e}");
-            }
-            break;
-        }
-        match status(&app) {
-            Some(ms) => {
-                let is_paused = paused_state(&app).unwrap_or(false);
-                // Khi paused: không cập nhật đồng hồ tray (giữ nguyên giá trị
-                // cuối trước lúc pause, thay vì nhảy số lên rồi reset khi resume).
-                if !is_paused {
-                    crate::tray::update_recording_time(ms);
-                }
-                let _ = app.emit("recording-tick", RecordingTick { ms, paused: is_paused });
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-            None => break,
-        }
-    });
-}
-
-/// `true` nếu phiên quay hiện tại đã bị SCStream tự dừng ngoài ý muốn (xem
-/// `spawn_tray_ticker`).
-#[cfg(target_os = "macos")]
-fn stopped_externally(app: &AppHandle) -> bool {
-    let state = app.state::<RecordingState>();
-    let guard = match state.0.lock() {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
-    guard
-        .as_ref()
-        .map(|r| r.stream.is_stopped_externally())
-        .unwrap_or(false)
-}
-
-/// Quay toàn màn hình CHÍNH trên Windows (giai đoạn 1 của plan Phase 5 —
-/// xem `capture::windows_stream` doc-comment: chưa hỗ trợ audio/window/region).
-#[cfg(target_os = "windows")]
+/// Quay toàn màn hình CHÍNH (nút "Quay" mặc định + hotkey khi chỉ có 1 màn hình).
 pub fn start_recording(app: &AppHandle) -> Result<(), String> {
     let monitor = crate::capture::monitor::primary()?;
-    let display_id = monitor
-        .id()
-        .map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
-    start_with_target(app, crate::capture::windows_stream::RecordTarget::Display(display_id))
+    let display_id = monitor.id().map_err(|e| format!("Không đọc được id màn hình: {e}"))?;
+    start_recording_monitor(app, display_id)
 }
 
-#[cfg(target_os = "windows")]
+/// Quay toàn bộ 1 màn hình CỤ THỂ (người dùng chọn qua overlay).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn start_recording_monitor(app: &AppHandle, display_id: u32) -> Result<(), String> {
-    start_with_target(app, crate::capture::windows_stream::RecordTarget::Display(display_id))
+    start_with_target(app, stream_impl::RecordTarget::Display(display_id))
 }
 
-#[cfg(target_os = "windows")]
-pub fn start_recording_region(
-    app: &AppHandle,
-    display_id: u32,
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-) -> Result<(), String> {
-    start_with_target(
-        app,
-        crate::capture::windows_stream::RecordTarget::Region { display_id, x, y, w, h },
-    )
-    // KHÔNG tự mở khung viền ở đây nữa — xem comment ở bản macOS phía trên.
+/// Quay 1 VÙNG đã chọn qua overlay. Đơn vị/hệ toạ độ: xem `flow::finalize_region`.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn start_recording_region(app: &AppHandle, display_id: u32, x: f64, y: f64, w: f64, h: f64) -> Result<(), String> {
+    start_with_target(app, stream_impl::RecordTarget::Region { display_id, x, y, w, h })
 }
 
-#[cfg(target_os = "windows")]
+/// Quay 1 cửa sổ đã chọn qua overlay.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn start_recording_window(app: &AppHandle, window_id: u32) -> Result<(), String> {
-    start_with_target(app, crate::capture::windows_stream::RecordTarget::Window(window_id))
-}
-
-#[cfg(target_os = "windows")]
-fn start_with_target(app: &AppHandle, target: crate::capture::windows_stream::RecordTarget) -> Result<(), String> {
-    // Giữ gate suốt hàm (tới sau khi ghi RecordingState) — xem `StartGate`.
-    let _gate = StartGate::acquire()?;
-    guard_can_start_recording(app)?;
-    let state = app.state::<RecordingState>();
-
-    let capture_mode: &'static str = match &target {
-        crate::capture::windows_stream::RecordTarget::Display(_) => "full",
-        crate::capture::windows_stream::RecordTarget::Region { .. } => "region",
-        crate::capture::windows_stream::RecordTarget::Window(_) => "window",
-    };
-
-    // Giai đoạn 6 (plan Phase 5): audio hệ thống trên Windows dùng WASAPI
-    // loopback qua `audio_wasapi.rs` — ĐỘC LẬP với WGC (khác macOS, nơi audio
-    // hệ thống lấy chung sender với video từ `mac_stream`), giống hệt cách
-    // mic đã là 1 capture riêng từ trước.
-    // Phải tính TRƯỚC khi `target` bị move vào `windows_stream::start` bên dưới.
-    let border_rect = record_border_rect(&target);
-    let keystroke_rect = record_keystroke_rect(&target);
-    let click_target_rect = record_target_rect(&target);
-
-    let audio_source = audio_source_setting(app);
-    let want_system_audio = audio_source == AudioSource::System || audio_source == AudioSource::Both;
-    let want_mic = audio_source == AudioSource::Mic || audio_source == AudioSource::Both;
-    let has_any_audio = want_system_audio || want_mic;
-
-    // Cờ pause dùng chung giữa writer thread video, writer thread audio, và ticker.
-    let paused = Arc::new(AtomicBool::new(false));
-    let paused_accumulated_ms = Arc::new(AtomicU64::new(0));
-    let pause_started_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
-    let recording_start: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
-
-    // Khởi tạo audio phi đồng bộ (chạy nền) để không chặn việc bắt đầu quay video và hiển thị indicator popup
-    let (video_path, output_path, audio) = if has_any_audio {
-        let tmp_dir = std::env::temp_dir().join(format!("snapdoc-rec-audio-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp_dir)
-            .map_err(|e| format!("Không tạo được thư mục tạm cho audio: {e}"))?;
-        let video_tmp_path = tmp_dir.join("video.mp4");
-        let final_path = new_output_path(app)?;
-        let audio = ActiveAudio::start_async(
-            app.clone(),
-            want_mic,
-            want_system_audio,
-            tmp_dir,
-            paused.clone(),
-            recording_start.clone(),
-        )?;
-        (video_tmp_path, final_path, Some(audio))
-    } else {
-        let final_path = new_output_path(app)?;
-        (final_path.clone(), final_path, None)
-    };
-
-    // Khởi tạo Video capture (WGC)
-    let (stream, frame_rx, _system_audio_rx) = crate::capture::windows_stream::start(target, FPS, false)?;
-    let (width, height) = (stream.width, stream.height);
-
-    let mut encoder = encoder::Encoder::start(&video_path, width, height, FPS)?;
-    let paused_for_writer = paused.clone();
-
-    let writer = std::thread::spawn(move || -> Result<(), String> {
-        while let Ok(frame) = frame_rx.recv() {
-            if paused_for_writer.load(Ordering::Relaxed) {
-                continue;
-            }
-            if frame.width != width || frame.height != height {
-                let fit_data = fit_frame_to_target(&frame.bgra, frame.width, frame.height, width, height);
-                encoder.write_frame(&fit_data)?;
-            } else {
-                encoder.write_frame(&frame.bgra)?;
-            }
-        }
-        encoder.finish()
-    });
-
-    let show_keystrokes = keystroke_overlay_setting(app);
-    let keystroke_listener = if show_keystrokes {
-        if let Some((kx, ky, kw, kh)) = keystroke_rect {
-            if let Err(e) = crate::windows::open_record_keystroke(app, kx, ky, kw, kh) {
-                eprintln!("[SnapDoc][record] Không hiện được overlay phím bấm: {e}");
-            }
-        }
-        match keystroke::KeystrokeListener::start(app.clone()) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                notify_warning(app, &format!("Phím bấm: {e}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    let show_clicks = click_overlay_setting(app);
-    if show_clicks {
-        if let Some((cx, cy, cw, ch, _)) = click_target_rect {
-            if let Err(e) = crate::windows::open_record_clicks(app, cx, cy, cw, ch) {
-                eprintln!("[SnapDoc][record] Không hiện được overlay click chuột: {e}");
-            }
-        }
-    }
-    let mouse_click_listener = if let Some((cx, cy, cw, ch, scale)) = click_target_rect {
-        match mouse_click::MouseClickListener::start(app.clone(), (cx, cy, cw, ch), scale) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                notify_warning(app, &format!("Click chuột / Telemetry: {e}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Điểm mốc bắt đầu quay chính thức — Audio, Video, Telemetry và duration_ms đều tính từ đây
-    let start_instant = Instant::now();
-    if let Ok(mut g) = recording_start.lock() {
-        *g = Some(start_instant);
-    }
-    stream.start_ticking();
-
-    {
-        let mut guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
-        *guard = Some(ActiveRecording {
-            stream,
-            writer,
-            audio,
-            video_path,
-            output_path,
-            started_at: start_instant,
-            width,
-            height,
-            capture_mode,
-            paused,
-            paused_accumulated_ms,
-            pause_started_at,
-            keystroke_listener,
-            mouse_click_listener,
-        });
-    }
-
-    // 1. Hiển thị ngay lập tức khung viền và popup indicator cho người dùng thấy phản hồi tức thì (<5ms)
-    if let Some((bx, by, bw, bh)) = border_rect {
-        if let Err(e) = crate::windows::open_record_border(app, bx, by, bw, bh) {
-            eprintln!("[SnapDoc][record] Không hiện được khung viền đang quay: {e}");
-        }
-    }
-
-    if let Err(e) = crate::windows::open_recording_indicator(app, click_target_rect) {
-        eprintln!("[SnapDoc][record] Không hiện được popup đang quay: {e}");
-    }
-
-    // 2. Chạy ticker để cập nhật thời gian đếm cho indicator ngay lập tức
-    spawn_tray_ticker(app.clone());
-
-    // 3. Tạo tray icon trong background thread để không chặn UI (Shell_NotifyIconW có thể mất ~760ms trên Windows)
-    let app_for_tray = app.clone();
-    std::thread::Builder::new()
-        .name("snapdoc-tray-init".into())
-        .spawn(move || {
-            if crate::record::status(&app_for_tray).is_some() {
-                crate::tray::show_recording_tray(&app_for_tray);
-            }
-        })
-        .ok();
-
-    Ok(())
-}
-
-/// Cập nhật đồng hồ đếm cạnh icon "đang quay" mỗi giây — tự dừng khi
-/// `status()` trả `None`. Đồng thời poll `is_stopped_externally()` để phát
-/// hiện WGC tự dừng ngoài ý muốn, cùng vai trò với bản macOS (xem đó để hiểu
-/// đầy đủ lý do, kể cả lý do emit thêm `recording-tick` thay vì để
-/// `RecordingIndicator.tsx` tự poll riêng — quan trọng hơn trên Windows vì
-/// đây chính là nơi hiện popup "đang quay").
-#[cfg(target_os = "windows")]
-fn spawn_tray_ticker(app: AppHandle) {
-    use tauri::Emitter;
-    std::thread::spawn(move || loop {
-        if stopped_externally(&app) {
-            if let Err(e) = stop_recording(&app) {
-                eprintln!("[SnapDoc][record] Dừng quay (WGC tự dừng bên ngoài) thất bại: {e}");
-            }
-            break;
-        }
-        match status(&app) {
-            Some(ms) => {
-                let is_paused = paused_state(&app).unwrap_or(false);
-                if !is_paused {
-                    crate::tray::update_recording_time(ms);
-                }
-                let _ = app.emit("recording-tick", RecordingTick { ms, paused: is_paused });
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-            None => break,
-        }
-    });
-}
-
-#[cfg(target_os = "windows")]
-fn stopped_externally(app: &AppHandle) -> bool {
-    let state = app.state::<RecordingState>();
-    let guard = match state.0.lock() {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
-    guard
-        .as_ref()
-        .map(|r| r.stream.is_stopped_externally())
-        .unwrap_or(false)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn start_recording(_app: &AppHandle) -> Result<(), String> {
-    Err("Quay màn hình hiện chỉ hỗ trợ macOS/Windows".to_string())
+    start_with_target(app, stream_impl::RecordTarget::Window(window_id))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -1362,14 +846,7 @@ pub fn start_recording_monitor(_app: &AppHandle, _display_id: u32) -> Result<(),
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn start_recording_region(
-    _app: &AppHandle,
-    _display_id: u32,
-    _x: f64,
-    _y: f64,
-    _w: f64,
-    _h: f64,
-) -> Result<(), String> {
+pub fn start_recording_region(_app: &AppHandle, _display_id: u32, _x: f64, _y: f64, _w: f64, _h: f64) -> Result<(), String> {
     Err("Quay màn hình hiện chỉ hỗ trợ macOS/Windows".to_string())
 }
 
@@ -1378,54 +855,373 @@ pub fn start_recording_window(_app: &AppHandle, _window_id: u32) -> Result<(), S
     Err("Quay màn hình hiện chỉ hỗ trợ macOS/Windows".to_string())
 }
 
-/// Dừng phiên quay hiện tại, đợi ffmpeg mux xong (+ ghép audio nếu có — xem
-/// `encoder::mux_audio`), ingest NGAY vào History (không còn chờ xác nhận
-/// Lưu/Xoá — video quay xong coi như đã lưu, y hệt 1 ảnh chụp xong), rồi mở
-/// Editor (chế độ video, xem `Editor.tsx`) để xem/cắt tiếp nếu muốn. Trả về
-/// đường dẫn file mp4 cuối cùng (vẫn hữu ích cho log/test).
+/// Những gì cần hiển thị SAU KHI phiên quay đã chính thức chạy.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct StartedUi {
+    border_rect: Option<(f64, f64, f64, f64)>,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    indicator_rect: Option<(f64, f64, f64, f64, f64)>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn start_with_target(app: &AppHandle, target: stream_impl::RecordTarget) -> Result<(), String> {
+    let ticket = begin_start(app)?;
+    let (active, ui) = start_inner(app, target)?;
+    let (stop_requested, generation) = ticket.commit(active);
+
+    if let Some((bx, by, bw, bh)) = ui.border_rect {
+        if let Err(e) = crate::windows::open_record_border(app, bx, by, bw, bh) {
+            eprintln!("[SnapDoc][record] Không hiện được khung viền đang quay: {e}");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Err(e) = crate::windows::open_recording_indicator(app, ui.indicator_rect) {
+        eprintln!("[SnapDoc][record] Không hiện được popup đang quay: {e}");
+    }
+    // Lệnh dừng tới ĐÚNG lúc đang mở khung viền/popup (đóng trước khi chúng
+    // kịp tồn tại) → tự đóng lại, không để khung đỏ kẹt trên màn hình.
+    if phase(app) != Phase::Recording {
+        crate::windows::close_record_border(app);
+        #[cfg(target_os = "windows")]
+        crate::windows::close_recording_indicator(app);
+    }
+    spawn_status_ticker(app.clone(), generation);
+    // Tạo tray icon ở thread nền: Shell_NotifyIconW có thể mất ~760ms trên
+    // Windows. `show_recording_tray` tự bỏ nếu phiên đã dừng trong lúc đó.
+    let app_for_tray = app.clone();
+    let _ = std::thread::Builder::new().name("snapdoc-tray-init".into()).spawn(move || {
+        if phase(&app_for_tray) == Phase::Recording {
+            crate::tray::show_recording_tray(&app_for_tray);
+        }
+    });
+    if stop_requested {
+        let app = app.clone();
+        // Lỗi lưu file đã được `stop_recording` tự báo cho người dùng.
+        std::thread::spawn(move || {
+            if let Err(e) = stop_recording(&app) {
+                eprintln!("[SnapDoc][record] Dừng quay (yêu cầu lúc đang khởi động) thất bại: {e}");
+            }
+        });
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn start_inner(app: &AppHandle, target: stream_impl::RecordTarget) -> Result<(ActiveRecording, StartedUi), String> {
+    use stream_impl::RecordTarget;
+
+    let capture_mode: &'static str = match &target {
+        RecordTarget::Display(_) => "full",
+        RecordTarget::Region { .. } => "region",
+        RecordTarget::Window(_) => "window",
+    };
+    let window_id = match &target {
+        RecordTarget::Window(id) => Some(*id),
+        _ => None,
+    };
+
+    // Phải tính TRƯỚC khi `target` bị move vào `stream_impl::start`.
+    #[cfg(target_os = "macos")]
+    let (target_rect, scale) = (record_target_rect(&target), 1.0);
+    #[cfg(target_os = "windows")]
+    let (target_rect, scale, indicator_rect) = {
+        let r = record_target_rect_scaled(&target);
+        (r.map(|(x, y, w, h, _)| (x, y, w, h)), r.map(|v| v.4).unwrap_or(1.0), r)
+    };
+    let border_rect = record_border_rect(&target, target_rect);
+
+    let s = settings(app);
+    let audio_source = audio_source_setting(&s);
+    let want_system_audio = matches!(audio_source, AudioSource::System | AudioSource::Both);
+    let want_mic = matches!(audio_source, AudioSource::Mic | AudioSource::Both);
+    let show_keystrokes = s.get("recordShowKeystrokes").and_then(|v| v.as_bool()).unwrap_or(false);
+    let show_clicks = s.get("recordShowClicks").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let output_path = new_output_path(app)?;
+    let session = Session::create(app, &output_path, capture_mode, FPS)?;
+    let mut session_guard = SessionGuard { dir: Some(session.dir.clone()) };
+    let clock = RecordingClock::new();
+    let mut cleanup = StartCleanup { app, armed: true };
+
+    // Overlay phím bấm / hiệu ứng click: mở TRƯỚC stream — trên macOS cần id
+    // cửa sổ để SCContentFilter cho phép chúng xuất hiện trong video.
+    let mut overlay_ids: Vec<u32> = Vec::new();
+    let keystroke_listener = if show_keystrokes {
+        if let Some(rect) = target_rect {
+            let (kx, ky, kw, kh) = record_keystroke_rect(rect, scale);
+            match crate::windows::open_record_keystroke(app, kx, ky, kw, kh) {
+                Ok(id) => overlay_ids.extend(id),
+                Err(e) => eprintln!("[SnapDoc][record] Không hiện được overlay phím bấm: {e}"),
+            }
+        }
+        match keystroke::KeystrokeListener::start(app.clone()) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                crate::notify::warning_now(app, &format!("Không hiển thị được phím bấm: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if show_clicks {
+        if let Some((cx, cy, cw, ch)) = target_rect {
+            match crate::windows::open_record_clicks(app, cx, cy, cw, ch) {
+                Ok(id) => overlay_ids.extend(id),
+                Err(e) => eprintln!("[SnapDoc][record] Không hiện được overlay click chuột: {e}"),
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    let _ = &overlay_ids;
+
+    // Telemetry chuột (auto-zoom trong Editor) — luôn bật, kể cả khi tắt hiệu ứng click.
+    let shared_rect: Option<SharedRect> = target_rect.map(|r| Arc::new(Mutex::new(r)));
+    let window_tracker = match (window_id, &shared_rect) {
+        (Some(id), Some(rect)) => Some(WindowTracker::spawn(id, rect.clone())),
+        _ => None,
+    };
+    let mouse_click_listener = match &shared_rect {
+        Some(rect) => match mouse_click::MouseClickListener::start(app.clone(), rect.clone(), clock.clone(), scale) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                eprintln!("[SnapDoc][record] Không bật được theo dõi chuột: {e}");
+                None
+            }
+        },
+        None => None,
+    };
+
+    // Nguồn quay video.
+    #[cfg(target_os = "macos")]
+    let (stream, system_audio_rx) = {
+        let record_self = crate::storage::settings::is_record_self(app);
+        stream_impl::start(target, FPS, want_system_audio, !record_self, &overlay_ids)?
+    };
+    #[cfg(target_os = "windows")]
+    let stream = stream_impl::start(target, FPS)?;
+    #[cfg(target_os = "windows")]
+    if let Some(w) = &stream.warning {
+        crate::notify::warning_now(app, w);
+    }
+    let (width, height) = (stream.width, stream.height);
+
+    // Audio.
+    let mut audio = AudioSet::new();
+    #[cfg(target_os = "macos")]
+    if let Some(rx) = system_audio_rx {
+        audio.add_ready(&session, "system", rx, stream_impl::AUDIO_SAMPLE_RATE, stream_impl::AUDIO_CHANNELS, &clock);
+    }
+    #[cfg(target_os = "windows")]
+    if want_system_audio {
+        audio.add_async(app, &session, "system", false, &clock, open_system_audio);
+    }
+    if want_mic {
+        audio.add_async(app, &session, "mic", true, &clock, open_mic);
+    }
+
+    // Encoder + writer + pacer (+ watchdog).
+    let encoder = encoder::Encoder::start(&session.video_path(), width, height, FPS)?;
+    let out_size = encoder.out_size();
+    let killer = encoder.killer();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<PacedFrame>(FRAME_CHANNEL_BOUND);
+    let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let writer_done = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let inner = spawn_video_writer(rx, encoder, progress.clone());
+        let done = writer_done.clone();
+        // Bọc để báo "writer đã xong" cho watchdog.
+        std::thread::Builder::new()
+            .name("snapdoc-record-writer-wait".into())
+            .spawn(move || {
+                let r = inner.join().unwrap_or(WriterOutcome { frames: 0, error: Some("Luồng ghi video bị panic".to_string()) });
+                done.store(true, Ordering::SeqCst);
+                r
+            })
+            .map_err(|e| format!("Không tạo được thread ghi video: {e}"))?
+    };
+    let pacer = Pacer::spawn(stream.latest(), clock.clone(), FPS, tx);
+    spawn_encoder_watchdog(killer, progress, pacer.backlog(), writer_done);
+
+    // Mốc 0 CHÍNH THỨC — video, audio, telemetry và đồng hồ hiển thị đều tính từ đây.
+    clock.start();
+
+    cleanup.armed = false;
+    session_guard.dir = None;
+    let active = ActiveRecording {
+        keystroke_listener,
+        mouse_click_listener,
+        window_tracker,
+        stream,
+        pacer,
+        writer,
+        audio,
+        clock,
+        session,
+        output_path,
+        capture_mode,
+        out_size,
+        generation: 0,
+    };
+    Ok((
+        active,
+        StartedUi {
+            border_rect,
+            #[cfg(target_os = "windows")]
+            indicator_rect,
+            #[cfg(not(target_os = "windows"))]
+            indicator_rect: None,
+        },
+    ))
+}
+
+// ── Ticker trạng thái ─────────────────────────────────────────────────────
+
+/// Mỗi giây: cập nhật đồng hồ tray + emit `recording-tick` cho indicator, và
+/// GIÁM SÁT phiên quay:
+/// - nguồn quay bị hệ thống dừng (nút "Stop sharing" của macOS, màn hình bị
+///   ngắt, cửa sổ đang quay bị đóng...) → tự dừng + lưu,
+/// - encoder chết giữa chừng (ffmpeg crash, đầy đĩa) → tự dừng + lưu phần đã
+///   ghi + báo lỗi — trước đây UI vẫn "đang quay" hàng giờ mà không ghi gì.
+fn spawn_status_ticker(app: AppHandle, generation: u64) {
+    let _ = std::thread::Builder::new().name("snapdoc-record-ticker".into()).spawn(move || loop {
+        let snapshot = {
+            let st = app.state::<RecordingState>();
+            let g = lock_active(&st);
+            match g.as_ref() {
+                Some(a) if a.generation == generation => Some((
+                    a.clock.elapsed_ms().unwrap_or(0),
+                    a.clock.is_paused(),
+                    a.stream.is_stopped_externally(),
+                    a.writer.is_finished(),
+                )),
+                _ => None,
+            }
+        };
+        let Some((ms, paused, external_stop, writer_dead)) = snapshot else { break };
+        if writer_dead || external_stop {
+            let reason = if writer_dead {
+                "Bộ mã hoá video đã dừng bất thường (có thể do đầy ổ đĩa) — phần đã quay được lưu lại."
+            } else {
+                "Hệ thống đã dừng việc ghi màn hình (màn hình bị ngắt, cửa sổ đang quay bị đóng hoặc bạn bấm dừng chia sẻ màn hình) — phần đã quay được lưu lại."
+            };
+            crate::notify::warning(&app, reason);
+            // Lỗi lưu file đã được `stop_recording` tự báo cho người dùng.
+            if let Err(e) = stop_recording(&app) {
+                eprintln!("[SnapDoc][record] Tự dừng quay thất bại: {e}");
+            }
+            break;
+        }
+        if !paused {
+            crate::tray::update_recording_time(&app, ms);
+        }
+        let _ = app.emit("recording-tick", RecordingTick { ms, paused });
+        std::thread::sleep(Duration::from_secs(1));
+    });
+}
+
+// ── Dừng quay ─────────────────────────────────────────────────────────────
+
+/// Dừng phiên quay hiện tại, hoàn tất file (ghép audio nếu có), ingest NGAY
+/// vào History rồi mở Editor (chế độ video). Trả đường dẫn file mp4 cuối
+/// (chuỗi rỗng nếu không có gì để dừng — gọi trùng từ nhiều nơi là no-op).
 pub fn stop_recording(app: &AppHandle) -> Result<String, String> {
     stop_recording_impl(app, true)
 }
 
-/// Gọi TRƯỚC khi thoát app (tray "Quit") — nếu đang quay, dừng SẠCH để file
-/// mp4 phát được (đóng stdin ffmpeg → flush + moov atom, ghép audio nếu có)
-/// và ingest thẳng vào History (không mở Editor vì app sắp thoát — bản quay
-/// sẽ nằm sẵn trong Library ở lần mở sau). No-op nếu không quay.
-/// Trước đây thoát giữa lúc quay giết ffmpeg giữa chừng → mp4 hỏng, mất trắng.
+/// Gọi TRƯỚC khi thoát app (tray "Quit", restart, cài update, Cmd+Q...):
+/// dừng SẠCH phiên đang quay (hoặc CHỜ phiên đang lưu dở xong) để file mp4
+/// hoàn chỉnh và có trong Library. Không mở Editor. No-op nếu không quay.
 pub fn finalize_on_exit(app: &AppHandle) {
-    if status(app).is_none() {
+    let Some(st) = app.try_state::<RecordingState>() else { return };
+    if lock_phase(&st).phase == Phase::Idle {
         return;
     }
-    match stop_recording_impl(app, false) {
-        Ok(p) if !p.is_empty() => {
-            eprintln!("[SnapDoc][record] Đã lưu bản quay trước khi thoát: {p}");
+    EXITING.store(true, Ordering::SeqCst);
+    // Lưu bản quay dài có thể mất vài chục giây — chờ tối đa 10 phút.
+    let deadline = Instant::now() + Duration::from_secs(600);
+    // Đường Cmd+Q/Dock Quit của macOS gọi hàm này NGAY TRÊN main thread: không
+    // được chờ việc nào cần main thread (tạo cửa sổ lúc khởi động, mở Editor).
+    let on_main_thread = std::thread::current().name() == Some("main");
+    loop {
+        let (current, saved) = {
+            let g = lock_phase(&st);
+            (g.phase, g.saved)
+        };
+        match current {
+            Phase::Idle => return,
+            // File đã an toàn — phần còn lại chỉ là mở Editor.
+            Phase::Stopping if saved => return,
+            Phase::Starting if on_main_thread => {
+                eprintln!("[SnapDoc][record] Thoát app giữa lúc đang khởi động quay — bỏ qua");
+                return;
+            }
+            Phase::Recording => {
+                match stop_recording_impl(app, false) {
+                    Ok(p) if !p.is_empty() => eprintln!("[SnapDoc][record] Đã lưu bản quay trước khi thoát: {p}"),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[SnapDoc][record] Không dừng sạch được phiên quay trước khi thoát: {e}"),
+                }
+            }
+            Phase::Starting | Phase::Stopping => {
+                let now = Instant::now();
+                if now >= deadline {
+                    eprintln!("[SnapDoc][record] Hết thời gian chờ phiên quay hoàn tất trước khi thoát");
+                    return;
+                }
+                let g = lock_phase(&st);
+                if g.phase == current && g.saved == saved {
+                    let _ = st.phase_cv.wait_timeout(g, (deadline - now).min(Duration::from_millis(500)));
+                }
+            }
         }
-        Ok(_) => {}
-        Err(e) => eprintln!("[SnapDoc][record] Không dừng sạch được phiên quay trước khi thoát: {e}"),
     }
 }
 
-/// Lõi dùng chung của `stop_recording` (ingest + mở Editor) và
-/// `finalize_on_exit` (`open_editor_after=false`: chỉ ingest, không mở Editor).
-fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<String, String> {
-    let state = app.state::<RecordingState>();
-    // Dừng có thể được kích hoạt gần-như-đồng-thời từ nhiều nơi (tray icon,
-    // hotkey, thanh "Dừng quay", indicator, ticker phát hiện dừng ngoài) —
-    // caller "thua cuộc" (state đã bị caller khác `take`) coi là NO-OP thay
-    // vì lỗi, tránh alert giả "Không có phiên quay nào đang chạy".
-    let Some(active) = state
-        .0
-        .lock()
-        .map_err(|_| "Lock RecordingState lỗi".to_string())?
-        .take()
-    else {
-        return Ok(String::new());
-    };
+/// Báo cho `finalize_on_exit` (nếu đang chờ) là dữ liệu đã an toàn trên đĩa.
+fn mark_saved(app: &AppHandle) {
+    let st = app.state::<RecordingState>();
+    lock_phase(&st).saved = true;
+    st.phase_cv.notify_all();
+}
 
-    // 1. NGAY LẬP TỨC dọn dẹp toàn bộ giao diện UI (khung viền, overlay, thanh dừng quay, clicks, keystroke, tray icon)
-    // Người dùng bấm Dừng quay là muốn giao diện quay biến mất ngay, không phải đứng chờ ffmpeg mux/encode xong!
-    crate::tray::hide_recording_tray(app);
-    crate::windows::close_overlays(app);
+/// Gỡ icon tray + trả pha về `Idle` khi rời khỏi hàm dừng ở MỌI đường (kể cả panic).
+struct IdleOnDrop<'a>(&'a AppHandle);
+
+impl Drop for IdleOnDrop<'_> {
+    fn drop(&mut self) {
+        crate::tray::hide_recording_tray(self.0);
+        set_idle(self.0);
+    }
+}
+
+fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<String, String> {
+    let st = app.state::<RecordingState>();
+    {
+        let mut g = lock_phase(&st);
+        match g.phase {
+            Phase::Recording => {
+                g.phase = Phase::Stopping;
+                g.saved = false;
+            }
+            // Đang khởi động: ghi nhận yêu cầu, dừng ngay khi khởi động xong.
+            Phase::Starting => {
+                g.stop_requested = true;
+                return Ok(String::new());
+            }
+            // Đang lưu / không quay: lệnh dừng trùng (tray + hotkey + indicator...) → no-op.
+            Phase::Stopping | Phase::Idle => return Ok(String::new()),
+        }
+    }
+    let _idle = IdleOnDrop(app);
+    let Some(active) = lock_active(&st).take() else { return Ok(String::new()) };
+
+    // 1. Dọn giao diện "đang quay" NGAY — không bắt người dùng nhìn khung đỏ
+    //    trong lúc chờ lưu file (icon tray chuyển sang "Đang lưu…", gỡ hẳn khi
+    //    xong). Không prewarm overlay ở đây: Editor mở sau đó tự đóng +
+    //    prewarm lại (tránh dựng pool overlay 2 lần).
+    crate::tray::set_recording_tray_saving(app);
+    crate::windows::close_overlays_no_prewarm(app);
     crate::windows::close_stop_control(app);
     crate::windows::close_record_border(app);
     crate::windows::close_record_keystroke(app);
@@ -1433,251 +1229,308 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
     #[cfg(target_os = "windows")]
     crate::windows::close_recording_indicator(app);
 
-    let mut active = active;
-    if let Some(mut kl) = active.keystroke_listener.take() {
+    let ActiveRecording {
+        keystroke_listener,
+        mouse_click_listener,
+        window_tracker,
+        stream,
+        pacer,
+        writer,
+        audio,
+        clock,
+        session,
+        output_path,
+        capture_mode,
+        out_size,
+        generation: _,
+    } = active;
+
+    // 2. Chốt độ dài: đóng băng đồng hồ — video (pacer) và audio (writer) cùng
+    //    dừng ĐÚNG tại mốc này.
+    clock.stop();
+    if let Some(mut kl) = keystroke_listener {
         kl.stop();
     }
-    let mut mouse_click_listener = active.mouse_click_listener.take();
+    let mut mouse_click_listener = mouse_click_listener;
     if let Some(ml) = mouse_click_listener.as_mut() {
         ml.stop();
     }
+    drop(window_tracker);
 
-    // Thời lượng thật của video = đúng khoảng thời gian ghi thật sự (không kể
-    // thời gian đã tạm dừng). Tính TRƯỚC khi `stream.stop()` tiêu thụ field
-    // `stream` (partial move). Nếu đang pause tại thời điểm dừng, cộng thêm
-    // khoảng pause dở đó vào accumulated trước khi trừ.
-    let extra_paused_ms = if let Ok(guard) = active.pause_started_at.lock() {
-        guard.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0)
-    } else { 0 };
-    let total_paused_ms = active.paused_accumulated_ms.load(Ordering::Relaxed) + extra_paused_ms;
-    let duration_ms = (active.started_at.elapsed().as_millis() as i64)
-        .saturating_sub(total_paused_ms as i64);
+    let mut warnings: Vec<String> = Vec::new();
 
-    // Clone cờ drop-frame TRƯỚC khi `stop()` tiêu thụ (move) field `stream`
-    // — để còn cảnh báo người dùng sau khi dừng xong (xem `notify_warning`).
+    // 3. Tắt NGUỒN trước (màn hình + mic — đèn báo ghi của hệ thống tắt ngay,
+    //    kể cả khi encoder còn phải xử lý nốt phần tồn đọng). Frame cuối vẫn
+    //    nằm trong `LatestFrame` cho pacer dùng. Dừng SCStream cũng đóng
+    //    sender audio hệ thống.
+    let latest_frame = stream.latest();
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let dropped_flag = active.stream.dropped_flag();
-
-    // 2. Dừng stream quay video và giải phóng sender audio hệ thống TRƯỚC:
-    // Trên macOS, SCStream sở hữu sender audio hệ thống (`audio_tx`) và `frame_tx`.
-    // Dừng stream trước sẽ đóng ticker (gửi EOF cho writer thread video) và đóng sender audio,
-    // đảm bảo các luồng ghi video/audio kết thúc trơn tru mà không bao giờ bị deadlock.
-    #[cfg(target_os = "macos")]
-    if let Err(e) = active.stream.stop() {
-        eprintln!("[SnapDoc][record] Cảnh báo dừng SCStream: {e}");
+    if let Err(e) = stream.stop() {
+        eprintln!("[SnapDoc][record] Cảnh báo dừng nguồn quay: {e}");
     }
-    #[cfg(target_os = "windows")]
-    if let Err(e) = active.stream.stop() {
-        eprintln!("[SnapDoc][record] Cảnh báo dừng WGC: {e}");
+    warnings.extend(audio.stop_and_collect());
+    // 4. Đẩy nốt frame còn nợ tới mốc dừng, đóng kênh → writer kết thúc encoder.
+    let lagging = pacer.lagging();
+    pacer.finish();
+    drop(latest_frame);
+    // 5. Chờ encoder ghi xong.
+    let outcome = writer.join().unwrap_or(WriterOutcome { frames: 0, error: Some("Luồng ghi video bị panic".to_string()) });
+    if let Some(e) = &outcome.error {
+        warnings.push(format!("Bộ mã hoá video gặp lỗi: {e}"));
+    }
+    if lagging {
+        warnings.push("Máy không theo kịp tốc độ quay ở một số đoạn — video có thể bị giật nhẹ.".to_string());
     }
 
-    // 3. Sau khi stream đã dừng, dừng và thu thập các track audio (mic & hệ thống)
-    let audio_meta = active.audio.map(|a| a.stop_and_collect());
-
-    // 4. Đợi luồng ghi video hoàn tất
-    let write_join_res = active.writer.join();
-    let write_result = write_join_res.map_err(|_| "Luồng ghi video bị panic".to_string())?;
-    write_result?;
-
-    // Có audio: ghép vào `output_path` thật bằng 1 lần chạy ffmpeg TĨNH (2
-    // file đã hoàn tất, không còn "sống" — không có rủi ro deadlock như
-    // hướng live-mux cũ, xem doc-comment đầu file). Lỗi ghép KHÔNG làm mất
-    // bản quay: dùng thẳng video tạm (không tiếng) làm kết quả cuối, không
-    // xoá `tmp_dir` trong trường hợp này vì video tạm đang nằm trong đó.
-    let output_path = match audio_meta {
-        // CẢ 2 NGUỒN (Mic + Hệ thống): Trộn qua mux_dual_audio với gain boost cho mic + cân bằng âm lượng hệ thống
-        Some((Some((mic_path, mic_sr, mic_ch)), Some((sys_path, sys_sr, sys_ch)), tmp_dir)) => {
-            match encoder::mux_dual_audio(
-                &active.video_path,
-                &mic_path,
-                mic_sr,
-                mic_ch,
-                &sys_path,
-                sys_sr,
-                sys_ch,
-                &active.output_path,
-            ) {
-                Ok(()) => {
-                    let _ = std::fs::remove_dir_all(&tmp_dir);
-                    active.output_path
-                }
-                Err(e) => {
-                    notify_warning(app, &format!("Ghép dual audio thất bại — video được giữ lại KHÔNG có tiếng: {e}"));
-                    if let Some(parent) = active.video_path.parent() {
-                        allow_asset_scope(app, parent);
-                    }
-                    active.video_path
-                }
-            }
+    // 7. Hoàn tất file (ghép audio, kiểm tra, đổi tên). Lỗi → GIỮ thư mục
+    //    phiên để khôi phục ở lần mở app sau, không mất bản quay.
+    let finalized = match finalize::finalize(&session.video_path(), &session.tracks(), &output_path) {
+        Ok(f) => {
+            // Chỉ xoá thư mục phiên SAU KHI file đã vào Thư viện (bên dưới) —
+            // crash ở giữa thì lần mở sau dựa vào marker này để hoàn tất nốt.
+            session.mark_finalized(&f.path);
+            f
         }
-        // CHỈ MIC: Ghép qua mux_audio với is_mic = true (gain boost 2.2x to rõ)
-        Some((Some((mic_path, mic_sr, mic_ch)), None, tmp_dir)) => {
-            match encoder::mux_audio(&active.video_path, &mic_path, mic_sr, mic_ch, true, &active.output_path) {
-                Ok(()) => {
-                    let _ = std::fs::remove_dir_all(&tmp_dir);
-                    active.output_path
-                }
-                Err(e) => {
-                    notify_warning(app, &format!("Ghép audio mic thất bại — video được giữ lại KHÔNG có tiếng: {e}"));
-                    if let Some(parent) = active.video_path.parent() {
-                        allow_asset_scope(app, parent);
-                    }
-                    active.video_path
-                }
+        Err(e) => {
+            for w in &warnings {
+                crate::notify::warning(app, w);
             }
-        }
-        // CHỈ HỆ THỐNG: Ghép qua mux_audio với is_mic = false (âm lượng chuẩn 1.0x)
-        Some((None, Some((sys_path, sys_sr, sys_ch)), tmp_dir)) => {
-            match encoder::mux_audio(&active.video_path, &sys_path, sys_sr, sys_ch, false, &active.output_path) {
-                Ok(()) => {
-                    let _ = std::fs::remove_dir_all(&tmp_dir);
-                    active.output_path
-                }
-                Err(e) => {
-                    notify_warning(app, &format!("Ghép audio hệ thống thất bại — video được giữ lại KHÔNG có tiếng: {e}"));
-                    if let Some(parent) = active.video_path.parent() {
-                        allow_asset_scope(app, parent);
-                    }
-                    active.video_path
-                }
+            mark_saved(app);
+            if !exiting() {
+                crate::windows::prewarm_overlays(app);
             }
+            let msg = format!("Không lưu được bản quay: {e}");
+            crate::notify::error(app, &msg);
+            return Err(msg);
         }
-        Some((None, None, tmp_dir)) => {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            if active.video_path != active.output_path {
-                let _ = std::fs::rename(&active.video_path, &active.output_path);
-            }
-            active.output_path
-        }
-        None => active.output_path,
     };
-
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    if dropped_flag.load(Ordering::Relaxed) {
-        notify_warning(
-            app,
-            "Một số khung hình đã bị bỏ qua vì máy không theo kịp tốc độ quay — video có thể bị giật nhẹ",
-        );
+    warnings.extend(finalized.warnings.iter().cloned());
+    let final_path = finalized.path;
+    if let Some(parent) = final_path.parent() {
+        allow_asset_scope(app, parent);
     }
 
-    let path = output_path.to_string_lossy().to_string();
+    // Thời lượng THẬT = số frame đã ghi / fps (khớp file 100%).
+    let duration_ms: i64 = if outcome.frames > 0 {
+        (outcome.frames * 1000 / FPS as u64) as i64
+    } else {
+        clock.elapsed_ms().unwrap_or(0) as i64
+    };
+    let (width, height) = out_size;
+
     if let Some(ml) = mouse_click_listener.as_ref() {
-        let _ = ml.save_telemetry(app, &output_path, active.width, active.height, duration_ms as u64);
+        if let Err(e) = ml.save_telemetry(app, &final_path, width, height, duration_ms as u64) {
+            eprintln!("[SnapDoc][record] Lưu telemetry chuột thất bại: {e}");
+        }
     }
-    // Ingest NGAY vào History — dùng chung cho cả 2 nhánh gọi (trước đây chỉ
-    // nhánh thoát app mới ingest ngay, nhánh mở Editor phải chờ user bấm Lưu).
-    let ingested = crate::history::ingest_video(
-        app,
-        std::path::Path::new(&path),
-        active.width,
-        active.height,
-        duration_ms,
-        active.capture_mode,
-    );
-    if open_editor_after {
-        match ingested {
-            Ok(record) => {
-                let state = app.state::<AppState>();
-                let mut g = state.pending_video.lock().map_err(|_| "Lock error".to_string())?;
-                *g = Some(PendingVideo {
-                    path: path.clone(),
-                    width: active.width,
-                    height: active.height,
-                    duration_ms,
-                    history_id: record.id,
-                    thumb_path: Some(record.thumb_path),
-                });
-                drop(g);
-                // Video đã lưu vào Library — Editor mở lên (chế độ video) chỉ để
-                // xem/cắt tiếp nếu muốn, tự đọc `PendingVideo` qua
-                // `takePendingVideo` khi mở, y hệt mở 1 video từ Library.
-                if let Err(e) = crate::windows::open_editor(app) {
-                    eprintln!("[SnapDoc][record] Không mở được Editor để xem bản quay vừa lưu: {e}");
-                }
+
+    for w in &warnings {
+        crate::notify::warning(app, w);
+    }
+
+    let path = final_path.to_string_lossy().to_string();
+    let ingested = crate::history::ingest_video(app, &final_path, width, height, duration_ms, capture_mode);
+    // Chưa vào được Thư viện → giữ thư mục phiên (đã có marker hoàn tất): lần
+    // mở app sau `recover_orphans` tự thêm file này vào Thư viện.
+    if ingested.is_ok() {
+        session.remove();
+    }
+    mark_saved(app);
+    if exiting() {
+        if let Err(e) = ingested {
+            eprintln!("[SnapDoc][record] Ingest bản quay trước khi thoát thất bại (file vẫn ở {path}): {e}");
+        }
+        return Ok(path);
+    }
+    match ingested {
+        Ok(record) if open_editor_after => {
+            let pending = PendingVideo {
+                path: path.clone(),
+                width,
+                height,
+                duration_ms,
+                history_id: record.id,
+                thumb_path: Some(record.thumb_path),
+            };
+            match app.state::<AppState>().pending_video.lock() {
+                Ok(mut g) => *g = Some(pending),
+                Err(p) => *p.into_inner() = Some(pending),
             }
-            Err(e) => {
-                eprintln!("[SnapDoc][record] Ingest bản quay vào History thất bại (file vẫn còn trên đĩa, không mở Editor): {e}");
+            // Editor mở lên (chế độ video) tự đọc `PendingVideo` qua `takePendingVideo`.
+            if let Err(e) = crate::windows::open_editor(app) {
+                eprintln!("[SnapDoc][record] Không mở được Editor để xem bản quay vừa lưu: {e}");
+                crate::windows::prewarm_overlays(app);
             }
         }
-    } else if let Err(e) = ingested {
-        eprintln!("[SnapDoc][record] Ingest bản quay vào History trước khi thoát thất bại (file vẫn còn trên đĩa): {e}");
+        Ok(_) => crate::windows::prewarm_overlays(app),
+        Err(e) => {
+            crate::windows::prewarm_overlays(app);
+            crate::notify::warning(
+                app,
+                &format!("Bản quay đã lưu tại {path} nhưng chưa đưa được vào Thư viện ({e}) — sẽ tự thử lại ở lần mở app sau."),
+            );
+        }
     }
-
     Ok(path)
 }
 
-/// Thời gian đã quay (ms) nếu đang có phiên quay — cửa sổ chỉ báo poll hàm
-/// này định kỳ để hiện đồng hồ đếm, tránh cần thêm 1 ticker thread ở Rust.
-/// Trả về thời gian GHI THẬT (không kể thời gian đã tạm dừng).
+// ── Trạng thái / pause ────────────────────────────────────────────────────
+
+/// Thời gian đã quay (ms, không kể thời gian pause) nếu đang quay.
 pub fn status(app: &AppHandle) -> Option<u64> {
-    let state = app.state::<RecordingState>();
-    let guard = state.0.lock().ok()?;
-    guard.as_ref().map(|r| {
-        let raw_ms = r.started_at.elapsed().as_millis() as u64;
-        let accumulated = r.paused_accumulated_ms.load(Ordering::Relaxed);
-        // Nếu đang paused thì cũng cộng thêm khoảng pause dở vào để đồng hồ
-        // đứng yên hoàn toàn (không nhích thêm giây nào trong lúc paused).
-        let current_pause_ms = if r.paused.load(Ordering::Relaxed) {
-            if let Ok(g) = r.pause_started_at.lock() {
-                g.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0)
-            } else { 0 }
-        } else { 0 };
-        raw_ms.saturating_sub(accumulated + current_pause_ms)
-    })
+    let st = app.try_state::<RecordingState>()?;
+    let g = lock_active(&st);
+    g.as_ref().map(|a| a.clock.elapsed_ms().unwrap_or(0))
 }
 
-/// Trạng thái tạm dừng hiện tại — `None` nếu không có phiên quay, `Some(true)`
-/// nếu đang paused, `Some(false)` nếu đang chạy.
+/// `None` nếu không quay, `Some(true)` nếu đang pause.
 pub fn paused_state(app: &AppHandle) -> Option<bool> {
-    let state = app.state::<RecordingState>();
-    let guard = state.0.lock().ok()?;
-    guard.as_ref().map(|r| r.paused.load(Ordering::Relaxed))
+    let st = app.try_state::<RecordingState>()?;
+    let g = lock_active(&st);
+    g.as_ref().map(|a| a.clock.is_paused())
 }
 
-/// Tạm dừng phiên quay hiện tại. No-op nếu không có phiên hoặc đã paused.
-pub fn pause_recording(app: &AppHandle) -> Result<(), String> {
-    use tauri::Emitter;
-    let state = app.state::<RecordingState>();
-    let guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
-    let Some(active) = guard.as_ref() else {
-        return Err("Không có phiên quay nào đang chạy".to_string());
-    };
-    if active.paused.load(Ordering::Relaxed) {
-        return Ok(()); // đã paused rồi
-    }
-    // Ghi lại mốc thời điểm bắt đầu pause TRƯỚC khi set cờ — nếu set cờ
-    // trước thì `status()` có thể đọc cờ=true nhưng `pause_started_at` vẫn
-    // None (race nhỏ giữa 2 thao tác), dẫn đến đồng hồ nhích thêm 1 tick.
-    if let Ok(mut g) = active.pause_started_at.lock() {
-        *g = Some(Instant::now());
-    }
-    active.paused.store(true, Ordering::Relaxed);
-    let _ = app.emit("recording-paused", true);
-    Ok(())
-}
-
-/// Tiếp tục phiên quay sau khi tạm dừng. No-op nếu không có phiên hoặc đang
-/// chạy.
-pub fn resume_recording(app: &AppHandle) -> Result<(), String> {
-    use tauri::Emitter;
-    let state = app.state::<RecordingState>();
-    let guard = state.0.lock().map_err(|_| "Lock RecordingState lỗi".to_string())?;
-    let Some(active) = guard.as_ref() else {
-        return Err("Không có phiên quay nào đang chạy".to_string());
-    };
-    if !active.paused.load(Ordering::Relaxed) {
-        return Ok(()); // đang chạy rồi
-    }
-    // Cộng thêm khoảng thời gian vừa pause vào accumulated TRƯỚC khi xoá cờ
-    // — nếu xoá cờ trước, `status()` sẽ không cộng `current_pause_ms` nữa
-    // nhưng `accumulated` chưa được cộng thêm → đồng hồ nhảy vọt.
-    if let Ok(mut g) = active.pause_started_at.lock() {
-        if let Some(t) = g.take() {
-            let elapsed = t.elapsed().as_millis() as u64;
-            active.paused_accumulated_ms.fetch_add(elapsed, Ordering::Relaxed);
+fn set_paused(app: &AppHandle, pause: bool) -> Result<(), String> {
+    let changed = {
+        let st = app.state::<RecordingState>();
+        if lock_phase(&st).phase != Phase::Recording {
+            return Err("Không có phiên quay nào đang chạy".to_string());
         }
+        let g = lock_active(&st);
+        let Some(active) = g.as_ref() else {
+            return Err("Không có phiên quay nào đang chạy".to_string());
+        };
+        if pause {
+            active.clock.pause()
+        } else {
+            active.clock.resume()
+        }
+    };
+    if changed {
+        let _ = app.emit("recording-paused", pause);
+        // Mọi đường pause (tray, indicator, IPC) đều cập nhật nhãn menu tray.
+        crate::tray::update_recording_tray_menu(app);
     }
-    active.paused.store(false, Ordering::Relaxed);
-    let _ = app.emit("recording-paused", false);
     Ok(())
+}
+
+/// Tạm dừng phiên quay hiện tại. No-op nếu đã pause.
+pub fn pause_recording(app: &AppHandle) -> Result<(), String> {
+    set_paused(app, true)
+}
+
+/// Tiếp tục sau khi tạm dừng. No-op nếu đang chạy.
+pub fn resume_recording(app: &AppHandle) -> Result<(), String> {
+    set_paused(app, false)
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    //! Chạy TOÀN BỘ pipeline của 1 phiên quay (trừ API chụp màn hình của OS,
+    //! cần quyền Screen Recording): nguồn frame giả → pacer → writer → ffmpeg
+    //! (MP4 phân mảnh) + audio PCM có khoảng lặng kiểu WASAPI + pause giữa
+    //! chừng → finalize. Kiểm tra file cuối có ĐÚNG thời lượng theo đồng hồ.
+    use super::*;
+    use crate::capture::frame::{new_latest, publish};
+
+    #[test]
+    fn full_pipeline_keeps_duration_and_audio_through_gaps_and_pause() {
+        if encoder::sidecar_path("ffmpeg").is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("snapdoc_pipeline_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = Session { dir: dir.clone() };
+        let (w, h) = (320u32, 240u32);
+
+        let clock = RecordingClock::new();
+        let latest = new_latest();
+        let stop_src = Arc::new(AtomicBool::new(false));
+
+        // Nguồn video giả: đổi nội dung ~20 lần/giây (giống màn hình thật — không đều).
+        let src = {
+            let (latest, stop) = (latest.clone(), stop_src.clone());
+            std::thread::spawn(move || {
+                let mut i = 0u8;
+                while !stop.load(Ordering::SeqCst) {
+                    publish(&latest, Frame { bgra: vec![i; (w * h * 4) as usize], width: w, height: h });
+                    i = i.wrapping_add(7);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            })
+        };
+
+        // Audio giả 48kHz stereo: có tiếng 0.5s đầu, IM LẶNG (không gói nào) 1s, rồi có tiếng lại.
+        let (atx, arx) = std::sync::mpsc::sync_channel::<pcm_writer::PcmChunk>(200);
+        session.register_track("system", 48_000, 2, false);
+        let audio_stop = Arc::new(AtomicBool::new(false));
+        let pcm = pcm_writer::spawn(
+            session.track_path("system"),
+            arx,
+            pcm_writer::PcmFormat { sample_rate: 48_000, channels: 2 },
+            clock.clone(),
+            audio_stop.clone(),
+        );
+        let audio_src = {
+            let (clock, stop) = (clock.clone(), stop_src.clone());
+            std::thread::spawn(move || {
+                let chunk = vec![1u8; 480 * 4]; // 10ms
+                while !stop.load(Ordering::SeqCst) {
+                    let t = clock.elapsed_ms().unwrap_or(0);
+                    if !(500..1500).contains(&t) {
+                        let _ = atx.try_send((Instant::now(), chunk.clone()));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            })
+        };
+
+        let enc = encoder::Encoder::start(&session.video_path(), w, h, FPS).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<PacedFrame>(FRAME_CHANNEL_BOUND);
+        let writer = spawn_video_writer(rx, enc, Arc::new(std::sync::atomic::AtomicU64::new(0)));
+        let pacer = Pacer::spawn(latest.clone(), clock.clone(), FPS, tx);
+
+        clock.start();
+        std::thread::sleep(Duration::from_millis(1800));
+        clock.pause();
+        std::thread::sleep(Duration::from_millis(700)); // không được tính
+        clock.resume();
+        std::thread::sleep(Duration::from_millis(700));
+
+        // Trình tự dừng giống `stop_recording_impl`.
+        clock.stop();
+        let expected_ms = clock.elapsed_ms().unwrap();
+        let expected_frames = pacer::frames_due(clock.elapsed().unwrap(), FPS);
+        pacer.finish();
+        stop_src.store(true, Ordering::SeqCst);
+        src.join().unwrap();
+        audio_src.join().unwrap();
+        audio_stop.store(true, Ordering::SeqCst);
+        let stats = pcm.join().unwrap();
+        let outcome = writer.join().unwrap();
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(outcome.frames, expected_frames, "số frame ghi ra phải đúng bằng số frame theo đồng hồ");
+        assert!(stats.padded >= Duration::from_millis(800), "khoảng im lặng phải được đệm: {:?}", stats.padded);
+
+        let out = dir.join("final.mp4");
+        let done = finalize::finalize(&session.video_path(), &session.tracks(), &out).unwrap();
+        assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+        let meta = probe::probe_video_metadata(&done.path).unwrap();
+        let frames_ms = (outcome.frames * 1000 / FPS as u64) as i64;
+        assert!(
+            (meta.duration_ms - expected_ms as i64).abs() <= 150,
+            "thời lượng file {}ms phải khớp đồng hồ {}ms (frames={}ms)",
+            meta.duration_ms,
+            expected_ms,
+            frames_ms
+        );
+        assert!((expected_ms as i64 - 2500).abs() < 300, "pause 700ms không được tính: {expected_ms}ms");
+
+        // File cuối phải có cả audio.
+        let mut cmd = std::process::Command::new(encoder::sidecar_path("ffmpeg").unwrap());
+        cmd.args(["-hide_banner", "-i"]).arg(&done.path);
+        let info = proc::run(&mut cmd, Duration::from_secs(20)).unwrap();
+        assert!(info.stderr.contains("Audio: aac"), "thiếu track audio:\n{}", info.stderr);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

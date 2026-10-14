@@ -16,18 +16,11 @@
 //!    copy đúng phần dữ liệu hữu ích (bỏ padding cuối hàng do IOSurface)
 //!    thành `Vec<u8>` BGRA rồi ghi vào `latest` (KHÔNG đẩy thẳng vào channel).
 //!
-//! KIẾN TRÚC FRAME PACING — xem doc-comment `spawn_ticker`/`windows_stream.rs`
-//! đầu file đó: SCStream chỉ THỰC SỰ gọi callback khi nội dung màn hình đổi
-//! (`setMinimumFrameInterval` chỉ giới hạn tốc độ TỐI ĐA, không đảm bảo tốc độ
-//! TỐI THIỂU) — nếu ghi thẳng từng frame nhận được vào encoder (giả định 1
-//! frame = 1/fps giây, đúng cách module này làm TRƯỚC ĐÂY), video quay ra sẽ
-//! "tua nhanh" mỗi khi màn hình đứng yên: kết thúc SỚM HƠN thời lượng hiển thị
-//! (đo đồng hồ treo tường ở `record/mod.rs`) và LỆCH với audio hệ thống (vẫn
-//! ghi đều theo thời gian thực). Cách sửa: TÁCH RIÊNG "SCStream cập nhật nội
-//! dung mới nhất" (callback chỉ ghi vào `latest`) khỏi "nhịp đẩy vào encoder"
-//! (`spawn_ticker` chạy đúng `fps` lần/giây, mỗi nhịp lấy `latest` hiện có —
-//! LẶP LẠI frame cũ nếu SCStream chưa gửi gì mới — rồi mới đẩy vào channel
-//! `Frame`) — cùng kiến trúc `windows_stream.rs` đã dùng cho WGC.
+//! KIẾN TRÚC FRAME PACING: SCStream chỉ THỰC SỰ gọi callback khi nội dung
+//! màn hình đổi (`setMinimumFrameInterval` chỉ giới hạn tốc độ TỐI ĐA) — module
+//! này chỉ cập nhật "frame mới nhất" (`LatestFrame`); nhịp đẩy frame vào
+//! encoder theo đúng đồng hồ của phiên quay nằm ở `record::pacer` (dùng chung
+//! với Windows).
 
 // Tên phương thức protocol (`stream:didOutputSampleBuffer:ofType:`...) phải
 // khớp đúng selector Objective-C nên không thể đổi sang snake_case.
@@ -37,15 +30,19 @@ use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use super::frame::{copy_rows, fit_even, publish, Frame, LatestFrame};
+use crate::record::pcm_writer::PcmChunk;
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
-use objc2_core_audio_types::{kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, AudioBufferList};
+use objc2_core_audio_types::{
+    kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsSignedInteger, AudioBufferList,
+};
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_media::{
     kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
@@ -90,51 +87,25 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// readonly lock — ta chỉ đọc, không sửa buffer của SCK.
 const LOCK_READONLY: CVPixelBufferLockFlags = CVPixelBufferLockFlags(1);
 
-/// Một frame video thô: BGRA, chưa nén — thứ tự kênh giữ nguyên như SCK trả
-/// về (không đảo sang RGBA như luồng chụp ảnh) vì bước encode video kế tiếp
-/// (ffmpeg `-pix_fmt bgra`) nhận thẳng định dạng này, tránh 1 lượt swap kênh
-/// tốn CPU trên mỗi frame ở tốc độ 30fps. `Clone` để `spawn_ticker` có thể
-/// gửi LẠI cùng nội dung cho nhiều nhịp liên tiếp khi SCStream chưa gửi
-/// frame mới (màn hình đứng yên) — xem doc-comment `spawn_ticker`.
-#[derive(Clone)]
-pub struct Frame {
-    pub bgra: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-}
-
-// Audio hệ thống truyền qua channel dạng `Vec<u8>` (PCM signed 16-bit
-// little-endian, ĐÃ xen kẽ kênh đúng `AUDIO_CHANNELS`) thẳng, không bọc
-// struct riêng — writer thread (`record/mod.rs::spawn_fifo_writer`) ghi
-// thẳng byte này vào fifo nạp cho ffmpeg, dùng chung hàm với mic
-// (`audio_mic.rs` cũng gửi `Vec<u8>` cùng dạng PCM s16le).
+// Audio hệ thống truyền qua channel dạng `PcmChunk` (thời điểm thu + PCM
+// s16le ĐÃ xen kẽ đúng `AUDIO_CHANNELS` kênh) — cùng dạng với mic, ghi ra file
+// bởi `record::pcm_writer`.
 
 /// Ivars của delegate object — Objective-C giữ instance này nên không thể
-/// dùng lifetime tham chiếu ra ngoài, phải sở hữu `Sender` trực tiếp.
+/// dùng lifetime tham chiếu ra ngoài, phải sở hữu dữ liệu trực tiếp.
 pub struct StreamOutputIvars {
-    /// Nội dung frame VIDEO mới nhất SCStream đã gửi — callback chỉ cập nhật
-    /// chỗ này, KHÔNG tự đẩy vào channel; `spawn_ticker` mới là nơi đẩy vào
-    /// `frame_tx` theo đúng nhịp fps thật (xem doc-comment `spawn_ticker`).
-    /// Bọc `Arc<Frame>` để `spawn_ticker` lặp lại frame cũ chỉ tốn chi phí clone
-    /// con trỏ Arc (8 bytes) thay vì deep-copy mảng byte 33MB mỗi nhịp.
-    latest: Arc<Mutex<Option<Arc<Frame>>>>,
-    /// `Some` khi bật quay âm thanh hệ thống (`capturesAudio=true` lúc
-    /// `start()`) — callback nhận `SCStreamOutputType::Audio` sẽ gửi thẳng
-    /// vào đây (audio không cần "nhịp lại" như video — gói tới đều theo thời
-    /// gian thực, không rơi vào tình huống "màn hình đứng yên → ít gói hơn"
-    /// như video). Bọc trong `Arc<Mutex<Option<...>>>` để có thể chủ động đóng
-    /// sender ngay khi dừng quay, tránh deadlock writer thread.
-    audio_tx: Arc<Mutex<Option<mpsc::SyncSender<Vec<u8>>>>>,
-    /// Đếm số frame đã DROP vì consumer (audio) hoặc `spawn_ticker` (video)
-    /// chậm hơn tốc độ quay — log khi stop.
-    dropped: Arc<AtomicBool>,
+    /// Frame VIDEO mới nhất SCStream đã gửi — `record::pacer` đọc theo nhịp fps.
+    latest: LatestFrame,
+    /// Buffer của frame cũ (không còn ai giữ) để tái dùng — tránh cấp phát
+    /// 20–60MB mỗi callback ở độ phân giải Retina.
+    spare: Mutex<Option<Vec<u8>>>,
+    /// `Some` khi bật quay âm thanh hệ thống — đóng (`None`) khi dừng quay để
+    /// writer PCM thấy EOF.
+    audio_tx: Arc<Mutex<Option<mpsc::SyncSender<PcmChunk>>>>,
     /// Set bởi `stream:didStopWithError:` khi SCStream tự dừng NGOÀI Ý MUỐN —
-    /// ví dụ người dùng bấm "Stop" trên icon "Screen Sharing" của HỆ THỐNG
-    /// macOS (khác icon "đang quay" riêng của app), chứ không qua
-    /// `RecordingHandle::stop()`. Chia sẻ với `RecordingHandle` để
-    /// `record::mod` phát hiện và tự dọn dẹp (đóng ffmpeg, ẩn tray icon)
-    /// thay vì treo mãi ở trạng thái "đang quay" trong khi SCK đã âm thầm
-    /// ngừng gửi frame.
+    /// người dùng bấm "Stop" trên icon "Screen Sharing" của hệ thống, màn hình
+    /// bị ngắt, cửa sổ đang quay bị đóng... `record::mod` poll cờ này để tự
+    /// dừng + lưu thay vì treo mãi ở trạng thái "đang quay".
     stopped_externally: Arc<AtomicBool>,
 }
 
@@ -157,20 +128,21 @@ define_class!(
         ) {
             match r#type {
                 SCStreamOutputType::Screen => {
-                    if let Some(frame) = unsafe { sample_buffer_to_frame(sample_buffer) } {
-                        // Chỉ ghi đè frame mới nhất — KHÔNG đẩy thẳng vào
-                        // channel nữa (xem doc-comment `latest`/`spawn_ticker`).
-                        // Bọc `Arc::new(frame)` để ticker chia sẻ dữ liệu zero-copy.
-                        *self.ivars().latest.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(frame));
+                    let spare = self.ivars().spare.lock().unwrap_or_else(|p| p.into_inner()).take();
+                    if let Some(frame) = unsafe { sample_buffer_to_frame(sample_buffer, spare) } {
+                        if let Some(buf) = publish(&self.ivars().latest, frame) {
+                            *self.ivars().spare.lock().unwrap_or_else(|p| p.into_inner()) = Some(buf);
+                        }
                     }
                 }
                 SCStreamOutputType::Audio => {
                     let tx_guard = self.ivars().audio_tx.lock().unwrap_or_else(|p| p.into_inner());
                     let Some(audio_tx) = tx_guard.as_ref() else { return };
-                    if let Some(frame) = unsafe { sample_buffer_to_audio(sample_buffer) } {
-                        if audio_tx.try_send(frame).is_err() {
-                            self.ivars().dropped.store(true, Ordering::Relaxed);
-                        }
+                    let captured_at = std::time::Instant::now();
+                    if let Some(pcm) = unsafe { sample_buffer_to_audio(sample_buffer) } {
+                        // Kênh đầy (writer chậm) → bỏ gói; `record::pcm_writer`
+                        // tự chèn lặng đúng chỗ đó nên tiếng không bị lệch.
+                        let _ = audio_tx.try_send((captured_at, pcm));
                     }
                 }
                 _ => {}
@@ -196,61 +168,25 @@ define_class!(
 
 impl StreamOutputHandler {
     fn new(
-        latest: Arc<Mutex<Option<Arc<Frame>>>>,
-        audio_tx: Arc<Mutex<Option<mpsc::SyncSender<Vec<u8>>>>>,
-        dropped: Arc<AtomicBool>,
+        latest: LatestFrame,
+        audio_tx: Arc<Mutex<Option<mpsc::SyncSender<PcmChunk>>>>,
         stopped_externally: Arc<AtomicBool>,
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(StreamOutputIvars {
             latest,
+            spare: Mutex::new(None),
             audio_tx,
-            dropped,
             stopped_externally,
         });
         unsafe { msg_send![super(this), init] }
     }
 }
 
-/// Thread đếm nhịp đúng `interval` (= 1/fps giây) — MỖI NHỊP lấy frame mới
-/// nhất SCStream đã gửi (`latest`, lặp lại frame cũ nếu chưa có gì mới kể từ
-/// nhịp trước) rồi đẩy vào `frame_tx`.
-fn spawn_ticker(
-    frame_tx: mpsc::SyncSender<Arc<Frame>>,
-    latest: Arc<Mutex<Option<Arc<Frame>>>>,
-    dropped: Arc<AtomicBool>,
-    stop: Arc<AtomicBool>,
-    interval: Duration,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
-        let start = Instant::now();
-        let mut frame_index: u32 = 0;
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                break;
-            }
-            let target_time = start + interval * frame_index;
-            let now = Instant::now();
-            if target_time > now {
-                std::thread::sleep((target_time - now).min(Duration::from_millis(20)));
-                continue;
-            }
-            frame_index = frame_index.wrapping_add(1).max(
-                ((now - start).as_nanos() / interval.as_nanos().max(1)) as u32,
-            );
-
-            let frame = latest.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            if let Some(frame) = frame {
-                if frame_tx.try_send(frame).is_err() {
-                    dropped.store(true, Ordering::Relaxed);
-                }
-            }
-        }
-    })
-}
-
-/// `CMSampleBuffer` (BGRA, IOSurface-backed `CVPixelBuffer`) → `Frame`.
-/// Chạy trong dispatch queue riêng của stream (KHÔNG phải main queue).
-unsafe fn sample_buffer_to_frame(sample_buffer: &CMSampleBuffer) -> Option<Frame> {
+/// `CMSampleBuffer` (BGRA, IOSurface-backed `CVPixelBuffer`) → `Frame`, tái
+/// dùng `spare` làm bộ nhớ đích nếu đúng kích thước. Chạy trong dispatch queue
+/// riêng của stream (KHÔNG phải main queue). Sample buffer "idle" (màn hình
+/// không đổi) không có image buffer → `None`, giữ nguyên frame cũ.
+unsafe fn sample_buffer_to_frame(sample_buffer: &CMSampleBuffer, spare: Option<Vec<u8>>) -> Option<Frame> {
     let pixel_buffer = unsafe { sample_buffer.image_buffer() }?;
 
     // Lock/Unlock là FFI thô (extern "C-unwind") nên cần unsafe; các hàm Get*
@@ -261,26 +197,12 @@ unsafe fn sample_buffer_to_frame(sample_buffer: &CMSampleBuffer) -> Option<Frame
     let bytes_per_row = CVPixelBufferGetBytesPerRow(&pixel_buffer);
     let base = CVPixelBufferGetBaseAddress(&pixel_buffer);
 
-    let frame = if base.is_null() || width == 0 || height == 0 {
+    let frame = if base.is_null() || width == 0 || height == 0 || bytes_per_row < width * 4 {
         None
     } else {
-        // IOSurface pad bytes_per_row >= width*4 — copy đúng row_len mỗi hàng,
-        // bỏ phần padding cuối hàng (giống cgimage_to_rgba ở mac_sck.rs).
-        let row_len = width * 4;
-        let mut buffer = vec![0u8; row_len * height];
-        unsafe {
-            let src = base as *const u8;
-            for y in 0..height {
-                let src_row = src.add(y * bytes_per_row);
-                let dst_row = buffer.as_mut_ptr().add(y * row_len);
-                std::ptr::copy_nonoverlapping(src_row, dst_row, row_len);
-            }
-        }
-        Some(Frame {
-            bgra: buffer,
-            width: width as u32,
-            height: height as u32,
-        })
+        // IOSurface pad bytes_per_row >= width*4 — copy đúng width*4 mỗi hàng.
+        let bgra = unsafe { copy_rows(base as *const u8, bytes_per_row, width * 4, height, spare) };
+        Some(Frame { bgra, width: width as u32, height: height as u32 })
     };
 
     unsafe { CVPixelBufferUnlockBaseAddress(&pixel_buffer, LOCK_READONLY) };
@@ -288,29 +210,46 @@ unsafe fn sample_buffer_to_frame(sample_buffer: &CMSampleBuffer) -> Option<Frame
 }
 
 /// Trần an toàn để không đọc tràn bộ nhớ nếu `mNumberBuffers` trả về bất
-/// thường — KHÔNG dùng để tính kích thước cấp phát nữa (xem lý do ở
-/// `sample_buffer_to_audio`: từng đoán cứng 8 buffer/136 byte và vẫn bị
-/// CoreMedia trả lỗi `kCMSampleBufferError_ArrayTooSmall` — API này không
-/// cho đoán, phải HỎI kích thước thật rồi mới cấp đúng).
+/// thường — KHÔNG dùng để tính kích thước cấp phát (xem `sample_buffer_to_audio`).
 const MAX_AUDIO_BUFFERS: usize = 64;
 
-/// `CMSampleBuffer` (audio, wrap 1 `AudioBufferList`) → PCM i16 interleaved
-/// (`Vec<u8>`). SCStream không cam kết format cụ thể (theo doc chỉ nói
-/// "dựa trên sampleRate/channelCount đã set"), nên đọc thẳng
-/// `AudioStreamBasicDescription` của sample buffer để biết chắc: float hay
-/// int, interleaved hay planar (non-interleaved — mỗi kênh 1 buffer riêng,
-/// phải tự xen kẽ lại).
+/// Đọc 1 sample (kênh `ch`, frame `i`) thành f32 [-1, 1] theo đúng định dạng
+/// SCStream trả về (float32 / int16 / int32, interleaved hoặc planar).
+#[derive(Clone, Copy)]
+enum SampleKind {
+    F32,
+    I16,
+    I32,
+}
+
+impl SampleKind {
+    fn bytes(self) -> usize {
+        match self {
+            SampleKind::I16 => 2,
+            _ => 4,
+        }
+    }
+
+    /// # Safety: `p` trỏ tới ít nhất `self.bytes()` byte hợp lệ.
+    unsafe fn read(self, p: *const u8) -> f32 {
+        match self {
+            SampleKind::F32 => unsafe { (p as *const f32).read_unaligned() },
+            SampleKind::I16 => (unsafe { (p as *const i16).read_unaligned() }) as f32 / 32768.0,
+            SampleKind::I32 => (unsafe { (p as *const i32).read_unaligned() } as f64 / 2147483648.0) as f32,
+        }
+    }
+}
+
+/// `CMSampleBuffer` (audio, wrap 1 `AudioBufferList`) → PCM s16le xen kẽ
+/// ĐÚNG `AUDIO_CHANNELS` kênh (mono được nhân đôi, >2 kênh lấy 2 kênh đầu) —
+/// file PCM được ghép với `-ac AUDIO_CHANNELS` cố định nên số kênh sai sẽ làm
+/// tiếng chạy nhanh/chậm gấp đôi.
 ///
-/// `AudioBufferList` là kiểu C "flexible array member"
-/// (`{ mNumberBuffers: u32, mBuffers: [AudioBuffer; 1] }` nhưng thực chứa
-/// `mNumberBuffers` phần tử) — phải tự cấp phát đủ chỗ rồi truy cập qua con
-/// trỏ thô, không dùng `list.mBuffers[i]` (mảng Rust khai báo cứng độ dài 1,
-/// index > 0 sẽ panic). Kích thước cần cấp phát KHÔNG được đoán cứng theo số
-/// kênh — gọi 2 lần theo đúng mẫu Apple tài liệu: lần 1 với
-/// `buffer_list_out=NULL` chỉ để HỎI `buffer_list_size_needed_out`, lần 2
-/// mới cấp đúng số byte đó rồi lấy dữ liệu thật. Đoán cứng (8 buffer/136
-/// byte) từng bị CoreMedia trả `kCMSampleBufferError_ArrayTooSmall`
-/// (-12737) dù nhìn tưởng dư dả — API này không cho đoán.
+/// `AudioBufferList` là kiểu C "flexible array member" — phải tự cấp phát đủ
+/// chỗ rồi truy cập qua con trỏ thô. Kích thước cần cấp phát KHÔNG được đoán
+/// cứng — gọi 2 lần theo đúng mẫu Apple: lần 1 hỏi `buffer_list_size_needed_out`,
+/// lần 2 cấp đúng số byte đó rồi lấy dữ liệu (đoán cứng từng bị CoreMedia trả
+/// `kCMSampleBufferError_ArrayTooSmall`).
 unsafe fn sample_buffer_to_audio(sample_buffer: &CMSampleBuffer) -> Option<Vec<u8>> {
     let format_desc = unsafe { sample_buffer.format_description() }?;
     let asbd_ptr = unsafe { CMAudioFormatDescriptionGetStreamBasicDescription(&format_desc) };
@@ -318,11 +257,25 @@ unsafe fn sample_buffer_to_audio(sample_buffer: &CMSampleBuffer) -> Option<Vec<u
         return None;
     }
     let asbd = unsafe { *asbd_ptr };
+    let flags = asbd.mFormatFlags;
+    let kind = if flags & kAudioFormatFlagIsFloat != 0 && asbd.mBitsPerChannel == 32 {
+        SampleKind::F32
+    } else if flags & kAudioFormatFlagIsSignedInteger != 0 && asbd.mBitsPerChannel == 16 {
+        SampleKind::I16
+    } else if flags & kAudioFormatFlagIsSignedInteger != 0 && asbd.mBitsPerChannel == 32 {
+        SampleKind::I32
+    } else if flags & kAudioFormatFlagIsFloat != 0 || asbd.mBitsPerChannel == 0 {
+        // SCStream thực tế luôn trả float32 — coi như mặc định.
+        SampleKind::F32
+    } else {
+        return None;
+    };
+    let non_interleaved = flags & kAudioFormatFlagIsNonInterleaved != 0;
+    let src_channels = (asbd.mChannelsPerFrame as usize).max(1);
 
     const FLAGS: u32 = kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment;
 
-    // Lần 1: hỏi kích thước THẬT cần cấp — `buffer_list_out=NULL` nghĩa là
-    // "chỉ tính size, chưa lấy dữ liệu" (đúng mẫu dùng API này của Apple).
+    // Lần 1: hỏi kích thước THẬT cần cấp.
     let mut needed_size: usize = 0;
     let _query_status = unsafe {
         sample_buffer.audio_buffer_list_with_retained_block_buffer(
@@ -360,8 +313,7 @@ unsafe fn sample_buffer_to_audio(sample_buffer: &CMSampleBuffer) -> Option<Vec<u
         )
     };
     // "WithRetainedBlockBuffer" trả block buffer đã +1 refcount — bọc vào
-    // CFRetained để tự CFRelease khi ra khỏi scope (giữ sống bộ nhớ mà
-    // AudioBufferList trỏ tới cho tới khi ta copy xong PCM ở dưới).
+    // CFRetained để tự CFRelease khi ra khỏi scope.
     let _block_buffer_guard = (!block_buffer_raw.is_null())
         .then(|| unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(block_buffer_raw)) });
 
@@ -369,52 +321,50 @@ unsafe fn sample_buffer_to_audio(sample_buffer: &CMSampleBuffer) -> Option<Vec<u
         None
     } else {
         let list: &AudioBufferList = unsafe { &*list_ptr };
-        let n = (list.mNumberBuffers as usize).min(MAX_AUDIO_BUFFERS);
-        let non_interleaved = asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0;
-        let is_float = asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0;
+        let n_buffers = (list.mNumberBuffers as usize).min(MAX_AUDIO_BUFFERS);
         let buffers_ptr = list.mBuffers.as_ptr();
+        let sb = kind.bytes();
+        let out_ch = AUDIO_CHANNELS as usize;
 
-        if n == 0 {
-            None
-        } else if non_interleaved {
-            // Planar: buffer[i] chứa riêng kênh i (float32) — tự interleave
-            // lại thành i16 xen kẽ cho đúng định dạng `-f s16le` phía ffmpeg.
-            let first = unsafe { &*buffers_ptr };
-            let frames = first.mDataByteSize as usize / 4;
-            let mut out = vec![0u8; frames * n * 2];
-            for ch in 0..n {
-                let buf = unsafe { &*buffers_ptr.add(ch) };
-                if buf.mData.is_null() {
-                    continue;
+        // (con trỏ dữ liệu, số byte, stride giữa 2 frame) cho từng kênh nguồn.
+        let mut chans: Vec<(*const u8, usize, usize)> = Vec::new();
+        if non_interleaved {
+            for i in 0..n_buffers {
+                let buf = unsafe { &*buffers_ptr.add(i) };
+                if !buf.mData.is_null() {
+                    chans.push((buf.mData as *const u8, buf.mDataByteSize as usize, sb));
                 }
-                let count = (buf.mDataByteSize as usize / 4).min(frames);
-                let src = unsafe { std::slice::from_raw_parts(buf.mData as *const f32, count) };
-                for (i, &s) in src.iter().enumerate() {
-                    let off = (i * n + ch) * 2;
-                    out[off..off + 2].copy_from_slice(&f32_to_i16_le(s));
+            }
+        } else if n_buffers > 0 {
+            let buf = unsafe { &*buffers_ptr };
+            if !buf.mData.is_null() {
+                let stride = sb * src_channels;
+                for c in 0..src_channels {
+                    let p = unsafe { (buf.mData as *const u8).add(c * sb) };
+                    let len = (buf.mDataByteSize as usize).saturating_sub(c * sb);
+                    chans.push((p, len, stride));
+                }
+            }
+        }
+
+        if chans.is_empty() {
+            None
+        } else {
+            let frames = chans
+                .iter()
+                .map(|&(_, len, stride)| if len >= sb { (len - sb) / stride + 1 } else { 0 })
+                .min()
+                .unwrap_or(0);
+            let mut out = Vec::with_capacity(frames * out_ch * 2);
+            for i in 0..frames {
+                for c in 0..out_ch {
+                    // Mono → nhân đôi sang cả 2 kênh; nhiều kênh → lấy kênh đầu.
+                    let (p, _, stride) = chans[c.min(chans.len() - 1)];
+                    let v = unsafe { kind.read(p.add(i * stride)) };
+                    out.extend_from_slice(&f32_to_i16_le(v));
                 }
             }
             Some(out)
-        } else {
-            // Interleaved: 1 buffer duy nhất, các kênh đã xen kẽ sẵn.
-            let buf = unsafe { &*buffers_ptr };
-            if buf.mData.is_null() {
-                None
-            } else if is_float {
-                let count = buf.mDataByteSize as usize / 4;
-                let src = unsafe { std::slice::from_raw_parts(buf.mData as *const f32, count) };
-                let mut out = vec![0u8; count * 2];
-                for (i, &s) in src.iter().enumerate() {
-                    out[i * 2..i * 2 + 2].copy_from_slice(&f32_to_i16_le(s));
-                }
-                Some(out)
-            } else {
-                // Coi như đã là PCM 16-bit signed interleaved — copy thẳng.
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(buf.mData as *const u8, buf.mDataByteSize as usize)
-                };
-                Some(bytes.to_vec())
-            }
         }
     };
 
@@ -424,7 +374,7 @@ unsafe fn sample_buffer_to_audio(sample_buffer: &CMSampleBuffer) -> Option<Vec<u
 
 #[inline]
 fn f32_to_i16_le(sample: f32) -> [u8; 2] {
-    let clamped = sample.clamp(-1.0, 1.0);
+    let clamped = if sample.is_finite() { sample.clamp(-1.0, 1.0) } else { 0.0 };
     let v = (clamped * i16::MAX as f32) as i16;
     v.to_le_bytes()
 }
@@ -433,19 +383,37 @@ fn f32_to_i16_le(sample: f32) -> [u8; 2] {
 /// của chính SnapDoc (`processID == my_pid`) để loại trừ khỏi stream quay video,
 /// đồng thời tìm các `SCWindow` ngoại lệ (như overlay phím bấm `record-keystroke`)
 /// để cho phép xuất hiện trong video quay.
-fn find_display_and_own_apps(
-    display_id: u32,
-    excepting_window_ids: &[u32],
-) -> Result<(Retained<SCDisplay>, Vec<Retained<SCRunningApplication>>, Vec<Retained<SCWindow>>), String> {
+type DisplayQuery = (Retained<SCDisplay>, Vec<Retained<SCRunningApplication>>, Vec<Retained<SCWindow>>);
+
+fn find_display_and_own_apps(display_id: u32, excepting_window_ids: &[u32]) -> Result<DisplayQuery, String> {
+    // Overlay phím bấm/click vừa tạo có thể CHƯA được WindowServer đưa vào
+    // SCShareableContent — thiếu nó trong danh sách ngoại lệ thì overlay bị
+    // loại khỏi video. Thử lại vài lần (tổng tối đa ~0.5s) tới khi thấy đủ,
+    // thay vì 1 lần ngủ cố định 60ms như trước (không chắc đủ trên máy chậm).
+    let mut last = None;
+    for attempt in 0..6 {
+        if !excepting_window_ids.is_empty() {
+            std::thread::sleep(Duration::from_millis(if attempt == 0 { 40 } else { 80 }));
+        }
+        let r = query_display_once(display_id, excepting_window_ids)?;
+        let found = excepting_window_ids
+            .iter()
+            .filter(|id| r.2.iter().any(|w| unsafe { w.windowID() } == **id))
+            .count();
+        let complete = found == excepting_window_ids.len();
+        last = Some(r);
+        if complete {
+            break;
+        }
+    }
+    last.ok_or_else(|| "Không lấy được danh sách màn hình".to_string())
+}
+
+fn query_display_once(display_id: u32, excepting_window_ids: &[u32]) -> Result<DisplayQuery, String> {
     let my_pid = std::process::id();
     let excepting_ids = excepting_window_ids.to_vec();
 
-    // Chờ 60ms để WindowServer macOS kịp index cửa sổ overlay phím mới tạo vào SCShareableContent
-    if !excepting_ids.is_empty() {
-        std::thread::sleep(std::time::Duration::from_millis(60));
-    }
-
-    let (tx, rx) = mpsc::channel::<Result<(Retained<SCDisplay>, Vec<Retained<SCRunningApplication>>, Vec<Retained<SCWindow>>), String>>();
+    let (tx, rx) = mpsc::channel::<Result<DisplayQuery, String>>();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, err: *mut objc2_foundation::NSError| {
         if content.is_null() {
             let msg = if err.is_null() {
@@ -539,34 +507,20 @@ fn find_window(window_id: u32) -> Result<Retained<SCWindow>, String> {
 }
 
 /// Stream đang chạy — giữ sống `SCStream` + delegate (ARC) cho tới khi
-/// `stop()`. `Drop` là lưới an toàn cho nhánh LỖI: `start_with_target`
-/// (record/mod.rs) còn nhiều bước fallible SAU khi stream đã chạy
-/// (`create_dir_all`, `new_output_path`, `Encoder::start`) — nếu 1 bước lỗi,
-/// handle bị drop mà không ai gọi `stop()`, để lại phiên capture của OS chạy
-/// mồ côi (đèn "đang ghi màn hình" của macOS sáng mãi) + ticker thread loop
-/// vô hạn. Đường dừng CHỦ ĐỘNG vẫn là `stop()` (có chờ xác nhận + timeout);
-/// `Drop` chỉ dừng fire-and-forget, không chặn.
+/// `stop()`. `Drop` là lưới an toàn cho nhánh LỖI (khởi động thất bại sau khi
+/// stream đã chạy): dừng SCStream fire-and-forget, không để phiên capture của
+/// OS chạy mồ côi (đèn "đang ghi màn hình" của macOS sáng mãi).
 pub struct RecordingHandle {
     stream: Retained<SCStream>,
     _handler: Retained<StreamOutputHandler>,
-    /// `stop()` đã được gọi tường minh — `Drop` không cần (và không được)
-    /// dừng lại lần nữa.
+    /// `stop()` đã được gọi tường minh — `Drop` không cần dừng lại lần nữa.
     stopped: bool,
-    /// Cờ dừng cho `spawn_ticker` + handle thread của nó — phải dừng/join
-    /// TRƯỚC khi coi phiên quay là kết thúc (xem `stop()`), vì `frame_tx` giờ
-    /// do ticker giữ (không phải `_handler` như trước), đóng nó là cách duy
-    /// nhất để writer thread bên `record/mod.rs` thấy EOF mà kết thúc.
-    ticker_stop: Arc<AtomicBool>,
-    ticker_thread: Option<JoinHandle<()>>,
-    audio_tx: Arc<Mutex<Option<mpsc::SyncSender<Vec<u8>>>>>,
-    dropped: Arc<AtomicBool>,
-    /// Cờ dùng chung với `StreamOutputIvars` (xem giải thích ở đó) — báo SCK
-    /// đã tự dừng ngoài ý muốn của ta.
+    latest: LatestFrame,
+    audio_tx: Arc<Mutex<Option<mpsc::SyncSender<PcmChunk>>>>,
+    /// Cờ dùng chung với `StreamOutputIvars` — SCK đã tự dừng ngoài ý muốn.
     stopped_externally: Arc<AtomicBool>,
-    /// Kích thước pixel vật lý của mỗi frame — cố định cho suốt phiên quay,
-    /// khớp đúng `SCStreamConfiguration` đã cấu hình lúc `start()`. Caller
-    /// (`record::mod`) cần giá trị này TRƯỚC frame đầu tiên để khởi động
-    /// ffmpeg với đúng `-s WxH`.
+    /// Kích thước pixel của mỗi frame — cố định cho suốt phiên quay, khớp đúng
+    /// `SCStreamConfiguration` lúc `start()` (đã giới hạn trong 4K).
     pub width: u32,
     pub height: u32,
 }
@@ -577,26 +531,20 @@ pub struct RecordingHandle {
 unsafe impl Send for RecordingHandle {}
 
 impl RecordingHandle {
-    /// Đóng sender audio hệ thống NGAY LẬP TỨC để luồng ghi PCM nhận EOF/timeout
-    /// mà không cần đợi teardown toàn bộ SCStream.
-    pub fn close_audio_sender(&self) {
-        if let Ok(mut g) = self.audio_tx.lock() {
-            g.take();
-        }
+    /// Ô frame mới nhất — `record::pacer` đọc theo nhịp fps.
+    pub fn latest(&self) -> LatestFrame {
+        self.latest.clone()
+    }
+
+    /// Đóng sender audio hệ thống để writer PCM thấy EOF.
+    fn close_audio_sender(&self) {
+        self.audio_tx.lock().unwrap_or_else(|p| p.into_inner()).take();
     }
 
     /// SCK đã tự dừng ngoài ý muốn (vd người dùng bấm "Stop" trên icon
-    /// "Screen Sharing" của hệ thống macOS) hay chưa — `record::mod` poll cờ
-    /// này để tự dọn dẹp phiên quay thay vì chờ mãi frame không bao giờ tới.
+    /// "Screen Sharing" của hệ thống macOS) hay chưa.
     pub fn is_stopped_externally(&self) -> bool {
         self.stopped_externally.load(Ordering::SeqCst)
-    }
-
-    /// Cờ "đã có frame bị drop" dùng chung với ticker/callback — caller
-    /// (`record::mod`) clone Arc này TRƯỚC khi `stop()` tiêu thụ handle để
-    /// còn đọc được sau khi dừng mà cảnh báo người dùng.
-    pub fn dropped_flag(&self) -> Arc<AtomicBool> {
-        self.dropped.clone()
     }
 
     /// Dừng quay, đợi SCStream xác nhận đã dừng hẳn (có timeout).
@@ -604,29 +552,11 @@ impl RecordingHandle {
         // Đánh dấu NGAY từ đầu — kể cả khi các bước dưới lỗi/timeout, Drop
         // cũng không được lặp lại việc dừng (yêu cầu dừng đã được gửi đi).
         self.stopped = true;
-
-        // 1. Đóng sender audio hệ thống ngay lập tức để luồng ghi PCM (spawn_pcm_file_writer)
-        // thoát vòng lặp và kết thúc ghi file mà không bị deadlock.
         self.close_audio_sender();
 
-        // 2. Dừng ticker TRƯỚC (đóng `frame_tx` nó đang giữ, kết thúc writer
-        // thread bên `record/mod.rs`) — cùng thứ tự với
-        // `windows_stream.rs::RecordingHandle::stop`. Phải làm bước này ở CẢ
-        // 2 nhánh dưới đây (kể cả nhánh SCK đã tự dừng), nếu không ticker
-        // thread sẽ chạy mãi không bao giờ dừng.
-        self.ticker_stop.store(true, Ordering::SeqCst);
-        if let Some(t) = self.ticker_thread.take() {
-            let _ = t.join();
-        }
-
-        // SCK đã tự dừng rồi (xem `is_stopped_externally`) — gọi lại
-        // `stopCaptureWithCompletionHandler` trên 1 stream không còn chạy có
-        // thể không bao giờ gọi completion handler, khiến ta chờ hết
-        // `TIMEOUT` (10s) một cách vô ích. Coi như đã dừng xong.
+        // SCK đã tự dừng rồi — gọi lại `stopCapture` trên 1 stream không còn
+        // chạy có thể không bao giờ gọi completion handler (chờ hết TIMEOUT vô ích).
         if self.stopped_externally.load(Ordering::SeqCst) {
-            if self.dropped.load(Ordering::Relaxed) {
-                eprintln!("[SnapDoc][record] Một số frame đã bị drop do encoder/consumer chậm hơn tốc độ quay");
-            }
             return Ok(());
         }
 
@@ -635,63 +565,44 @@ impl RecordingHandle {
             let r = if err.is_null() {
                 Ok(())
             } else {
-                Err(format!("Lỗi dừng quay: {}", unsafe {
-                    (*err).localizedDescription()
-                }))
+                Err(format!("Lỗi dừng quay: {}", unsafe { (*err).localizedDescription() }))
             };
             let _ = tx.send(r);
         });
         unsafe { self.stream.stopCaptureWithCompletionHandler(Some(&handler)) };
-        let result = rx
-            .recv_timeout(TIMEOUT)
-            .map_err(|_| "Hết thời gian chờ dừng quay".to_string())?;
-        if self.dropped.load(Ordering::Relaxed) {
-            eprintln!("[SnapDoc][record] Một số frame đã bị drop do encoder/consumer chậm hơn tốc độ quay");
-        }
-        result
+        rx.recv_timeout(TIMEOUT)
+            .map_err(|_| "Hết thời gian chờ dừng quay".to_string())?
     }
 }
 
 impl Drop for RecordingHandle {
     fn drop(&mut self) {
         self.close_audio_sender();
-        if self.stopped {
+        if self.stopped || self.stopped_externally.load(Ordering::SeqCst) {
             return;
         }
-        // Nhánh lỗi (chưa ai gọi `stop()`): dừng ticker + join để nó không
-        // loop vô hạn, rồi yêu cầu SCK dừng fire-and-forget (không chờ
-        // completion — Drop không được chặn thread hiện tại tới 10s).
-        self.ticker_stop.store(true, Ordering::SeqCst);
-        if let Some(t) = self.ticker_thread.take() {
-            let _ = t.join();
-        }
-        if !self.stopped_externally.load(Ordering::SeqCst) {
-            eprintln!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng SCStream khẩn cấp");
-            unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
-        }
+        eprintln!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng SCStream khẩn cấp");
+        unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
     }
 }
 
 /// Bắt đầu quay theo `RecordTarget` (toàn màn hình / 1 vùng / 1 cửa sổ).
 ///
-/// `fps`: tốc độ khung hình mong muốn (khuyến nghị 30). `capture_system_audio`:
-/// bật `SCStreamConfiguration.capturesAudio` (macOS 13+, an toàn với
-/// `minimumSystemVersion` 14.0 của app) — audio HỆ THỐNG (loa), KHÔNG phải
-/// mic (mic dùng `record::audio_mic` riêng, xem module đó để hiểu vì sao).
-/// Trả về `RecordingHandle` (giữ để gọi `stop()`) + `Receiver<Frame>` video +
-/// `Receiver<Vec<u8>>` audio hệ thống (`Some` chỉ khi
-/// `capture_system_audio=true`).
+/// `capture_system_audio`: bật `SCStreamConfiguration.capturesAudio` — audio
+/// HỆ THỐNG (loa), KHÔNG phải mic (mic dùng `record::audio_mic`). Trả về
+/// `RecordingHandle` + `Receiver` PCM s16le `AUDIO_SAMPLE_RATE`/`AUDIO_CHANNELS`
+/// của audio hệ thống (`Some` chỉ khi `capture_system_audio=true`).
 pub fn start(
     target: RecordTarget,
     fps: u32,
     capture_system_audio: bool,
     exclude_own_app: bool,
     excepting_window_ids: &[u32],
-) -> Result<(RecordingHandle, mpsc::Receiver<Arc<Frame>>, Option<mpsc::Receiver<Vec<u8>>>), String> {
+) -> Result<(RecordingHandle, Option<mpsc::Receiver<PcmChunk>>), String> {
     // `source_rect`: Some khi quay 1 VÙNG (crop qua `SCStreamConfiguration`),
     // None khi quay trọn nội dung của filter (toàn màn hình hoặc cả cửa sổ).
     let (filter, source_rect): (Retained<SCContentFilter>, Option<CGRect>) = match &target {
-        RecordTarget::Display(display_id) => {
+        RecordTarget::Display(display_id) | RecordTarget::Region { display_id, .. } => {
             let (display, own_apps, excepting_windows) = find_display_and_own_apps(*display_id, excepting_window_ids)?;
             let empty_apps: Vec<Retained<SCRunningApplication>> = vec![];
             let own_apps_arr = if exclude_own_app {
@@ -705,7 +616,8 @@ pub fn start(
             } else {
                 NSArray::from_retained_slice(&empty_windows)
             };
-            // Loại trừ toàn bộ các cửa sổ của SnapDoc (khi exclude_own_app=true), NGOẠI TRỪ các cửa sổ trong exceptingWindows (overlay phím bấm).
+            // Loại trừ toàn bộ các cửa sổ của SnapDoc (khi exclude_own_app=true),
+            // NGOẠI TRỪ các cửa sổ trong exceptingWindows (overlay phím bấm/click).
             let filter = unsafe {
                 SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
                     SCContentFilter::alloc(),
@@ -714,36 +626,14 @@ pub fn start(
                     &excepting_windows_arr,
                 )
             };
-            (filter, None)
-        }
-        RecordTarget::Region { display_id, x, y, w, h } => {
-            let (display, own_apps, excepting_windows) = find_display_and_own_apps(*display_id, excepting_window_ids)?;
-            let empty_apps: Vec<Retained<SCRunningApplication>> = vec![];
-            let own_apps_arr = if exclude_own_app {
-                NSArray::from_retained_slice(&own_apps)
-            } else {
-                NSArray::from_retained_slice(&empty_apps)
+            let rect = match &target {
+                RecordTarget::Region { x, y, w, h, .. } => Some(CGRect {
+                    origin: CGPoint { x: *x, y: *y },
+                    size: CGSize { width: *w, height: *h },
+                }),
+                _ => None,
             };
-            let empty_windows: Vec<Retained<SCWindow>> = vec![];
-            let excepting_windows_arr = if exclude_own_app {
-                NSArray::from_retained_slice(&excepting_windows)
-            } else {
-                NSArray::from_retained_slice(&empty_windows)
-            };
-            // Loại trừ toàn bộ các cửa sổ của SnapDoc (khi exclude_own_app=true), NGOẠI TRỪ các cửa sổ trong exceptingWindows (overlay phím bấm).
-            let filter = unsafe {
-                SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
-                    SCContentFilter::alloc(),
-                    &display,
-                    &own_apps_arr,
-                    &excepting_windows_arr,
-                )
-            };
-            let rect = CGRect {
-                origin: CGPoint { x: *x, y: *y },
-                size: CGSize { width: *w, height: *h },
-            };
-            (filter, Some(rect))
+            (filter, rect)
         }
         RecordTarget::Window(window_id) => {
             let window = find_window(*window_id)?;
@@ -758,27 +648,25 @@ pub fn start(
     // Kích thước pixel đầu ra: bằng đúng vùng crop nếu có `source_rect`, nếu
     // không thì bằng toàn bộ nội dung của filter (`contentRect`).
     let (px_w, px_h) = if let Some(rect) = source_rect {
-        (
-            ((rect.size.width * scale).round() as usize).max(2),
-            ((rect.size.height * scale).round() as usize).max(2),
-        )
+        ((rect.size.width * scale).round().max(2.0) as u32, (rect.size.height * scale).round().max(2.0) as u32)
     } else {
         let content_rect: CGRect = unsafe { filter.contentRect() };
         (
-            ((content_rect.size.width * scale).round() as usize).max(2),
-            ((content_rect.size.height * scale).round() as usize).max(2),
+            (content_rect.size.width * scale).round().max(2.0) as u32,
+            (content_rect.size.height * scale).round().max(2.0) as u32,
         )
     };
-    // Ép về SỐ CHẴN (`& !1` xoá bit thấp nhất, luôn còn >= 2 nhờ `.max(2)`
-    // trên) — `Encoder::start` (encoder.rs) encode ra `yuv420p`, đòi hỏi CẢ
-    // width/height chẵn (chroma subsampling 4:2:0 chia đôi từng chiều).
-    // `content_rect` (toàn màn hình/cửa sổ) thường sẵn chẵn nên hiếm gặp, nhưng
-    // `source_rect` (quay 1 VÙNG do người dùng tự kéo chọn, kích thước bất kỳ)
-    // ra số lẻ rất dễ xảy ra — ffmpeg từ chối ngay khi bắt đầu encode, đóng
-    // stdin, mọi lần `write_frame()` sau đó lỗi "Broken pipe" (đã tái hiện và
-    // xác nhận qua log: 1822×1161 — 1161 lẻ — đúng lúc quay 1 vùng chọn tự do).
-    let px_w = px_w & !1;
-    let px_h = px_h & !1;
+    // Giới hạn trong 4K (màn 5K/6K Retina vượt giới hạn H.264 của encoder phần
+    // cứng và đẩy hàng GB/s qua pipe) — SCK tự thu nhỏ trên GPU, gần như miễn
+    // phí. Đồng thời ép SỐ CHẴN: `yuv420p` đòi width/height chẵn (vùng chọn
+    // tự do rất dễ ra số lẻ, vd 1822×1161 → ffmpeg từ chối ngay khi encode).
+    let (px_w, px_h) = fit_even(
+        px_w,
+        px_h,
+        crate::record::encoder::MAX_LONG_EDGE,
+        crate::record::encoder::MAX_SHORT_EDGE,
+    );
+    let (px_w, px_h) = (px_w as usize, px_h as usize);
 
     let config = unsafe { SCStreamConfiguration::new() };
     unsafe {
@@ -800,32 +688,20 @@ pub fn start(
             config.setCapturesAudio(true);
             config.setSampleRate(AUDIO_SAMPLE_RATE as isize);
             config.setChannelCount(AUDIO_CHANNELS as isize);
-            // KHÔNG bật excludesCurrentProcessAudio: về lý thuyết chỉ loại
-            // tiếng của chính SnapDoc, nhưng đây là biến số không cần thiết
-            // cho tính năng (SnapDoc không tự phát âm thanh gì đáng kể) — bỏ
-            // để loại trừ khả năng nó là nguyên nhân audio hệ thống bị câm.
         }
     }
 
-    // Channel có giới hạn dung lượng — nếu encoder xử lý chậm hơn tốc độ quay,
-    // các lệnh gọi try_send() trong callback sẽ thất bại (drop) thay vì chặn
-    // luồng SCK. Bound = 2 giây buffer ở fps yêu cầu. Dùng Arc<Frame> để zero-copy.
-    let bound = (fps.max(1) as usize) * 2;
-    let (frame_tx, frame_rx) = mpsc::sync_channel::<Arc<Frame>>(bound);
-    // Audio đến theo packet nhỏ (~10-20ms/lần) chứ không theo fps — bound rời
-    // rạc hơn (packet/giây, không phải sample/giây) vẫn đủ ~2s đệm.
+    // Audio đến theo packet nhỏ (~10-20ms/lần) — ~2s đệm.
     let (audio_tx, audio_rx) = if capture_system_audio {
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(200);
+        let (tx, rx) = mpsc::sync_channel::<PcmChunk>(200);
         (Some(tx), Some(rx))
     } else {
         (None, None)
     };
     let audio_tx = Arc::new(Mutex::new(audio_tx));
-    let dropped = Arc::new(AtomicBool::new(false));
     let stopped_externally = Arc::new(AtomicBool::new(false));
-    let latest: Arc<Mutex<Option<Arc<Frame>>>> = Arc::new(Mutex::new(None));
-    let handler_obj =
-        StreamOutputHandler::new(latest.clone(), audio_tx.clone(), dropped.clone(), stopped_externally.clone());
+    let latest = super::frame::new_latest();
+    let handler_obj = StreamOutputHandler::new(latest.clone(), audio_tx.clone(), stopped_externally.clone());
 
     let delegate_proto = ProtocolObject::from_ref(&*handler_obj);
     let stream = unsafe {
@@ -837,21 +713,17 @@ pub fn start(
         )
     };
 
+    // Dispatch queue riêng cho callback (không dùng main queue để callback
+    // nhận frame liên tục không bị chặn bởi UI thread).
     let queue = DispatchQueue::new("com.snapdoc.record.video", None);
     let output_proto = ProtocolObject::from_ref(&*handler_obj);
     unsafe {
         stream
-            .addStreamOutput_type_sampleHandlerQueue_error(
-                output_proto,
-                SCStreamOutputType::Screen,
-                Some(&queue),
-            )
+            .addStreamOutput_type_sampleHandlerQueue_error(output_proto, SCStreamOutputType::Screen, Some(&queue))
             .map_err(|e| format!("Không thêm được stream output: {}", e.localizedDescription()))?;
     }
     if capture_system_audio {
-        // Queue RIÊNG cho callback audio — tách khỏi queue video để 1 lượt
-        // callback video (copy cả khung hình, có thể vài ms) không làm trễ
-        // audio (nhạy độ trễ hơn nhiều, chỉ vài chục byte mỗi lần).
+        // Queue RIÊNG cho audio — 1 lượt copy khung hình (vài ms) không làm trễ audio.
         let audio_queue = DispatchQueue::new("com.snapdoc.record.audio", None);
         let audio_output_proto = ProtocolObject::from_ref(&*handler_obj);
         unsafe {
@@ -870,36 +742,33 @@ pub fn start(
         let r = if err.is_null() {
             Ok(())
         } else {
-            Err(format!("Lỗi bắt đầu quay: {}", unsafe {
-                (*err).localizedDescription()
-            }))
+            Err(format!("Lỗi bắt đầu quay: {}", unsafe { (*err).localizedDescription() }))
         };
         let _ = start_tx.send(r);
     });
     unsafe { stream.startCaptureWithCompletionHandler(Some(&start_handler)) };
-    start_rx
-        .recv_timeout(TIMEOUT)
-        .map_err(|_| "Hết thời gian chờ bắt đầu quay".to_string())??;
-
-    // Nhịp đẩy frame ra encoder ĐÚNG fps thật — xem doc-comment `spawn_ticker`.
-    let interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
-    let ticker_stop = Arc::new(AtomicBool::new(false));
-    let ticker_thread = spawn_ticker(frame_tx, latest, dropped.clone(), ticker_stop.clone(), interval);
+    match start_rx.recv_timeout(TIMEOUT) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            // Có thể capture vẫn khởi động muộn — yêu cầu dừng để không bỏ
+            // lại phiên capture mồ côi.
+            unsafe { stream.stopCaptureWithCompletionHandler(None) };
+            return Err("Hết thời gian chờ bắt đầu quay".to_string());
+        }
+    }
 
     Ok((
         RecordingHandle {
             stream,
             _handler: handler_obj,
-            audio_tx,
             stopped: false,
-            ticker_stop,
-            ticker_thread: Some(ticker_thread),
-            dropped,
+            latest,
+            audio_tx,
             stopped_externally,
             width: px_w as u32,
             height: px_h as u32,
         },
-        frame_rx,
         audio_rx,
     ))
 }
@@ -908,8 +777,7 @@ pub fn start(
 mod tests {
     use super::*;
 
-    /// Smoke test thủ công: quay 3 giây, kiểm tra nhận đủ ~fps*3 frame và
-    /// lưu frame cuối ra PNG để soi bằng mắt.
+    /// Smoke test thủ công: quay 2 giây, kiểm tra có frame và lưu frame cuối ra PNG.
     /// Chạy: `cargo test --package snapdoc -- --ignored --nocapture mac_stream`
     /// Yêu cầu: Terminal/iTerm đã được cấp quyền Screen Recording.
     #[test]
@@ -919,26 +787,14 @@ mod tests {
 
         let monitor = Monitor::all().unwrap().into_iter().find(|m| m.is_primary().unwrap_or(false)).unwrap();
         let display_id = monitor.id().unwrap();
-        let fps = 30;
-
-        let (handle, rx, _audio_rx) =
-            start(RecordTarget::Display(display_id), fps, false, false, &[]).expect("start() thất bại");
-
-        let mut count = 0u32;
-        let mut last: Option<std::sync::Arc<Frame>> = None;
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while std::time::Instant::now() < deadline {
-            if let Ok(frame) = rx.recv_timeout(Duration::from_millis(500)) {
-                count += 1;
-                last = Some(frame);
-            }
-        }
+        let (handle, _audio_rx) =
+            start(RecordTarget::Display(display_id), 30, false, false, &[]).expect("start() thất bại");
+        std::thread::sleep(Duration::from_secs(2));
+        let frame = handle.latest().lock().unwrap().clone();
         handle.stop().expect("stop() thất bại");
 
-        eprintln!("[test] nhận {count} frame trong 3s (~{:.1} fps)", count as f64 / 3.0);
-        assert!(count > 0, "không nhận được frame nào");
-
-        let frame = last.expect("không có frame nào để lưu");
+        let frame = frame.expect("không nhận được frame nào");
+        assert_eq!(frame.bgra.len(), (frame.width * frame.height * 4) as usize);
         let mut rgba = frame.bgra.clone();
         for px in rgba.chunks_exact_mut(4) {
             px.swap(0, 2);

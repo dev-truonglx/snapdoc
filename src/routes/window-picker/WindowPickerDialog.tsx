@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { ipc, type WindowMetaInfo, type WindowThumbReady } from "../../lib/ipc";
+import { showError } from "../../lib/notify";
 
 const params = new URLSearchParams(window.location.search);
 const RECORD = params.get("record") === "1";
@@ -69,7 +70,7 @@ export default function WindowPickerDialog() {
     setBusy(true);
     ipc.finalizeWindow(id).catch((e) => {
       setBusy(false);
-      alert(String(e));
+      showError(e);
     });
   };
 

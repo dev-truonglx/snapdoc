@@ -1,3 +1,4 @@
+pub mod frame;
 pub mod freeze;
 pub mod fullscreen;
 pub mod monitor;
