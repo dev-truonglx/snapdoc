@@ -7,11 +7,11 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { Stage, Layer, Rect, Line, Ellipse, Text, Circle, Group, Image as KImage, Transformer, Arrow } from "react-konva";
+import { Stage, Layer, Rect, Line, Ellipse, Text, Circle, Group, Image as KImage, Transformer, Arrow, Path } from "react-konva";
 import type Konva from "konva";
 import { useTranslation } from "react-i18next";
 import { useEditor } from "../store";
-import type { Annotation } from "../model";
+import type { Annotation, TextAnn } from "../model";
 import { uid } from "../model";
 import { copyToClipboard } from "../../output/useOutput";
 import { toSafeBlobUrl } from "../../../lib/blobUtils";
@@ -47,7 +47,7 @@ interface Draft {
 
 /** Draft cho mũi tên / đường thẳng đang kéo. */
 interface ArrowDraft {
-  type: "arrow" | "line" | "numbered-arrow";
+  type: "arrow" | "double-arrow" | "line" | "numbered-arrow";
   x: number;
   y: number;
   x2: number;
@@ -109,6 +109,78 @@ function LineEndpoints({ x1, y1, x2, y2 }: { x1: number; y1: number; x2: number;
       <Circle x={x2} y={y2} radius={4} fill="#ffffff" stroke="#3b82f6" strokeWidth={1.5} listening={false} />
     </>
   );
+}
+
+/** Tìm giao điểm của tia từ tâm theo góc theta với chu vi hình chữ nhật bo góc */
+function getPointOnRoundedRect(w: number, h: number, r: number, theta: number): { x: number; y: number } {
+  const hw = w / 2;
+  const hh = h / 2;
+  const cos = Math.cos(theta);
+  const sin = Math.sin(theta);
+  const tx = Math.abs(cos) > 1e-6 ? hw / Math.abs(cos) : Infinity;
+  const ty = Math.abs(sin) > 1e-6 ? hh / Math.abs(sin) : Infinity;
+  const t = Math.min(tx, ty);
+  const x = t * cos;
+  const y = t * sin;
+  if (Math.abs(x) <= hw - r + 1e-4) return { x: hw + x, y: hh + y };
+  if (Math.abs(y) <= hh - r + 1e-4) return { x: hw + x, y: hh + y };
+  const cx = Math.sign(cos) * (hw - r);
+  const cy = Math.sign(sin) * (hh - r);
+  const b = cos * cx + sin * cy;
+  const c = cx * cx + cy * cy - r * r;
+  const disc = b * b - c;
+  const tCircle = b + Math.sqrt(Math.max(0, disc));
+  return { x: hw + tCircle * cos, y: hh + tCircle * sin };
+}
+
+/** Tạo chuỗi SVG path cho khung callout / speech bubble bo góc có mỏ nhọn xoay 360 độ linh hoạt */
+function getCalloutPath(w: number, h: number, r: number, tx: number, ty: number): string {
+  const cx = w / 2;
+  const cy = h / 2;
+  const dx = tx - cx;
+  const dy = ty - cy;
+  const dist = Math.hypot(dx, dy);
+  const angle = Math.atan2(dy, dx);
+  const pMid = getPointOnRoundedRect(w, h, r, angle);
+  const midDist = Math.hypot(pMid.x - cx, pMid.y - cy);
+
+  const safeR = Math.max(4, Math.min(r, w / 2 - 2, h / 2 - 2));
+
+  // Nếu điểm target nằm bên trong hộp hoặc quá sát mép -> vẽ hình chữ nhật bo góc bình thường
+  if (dist <= midDist + 4) {
+    return [
+      `M ${safeR} 0`,
+      `L ${w - safeR} 0`,
+      `A ${safeR} ${safeR} 0 0 1 ${w} ${safeR}`,
+      `L ${w} ${h - safeR}`,
+      `A ${safeR} ${safeR} 0 0 1 ${w - safeR} ${h}`,
+      `L ${safeR} ${h}`,
+      `A ${safeR} ${safeR} 0 0 1 0 ${h - safeR}`,
+      `L 0 ${safeR}`,
+      `A ${safeR} ${safeR} 0 0 1 ${safeR} 0`,
+      `Z`,
+    ].join(" ");
+  }
+
+  const baseWidth = Math.min(26, Math.max(16, Math.min(w, h) * 0.35));
+  const halfAngle = Math.asin(Math.min(0.7, (baseWidth / 2) / Math.max(10, midDist)));
+
+  const angle1 = angle - halfAngle;
+  const angle2 = angle + halfAngle;
+
+  const TWO_PI = Math.PI * 2;
+  let sweep = angle1 - angle2;
+  while (sweep < 0) sweep += TWO_PI;
+
+  const numSteps = Math.max(48, Math.round((sweep / TWO_PI) * 72));
+  let d = "";
+  for (let i = 0; i <= numSteps; i++) {
+    const a = angle2 + (sweep * i) / numSteps;
+    const pt = getPointOnRoundedRect(w, h, safeR, a);
+    d += (i === 0 ? "M " : " L ") + pt.x.toFixed(1) + " " + pt.y.toFixed(1);
+  }
+  d += " L " + tx.toFixed(1) + " " + ty.toFixed(1) + " Z";
+  return d;
 }
 
 function StepSelectionFrame({ x, y, radius }: { x: number; y: number; radius: number }) {
@@ -262,6 +334,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   // Theo dõi khi đang resize crop rect bằng handle hoặc move crop
   const [resizingCropHandle, setResizingCropHandle] = useState<string | null>(null);
   const [cropHoverHandle, setCropHoverHandle] = useState<string | null>(null);
+  const [hoveredTextId, setHoveredTextId] = useState<string | null>(null);
 
   // Reset crop khi chuyển đổi ảnh hoặc chuyển sang công cụ khác
   useEffect(() => {
@@ -1048,9 +1121,9 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     window.addEventListener("mouseup", onUp);
   };
 
-  // Tương tự `beginShapeDraft` nhưng cho arrow/line/numbered-arrow.
+  // Tương tự `beginShapeDraft` nhưng cho arrow/double-arrow/line/numbered-arrow.
   const beginArrowDraft = (
-    type: "arrow" | "line" | "numbered-arrow",
+    type: "arrow" | "double-arrow" | "line" | "numbered-arrow",
     startX: number,
     startY: number,
   ) => {
@@ -1061,18 +1134,30 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const sy = clamp(startY, d.imgH);
     setArrowDraft({ type, x: sx, y: sy, x2: sx, y2: sy });
 
+    const computeEnd = (clientX: number, clientY: number, shift: boolean) => {
+      const p = clientToImg(clientX, clientY);
+      let x2 = clamp(p.x, d.imgW);
+      let y2 = clamp(p.y, d.imgH);
+      if (shift) {
+        const dx = x2 - sx;
+        const dy = y2 - sy;
+        const angle = Math.atan2(dy, dx);
+        const snapAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        x2 = clamp(Math.round(sx + dist * Math.cos(snapAngle)), d.imgW);
+        y2 = clamp(Math.round(sy + dist * Math.sin(snapAngle)), d.imgH);
+      }
+      return { x2, y2 };
+    };
+
     const onMove = (me: MouseEvent) => {
-      const p = clientToImg(me.clientX, me.clientY);
-      const x2 = clamp(p.x, d.imgW);
-      const y2 = clamp(p.y, d.imgH);
+      const { x2, y2 } = computeEnd(me.clientX, me.clientY, me.shiftKey);
       setArrowDraft({ type, x: sx, y: sy, x2, y2 });
     };
     const onUp = (ue: MouseEvent) => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
-      const p = clientToImg(ue.clientX, ue.clientY);
-      const x2 = clamp(p.x, d.imgW);
-      const y2 = clamp(p.y, d.imgH);
+      const { x2, y2 } = computeEnd(ue.clientX, ue.clientY, ue.shiftKey);
       setArrowDraft(null);
       const dx = x2 - sx;
       const dy = y2 - sy;
@@ -1087,6 +1172,12 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       } else if (type === "arrow") {
         useEditor.getState().addAnnotation({
           id: uid(), type: "arrow",
+          x: sx, y: sy, x2, y2,
+          color, strokeWidth,
+        });
+      } else if (type === "double-arrow") {
+        useEditor.getState().addAnnotation({
+          id: uid(), type: "double-arrow",
           x: sx, y: sy, x2, y2,
           color, strokeWidth,
         });
@@ -1145,7 +1236,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
           } else if (a.type === "ellipse") {
             ax2 = a.x + a.width;
             ay2 = a.y + a.height;
-          } else if (a.type === "arrow" || a.type === "line" || a.type === "numbered-arrow") {
+          } else if (a.type === "arrow" || a.type === "double-arrow" || a.type === "line" || a.type === "numbered-arrow") {
             ax1 = Math.min(a.x, a.x2);
             ay1 = Math.min(a.y, a.y2);
             ax2 = Math.max(a.x, a.x2);
@@ -1156,8 +1247,20 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
             ax2 = a.x + a.radius;
             ay2 = a.y + a.radius;
           } else if (a.type === "text") {
-            ax2 = a.x + (a.width || 80);
-            ay2 = a.y + (a.fontSize || 22) * 1.5;
+            const padX = a.bgColor ? Math.max(8, Math.round((a.fontSize || 22) * 0.35)) : 0;
+            const padY = a.bgColor ? Math.max(6, Math.round((a.fontSize || 22) * 0.25)) : 0;
+            const lines = (a.text || "").split("\n");
+            const maxLineLen = Math.max(...lines.map((l) => l.length), 1);
+            const estW = a.width || Math.max(40, maxLineLen * (a.fontSize || 22) * 0.62);
+            const estH = Math.max((a.fontSize || 22) * 1.35, lines.length * (a.fontSize || 22) * 1.35);
+            ax2 = a.x + estW + padX * 2;
+            ay2 = a.y + estH + padY * 2;
+            if (a.hasTargetArrow && a.targetX !== undefined && a.targetY !== undefined) {
+              ax1 = Math.min(ax1, a.targetX);
+              ay1 = Math.min(ay1, a.targetY);
+              ax2 = Math.max(ax2, a.targetX);
+              ay2 = Math.max(ay2, a.targetY);
+            }
           }
 
           return !(ax2 < x1 || ax1 > x2 || ay2 < y1 || ay1 > y2);
@@ -1201,7 +1304,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       beginShapeDraft(tool, x, y);
       return;
     }
-    if (tool === "arrow" || tool === "line" || tool === "numbered-arrow") {
+    if (tool === "arrow" || tool === "double-arrow" || tool === "line" || tool === "numbered-arrow") {
       beginArrowDraft(tool, x, y);
       return;
     }
@@ -1231,6 +1334,10 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       // trình duyệt sẽ giật focus về <canvas> của Konva, làm textarea blur ngay
       // (onBlur → commitText rỗng → annotation bị xoá trước khi gõ được chữ).
       e.evt.preventDefault();
+      const curBgColor = useEditor.getState().textBgColor;
+      const curHasArrow = useEditor.getState().textHasArrow;
+      const assignedBg = curHasArrow ? (curBgColor || "#3b82f6") : (curBgColor || undefined);
+      const assignedColor = curHasArrow && (color === "#ef4444" || color === "#111827") ? "#ffffff" : color;
       const id = uid();
       useEditor.getState().addAnnotation({
         id,
@@ -1239,8 +1346,11 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         y,
         text: "",
         fontSize,
-        color,
+        color: assignedColor,
         strokeWidth,
+        bgColor: assignedBg,
+        hasTargetArrow: curHasArrow || false,
+        ...(curHasArrow ? { targetX: x - 50, targetY: y + 15 } : null),
       });
       beginEdit(id, "");
     }
@@ -1295,15 +1405,14 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         radius: Math.max(8, a.radius * s),
       } as Partial<Annotation>);
     } else if (a.type === "text") {
-      const textNode = node as Konva.Text;
-      const textSx = textNode.scaleX();
-      textNode.scaleX(1);
-      textNode.scaleY(1);
-      const newW = Math.max(30, Math.round(textNode.width() * textSx));
-      textNode.width(newW);
+      const sx = node.scaleX();
+      node.scaleX(1);
+      node.scaleY(1);
+      const curW = a.width || Math.max(40, Math.round((a.text?.length || 1) * (a.fontSize || 22) * 0.62));
+      const newW = Math.max(30, Math.round(curW * sx));
       useEditor.getState().updateAnnotation(a.id, {
-        x: textNode.x(),
-        y: textNode.y(),
+        x: node.x(),
+        y: node.y(),
         width: newW,
       } as Partial<Annotation>);
     }
@@ -1332,18 +1441,22 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   // nơi .focus() chỉ ăn khi chạy trong stack sự kiện chuột gốc.
   const beginEdit = (id: string, value: string, node?: Konva.Node) => {
     hasResizedTextareaRef.current = false;
-    // Chiều cao 1 dòng theo cỡ chữ hiển thị (fontSize × scale) + padding — vừa
-    // phải thay vì cố định 60px (quá cao cho 1 dòng).
-    const lineH = Math.max(32, Math.round(fontSize * scale * 1.35) + 12);
+    const ann = doc?.annotations.find((a) => a.id === id);
+    const annFontSize = (ann && ann.type === "text" ? ann.fontSize : fontSize) || fontSize;
+    const hasArrow = ann && ann.type === "text" && !!ann.hasTargetArrow;
+    const hasBg = ann && ann.type === "text" && (ann.bgColor || hasArrow);
+    const padY = hasBg ? (hasArrow ? Math.max(8, Math.round(annFontSize * 0.35)) : Math.max(6, Math.round(annFontSize * 0.25))) * scale : 0;
+    const padX = hasBg ? (hasArrow ? Math.max(12, Math.round(annFontSize * 0.5)) : Math.max(8, Math.round(annFontSize * 0.35))) * scale : 0;
+    // Chiều cao 1 dòng theo cỡ chữ hiển thị (fontSize × scale) + padding
+    const lineH = Math.max(32, Math.round(annFontSize * scale * 1.35) + 12 + padY * 2);
     let w = 120;
     let h = lineH;
     if (node) {
-      w = Math.max(120, node.width() * scale + 24);
-      h = Math.max(lineH, node.height() * scale + 12);
+      w = Math.max(120, node.width() * scale + 24 + padX * 2);
+      h = Math.max(lineH, node.height() * scale + 12 + padY * 2);
     } else {
-      const ann = doc?.annotations.find((a) => a.id === id);
       if (ann && ann.type === "text" && ann.width) {
-        w = Math.max(120, ann.width * scale + 24);
+        w = Math.max(120, ann.width * scale + 24 + padX * 2);
       }
     }
     minHeightRef.current = h;
@@ -1455,7 +1568,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const isCircleSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "step");
   const isNumberedRectSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "numbered-rect");
   // Line / arrow / numbered-arrow → Transformer ẩn (kéo di chuyển trực tiếp, không resize bounding box)
-  const isLineSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "line" || a.type === "arrow" || a.type === "numbered-arrow");
+  const isLineSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "line" || a.type === "arrow" || a.type === "double-arrow" || a.type === "numbered-arrow");
   const isTextSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "text");
 
   if (!doc) {
@@ -1754,49 +1867,226 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                     )}
                   </Group>
                 );
-              if (a.type === "text")
+              if (a.type === "text") {
+                const hasArrow = !!a.hasTargetArrow;
+                const activeBg = hasArrow ? (a.bgColor || "#3b82f6") : (a.bgColor && a.bgColor !== "transparent" ? a.bgColor : "");
+                const hasBg = !!activeBg;
+                const padX = hasBg ? (hasArrow ? Math.max(12, Math.round((a.fontSize || 22) * 0.5)) : Math.max(8, Math.round((a.fontSize || 22) * 0.35))) : 0;
+                const padY = hasBg ? (hasArrow ? Math.max(8, Math.round((a.fontSize || 22) * 0.35)) : Math.max(6, Math.round((a.fontSize || 22) * 0.25))) : 0;
+                const lines = (a.text || " ").split("\n");
+                const maxLineLen = Math.max(...lines.map((l) => l.length), 1);
+                const estW = a.width || Math.max(40, Math.round(maxLineLen * (a.fontSize || 22) * 0.62));
+                const estH = Math.max(Math.round((a.fontSize || 22) * 1.35), lines.length * Math.round((a.fontSize || 22) * 1.35));
+                const boxW = estW + padX * 2;
+                const boxH = estH + padY * 2;
+                const safeR = hasArrow ? Math.min(14, Math.max(8, Math.min(boxW, boxH) * 0.25)) : 6;
+
+                // Tọa độ đỉnh mỏ nhọn callout tương đối so với góc trên-trái hộp text
+                const targetX = a.targetX ?? (a.x - 50);
+                const targetY = a.targetY ?? (a.y + boxH / 2);
+                const tx = targetX - a.x;
+                const ty = targetY - a.y;
+                const calloutPath = hasArrow ? getCalloutPath(boxW, boxH, safeR, tx, ty) : "";
+
+                // Tính 2 điểm chân mỏ nhọn trên chu vi bo góc
+                const cx = boxW / 2;
+                const cy = boxH / 2;
+                const dx = tx - cx;
+                const dy = ty - cy;
+                const angle = Math.atan2(dy, dx);
+                const pMid = getPointOnRoundedRect(boxW, boxH, safeR, angle);
+                const midDist = Math.hypot(pMid.x - cx, pMid.y - cy);
+                const baseWidth = Math.min(26, Math.max(16, Math.min(boxW, boxH) * 0.35));
+                const halfAngle = Math.asin(Math.min(0.7, (baseWidth / 2) / Math.max(10, midDist)));
+                const pt1 = getPointOnRoundedRect(boxW, boxH, safeR, angle - halfAngle);
+                const pt2 = getPointOnRoundedRect(boxW, boxH, safeR, angle + halfAngle);
+
                 return (
                   <Group key={a.id}>
-                    <Text
+                    <Group
                       id={a.id}
                       x={a.x}
                       y={a.y}
-                      text={a.text || " "}
-                      fontSize={a.fontSize}
-                      fill={a.color}
-                      fontStyle="bold"
-                      width={a.width}
-                      wrap="word"
-                      shadowColor={isSelected ? "#3b82f6" : undefined}
-                      shadowBlur={isSelected ? 6 : 0}
-                      shadowOpacity={isSelected ? 0.9 : 0}
                       draggable={draggable}
                       onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                       onDblClick={(e) => beginEdit(a.id, a.text, e.target)}
-                      onDragEnd={(e) => onDragEnd(a.id, e)}
-                      onTransform={(e) => {
-                        const node = e.target as Konva.Text;
-                        const sx = node.scaleX();
-                        const newW = Math.max(30, node.width() * sx);
-                        node.setAttrs({
-                          width: newW,
-                          scaleX: 1,
-                          scaleY: 1,
-                        });
+                      onMouseEnter={() => setHoveredTextId(a.id)}
+                      onMouseLeave={() => setHoveredTextId(null)}
+                      onDragEnd={(e) => {
+                        const nx = e.currentTarget.x();
+                        const ny = e.currentTarget.y();
+                        const dx = nx - a.x;
+                        const dy = ny - a.y;
+                        const patch: Partial<TextAnn> = {
+                          x: nx,
+                          y: ny,
+                        };
+                        if (a.hasTargetArrow && a.targetX !== undefined && a.targetY !== undefined) {
+                          patch.targetX = a.targetX + dx;
+                          patch.targetY = a.targetY + dy;
+                        }
+                        useEditor.getState().updateAnnotation(a.id, patch as Partial<Annotation>);
                       }}
-                      onTransformEnd={(e) => onTransformEnd(a, e.target)}
+                      onTransform={(e) => {
+                        const node = e.target;
+                        const sx = node.scaleX();
+                        node.scaleX(1);
+                        node.scaleY(1);
+                        const curW = a.width || Math.max(40, (a.text?.length || 1) * (a.fontSize || 22) * 0.62);
+                        const newW = Math.max(30, Math.round(curW * sx));
+                        useEditor.getState().updateAnnotationLive(a.id, { width: newW } as Partial<Annotation>);
+                      }}
+                      onTransformEnd={(e) => {
+                        const node = e.target;
+                        const sx = node.scaleX();
+                        node.scaleX(1);
+                        node.scaleY(1);
+                        const curW = a.width || Math.max(40, (a.text?.length || 1) * (a.fontSize || 22) * 0.62);
+                        const newW = Math.max(30, Math.round(curW * sx));
+                        useEditor.getState().updateAnnotation(a.id, {
+                          x: node.x(),
+                          y: node.y(),
+                          width: newW,
+                        } as Partial<Annotation>);
+                      }}
                       visible={editing?.id !== a.id}
-                    />
+                    >
+                      {/* Khung Callout nguyên khối kèm mỏ nhọn (khi có hasTargetArrow) */}
+                      {hasArrow && (
+                        <Path
+                          data={calloutPath}
+                          fill={activeBg}
+                          shadowColor="rgba(0,0,0,0.22)"
+                          shadowBlur={5}
+                          shadowOffset={{ x: 0, y: 1.5 }}
+                          shadowOpacity={0.25}
+                          stroke={isSelected ? "#3b82f6" : "rgba(0,0,0,0.12)"}
+                          strokeWidth={isSelected ? 1.5 : 0.8}
+                        />
+                      )}
+
+                      {/* Khung chữ nhật bo góc thông thường (khi có bgColor nhưng không có arrow) */}
+                      {!hasArrow && hasBg && (
+                        <Rect
+                          x={0}
+                          y={0}
+                          width={boxW}
+                          height={boxH}
+                          fill={activeBg}
+                          cornerRadius={safeR}
+                          shadowColor="rgba(0,0,0,0.25)"
+                          shadowBlur={4}
+                          shadowOffset={{ x: 0, y: 1 }}
+                          shadowOpacity={0.3}
+                          stroke={isSelected ? "#3b82f6" : "rgba(0,0,0,0.15)"}
+                          strokeWidth={isSelected ? 1.5 : 1}
+                        />
+                      )}
+
+                      {/* Text */}
+                      <Text
+                        x={padX}
+                        y={padY}
+                        text={a.text || " "}
+                        fontSize={a.fontSize}
+                        fill={a.color}
+                        fontStyle="bold"
+                        width={a.width}
+                        wrap="word"
+                        shadowColor={!hasBg && isSelected ? "#3b82f6" : undefined}
+                        shadowBlur={!hasBg && isSelected ? 6 : 0}
+                        shadowOpacity={!hasBg && isSelected ? 0.9 : 0}
+                      />
+                    </Group>
+
+                    {/* Vùng mỏ nhọn & Handle điều khiển đỉnh mũi tên (xoay 360 độ linh hoạt khi nhấn giữ) */}
+                    {tool === "select" && hasArrow && (isSelected || hoveredTextId === a.id) && (
+                      <Group>
+                        {/* Hit-area tam giác thân mỏ nhọn: rê chuột vào đổi con trỏ move, click vào select */}
+                        <Line
+                          points={[
+                            a.x + pt1.x, a.y + pt1.y,
+                            targetX, targetY,
+                            a.x + pt2.x, a.y + pt2.y,
+                          ]}
+                          closed={true}
+                          fill="transparent"
+                          hitStrokeWidth={16}
+                          onMouseEnter={(e) => {
+                            const c = e.target.getStage()?.container();
+                            if (c) c.style.cursor = "move";
+                          }}
+                          onMouseLeave={(e) => {
+                            const c = e.target.getStage()?.container();
+                            if (c) c.style.cursor = "default";
+                          }}
+                          onMouseDown={(e) => {
+                            e.cancelBubble = true;
+                            if (!isSelected) {
+                              useEditor.getState().select(a.id);
+                            }
+                          }}
+                        />
+
+                        {/* Chấm tròn handle ở đỉnh mỏ nhọn: kéo xoay 360 độ linh hoạt quanh khung chữ */}
+                        <Circle
+                          x={targetX}
+                          y={targetY}
+                          radius={7}
+                          fill="#ffffff"
+                          stroke="#2563eb"
+                          strokeWidth={2.5}
+                          hitStrokeWidth={32}
+                          shadowColor="rgba(0,0,0,0.35)"
+                          shadowBlur={6}
+                          shadowOffset={{ x: 0, y: 1.5 }}
+                          shadowOpacity={0.4}
+                          draggable={true}
+                          onMouseDown={(e) => {
+                            e.cancelBubble = true;
+                            if (!isSelected) {
+                              useEditor.getState().select(a.id);
+                            }
+                          }}
+                          onMouseEnter={(e) => {
+                            const c = e.target.getStage()?.container();
+                            if (c) c.style.cursor = "move";
+                          }}
+                          onMouseLeave={(e) => {
+                            const c = e.target.getStage()?.container();
+                            if (c) c.style.cursor = "default";
+                          }}
+                          onDragMove={(e) => {
+                            const nx = Math.round(e.target.x());
+                            const ny = Math.round(e.target.y());
+                            useEditor.getState().updateAnnotationLive(a.id, {
+                              targetX: nx,
+                              targetY: ny,
+                            } as Partial<Annotation>);
+                          }}
+                          onDragEnd={(e) => {
+                            const nx = Math.round(e.target.x());
+                            const ny = Math.round(e.target.y());
+                            useEditor.getState().updateAnnotation(a.id, {
+                              targetX: nx,
+                              targetY: ny,
+                            } as Partial<Annotation>);
+                          }}
+                        />
+                      </Group>
+                    )}
+
                     {isSelected && activeIds.length > 1 && (
                       <SelectionFrame
                         x={a.x}
                         y={a.y}
-                        width={a.width || Math.max(40, (a.text?.length || 1) * (a.fontSize || 22) * 0.6)}
-                        height={(a.fontSize || 22) * 1.35}
+                        width={boxW}
+                        height={boxH}
                       />
                     )}
                   </Group>
                 );
+              }
               // step
               if (a.type === "step") {
                 const badgeRadius = a.radius || Math.max(Math.round(a.strokeWidth * 2 + 5), 10);
@@ -1852,6 +2142,45 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                     stroke={a.color}
                     strokeWidth={a.strokeWidth}
                     fill={a.color}
+                    pointerLength={Math.max(10, a.strokeWidth * 3)}
+                    pointerWidth={Math.max(8, a.strokeWidth * 2.5)}
+                    lineCap="round"
+                    lineJoin="round"
+                    hitStrokeWidth={Math.max(20, a.strokeWidth * 3)}
+                    shadowColor={isSelected ? "#3b82f6" : undefined}
+                    shadowBlur={isSelected ? 6 : 0}
+                    shadowOpacity={isSelected ? 0.9 : 0}
+                    draggable={draggable}
+                    onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                    onTap={() => useEditor.getState().select(a.id)}
+                    onDragEnd={(e) => {
+                      const dx = e.currentTarget.x();
+                      const dy = e.currentTarget.y();
+                      e.currentTarget.x(0);
+                      e.currentTarget.y(0);
+                      useEditor.getState().updateAnnotation(a.id, {
+                        x: a.x + dx, y: a.y + dy,
+                        x2: a.x2 + dx, y2: a.y2 + dy,
+                      } as Partial<Annotation>);
+                    }}
+                  />
+                  {isSelected && activeIds.length > 1 && (
+                    <LineEndpoints x1={a.x} y1={a.y} x2={a.x2} y2={a.y2} />
+                  )}
+                </Group>
+              );
+              // double-arrow (mũi tên 2 chiều đánh dấu khoảng cách)
+              if (a.type === "double-arrow")
+              return (
+                <Group key={a.id}>
+                  <Arrow
+                    id={a.id}
+                    points={[a.x, a.y, a.x2, a.y2]}
+                    stroke={a.color}
+                    strokeWidth={a.strokeWidth}
+                    fill={a.color}
+                    pointerAtBeginning={true}
+                    pointerAtEnding={true}
                     pointerLength={Math.max(10, a.strokeWidth * 3)}
                     pointerWidth={Math.max(8, a.strokeWidth * 2.5)}
                     lineCap="round"
@@ -2199,6 +2528,24 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                   />
                 );
               }
+              if (arrowDraft.type === "double-arrow") {
+                return (
+                  <Arrow
+                    points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
+                    stroke={color}
+                    strokeWidth={strokeWidth}
+                    fill={color}
+                    pointerAtBeginning={true}
+                    pointerAtEnding={true}
+                    pointerLength={Math.max(10, strokeWidth * 3)}
+                    pointerWidth={Math.max(8, strokeWidth * 2.5)}
+                    lineCap="round"
+                    lineJoin="round"
+                    opacity={0.7}
+                    dash={[8, 4]}
+                  />
+                );
+              }
               // numbered-arrow preview
               const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
               const startX = arrowDraft.x + nx * radius;
@@ -2346,8 +2693,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
 
         {editing && (() => {
           const activeAnn = doc?.annotations.find((x) => x.id === editing.id);
-          const activeFontSize = ((activeAnn?.type === "text" ? (activeAnn as any).fontSize : fontSize) ?? fontSize) * scale;
+          const textAnn = activeAnn?.type === "text" ? (activeAnn as TextAnn) : null;
+          const activeFontSize = ((textAnn ? textAnn.fontSize : fontSize) ?? fontSize) * scale;
           const activeColor = (activeAnn && "color" in activeAnn ? (activeAnn as any).color : null) ?? color;
+          const hasArrow = !!textAnn?.hasTargetArrow;
+          const activeBg = hasArrow ? (textAnn?.bgColor || "#3b82f6") : (textAnn?.bgColor && textAnn.bgColor !== "transparent" ? textAnn.bgColor : "transparent");
+          const padX = activeBg !== "transparent" ? (hasArrow ? Math.max(12, Math.round(((textAnn?.fontSize) || 22) * 0.5)) : Math.max(8, Math.round(((textAnn?.fontSize) || 22) * 0.35))) * scale : 0;
+          const padY = activeBg !== "transparent" ? (hasArrow ? Math.max(8, Math.round(((textAnn?.fontSize) || 22) * 0.35)) : Math.max(6, Math.round(((textAnn?.fontSize) || 22) * 0.25))) * scale : 0;
           return (
             <div 
               style={{
@@ -2386,11 +2738,12 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                   fontWeight: "bold",
                   color: activeColor,
                   fontFamily: "Arial, sans-serif",
-                  background: "transparent",
+                  background: activeBg,
+                  borderRadius: activeBg !== "transparent" ? 6 : 0,
                   border: "1px dashed #3b82f6",
                   outline: "none",
                   resize: "none",
-                  padding: 0,
+                  padding: `${padY}px ${padX}px`,
                   overflow: "hidden",
                   WebkitUserSelect: "text",
                   userSelect: "text",

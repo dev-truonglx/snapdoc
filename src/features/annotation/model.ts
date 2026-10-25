@@ -5,6 +5,7 @@ export type Tool =
   | "text"
   | "step"
   | "arrow"
+  | "double-arrow"
   | "line"
   | "numbered-arrow"
   | "numbered-rect"
@@ -36,6 +37,13 @@ export interface TextAnn extends Base {
   text: string;
   fontSize: number;
   width?: number;
+  /** Màu nền khung chữ (hex/rgba hoặc undefined cho không nền) */
+  bgColor?: string;
+  /** Bật/tắt mũi tên chỉ đích (Callout) */
+  hasTargetArrow?: boolean;
+  /** Toạ độ đích mũi tên trỏ tới */
+  targetX?: number;
+  targetY?: number;
 }
 export interface StepAnn extends Base {
   type: "step";
@@ -45,6 +53,12 @@ export interface StepAnn extends Base {
 /** Mũi tên có đầu nhọn: từ (x,y) → (x2,y2). */
 export interface ArrowAnn extends Base {
   type: "arrow";
+  x2: number;
+  y2: number;
+}
+/** Mũi tên 2 chiều (hai đầu nhọn): từ (x,y) ↔ (x2,y2) dùng chỉ khoảng cách / kích thước. */
+export interface DoubleArrowAnn extends Base {
+  type: "double-arrow";
   x2: number;
   y2: number;
 }
@@ -115,6 +129,7 @@ export type Annotation =
   | TextAnn
   | StepAnn
   | ArrowAnn
+  | DoubleArrowAnn
   | LineAnn
   | NumberedArrowAnn
   | NumberedRectAnn
@@ -206,3 +221,11 @@ export const PRESET_COLORS = ["#ef4444", "#f59e0b", "#22c55e", "#3b82f6", "#a855
 export const STROKE_WIDTHS = [1, 2, 4, 6];
 export const HIGHLIGHT_COLORS = ["#facc15", "#4ade80", "#60a5fa", "#f87171", "#e879f9"];
 export const SOLID_COLORS = ["#1a1a1a", "#ef4444", "#111827", "#ffffff", "#0f172a"];
+export const TEXT_BG_PRESETS = [
+  { id: "none", color: "" },
+  { id: "white", color: "#ffffff" },
+  { id: "dark", color: "#18181b" },
+  { id: "yellow", color: "#fef08a" },
+  { id: "blue", color: "#dbeafe" },
+  { id: "red", color: "#fee2e2" },
+];

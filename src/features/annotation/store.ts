@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Annotation, BackgroundConfig, Doc, Tool } from "./model";
+import type { Annotation, BackgroundConfig, Doc, TextAnn, Tool } from "./model";
 import { HIGHLIGHT_COLORS } from "./model";
 
 const HISTORY_LIMIT = 30;
@@ -11,7 +11,7 @@ const HISTORY_LIMIT = 30;
  * Ctrl+Z để hoàn tác. Gộp: giữ nguyên `past`, undo về thẳng trạng thái TRƯỚC
  * chuỗi chỉnh. CHỈ áp dụng cho key style — di chuyển/resize (x, y, width...)
  * vẫn mỗi lần 1 entry như cũ. */
-const COALESCE_KEYS = new Set(["color", "strokeWidth", "fontSize", "blurMode", "solidColor", "blurRadius"]);
+const COALESCE_KEYS = new Set(["color", "strokeWidth", "fontSize", "blurMode", "solidColor", "blurRadius", "bgColor"]);
 const COALESCE_WINDOW_MS = 800;
 
 interface EditorState {
@@ -49,6 +49,10 @@ interface EditorState {
   highlightColor: string;
   strokeWidth: number;
   fontSize: number;
+  /** Màu nền text (khung chữ). Trống = không có nền */
+  textBgColor: string;
+  /** Bật/tắt mũi tên chỉ đích của text */
+  textHasArrow: boolean;
   /** Bán kính blur (px image-space). */
   blurRadius: number;
   /** Kiểu che mờ hiện tại. */
@@ -104,6 +108,9 @@ interface EditorState {
   setHighlightColor: (c: string) => void;
   setStrokeWidth: (w: number) => void;
   setFontSize: (size: number) => void;
+  setTextBgColor: (color: string) => void;
+  setTextHasArrow: (hasArrow: boolean) => void;
+  setTextArrowDirection: (dir: "left" | "right" | "up" | "down" | "top-left" | "top-right" | "bottom-left" | "bottom-right") => void;
   setBlurRadius: (r: number) => void;
   commitBlurRadius: () => void;
   setBlurMode: (m: "blur" | "pixelate" | "solid") => void;
@@ -180,6 +187,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   highlightColor: HIGHLIGHT_COLORS[0],
   strokeWidth: 2,
   fontSize: 22,
+  textBgColor: "",
+  textHasArrow: false,
   blurRadius: 10,
   blurMode: "blur" as const,
   blurSolidColor: "#1a1a1a",
@@ -335,6 +344,105 @@ export const useEditor = create<EditorState>((set, get) => ({
     set({ fontSize });
   },
 
+  setTextBgColor: (bgColor) => {
+    const { editingTextId, selectedIds, selectedId, doc } = get();
+    const targets = editingTextId ? [editingTextId] : (selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []));
+    if (targets.length > 0 && doc) {
+      const targetSet = new Set(targets);
+      const next = {
+        ...doc,
+        annotations: doc.annotations.map((a) =>
+          targetSet.has(a.id) && a.type === "text"
+            ? ({ ...a, bgColor: bgColor || undefined } as Annotation)
+            : a,
+        ),
+      };
+      set({ ...commit(get(), next), textBgColor: bgColor });
+      return;
+    }
+    set({ textBgColor: bgColor });
+  },
+
+  setTextHasArrow: (hasArrow) => {
+    const { editingTextId, selectedIds, selectedId, doc } = get();
+    const targets = editingTextId ? [editingTextId] : (selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []));
+    const nextBgColor = hasArrow && !get().textBgColor ? "#3b82f6" : get().textBgColor;
+    if (targets.length > 0 && doc) {
+      const targetSet = new Set(targets);
+      const next = {
+        ...doc,
+        annotations: doc.annotations.map((a) => {
+          if (!targetSet.has(a.id) || a.type !== "text") return a;
+          const textAnn = a as TextAnn;
+          const estH = (textAnn.fontSize || 22) * 1.35;
+          const assignedBg = hasArrow && !textAnn.bgColor ? "#3b82f6" : textAnn.bgColor;
+          const assignedColor = hasArrow && (textAnn.color === "#ef4444" || textAnn.color === "#111827") ? "#ffffff" : textAnn.color;
+          return {
+            ...textAnn,
+            bgColor: assignedBg,
+            color: assignedColor,
+            hasTargetArrow: hasArrow,
+            targetX: textAnn.targetX ?? (textAnn.x - 50),
+            targetY: textAnn.targetY ?? (textAnn.y + estH / 2),
+          } as Annotation;
+        }),
+      };
+      set({ ...commit(get(), next), textHasArrow: hasArrow, textBgColor: nextBgColor });
+      return;
+    }
+    set({ textHasArrow: hasArrow, textBgColor: nextBgColor });
+  },
+
+  setTextArrowDirection: (dir) => {
+    const { editingTextId, selectedIds, selectedId, doc } = get();
+    const targets = editingTextId ? [editingTextId] : (selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []));
+    if (targets.length > 0 && doc) {
+      const targetSet = new Set(targets);
+      const next = {
+        ...doc,
+        annotations: doc.annotations.map((a) => {
+          if (!targetSet.has(a.id) || a.type !== "text") return a;
+          const textAnn = a as TextAnn;
+          const padX = textAnn.bgColor ? Math.max(8, Math.round((textAnn.fontSize || 22) * 0.35)) : 0;
+          const padY = textAnn.bgColor ? Math.max(6, Math.round((textAnn.fontSize || 22) * 0.25)) : 0;
+          const estW = (textAnn.width || Math.max(40, (textAnn.text?.length || 1) * (textAnn.fontSize || 22) * 0.62)) + padX * 2;
+          const estH = ((textAnn.fontSize || 22) * 1.35) + padY * 2;
+          let tx = textAnn.x - 50;
+          let ty = textAnn.y + estH / 2;
+          if (dir === "right") {
+            tx = textAnn.x + estW + 50;
+            ty = textAnn.y + estH / 2;
+          } else if (dir === "up") {
+            tx = textAnn.x + estW / 2;
+            ty = textAnn.y - 50;
+          } else if (dir === "down") {
+            tx = textAnn.x + estW / 2;
+            ty = textAnn.y + estH + 50;
+          } else if (dir === "top-left") {
+            tx = textAnn.x - 45;
+            ty = textAnn.y - 35;
+          } else if (dir === "top-right") {
+            tx = textAnn.x + estW + 45;
+            ty = textAnn.y - 35;
+          } else if (dir === "bottom-left") {
+            tx = textAnn.x - 45;
+            ty = textAnn.y + estH + 35;
+          } else if (dir === "bottom-right") {
+            tx = textAnn.x + estW + 45;
+            ty = textAnn.y + estH + 35;
+          }
+          return {
+            ...textAnn,
+            hasTargetArrow: true,
+            targetX: tx,
+            targetY: ty,
+          } as Annotation;
+        }),
+      };
+      set({ ...commit(get(), next), textHasArrow: true });
+    }
+  },
+
   setBlurRadius: (blurRadius) => {
     const { selectedIds, selectedId, doc } = get();
     const targets = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
@@ -428,7 +536,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       selectedIds: nextIds,
       ...(ann && "color" in ann && ann.type !== "highlight" ? { color: (ann as any).color } : null),
       ...(ann && "strokeWidth" in ann && (ann as any).strokeWidth > 0 ? { strokeWidth: (ann as any).strokeWidth } : null),
-      ...(ann?.type === "text"      ? { fontSize: ann.fontSize }                                    : null),
+      ...(ann?.type === "text"      ? { fontSize: ann.fontSize, textBgColor: ann.bgColor || "", textHasArrow: !!ann.hasTargetArrow } : null),
       ...(ann?.type === "highlight" ? { highlightColor: ann.color }                                 : null),
       ...(ann?.type === "blur"      ? { blurRadius: ann.blurRadius, blurMode: ann.blurMode,
                                         blurSolidColor: ann.solidColor }                            : null),
@@ -451,7 +559,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       selectedIds: nextIds,
       ...(ann && "color" in ann && ann.type !== "highlight" ? { color: (ann as any).color } : null),
       ...(ann && "strokeWidth" in ann && (ann as any).strokeWidth > 0 ? { strokeWidth: (ann as any).strokeWidth } : null),
-      ...(ann?.type === "text"      ? { fontSize: ann.fontSize }                                    : null),
+      ...(ann?.type === "text"      ? { fontSize: ann.fontSize, textBgColor: ann.bgColor || "", textHasArrow: !!ann.hasTargetArrow } : null),
       ...(ann?.type === "highlight" ? { highlightColor: ann.color }                                 : null),
       ...(ann?.type === "blur"      ? { blurRadius: ann.blurRadius, blurMode: ann.blurMode,
                                         blurSolidColor: ann.solidColor }                            : null),
