@@ -162,6 +162,19 @@ impl LastCaptureMode {
     }
 }
 
+/// Ảnh freeze của 1 màn hình. `jpeg` chỉ để hiển thị nền overlay
+/// (`get_frozen_screen`); `rgba` là pixel gốc lossless để crop ảnh cuối
+/// (`flow::crop_frozen`). Dùng `Arc` để clone ra khỏi mutex là O(1).
+#[derive(Clone, Default)]
+pub struct FrozenScreen {
+    /// Rỗng = màn này không có freeze (bị loại / lỗi).
+    pub jpeg: std::sync::Arc<Vec<u8>>,
+    pub rgba: Option<std::sync::Arc<image::RgbaImage>>,
+    /// `true` khi pixel lossless còn đang convert (macOS: sau khi JPEG đã
+    /// sẵn sàng) — `crop_frozen` chờ ngắn thay vì crop từ JPEG.
+    pub rgba_pending: bool,
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub pending: Mutex<Option<PendingCapture>>,
@@ -247,9 +260,10 @@ pub struct AppState {
     /// Ảnh "đóng băng" màn hình (JPEG binary bytes) chụp ngay trước khi mở
     /// overlay chọn vùng — overlay dùng làm background tĩnh để tránh tương tác
     /// với app đang chạy phía sau (như Snagit/Lightshot).
-    /// Key = chỉ số màn hình (khớp với `overlay-{i}`), value = JPEG bytes.
+    /// Key = chỉ số màn hình (khớp với `overlay-{i}`), value = JPEG (nền
+    /// overlay) + pixel lossless (nguồn crop, xem `FrozenScreen`).
     /// Xoá sau khi overlay đóng (`close_overlays` / `cancel_overlay`).
-    pub frozen_screens: Mutex<HashMap<usize, Vec<u8>>>,
+    pub frozen_screens: Mutex<HashMap<usize, FrozenScreen>>,
     /// Condvar để frontend gọi get_frozen_screen có thể chờ ngay khi thread chụp
     /// freeze đang chạy song song, lập tức trả về khi màn hình tương ứng hoàn thành.
     pub frozen_screens_cvar: std::sync::Condvar,

@@ -199,7 +199,7 @@ export default function CaptureBar() {
               key={r.id}
               onClick={() => selectVideoMode(r.id)}
               style={scopeBtn}
-              title={`Quay ${r.label.toLowerCase()}`}
+              title={t("captureBar.recordModeLabel", { mode: r.label.toLowerCase() })}
             >
               <span style={recordIconWrap}>
                 {SCOPE_ICONS[r.id]}

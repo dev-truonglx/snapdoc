@@ -8,6 +8,7 @@ export default function Settings() {
   const { t, i18n } = useTranslation();
   const [s, setS] = useState<S | null>(null);
   const [perm, setPerm] = useState<boolean | null>(null);
+  const [permRequested, setPermRequested] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "err">("idle");
   const [shortcutMsg, setShortcutMsg] = useState<"ok" | "err" | null>(null);
   const [hotkeyWarning, setHotkeyWarning] = useState<string | null>(null);
@@ -101,6 +102,16 @@ export default function Settings() {
       unlistenSettings.then((fn) => fn());
       unlistenUpdateReady.then((fn) => fn());
     };
+  }, []);
+
+  // Kiểm tra lại quyền khi cửa sổ được focus lại — user thường sang System
+  // Settings bật quyền rồi quay về, không cần đóng/mở lại Settings.
+  useEffect(() => {
+    const recheck = () => {
+      ipc.checkPermission().then(setPerm).catch(() => {});
+    };
+    window.addEventListener("focus", recheck);
+    return () => window.removeEventListener("focus", recheck);
   }, []);
 
   if (!s) return <div className="solid-bg" style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)" }}>{t("common.loading")}</div>;
@@ -412,8 +423,28 @@ export default function Settings() {
               <div style={permLabel}>{t("settings.screenRecording")}</div>
               <div style={permDesc}>{t("settings.screenRecordingDesc")}</div>
             </div>
-            <PermBadge granted={perm} />
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {/* Chỉ hiện khi chưa có quyền — Rust chỉ thật sự xin quyền trên
+                  macOS, OS khác `check_screen_permission` luôn true. */}
+              {perm === false && (
+                <button
+                  style={smallBtn}
+                  onClick={async () => {
+                    const ok = await ipc.requestScreenPermission().catch(() => false);
+                    setPermRequested(!ok);
+                    if (ok) setPerm(true);
+                    else ipc.checkPermission().then(setPerm).catch(() => {});
+                  }}
+                >
+                  {t("settings.requestPermission")}
+                </button>
+              )}
+              <PermBadge granted={perm} />
+            </div>
           </div>
+          {perm === false && permRequested && (
+            <div style={{ ...permDesc, marginTop: 8 }}>{t("settings.requestPermissionHint")}</div>
+          )}
         </Card>
 
       </div>

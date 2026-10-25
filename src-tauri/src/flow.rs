@@ -71,11 +71,13 @@ pub(crate) fn hide_editor_for_freeze(app: &AppHandle) {
     // Nhớ lại việc ta sắp ẩn một editor đang hiển thị, để các nhánh chụp không
     // tự mở lại editor (`output = "clipboard"`/`"save"`, huỷ overlay bằng Esc)
     // vẫn hiện nó lại — xem `windows::show_editor_if_hidden_for_capture`.
+    // Đọc visible TRƯỚC `hide_editor` — dùng lại cho bước sleep cuối hàm.
+    let editor_was_visible = app
+        .get_webview_window("editor")
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
     {
-        let visible = app
-            .get_webview_window("editor")
-            .map(|w| w.is_visible().unwrap_or(false))
-            .unwrap_or(false);
+        let visible = editor_was_visible;
         if visible {
             app.state::<AppState>()
                 .editor_hidden_for_capture
@@ -138,15 +140,8 @@ pub(crate) fn hide_editor_for_freeze(app: &AppHandle) {
     windows::hide_editor(app);
 
     #[cfg(target_os = "macos")]
-    {
-        let was_visible = app
-            .get_webview_window("editor")
-            .map(|w| w.is_visible().unwrap_or(false))
-            .unwrap_or(false);
-        if was_visible {
-            #[cfg(target_os = "macos")]
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+    if editor_was_visible {
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
@@ -384,8 +379,8 @@ fn overlay_index(win: &WebviewWindow) -> Option<usize> {
 
 /// Crop ảnh cuối từ ẢNH FREEZE (grab A — chụp TRƯỚC khi overlay giành key
 /// window) thay vì chụp lại pixel live — giữ nguyên dropdown/menu native đang
-/// mở. Nguồn là ĐÚNG ảnh JPEG đang hiển thị làm nền overlay (`frozen_screens`),
-/// KHÔNG đụng gì tới luồng chụp/lưu freeze để không ảnh hưởng nền hiển thị.
+/// mở. Nguồn là pixel LOSSLESS của đúng lần chụp freeze đang làm nền overlay
+/// (`FrozenScreen::rgba`), KHÔNG đụng gì tới JPEG nền hiển thị.
 /// Trả `None` khi không có ảnh freeze cho màn `idx` (vd bị loại do editor mở,
 /// hoặc freeze lỗi) → caller tự fallback về chụp live.
 ///
@@ -395,9 +390,8 @@ fn overlay_index(win: &WebviewWindow) -> Option<usize> {
 /// `image_px / snap_size` suy trực tiếp từ ảnh + `MonitorSnap` (đa nền tảng,
 /// không cần `cfg`).
 ///
-/// LƯU Ý CHẤT LƯỢNG: ảnh freeze là JPEG q85 → crop ra hơi kém lossless một
-/// chút (rõ nhất ở chữ nhỏ). Đánh đổi để giữ dropdown và tuyệt đối không tác
-/// động tới nền freeze.
+/// Chỉ khi không có pixel lossless (convert lỗi/hết thời gian chờ) mới
+/// fallback giải mã JPEG nền (q80 macOS / q75 Win-Linux, có artifact nhẹ).
 fn crop_frozen(
     app: &AppHandle,
     idx: usize,
@@ -407,13 +401,28 @@ fn crop_frozen(
     rw: f64,
     rh: f64,
 ) -> Option<capture::Capture> {
-    // Lấy JPEG bytes (đúng bản đang hiển thị) rồi giải mã ra RGBA để crop.
-    let bytes = {
+    let frozen = {
         let state = app.state::<AppState>();
-        let guard = state.frozen_screens.lock().ok()?;
-        guard.get(&idx).cloned()?
+        let mut g = state.frozen_screens.lock().ok()?;
+        // macOS: pixel lossless tới ngay SAU JPEG — chờ ngắn nếu còn đang convert.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            let pending = g.get(&idx).map(|f| f.rgba_pending).unwrap_or(false);
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if !pending || remaining.is_zero() {
+                break g.get(&idx).cloned();
+            }
+            g = state.frozen_screens_cvar.wait_timeout(g, remaining).ok()?.0;
+        }
+    }?;
+    let decoded;
+    let img: &image::RgbaImage = match frozen.rgba.as_deref() {
+        Some(img) => img,
+        None => {
+            decoded = image::load_from_memory(&frozen.jpeg).ok()?.to_rgba8();
+            &decoded
+        }
     };
-    let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
 
     let (bw, bh) = (img.width() as f64, img.height() as f64);
     if s.w <= 0.0 || s.h <= 0.0 || bw < 1.0 || bh < 1.0 {
@@ -435,8 +444,9 @@ fn crop_frozen(
     if cw < 1.0 || ch < 1.0 {
         return None;
     }
+    // Chỉ copy đúng vùng crop, không copy cả màn.
     let cropped =
-        image::imageops::crop_imm(&img, cx as u32, cy as u32, cw as u32, ch as u32).to_image();
+        image::imageops::crop_imm(img, cx as u32, cy as u32, cw as u32, ch as u32).to_image();
     capture::persist(&cropped).ok()
 }
 
@@ -626,7 +636,7 @@ pub fn finish(
 
     match output {
         "clipboard" => {
-            clipboard::copy_png(&cap.base64)?;
+            clipboard::copy_png_bytes(&cap.bytes)?;
             auto_export_copy(app, &cap, ingested_id.as_deref());
             // Nhánh này mở THUMBNAIL, không mở editor — nên phải tự hiện lại
             // editor nếu vừa ẩn nó lúc nó đang hiển thị.
@@ -634,17 +644,16 @@ pub fn finish(
             windows::open_thumbnail(app)
         }
         "copy_editor" => {
-            clipboard::copy_png(&cap.base64)?;
+            clipboard::copy_png_bytes(&cap.bytes)?;
             auto_export_copy(app, &cap, ingested_id.as_deref());
             windows::open_editor(app)
         }
         "save" | "save_copy" => {
             let save_dir = resolve_save_dir(app);
             let path = format!("{save_dir}/{}.png", stamp_filename("Screenshot"));
-            let data = format!("data:image/png;base64,{}", cap.base64);
-            let saved = storage::save::write_png(&path, &data)?;
+            let saved = storage::save::write_bytes(&path, &cap.bytes)?;
             if output == "save_copy" {
-                clipboard::copy_png(&cap.base64)?;
+                clipboard::copy_png_bytes(&cap.bytes)?;
             }
             // Đây CHÍNH LÀ hành động Save chủ ý của user (không phải bản
             // auto-export best-effort) — ghi luôn `exported_path` bằng đúng
@@ -691,12 +700,7 @@ fn auto_export_copy(app: &AppHandle, cap: &capture::Capture, history_id: Option<
     let is_jpeg = cap.bytes.starts_with(&[0xFF, 0xD8]);
     let ext = if is_jpeg { "jpg" } else { "png" };
     let path = format!("{save_dir}/{}.{ext}", stamp_filename("Screenshot"));
-    let data = if is_jpeg {
-        format!("data:image/jpeg;base64,{}", cap.base64)
-    } else {
-        format!("data:image/png;base64,{}", cap.base64)
-    };
-    match storage::save::write_png(&path, &data) {
+    match storage::save::write_bytes(&path, &cap.bytes) {
         Ok(saved) => {
             if let Some(id) = history_id {
                 if let Err(e) = crate::history::commands::set_history_exported_path_sync(app, id, &saved) {
@@ -1450,12 +1454,9 @@ pub fn capture_quick_region(
         return Err("Vung chon khong hop le".to_string());
     }
 
-    // Ẩn overlay để không dính dim/annotation vào ảnh, rồi chờ compositor cập nhật.
+    // Ẩn overlay để không dính dim/annotation vào ảnh. Chỉ cần chờ compositor
+    // cập nhật khi phải chụp live (fallback bên dưới) — crop freeze thì không.
     let _ = win.hide();
-    #[cfg(target_os = "macos")]
-    std::thread::sleep(std::time::Duration::from_millis(70));
-    #[cfg(not(target_os = "macos"))]
-    std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Ưu tiên CROP từ buffer freeze (grab A — chụp TRƯỚC khi overlay giành key
     // window) thay vì chụp lại pixel live: giữ nguyên dropdown/menu native đang
@@ -1475,6 +1476,10 @@ pub fn capture_quick_region(
     // để mà lộ vào ảnh. Cửa sổ đang thật sự hiển thị (user chủ ý xem, kể cả
     // trên màn khác) thì trước giờ vẫn KHÔNG được loại khỏi ảnh (giữ đúng
     // hành vi cũ: "ý user đang muốn tự chụp chính nó").
+    #[cfg(target_os = "macos")]
+    std::thread::sleep(std::time::Duration::from_millis(70));
+    #[cfg(not(target_os = "macos"))]
+    std::thread::sleep(std::time::Duration::from_millis(200));
     let cap = capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)?;
     Ok(cap.base64)
 }

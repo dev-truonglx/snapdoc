@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 use tauri_plugin_global_shortcut::ShortcutState;
 
-/// True khi process này được khởi chạy qua "Open with" (Windows argv có ảnh).
+/// True khi process này được khởi chạy qua "Open with" (Windows argv có ảnh/video).
 /// Instance đó là editor tạm: không tray, không chạy nền — đóng cửa sổ là thoát.
 static OPEN_WITH_MODE: AtomicBool = AtomicBool::new(false);
 
@@ -45,6 +45,20 @@ fn redirect_stdio_to_dev_log() {
     }
 }
 
+/// Mở History DB + worker ingest. Lỗi init KHÔNG chặn khởi động app — chỉ
+/// tắt tính năng Library (mọi command History trả lỗi rõ qua `try_state`).
+fn init_history(handle: &tauri::AppHandle) {
+    match history::assets::db_path(handle).and_then(|p| history::db::open(&p)) {
+        Ok(conn) => {
+            let ingest_tx = history::spawn_ingest_worker(handle.clone());
+            handle.manage(history::db::HistoryState::new(conn, ingest_tx));
+        }
+        Err(e) => {
+            eprintln!("[SnapDoc][history] init thất bại, tính năng Library sẽ tắt: {e}");
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(debug_assertions)]
@@ -59,7 +73,9 @@ pub fn run() {
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_lowercase();
-                if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif") {
+                // `.snapdoc` đi chung đường ảnh: open_file_path_sync tự nhận
+                // dạng container bằng magic bytes.
+                if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "snapdoc") {
                     Some((path.clone(), false)) // (path, is_video)
                 } else if matches!(ext.as_str(), "mp4" | "mov" | "avi" | "mkv" | "webm") {
                     Some((path.clone(), true)) // (path, is_video)
@@ -69,12 +85,10 @@ pub fn run() {
             });
 
             if let Some((path, is_video)) = open_with_path {
-                // Add asset scope NGAY nếu là video, TRƯỚC khi spawn thread
+                // Mở asset scope cho ĐÚNG file video (không cả thư mục) NGAY,
+                // TRƯỚC khi spawn thread.
                 if is_video {
-                    if let Some(parent) = std::path::Path::new(&path).parent() {
-                        eprintln!("[SnapDoc] Pre-adding asset scope for video: {}", parent.display());
-                        let _ = app.asset_protocol_scope().allow_directory(parent, true);
-                    }
+                    record::allow_asset_file(app, std::path::Path::new(&path));
                 }
                 
                 let h = app.clone();
@@ -223,10 +237,10 @@ pub fn run() {
             // native. Trước đây CaptureBar `alert()` — không hiện gì trên macOS.
             notify::install_error_bridge(&handle);
 
-            // Windows: phát hiện khởi chạy qua "Open with" (argv[1] là ảnh).
+            // Windows: phát hiện khởi chạy qua "Open with" (argv[1] là ảnh/video).
             // macOS dùng RunEvent::Opened trên instance đang chạy → không qua đây.
             #[cfg(target_os = "windows")]
-            let open_with_path: Option<String> = {
+            let open_with_path: Option<(String, bool)> = {
                 let args: Vec<String> = std::env::args().collect();
                 args.get(1).and_then(|path| {
                     let ext = std::path::Path::new(path)
@@ -234,15 +248,17 @@ pub fn run() {
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_lowercase();
-                    if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif") {
-                        Some(path.clone())
+                    if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "snapdoc") {
+                        Some((path.clone(), false)) // (path, is_video)
+                    } else if matches!(ext.as_str(), "mp4" | "mov" | "avi" | "mkv" | "webm") {
+                        Some((path.clone(), true))
                     } else {
                         None
                     }
                 })
             };
             #[cfg(not(target_os = "windows"))]
-            let open_with_path: Option<String> = None;
+            let open_with_path: Option<(String, bool)> = None;
 
             // Instance "Open with": chỉ mở editor với ảnh — KHÔNG tray, KHÔNG
             // hotkey/prewarm/autostart/update. Đóng cửa sổ editor là thoát hẳn
@@ -254,10 +270,26 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
                 #[cfg(target_os = "windows")]
-                if let Some(path) = open_with_path {
+                if let Some((path, is_video)) = open_with_path {
+                    if is_video {
+                        // Video đi qua History (ingest + PendingVideo) → instance
+                        // "Open with" cũng phải có History DB, nếu không
+                        // `open_video_file_path_sync` lỗi "History chưa sẵn sàng".
+                        // Vẫn là editor tạm: đóng cửa sổ là thoát như với ảnh.
+                        init_history(&handle);
+                        record::allow_asset_file(&handle, std::path::Path::new(&path));
+                    }
                     let h = handle.clone();
                     std::thread::spawn(move || {
-                        let _ = commands::open_file_path_sync(&h, path);
+                        // Video: remux/transcode có thể lâu — không chặn main thread.
+                        let r = if is_video {
+                            commands::open_video_file_path_sync(&h, path)
+                        } else {
+                            commands::open_file_path_sync(&h, path)
+                        };
+                        if let Err(e) = r {
+                            eprintln!("[SnapDoc] Open with thất bại: {e}");
+                        }
                     });
                 }
                 return Ok(());
@@ -267,16 +299,7 @@ pub fn run() {
             // capture ngay sau đó (ingest cần HistoryState đã sẵn sàng).
             // Lỗi init KHÔNG chặn khởi động app — chỉ tắt tính năng Library
             // (mọi command History sẽ trả lỗi rõ ràng qua `try_state`).
-            match history::assets::db_path(&handle).and_then(|p| history::db::open(&p)) {
-                Ok(conn) => {
-                    use tauri::Manager;
-                    let ingest_tx = history::spawn_ingest_worker(handle.clone());
-                    app.manage(history::db::HistoryState::new(conn, ingest_tx));
-                }
-                Err(e) => {
-                    eprintln!("[SnapDoc][history] init thất bại, tính năng Library sẽ tắt: {e}");
-                }
-            }
+            init_history(&handle);
 
             // Tự động dọn Trash quá hạn 30 ngày — thread riêng, không chặn
             // khởi động, cùng convention với cleanup_stale_temp bên dưới. Xem
@@ -285,20 +308,29 @@ pub fn run() {
             // vô hạn.
             {
                 let h = handle.clone();
-                std::thread::spawn(move || match history::commands::purge_old_trash(&h) {
-                    Ok(n) if n > 0 => {
-                        eprintln!("[SnapDoc][history] Đã tự xoá {n} mục trong Trash quá hạn 30 ngày")
+                std::thread::spawn(move || {
+                    match history::commands::purge_old_trash(&h) {
+                        Ok(n) if n > 0 => {
+                            eprintln!("[SnapDoc][history] Đã tự xoá {n} mục trong Trash quá hạn 30 ngày")
+                        }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[SnapDoc][history] Tự dọn Trash quá hạn thất bại: {e}"),
                     }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("[SnapDoc][history] Tự dọn Trash quá hạn thất bại: {e}"),
+                    // File tạm `.snapdoc` sót lại do crash giữa lúc ghi (tên tmp giờ
+                    // là duy nhất mỗi lần ghi nên không còn tự bị ghi đè lần sau).
+                    if let Ok(dir) = history::assets::assets_dir(&h) {
+                        let n = snapdoc_file::remove_stale_tmp(&dir, std::time::Duration::from_secs(3600));
+                        if n > 0 {
+                            eprintln!("[SnapDoc][history] Đã dọn {n} file tạm .snapdoc sót lại");
+                        }
+                    }
                 });
             }
 
-            // Mở scope asset-protocol cho thư mục lưu video hiện tại — nếu
-            // không, `convertFileSrc` trong record-review/History sẽ bị chặn
-            // đọc video đã quay ở phiên trước (scope tĩnh trong tauri.conf.json
-            // chỉ cho phép $APPDATA/SnapDoc/library, không phải saveDir).
-            record::allow_asset_scope_at_startup(&handle);
+            // KHÔNG mở scope asset-protocol cho cả saveDir nữa (saveDir do user
+            // chọn, có thể là ~/): video ngoài Library được cấp TỪNG FILE lúc
+            // webview cần (`list_history`, PendingVideo, export...) — xem
+            // `record::allow_asset_file`.
 
             // Dọn rác tạm phiên trước (crash/quit giữa lúc quay/trim) — thread
             // riêng, không chặn khởi động.
@@ -526,18 +558,15 @@ pub fn run() {
                                     .to_lowercase();
                                 if matches!(
                                     ext.as_str(),
-                                    "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif"
+                                    "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "snapdoc"
                                 ) {
                                     let _ = commands::open_file_path_sync(_app, path_str);
                                 } else if matches!(
                                     ext.as_str(),
                                     "mp4" | "mov" | "avi" | "mkv" | "webm"
                                 ) {
-                                    // Add scope TRƯỚC khi open
-                                    if let Some(parent) = path.parent() {
-                                        eprintln!("[SnapDoc] Pre-adding asset scope for video: {}", parent.display());
-                                        let _ = _app.asset_protocol_scope().allow_directory(parent, true);
-                                    }
+                                    // Mở scope cho ĐÚNG file TRƯỚC khi open.
+                                    record::allow_asset_file(_app, &path);
                                     // Remux/transcode có thể mất vài phút — không chặn main thread.
                                     let h = _app.clone();
                                     std::thread::spawn(move || {

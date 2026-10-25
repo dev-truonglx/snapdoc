@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import { ipc, type HistoryFilter, type HistoryItem } from "../../lib/ipc";
-import { todayStartMs, ONE_DAY_MS } from "./dateUtils";
 
 const PAGE_SIZE = 60;
 
@@ -45,14 +44,13 @@ interface HistoryState {
 
 export const useHistory = create<HistoryState>((set, get) => ({
   items: [],
-  // Mặc định lọc theo NGÀY HIỆN TẠI khi mở History — người dùng thường muốn
-  // xem ngay những gì vừa chụp/quay hôm nay, không phải lướt hết lịch sử.
+  // Mặc định KHÔNG giới hạn ngày (toàn bộ, mới nhất trước) — trước đây lọc
+  // "hôm nay" tính 1 lần lúc load module nên bị lệch sau nửa đêm. Khoảng ngày
+  // nhanh (Hôm nay / 7 ngày / 30 ngày) chọn ở `HistoryToolbar.tsx`.
   filter: {
     limit: PAGE_SIZE,
     offset: 0,
     trashOnly: false,
-    from: todayStartMs(),
-    to: todayStartMs() + ONE_DAY_MS,
   },
   selectedId: null,
   selectedIds: [],

@@ -588,10 +588,10 @@ export default function GifExportModal({
                 disabled={busy}
                 style={selectStyle}
               >
-                <option value={1.0}>1.0x (Bình thường)</option>
+                <option value={1.0}>{t("gifExport.speedNormal")}</option>
                 <option value={1.25}>1.25x</option>
-                <option value={1.5}>1.5x (Nhanh)</option>
-                <option value={2.0}>2.0x (Gấp đôi)</option>
+                <option value={1.5}>{t("gifExport.speedFast")}</option>
+                <option value={2.0}>{t("gifExport.speedDouble")}</option>
               </select>
             </div>
 

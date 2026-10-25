@@ -1,10 +1,16 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use image::buffer::ConvertBuffer;
+use image::RgbaImage;
 
 #[cfg_attr(target_os = "macos", allow(unused_imports))]
 use image::codecs::jpeg::JpegEncoder;
 #[cfg_attr(target_os = "macos", allow(unused_imports))]
 use image::ImageEncoder;
 use xcap::Monitor;
+
+use crate::state::FrozenScreen;
 
 /// Chụp toàn bộ N màn hình SONG SONG (spawn thread / join) rồi encode JPEG
 /// quality 85 — dùng làm "frozen screen" background của overlay để màn hình
@@ -29,7 +35,17 @@ pub fn capture_frozen_screens() -> HashMap<usize, Vec<u8>> {
 /// Ghi ảnh freeze của màn hình `idx` — CHỈ khi lượt chụp `gen` vẫn là lượt
 /// mới nhất (`AppState::freeze_gen`). Spam phím tắt có thể để lại thread chụp
 /// của lượt cũ chạy song song; không cho chúng ghi đè ảnh cũ lên phiên mới.
-fn store_frozen(state: &crate::state::AppState, gen: u64, idx: usize, buf: Vec<u8>) {
+///
+/// `rgba`: pixel lossless để crop (giữ song song với JPEG hiển thị);
+/// `rgba_pending`: pixel sẽ tới sau qua `store_frozen_rgba` (macOS).
+fn store_frozen(
+    state: &crate::state::AppState,
+    gen: u64,
+    idx: usize,
+    jpeg: Vec<u8>,
+    rgba: Option<RgbaImage>,
+    rgba_pending: bool,
+) {
     use std::sync::atomic::Ordering;
     if state.freeze_gen.load(Ordering::SeqCst) != gen {
         return;
@@ -37,7 +53,30 @@ fn store_frozen(state: &crate::state::AppState, gen: u64, idx: usize, buf: Vec<u
     if let Ok(mut g) = state.frozen_screens.lock() {
         // Kiểm tra lại dưới lock: `clear_frozen_screens`/lượt mới có thể vừa chạy.
         if state.freeze_gen.load(Ordering::SeqCst) == gen {
-            g.insert(idx, buf);
+            g.insert(
+                idx,
+                FrozenScreen {
+                    jpeg: Arc::new(jpeg),
+                    rgba: rgba.map(Arc::new),
+                    rgba_pending,
+                },
+            );
+        }
+    }
+    state.frozen_screens_cvar.notify_all();
+}
+
+/// Gắn pixel lossless (tới SAU JPEG) vào màn `idx` đã có. `None` = convert
+/// lỗi → bỏ cờ chờ để `crop_frozen` fallback về JPEG ngay.
+#[cfg(target_os = "macos")]
+fn store_frozen_rgba(state: &crate::state::AppState, gen: u64, idx: usize, rgba: Option<RgbaImage>) {
+    use std::sync::atomic::Ordering;
+    if let Ok(mut g) = state.frozen_screens.lock() {
+        if state.freeze_gen.load(Ordering::SeqCst) == gen {
+            if let Some(entry) = g.get_mut(&idx) {
+                entry.rgba = rgba.map(Arc::new);
+                entry.rgba_pending = false;
+            }
         }
     }
     state.frozen_screens_cvar.notify_all();
@@ -69,14 +108,22 @@ pub fn capture_frozen_screens_streaming(
         use tauri::Manager;
         let state = app.state::<crate::state::AppState>();
 
-        super::mac_sck::capture_displays_excluding_own_app_jpeg(&targets, 0.8, |idx, res| {
+        use super::mac_sck::FrozenPart;
+        // JPEG giao trước cho overlay; RGBA lossless (để crop) tới sau.
+        super::mac_sck::capture_displays_excluding_own_app_jpeg(&targets, 0.8, true, |idx, res| {
             match res {
-                Ok(buf) => {
-                    store_frozen(&state, gen, idx, buf);
+                Ok(FrozenPart::Jpeg(buf)) => {
+                    store_frozen(&state, gen, idx, buf, None, true);
                     eprintln!("[SnapDoc Timing] stream display {idx} ready (hardware jpeg)");
+                }
+                Ok(FrozenPart::Rgba(img)) => {
+                    store_frozen_rgba(&state, gen, idx, Some(img));
+                    eprintln!("[SnapDoc Timing] stream display {idx} lossless ready");
                 }
                 Err(e) => {
                     eprintln!("[SnapDoc][freeze] Màn hình {idx} lỗi: {e}");
+                    // Lỗi phía RGBA (JPEG đã có) → bỏ cờ chờ; chưa có entry thì no-op.
+                    store_frozen_rgba(&state, gen, idx, None);
                 }
             }
         });
@@ -93,13 +140,13 @@ pub fn capture_frozen_screens_streaming(
                 (Ok(x), Ok(y), Ok(id)) => {
                     if exclude_monitor_ids.contains(&id) {
                         eprintln!("[SnapDoc][freeze] Bỏ qua màn hình {i} (display_id={id}) vì chứa cửa sổ editor");
-                        store_frozen(&state, gen, i, Vec::new());
+                        store_frozen(&state, gen, i, Vec::new(), None, false);
                     } else {
                         points.push((i, x, y, id));
                     }
                 }
                 _ => {
-                    store_frozen(&state, gen, i, Vec::new());
+                    store_frozen(&state, gen, i, Vec::new(), None, false);
                 }
             }
         }
@@ -112,10 +159,11 @@ pub fn capture_frozen_screens_streaming(
                         .map_err(|e| format!("Không tìm lại được màn hình: {e}"))
                         .and_then(|m| capture_one_jpeg(&m));
                     match result {
-                        Ok(bytes) => store_frozen(state_ref, gen, i, bytes),
+                        // Giữ luôn ảnh raw (lossless) để crop — không tốn thêm gì.
+                        Ok((bytes, raw)) => store_frozen(state_ref, gen, i, bytes, Some(raw), false),
                         Err(e) => {
                             eprintln!("[SnapDoc][freeze] Màn hình {i} lỗi: {e}");
-                            store_frozen(state_ref, gen, i, Vec::new());
+                            store_frozen(state_ref, gen, i, Vec::new(), None, false);
                         }
                     }
                 });
@@ -146,11 +194,12 @@ pub fn capture_frozen_screens_ex(exclude_monitor_ids: &[u32]) -> HashMap<usize, 
 
         use std::sync::Mutex;
         let result = Mutex::new(HashMap::new());
-        super::mac_sck::capture_displays_excluding_own_app_jpeg(&targets, 0.85, |idx, res| {
+        super::mac_sck::capture_displays_excluding_own_app_jpeg(&targets, 0.85, false, |idx, res| {
             match res {
-                Ok(buf) => {
+                Ok(super::mac_sck::FrozenPart::Jpeg(buf)) => {
                     result.lock().unwrap().insert(idx, buf);
                 }
+                Ok(super::mac_sck::FrozenPart::Rgba(_)) => {}
                 Err(e) => {
                     eprintln!("[SnapDoc][freeze] Màn hình {idx} lỗi: {e}");
                 }
@@ -187,7 +236,7 @@ pub fn capture_frozen_screens_ex(exclude_monitor_ids: &[u32]) -> HashMap<usize, 
                         .map_err(|e| format!("Không tìm lại được màn hình: {e}"))
                         .and_then(|m| capture_one_jpeg(&m));
                     match result {
-                        Ok(bytes) => (i, Some(bytes)),
+                        Ok((bytes, _raw)) => (i, Some(bytes)),
                         Err(e) => {
                             eprintln!("[SnapDoc][freeze] Màn hình {i} lỗi: {e}");
                             (i, None)
@@ -207,8 +256,9 @@ pub fn capture_frozen_screens_ex(exclude_monitor_ids: &[u32]) -> HashMap<usize, 
     }
 }
 
+/// Trả `(JPEG hiển thị, ảnh raw lossless)` — raw giữ lại để crop ảnh cuối.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-fn capture_one_jpeg(m: &Monitor) -> Result<Vec<u8>, String> {
+fn capture_one_jpeg(m: &Monitor) -> Result<(Vec<u8>, RgbaImage), String> {
     let t0 = std::time::Instant::now();
     // Chụp raw RGBA.
     let raw = capture_raw(m)?;
@@ -217,7 +267,7 @@ fn capture_one_jpeg(m: &Monitor) -> Result<Vec<u8>, String> {
     // Encode JPEG quality 75 vào buffer (chất lượng cao cho freeze preview, nén nhanh hơn).
     let mut buf: Vec<u8> = Vec::new();
     let t1 = std::time::Instant::now();
-    let rgb: image::RgbImage = image::DynamicImage::ImageRgba8(raw).into_rgb8();
+    let rgb: image::RgbImage = raw.convert();
     let t_rgb = t1.elapsed();
 
     let t2 = std::time::Instant::now();
@@ -234,7 +284,7 @@ fn capture_one_jpeg(m: &Monitor) -> Result<Vec<u8>, String> {
     eprintln!("[SnapDoc Timing] freeze capture_one_jpeg: total={:?}, raw={:?}, into_rgb8={:?}, jpeg_encode={:?}",
         t0.elapsed(), t_raw, t_rgb, t_jpeg);
 
-    Ok(buf)
+    Ok((buf, raw))
 }
 
 /// Chụp 1 màn hình thành RgbaImage thô — dùng backend phù hợp theo OS.

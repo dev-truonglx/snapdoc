@@ -250,26 +250,30 @@ pub(crate) fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = resolve_save_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Không tạo được thư mục lưu: {e}"))?;
     // mp4 nằm NGOÀI `$APPDATA/SnapDoc/library` (scope tĩnh trong
-    // tauri.conf.json) — phải mở thêm scope asset-protocol cho đúng thư mục
-    // này thì Editor/History mới phát được video.
-    allow_asset_scope(app, &dir);
+    // tauri.conf.json) — caller tự `allow_asset_file` cho ĐÚNG file này sau khi
+    // ghi xong, không mở cả thư mục (saveDir do user chọn, có thể là ~/).
     // dedupe: 2 bản quay bắt đầu trong cùng 1 giây không được ghi đè nhau.
     Ok(crate::storage::save::dedupe(
         dir.join(format!("{}.mp4", crate::flow::stamp_filename("Recording"))),
     ))
 }
 
-/// Mở scope asset-protocol cho 1 thư mục chứa video.
-pub(crate) fn allow_asset_scope(app: &AppHandle, dir: &std::path::Path) {
-    if let Err(e) = app.asset_protocol_scope().allow_directory(dir, true) {
-        eprintln!("[SnapDoc][record] Không mở được asset scope cho {}: {e}", dir.display());
+/// Mở scope asset-protocol cho ĐÚNG 1 file mà webview cần nạp qua
+/// `convertFileSrc` (video/GIF nằm ngoài Library). Không bao giờ mở cả thư
+/// mục: saveDir do user tự chọn (có thể là ~/ hay Desktop), mở đệ quy là cho
+/// webview đọc được mọi file trong đó.
+///
+/// Cấp thêm đường dẫn đã canonicalize: `Scope::is_allowed` resolve symlink
+/// trước khi so pattern, thư mục có symlink sẽ không khớp nếu chỉ cấp bản gốc.
+pub(crate) fn allow_asset_file(app: &AppHandle, file: &std::path::Path) {
+    let scope = app.asset_protocol_scope();
+    if let Err(e) = scope.allow_file(file) {
+        eprintln!("[SnapDoc][record] Không mở được asset scope cho {}: {e}", file.display());
     }
-}
-
-/// Gọi 1 lần lúc khởi động app — xem `allow_asset_scope`.
-pub fn allow_asset_scope_at_startup(app: &AppHandle) {
-    if let Ok(dir) = resolve_save_dir(app) {
-        allow_asset_scope(app, &dir);
+    if let Ok(real) = std::fs::canonicalize(file) {
+        if real != file {
+            let _ = scope.allow_file(&real);
+        }
     }
 }
 
@@ -633,7 +637,74 @@ fn spawn_encoder_watchdog(
 /// (x, y, w, h) của vùng đang quay theo toạ độ màn hình — chia sẻ với
 /// listener chuột. Khi quay 1 CỬA SỔ, `WindowTracker` cập nhật gốc (x, y)
 /// mỗi khi cửa sổ bị kéo đi (nội dung video luôn bám cửa sổ).
+///
+/// (w, h) CỐ Ý giữ nguyên lúc bắt đầu: khung video cố định từ đầu, còn
+/// listener chuột ghi toạ độ `local = điểm - gốc` KHÔNG co giãn theo khung →
+/// cập nhật w/h khi user resize cửa sổ sẽ ghi ra click nằm ngoài khung video.
 pub type SharedRect = Arc<Mutex<(f64, f64, f64, f64)>>;
+
+/// Gốc (x, y) hiện tại của 1 cửa sổ — hỏi THẲNG đúng cửa sổ đó thay vì
+/// `xcap::Window::all()` (liệt kê mọi cửa sổ, và trên macOS mỗi `x()`/`y()`
+/// lại copy cả danh sách lần nữa) mỗi 500ms. Cùng hệ toạ độ với
+/// `capture::window::list`: macOS points (`kCGWindowBounds`), Windows px vật
+/// lý (`DWMWA_EXTENDED_FRAME_BOUNDS`). `None` khi cửa sổ đã đóng.
+#[cfg(target_os = "macos")]
+fn window_origin(window_id: u32) -> Option<(f64, f64)> {
+    use objc2_core_foundation::{CFDictionary, CFString, CGRect};
+    use objc2_core_graphics::{
+        CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
+    };
+    let arr = CGWindowListCopyWindowInfo(CGWindowListOption::OptionIncludingWindow, window_id)?;
+    if arr.count() < 1 {
+        return None;
+    }
+    unsafe {
+        let dict = arr.value_at_index(0) as *const CFDictionary;
+        if dict.is_null() {
+            return None;
+        }
+        let key = CFString::from_static_str("kCGWindowBounds");
+        let bounds = (*dict).value((&*key as *const CFString).cast()) as *const CFDictionary;
+        if bounds.is_null() {
+            return None;
+        }
+        let mut rect = CGRect::default();
+        if !CGRectMakeWithDictionaryRepresentation(Some(&*bounds), &mut rect) {
+            return None;
+        }
+        Some((rect.origin.x, rect.origin.y))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn window_origin(window_id: u32) -> Option<(f64, f64)> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+    // id → HWND giống capture/windows_stream.rs (xcap id = HWND cắt về u32).
+    let hwnd = window_id as i32 as isize as *mut std::ffi::c_void;
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+            &mut rect as *mut RECT as *mut std::ffi::c_void,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    if hr != 0 {
+        return None;
+    }
+    Some((rect.left as f64, rect.top as f64))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn window_origin(window_id: u32) -> Option<(f64, f64)> {
+    let w = xcap::Window::all()
+        .ok()?
+        .into_iter()
+        .find(|w| w.id().map(|i| i == window_id).unwrap_or(false))?;
+    Some((w.x().ok()? as f64, w.y().ok()? as f64))
+}
 
 struct WindowTracker {
     stop: Arc<AtomicBool>,
@@ -654,12 +725,7 @@ impl WindowTracker {
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
-                    let origin = xcap::Window::all().ok().and_then(|ws| {
-                        ws.into_iter()
-                            .find(|w| w.id().map(|i| i == window_id).unwrap_or(false))
-                            .and_then(|w| Some((w.x().ok()? as f64, w.y().ok()? as f64)))
-                    });
-                    if let Some((x, y)) = origin {
+                    if let Some((x, y)) = window_origin(window_id) {
                         let mut g = rect.lock().unwrap_or_else(|p| p.into_inner());
                         g.0 = x;
                         g.1 = y;
@@ -1306,9 +1372,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
     };
     warnings.extend(finalized.warnings.iter().cloned());
     let final_path = finalized.path;
-    if let Some(parent) = final_path.parent() {
-        allow_asset_scope(app, parent);
-    }
+    allow_asset_file(app, &final_path);
 
     // Thời lượng THẬT = số frame đã ghi / fps (khớp file 100%).
     let duration_ms: i64 = if outcome.frames > 0 {

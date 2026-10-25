@@ -53,7 +53,9 @@
     "permGranted": "✓ Đã cấp",
     "permDenied": "✕ Chưa cấp",
     "languageSection": "NGÔN NGỮ",
-    "languageLabel": "Ngôn ngữ hiển thị"
+    "languageLabel": "Ngôn ngữ hiển thị",
+    "requestPermission": "Cấp quyền",
+    "requestPermissionHint": "Nếu không thấy hộp thoại, hãy bật SnapDoc trong Cài đặt hệ thống › Quyền riêng tư & Bảo mật › Ghi màn hình, rồi khởi động lại SnapDoc."
   },
   "updates": {
     "checkingUpdates": "Đang kiểm tra…",
@@ -273,7 +275,13 @@
     "permanentDeleteSelected": "Xoá vĩnh viễn ({{count}})",
     "permanentDeleteSelectedConfirm": "Xoá vĩnh viễn {{count}} mục đã chọn? Thao tác này không thể hoàn tác.",
     "batchActions": "Thao tác hàng loạt",
-    "totalSelectedSize": "Tổng dung lượng"
+    "totalSelectedSize": "Tổng dung lượng",
+    "dateRange": "Khoảng thời gian",
+    "rangeAll": "Tất cả",
+    "rangeToday": "Hôm nay",
+    "rangeLast7": "7 ngày qua",
+    "rangeLast30": "30 ngày qua",
+    "rangeCustom": "Tùy chọn"
   },
   "thumbnail": {
     "openEditorTooltip": "Nhấn để mở editor",
@@ -545,7 +553,27 @@
     "speedZoneTrack": "Dải tốc độ (Speed Track)",
     "speedZoneSelected": "Vùng tốc độ đang chọn",
     "speedRegionsCount": "{{count}} vùng tốc độ",
-    "speedZoneThis": "Tốc độ đoạn này"
+    "speedZoneThis": "Tốc độ đoạn này",
+    "overlayTrackRect": "Khung",
+    "overlayTrackBlur": "Che mờ",
+    "overlayTrackBlackout": "Hộp đen",
+    "overlayTrackText": "Chữ",
+    "overlayTrackArrow": "Mũi tên",
+    "fontSizeDecrease": "Giảm cỡ chữ",
+    "fontSize": "Cỡ chữ (px)",
+    "fontSizeIncrease": "Tăng cỡ chữ",
+    "zoomTrackHint": "Dải thu phóng (Zoom Track) — Kéo để chỉnh mốc thời gian, nhấp đúp để tạo mốc mới",
+    "zoomFocusPinHint": "Bấm & kéo để dời tâm thu phóng theo ý muốn",
+    "zoomFocusCenter": "Tâm Zoom:",
+    "deleteZoomSegment": "Xóa mốc zoom này (Delete / Backspace)",
+    "play": "Phát",
+    "pause": "Tạm dừng",
+    "mute": "Tắt tiếng",
+    "unmute": "Bật tiếng",
+    "autoZoomOn": "Tự động Zoom Focus theo thao tác chuột",
+    "autoZoomOff": "Tắt Zoom Focus chuột",
+    "autoZoomLabel": "Focus",
+    "addZoomAtPlayhead": "Thêm vùng Zoom Focus tại thời điểm hiện tại"
   },
   "gifExport": {
     "title": "Xuất ảnh GIF",
@@ -580,7 +608,10 @@
     "copiedToast": "Đã sao chép ảnh GIF vào clipboard",
     "savedToast": "Đã xuất file GIF thành công",
     "savedLibraryToast": "Đã lưu ảnh GIF vào Thư viện",
-    "exportFailed": "Xuất GIF thất bại"
+    "exportFailed": "Xuất GIF thất bại",
+    "speedNormal": "1.0x (Bình thường)",
+    "speedFast": "1.5x (Nhanh)",
+    "speedDouble": "2.0x (Gấp đôi)"
   },
   "recordingIndicator": {
     "clickToStop": "Bấm để dừng quay",

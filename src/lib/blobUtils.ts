@@ -67,3 +67,23 @@ export function toSafeBlobUrl(
   }
   return { url: src };
 }
+
+/** Đọc Blob thành data URL (base64). */
+export function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Backend (`copy_image`/`save_image`…) chỉ nhận base64/data URL. Nếu `src` là
+ * `blob:` URL thì đọc ra data URL; các dạng khác trả nguyên.
+ */
+export async function ensureDataUrl(src: string): Promise<string> {
+  if (!src.startsWith("blob:")) return src;
+  const blob = await fetch(src).then((r) => r.blob());
+  return blobToDataUrl(blob);
+}

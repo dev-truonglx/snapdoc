@@ -1,5 +1,6 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import { ipc } from "../../lib/ipc";
+import { ensureDataUrl } from "../../lib/blobUtils";
 
 /** Tên file mặc định theo template Screenshot_YYYY-MM-DD_HHMMSS. */
 export function stampName(): string {
@@ -29,8 +30,10 @@ export function stampGifName(): string {
   )}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
+// Mọi hàm xuất ảnh bên dưới đều qua `ensureDataUrl`: nguồn có thể là `blob:`
+// URL (vd. cửa sổ Thumbnail) mà backend chỉ hiểu base64/data URL.
 export async function copyToClipboard(dataUrl: string): Promise<void> {
-  await ipc.copyImage(dataUrl);
+  await ipc.copyImage(await ensureDataUrl(dataUrl));
 }
 
 /** Thư mục chứa file từ đường dẫn đầy đủ (hỗ trợ cả `/` và `\` — path Windows dùng `\`). */
@@ -75,9 +78,10 @@ export async function saveToFileAuto(dataUrl: string, alsoCopy = false): Promise
   const settings = await ipc.getSettings().catch(() => null);
   const dir = settings?.saveDir || (await ipc.defaultSaveDir());
   const path = `${dir}/${stampName()}.png`;
+  const data = await ensureDataUrl(dataUrl);
   return alsoCopy
-    ? await ipc.saveAndCopy(path, dataUrl)
-    : await ipc.saveImage(path, dataUrl);
+    ? await ipc.saveAndCopy(path, data)
+    : await ipc.saveImage(path, data);
 }
 
 /**
@@ -89,7 +93,8 @@ export async function saveToFile(dataUrl: string, alsoCopy = false): Promise<str
   const dir = settings?.saveDir || (await ipc.defaultSaveDir());
   const path = await promptSavePath(dir ? `${dir}/${stampName()}.png` : `${stampName()}.png`);
   if (!path) return null;
-  return alsoCopy ? await ipc.saveAndCopy(path, dataUrl) : await ipc.saveImage(path, dataUrl);
+  const data = await ensureDataUrl(dataUrl);
+  return alsoCopy ? await ipc.saveAndCopy(path, data) : await ipc.saveImage(path, data);
 }
 
 /**
@@ -106,5 +111,5 @@ export async function saveAsToFile(dataUrl: string): Promise<string | null> {
   if (settings) {
     ipc.setSettings({ ...settings, lastImageSaveAsDir: dirnameOf(path) }).catch(() => {});
   }
-  return await ipc.saveImage(path, dataUrl);
+  return await ipc.saveImage(path, await ensureDataUrl(dataUrl));
 }

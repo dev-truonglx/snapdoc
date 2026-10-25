@@ -4,6 +4,7 @@ import { ipc } from "../../../lib/ipc";
 import { uid } from "../model";
 import {
   composeStitch,
+  type StitchImageCache,
   type StitchAlign,
   type StitchDirection,
   type StitchResult,
@@ -40,7 +41,20 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
 
-  // Recompute preview mỗi khi danh sách / tuỳ chọn đổi. Guard chống race.
+  // Ảnh đã load giữ suốt đời dialog — đổi tuỳ chọn không decode lại.
+  const imgCacheRef = useRef<StitchImageCache>(new Map());
+  // Kết quả preview gần nhất + input sinh ra nó — `apply` dùng lại nếu khớp.
+  const lastPreviewRef = useRef<{
+    items: Item[];
+    direction: StitchDirection;
+    align: StitchAlign;
+    gap: number;
+    background: string;
+    result: StitchResult;
+  } | null>(null);
+
+  // Recompute preview mỗi khi danh sách / tuỳ chọn đổi (debounce 150ms — gõ gap
+  // từng phím không compose liên tục). Guard chống race.
   useEffect(() => {
     let cancelled = false;
     if (items.length === 0) {
@@ -48,18 +62,27 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
       setDims(null);
       return;
     }
-    composeStitch(items.map((i) => i.src), { direction, align, gap, background })
-      .then((r) => {
-        if (cancelled) return;
-        setPreviewUrl(r.dataUrl);
-        setDims({ w: r.width, h: r.height });
-        setError(null);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(String(e));
-      });
+    // Bỏ ảnh không còn trong danh sách khỏi cache
+    const cache = imgCacheRef.current;
+    const live = new Set(items.map((i) => i.src));
+    for (const k of cache.keys()) if (!live.has(k)) cache.delete(k);
+    const timer = window.setTimeout(() => {
+      const opts = { direction, align, gap, background };
+      composeStitch(items.map((i) => i.src), opts, cache)
+        .then((r) => {
+          if (cancelled) return;
+          lastPreviewRef.current = { items, ...opts, result: r };
+          setPreviewUrl(r.dataUrl);
+          setDims({ w: r.width, h: r.height });
+          setError(null);
+        })
+        .catch((e) => {
+          if (!cancelled) setError(String(e));
+        });
+    }, 150);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [items, direction, align, gap, background]);
 
@@ -123,12 +146,21 @@ export default function StitchDialog({ initialImage, onApply, onCancel }: Props)
     }
     setBusy(true);
     try {
-      const result = await composeStitch(items.map((i) => i.src), {
-        direction,
-        align,
-        gap,
-        background,
-      });
+      // Preview mới nhất khớp đúng input hiện tại → dùng luôn, khỏi compose lại.
+      const last = lastPreviewRef.current;
+      const result =
+        last &&
+        last.items === items &&
+        last.direction === direction &&
+        last.align === align &&
+        last.gap === gap &&
+        last.background === background
+          ? last.result
+          : await composeStitch(
+              items.map((i) => i.src),
+              { direction, align, gap, background },
+              imgCacheRef.current,
+            );
       onApply(result);
     } catch (e) {
       setError(String(e));

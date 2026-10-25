@@ -1,4 +1,5 @@
 import React, { useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   type ZoomSegment,
   MIN_ZOOM_DURATION_MS,
@@ -35,6 +36,7 @@ export default function ZoomTimelineTrack({
   snapPoints = [],
   onAddZoomSegment,
 }: ZoomTimelineTrackProps) {
+  const { t } = useTranslation();
   const trackRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<{
     id: string;
@@ -154,7 +156,7 @@ export default function ZoomTimelineTrack({
         const clickMs = Math.round(clickRatio * totalMs);
         onAddZoomSegment?.(clickMs);
       }}
-      title="Dải thu phóng (Zoom Track) — Kéo để chỉnh mốc thời gian, nhấp đúp để tạo mốc mới"
+      title={t("videoTrimmer.zoomTrackHint")}
     >
       {/* Nhãn Track bên trái */}
       <div style={trackLabelStyle}>

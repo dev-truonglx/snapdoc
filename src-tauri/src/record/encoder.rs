@@ -428,30 +428,6 @@ pub fn copy_without_audio(input_path: &Path, output_path: &Path) -> Result<(), S
     Ok(())
 }
 
-/// Cắt video theo danh sách đoạn GIỮ LẠI (ms, đã sort tăng dần, không chồng
-/// lấp) — dùng cho cả trim đầu/cuối (1 đoạn) và xoá đoạn giữa (nhiều đoạn).
-/// Re-encode từng đoạn (KHÔNG dùng `-c:v copy`) để cắt chính xác tới bất kỳ
-/// mốc thời gian nào: `Encoder::start` không set GOP nhỏ nên `-c copy` chỉ
-/// cắt được ở keyframe gần nhất (mặc định libx264 ~250 frame, tức ~8s ở
-/// 30fps) — không đủ chính xác cho việc người dùng tự chọn mốc cắt. Video
-/// quay màn hình thường ngắn nên re-encode không đáng lo hiệu năng.
-///
-/// Mỗi đoạn giữ lại được encode ra 1 file tạm riêng (`-ss`/`-t` ĐẶT SAU
-/// `-i` để seek chính xác tới frame thay vì snap theo keyframe; dùng `-t`
-/// thay vì `-to` để tránh nhập nhằng absolute/relative timestamp của ffmpeg
-/// khi `-ss` cũng là output option), rồi LUÔN ghép lại bằng 1 lệnh concat
-/// demuxer `-c copy` — kể cả khi chỉ có 1 đoạn (1 code path duy nhất, chi phí
-/// thêm không đáng kể). `output_path` chỉ được ghi khi mọi bước thành công —
-/// `input_path` không bao giờ bị đụng vào (caller tự quyết định
-/// `fs::rename` đè lên file gốc sau khi hàm này trả về `Ok`).
-///
-/// `on_progress` được gọi liên tục với tỉ lệ 0.0..=1.0 trong lúc encode từng
-/// đoạn (đọc `out_time_us=` từ `-progress pipe:1` của ffmpeg — machine-
-/// readable, ổn định hơn parse chuỗi `time=` trong stderr thường), quy đổi
-/// theo tổng thời lượng CÒN LẠI của mọi đoạn (không phải % số đoạn xong, vì 1
-/// đoạn dài có thể chiếm hầu hết thời gian trong khi các đoạn khác rất ngắn).
-/// Bước ghép cuối (`-c copy`) rất nhanh nên không cần progress riêng — nhảy
-/// thẳng lên `1.0` khi xong.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoOverlay {
@@ -517,6 +493,31 @@ pub struct ZoomSegment {
     pub focus_y: f64,
     #[serde(default)]
     pub easing: Option<String>,
+}
+
+/// Màu mặc định khi màu từ frontend không hợp lệ (đỏ `#ef4444`, khớp UI).
+const DEFAULT_OVERLAY_COLOR: &str = "0xef4444";
+
+/// Chuẩn hoá màu từ IPC thành dạng ffmpeg `0xRRGGBB[AA]`. Chỉ nhận
+/// `#RGB`/`#RRGGBB`/`#RRGGBBAA` (hoặc tiền tố `0x`) — chuỗi khác (vd chứa
+/// `:`/`;`/`[` để chèn filter) rơi về màu mặc định.
+pub(crate) fn ffmpeg_color(raw: Option<&str>) -> String {
+    let Some(s) = raw.map(str::trim) else {
+        return DEFAULT_OVERLAY_COLOR.to_string();
+    };
+    let hex = s
+        .strip_prefix('#')
+        .or_else(|| s.strip_prefix("0x"))
+        .or_else(|| s.strip_prefix("0X"));
+    match hex {
+        Some(h) if h.bytes().all(|b| b.is_ascii_hexdigit()) => match h.len() {
+            6 | 8 => format!("0x{h}"),
+            // #RGB → 0xRRGGBB
+            3 => format!("0x{}", h.chars().flat_map(|c| [c, c]).collect::<String>()),
+            _ => DEFAULT_OVERLAY_COLOR.to_string(),
+        },
+        _ => DEFAULT_OVERLAY_COLOR.to_string(),
+    }
 }
 
 /// Sinh chuỗi filter atempo cho FFmpeg (hỗ trợ speed từ 0.05 đến 16.0 bằng cách xâu chuỗi atempo=2.0 hoặc atempo=0.5).
@@ -674,12 +675,8 @@ pub fn build_overlay_filter_graph(
             let (color, thickness) = if o.overlay_type == "blur" && o.is_blackout.unwrap_or(false) {
                 ("black".to_string(), "fill".to_string())
             } else {
-                let col = o.stroke_color.as_deref().unwrap_or("#ef4444");
-                let clean_col = if let Some(hex) = col.strip_prefix('#') {
-                    format!("0x{hex}")
-                } else {
-                    col.to_string()
-                };
+                // Màu đến từ IPC → PHẢI lọc trước khi ghép vào filter graph.
+                let clean_col = ffmpeg_color(o.stroke_color.as_deref());
                 let w = o.stroke_width.unwrap_or(3.0).max(1.0).round() as u32;
                 (clean_col, w.to_string())
             };
@@ -713,7 +710,13 @@ pub fn build_overlay_filter_graph(
             .filter(|z| z.scale > 1.01 && z.end_time_ms > z.start_time_ms)
             .collect();
         if !valid_zooms.is_empty() {
-            let (vw, vh) = video_size.unwrap_or((1920, 1080));
+            // zoompan chạy SAU crop → khung ra phải bằng kích thước đã crop
+            // (cùng làm tròn chẵn như crop_filter), không phải kích thước gốc,
+            // nếu không video bị kéo giãn về tỉ lệ ban đầu.
+            let (vw, vh) = match crop {
+                Some(c) => ((c.width / 2) * 2, (c.height / 2) * 2),
+                None => video_size.unwrap_or((1920, 1080)),
+            };
             let vw = if vw > 0 { vw } else { 1920 };
             let vh = if vh > 0 { vh } else { 1080 };
 
@@ -763,6 +766,86 @@ pub fn build_overlay_filter_graph(
     Some(fg)
 }
 
+/// Chạy 1 lệnh ffmpeg đã có sẵn `-progress pipe:1` (caller tự thêm TRƯỚC
+/// file output) và gọi `on_out_ms` với số ms đầu ra đã xử lý — đọc
+/// `out_time_us=` (hoặc `out_time_ms=`, ffmpeg đặt tên nhầm: cũng là µs).
+/// Lỗi trả `"{err_label}: {status} — {stderr}"`.
+fn run_ffmpeg_with_progress(
+    cmd: &mut Command,
+    ffmpeg: &Path,
+    err_label: &str,
+    mut on_out_ms: impl FnMut(i64),
+) -> Result<(), String> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
+    let mut stderr_pipe = child.stderr.take().expect("stderr đã piped");
+    let stderr_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let _ = stderr_pipe.read_to_string(&mut buf);
+        buf
+    });
+
+    let stdout = child.stdout.take().expect("stdout đã piped");
+    {
+        use std::io::{BufRead, BufReader};
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(us) = parse_progress_out_us(&line) {
+                on_out_ms(us / 1000);
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("ffmpeg lỗi khi chờ tiến trình: {e}"))?;
+    let stderr = stderr_thread.join().unwrap_or_default();
+    if !status.success() {
+        return Err(format!("{err_label}: {status} — {stderr}"));
+    }
+    Ok(())
+}
+
+/// Đọc µs từ 1 dòng `-progress` (`out_time_us=` / `out_time_ms=`); `N/A` → None.
+fn parse_progress_out_us(line: &str) -> Option<i64> {
+    let v = line
+        .strip_prefix("out_time_us=")
+        .or_else(|| line.strip_prefix("out_time_ms="))?;
+    v.trim().parse::<i64>().ok()
+}
+
+/// Cắt video theo danh sách đoạn GIỮ LẠI (ms, đã sort tăng dần, không chồng
+/// lấp) — dùng cho cả trim đầu/cuối (1 đoạn) và xoá đoạn giữa (nhiều đoạn).
+/// Re-encode từng đoạn (KHÔNG dùng `-c:v copy`) để cắt chính xác tới bất kỳ
+/// mốc thời gian nào: `Encoder::start` không set GOP nhỏ nên `-c copy` chỉ
+/// cắt được ở keyframe gần nhất (mặc định libx264 ~250 frame, tức ~8s ở
+/// 30fps) — không đủ chính xác cho việc người dùng tự chọn mốc cắt. Video
+/// quay màn hình thường ngắn nên re-encode không đáng lo hiệu năng.
+///
+/// Mỗi đoạn giữ lại được encode ra 1 file tạm riêng (`-ss`/`-t` ĐẶT SAU
+/// `-i` để seek chính xác tới frame thay vì snap theo keyframe; dùng `-t`
+/// thay vì `-to` để tránh nhập nhằng absolute/relative timestamp của ffmpeg
+/// khi `-ss` cũng là output option), rồi ghép lại bằng 1 lệnh concat demuxer
+/// `-c copy`. Chỉ 1 đoạn thì chạy single-pass (cắt + filter + encode trong 1
+/// lệnh), không qua bước ghép. `output_path` chỉ được ghi khi mọi bước thành công —
+/// `input_path` không bao giờ bị đụng vào (caller tự quyết định
+/// `fs::rename` đè lên file gốc sau khi hàm này trả về `Ok`).
+///
+/// `on_progress` được gọi liên tục với tỉ lệ 0.0..=1.0 (đọc `out_time_us=` từ
+/// `-progress pipe:1` của ffmpeg — machine-readable, ổn định hơn parse chuỗi
+/// `time=` trong stderr), quy đổi theo tổng thời lượng của mọi đoạn (không
+/// phải % số đoạn xong, vì 1 đoạn dài có thể chiếm hầu hết thời gian). Nhiều
+/// đoạn thì chia pha: cắt đoạn → ghép (`-c copy`) → lượt hiệu ứng (re-encode
+/// lần 2, nếu có overlay/crop/zoom) — mỗi pha một khoảng riêng, xem thân hàm.
+/// `1.0` chỉ được gửi khi MỌI bước đã xong.
 pub fn trim(
     input_path: &Path,
     keep_ranges_ms: &[(i64, i64, f64)],
@@ -878,55 +961,24 @@ pub fn trim(
 
             cmd.args(["-movflags", "+faststart"])
                 .args(["-progress", "pipe:1"])
-                .arg(output_path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(CREATE_NO_WINDOW);
-            }
-
-            let mut child = cmd
-                .spawn()
-                .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-
-            let mut stderr_pipe = child.stderr.take().expect("stderr đã piped");
-            let stderr_thread = std::thread::spawn(move || {
-                use std::io::Read;
-                let mut buf = String::new();
-                let _ = stderr_pipe.read_to_string(&mut buf);
-                buf
-            });
-
-            let stdout = child.stdout.take().expect("stdout đã piped");
-            {
-                use std::io::{BufRead, BufReader};
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if let Some(v) = line.strip_prefix("out_time_us=") {
-                        if let Ok(us) = v.trim().parse::<i64>() {
-                            let cur_ms = (us / 1000).clamp(0, seg_play_ms);
-                            on_progress((cur_ms as f64 / seg_play_ms.max(1) as f64).min(1.0));
-                        }
-                    }
-                }
-            }
-
-            let status = child
-                .wait()
-                .map_err(|e| format!("ffmpeg lỗi khi chờ tiến trình: {e}"))?;
-            let stderr = stderr_thread.join().unwrap_or_default();
-            if !status.success() {
-                return Err(format!("ffmpeg xử lý video thất bại: {status} — {stderr}"));
-            }
+                .arg(output_path);
+            run_ffmpeg_with_progress(&mut cmd, &ffmpeg, "ffmpeg xử lý video thất bại", |out_ms| {
+                let cur_ms = out_ms.clamp(0, seg_play_ms);
+                on_progress((cur_ms as f64 / seg_play_ms.max(1) as f64).min(1.0));
+            })?;
 
             on_progress(1.0);
             return Ok(());
         }
 
-        // Trường hợp nhiều đoạn giữ lại (xoá đoạn ở giữa): encode từng đoạn với fast seeking
+        // Trường hợp nhiều đoạn giữ lại (xoá đoạn ở giữa): encode từng đoạn với fast seeking.
+        //
+        // Tiến độ chia theo pha để UI không đứng ở 100% trong lúc còn chạy:
+        // - có lượt hiệu ứng (re-encode cả video lần 2, tốn ngang pha cắt):
+        //   cắt đoạn 0..0.5, ghép 0.5..0.55, hiệu ứng 0.55..1.0;
+        // - không có: cắt đoạn 0..0.95, ghép (copy, nhanh) 0.95..1.0.
+        // `1.0` chỉ gửi ở cuối cùng.
+        let (seg_end, concat_end) = if filter_graph.is_some() { (0.5, 0.55) } else { (0.95, 1.0) };
         let mut seg_paths = Vec::with_capacity(keep_ranges_ms.len());
         let mut done_ms: i64 = 0;
         for (i, (start_ms, end_ms, speed)) in keep_ranges_ms.iter().enumerate() {
@@ -959,52 +1011,16 @@ pub fn trim(
             } else {
                 cmd.args(["-c:a", "aac", "-b:a", "160k"]);
             }
-            cmd.args(["-progress", "pipe:1"])
-                .arg(&seg_path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+            cmd.args(["-progress", "pipe:1"]).arg(&seg_path);
 
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(CREATE_NO_WINDOW);
-            }
-
-            let mut child = cmd
-                .spawn()
-                .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-            let mut stderr_pipe = child.stderr.take().expect("stderr đã piped");
-            let stderr_thread = std::thread::spawn(move || {
-                use std::io::Read;
-                let mut buf = String::new();
-                let _ = stderr_pipe.read_to_string(&mut buf);
-                buf
-            });
-
-            let stdout = child.stdout.take().expect("stdout đã piped");
-            {
-                use std::io::{BufRead, BufReader};
-                let seg_base_ms = done_ms;
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if let Some(v) = line.strip_prefix("out_time_us=") {
-                        if let Ok(us) = v.trim().parse::<i64>() {
-                            let cur_ms = (us / 1000).clamp(0, seg_play_ms);
-                            on_progress(((seg_base_ms + cur_ms) as f64 / total_ms as f64).min(1.0));
-                        }
-                    }
-                }
-            }
-
-            let status = child
-                .wait()
-                .map_err(|e| format!("ffmpeg lỗi khi chờ tiến trình: {e}"))?;
-            let stderr = stderr_thread.join().unwrap_or_default();
-            if !status.success() {
-                return Err(format!("ffmpeg cắt đoạn {i} thất bại: {status} — {stderr}"));
-            }
+            let seg_base_ms = done_ms;
+            run_ffmpeg_with_progress(&mut cmd, &ffmpeg, &format!("ffmpeg cắt đoạn {i} thất bại"), |out_ms| {
+                let cur_ms = out_ms.clamp(0, seg_play_ms);
+                let frac = ((seg_base_ms + cur_ms) as f64 / total_ms as f64).min(1.0);
+                on_progress(frac * seg_end);
+            })?;
             done_ms += seg_play_ms;
-            on_progress((done_ms as f64 / total_ms as f64).min(1.0));
+            on_progress((done_ms as f64 / total_ms as f64).min(1.0) * seg_end);
             seg_paths.push(seg_path);
         }
 
@@ -1033,24 +1049,13 @@ pub fn trim(
             cmd.args(["-map", "0:a?", "-c:a", "copy"]);
         }
         cmd.args(["-movflags", "+faststart"])
-            .arg(&concat_target)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        let output = cmd
-            .output()
-            .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("ffmpeg ghép các đoạn thất bại: {} — {stderr}", output.status));
-        }
+            .args(["-progress", "pipe:1"])
+            .arg(&concat_target);
+        run_ffmpeg_with_progress(&mut cmd, &ffmpeg, "ffmpeg ghép các đoạn thất bại", |out_ms| {
+            let frac = (out_ms.max(0) as f64 / total_ms as f64).min(1.0);
+            on_progress(seg_end + frac * (concat_end - seg_end));
+        })?;
+        on_progress(concat_end);
 
         // Nếu có overlay trên nhiều đoạn ghép, áp dụng filter graph từ concat_target
         if let Some(fg) = filter_graph {
@@ -1074,24 +1079,12 @@ pub fn trim(
             filter_cmd.args(best_h264_encoder_args(&ffmpeg));
             filter_cmd
                 .args(["-movflags", "+faststart"])
-                .arg(output_path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
-
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                filter_cmd.creation_flags(CREATE_NO_WINDOW);
-            }
-
-            let filter_out = filter_cmd
-                .output()
-                .map_err(|e| format!("Không khởi chạy ffmpeg áp dụng hiệu ứng ({}): {e}", ffmpeg.display()))?;
-            if !filter_out.status.success() {
-                let stderr = String::from_utf8_lossy(&filter_out.stderr);
-                return Err(format!("ffmpeg áp dụng khung/che mờ thất bại: {} — {stderr}", filter_out.status));
-            }
+                .args(["-progress", "pipe:1"])
+                .arg(output_path);
+            run_ffmpeg_with_progress(&mut filter_cmd, &ffmpeg, "ffmpeg áp dụng khung/che mờ thất bại", |out_ms| {
+                let frac = (out_ms.max(0) as f64 / total_ms as f64).min(1.0);
+                on_progress(concat_end + frac * (1.0 - concat_end));
+            })?;
         }
 
         on_progress(1.0);
@@ -1351,6 +1344,56 @@ mod tests {
         assert_eq!(build_atempo_filter(0.5), "atempo=0.5");
         assert_eq!(build_atempo_filter(0.25), "atempo=0.5,atempo=0.5");
         assert_eq!(build_atempo_filter(1.5), "atempo=1.5");
+    }
+
+    #[test]
+    fn zoompan_uses_cropped_size() {
+        let crop = VideoCrop { x: 10, y: 20, width: 801, height: 451 };
+        let zooms = [ZoomSegment {
+            id: "z".into(),
+            start_time_ms: 0.0,
+            end_time_ms: 2000.0,
+            scale: 2.0,
+            focus_x: 0.5,
+            focus_y: 0.5,
+            easing: None,
+        }];
+        let fg = build_overlay_filter_graph(&[], &[], Some(&crop), Some(&zooms), Some((1920, 1080)), None)
+            .expect("có filter graph");
+        assert!(fg.contains("crop=800:450:10:20"), "{fg}");
+        assert!(fg.contains("s=800x450"), "{fg}");
+        assert!(!fg.contains("s=1920x1080"), "{fg}");
+    }
+
+    #[test]
+    fn overlay_color_is_sanitized() {
+        assert_eq!(ffmpeg_color(Some("#ef4444")), "0xef4444");
+        assert_eq!(ffmpeg_color(Some("#EF444480")), "0xEF444480");
+        assert_eq!(ffmpeg_color(Some("0x00ff00")), "0x00ff00");
+        assert_eq!(ffmpeg_color(Some("#abc")), "0xaabbcc");
+        assert_eq!(ffmpeg_color(None), DEFAULT_OVERLAY_COLOR);
+        for bad in ["red", "#12345", "#gggggg", "#ff0000:t=fill", "#fff[x];[0:v]", "0xff0000,drawtext", ""] {
+            assert_eq!(ffmpeg_color(Some(bad)), DEFAULT_OVERLAY_COLOR, "{bad}");
+        }
+
+        // Màu độc hại không lọt vào filter graph.
+        let ov: VideoOverlay = serde_json::from_value(serde_json::json!({
+            "id": "r", "type": "rect", "relX": 0.1, "relY": 0.1, "relW": 0.2, "relH": 0.2,
+            "startTimeMs": 0.0, "endTimeMs": 1000.0,
+            "strokeColor": "red:t=fill[evil];[0:v]drawtext=text=x",
+        }))
+        .unwrap();
+        let fg = build_overlay_filter_graph(&[ov], &[], None, None, None, None).expect("có filter graph");
+        assert!(fg.contains(&format!("color={DEFAULT_OVERLAY_COLOR}:")), "{fg}");
+        assert!(!fg.contains("evil") && !fg.contains("drawtext"), "{fg}");
+    }
+
+    #[test]
+    fn parses_progress_lines() {
+        assert_eq!(parse_progress_out_us("out_time_us=1500000"), Some(1_500_000));
+        assert_eq!(parse_progress_out_us("out_time_ms=2000000"), Some(2_000_000));
+        assert_eq!(parse_progress_out_us("out_time_us=N/A"), None);
+        assert_eq!(parse_progress_out_us("out_time=00:00:01.5"), None);
     }
 }
 

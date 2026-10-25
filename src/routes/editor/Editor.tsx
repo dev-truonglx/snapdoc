@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -52,6 +52,11 @@ const EMPTY_TRIM_STATE = {
   overlays: [] as VideoOverlayItem[],
   zoomSegments: [] as ZoomSegment[],
   crop: null as VideoCrop | null,
+  // Rasterize overlay text/arrow lúc lưu (VideoTrimmer cung cấp); mặc định giữ nguyên.
+  prepareOverlays: ((o: VideoOverlayItem[]) => o) as (
+    overlays: VideoOverlayItem[],
+    crop: VideoCrop | null,
+  ) => VideoOverlayItem[],
 };
 
 /** "Dấu vân tay" của trạng thái cắt video — dùng để so với lần lưu gần nhất.
@@ -62,7 +67,14 @@ const EMPTY_TRIM_STATE = {
  * việc vừa export xong. (Sau "Lưu đè" thì đã đúng sẵn vì `doSaveVideo` reset
  * `videoTrimState` và bump `videoVersion` để remount trimmer.) */
 const trimSig = (s: typeof EMPTY_TRIM_STATE) =>
-  JSON.stringify([s.keepRanges, s.removeAudio, s.overlays, s.zoomSegments, s.crop]);
+  JSON.stringify([
+    s.keepRanges,
+    s.removeAudio,
+    // Bỏ `imageData` (PNG base64 lớn) — chỉ là dữ liệu dẫn xuất lúc xuất video.
+    s.overlays.map(({ imageData: _, ...rest }) => rest),
+    s.zoomSegments,
+    s.crop,
+  ]);
 
 export default function Editor() {
   const { t } = useTranslation();
@@ -241,8 +253,10 @@ export default function Editor() {
   };
 
   // Video dirty = có thay đổi VÀ thay đổi đó khác lần lưu gần nhất.
+  // Memo: chỉ stringify lại khi trạng thái cắt đổi, không phải mỗi render.
+  const videoTrimSig = useMemo(() => trimSig(videoTrimState), [videoTrimState]);
   const videoDirty =
-    !!videoDoc && videoTrimState.hasChanges && trimSig(videoTrimState) !== videoSavedSig;
+    !!videoDoc && videoTrimState.hasChanges && videoTrimSig !== videoSavedSig;
   useEffect(() => {
     useEditor.getState().setVideoDirty(videoDirty);
   }, [videoDirty]);
@@ -267,22 +281,38 @@ export default function Editor() {
   // Debounce 1.5s — đủ thưa để không gọi liên tục khi đang kéo vẽ,
   // đủ dày để thumbnail cập nhật nhanh sau khi dừng tay.
   const thumbTimerRef = useRef<number | null>(null);
+  // Bộ annotation mà thumbnail hiện tại đang phản ánh (theo historyId). Vừa
+  // load/chuyển doc thì thumbnail trên đĩa đã khớp → không render lại.
+  const thumbBaseRef = useRef<{ historyId: string | null | undefined; anns: unknown }>({
+    historyId: undefined,
+    anns: undefined,
+  });
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
     if (thumbTimerRef.current !== null) window.clearTimeout(thumbTimerRef.current);
+    const base = thumbBaseRef.current;
+    if (base.historyId !== docHistoryId) {
+      thumbBaseRef.current = { historyId: docHistoryId, anns: docAnnotations };
+      return;
+    }
+    if (base.anns === docAnnotations) return;
     thumbTimerRef.current = window.setTimeout(() => {
       thumbTimerRef.current = null;
       const historyId = useEditor.getState().doc?.historyId;
       if (!historyId) return;
-      const preview = stageRef.current?.exportPng();
+      // exportThumbPng (không phải exportPng): exportPng sẽ áp dụng và xoá vùng
+      // crop người dùng đang chọn dở. Render nhỏ (~2×320px) thay vì 1:1 để
+      // không gửi base64 nhiều MB qua IPC rồi Rust lại thu nhỏ.
+      const preview = stageRef.current?.exportThumbPng(320);
       if (!preview) return;
+      thumbBaseRef.current = { historyId, anns: useEditor.getState().doc?.annotations };
       ipc.updateHistoryThumb(historyId, preview).catch(() => {});
     }, 1500);
     return () => {
       if (thumbTimerRef.current !== null) window.clearTimeout(thumbTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docAnnotations]);
+  }, [docAnnotations, docHistoryId]);
 
   const flash = (msg: string) => {
     setToast(msg);
@@ -574,7 +604,7 @@ export default function Editor() {
         videoDoc.historyId,
         videoTrimState.keepRanges,
         videoTrimState.removeAudio,
-        videoTrimState.overlays,
+        videoTrimState.prepareOverlays(videoTrimState.overlays, videoTrimState.crop),
         videoTrimState.zoomSegments,
         videoTrimState.crop,
       );
@@ -632,7 +662,7 @@ export default function Editor() {
         videoTrimState.keepRanges,
         videoTrimState.removeAudio,
         outputPath,
-        videoTrimState.overlays,
+        videoTrimState.prepareOverlays(videoTrimState.overlays, videoTrimState.crop),
         videoTrimState.zoomSegments,
         videoTrimState.crop,
       );
@@ -643,7 +673,7 @@ export default function Editor() {
       // Bản gốc KHÔNG đổi (chỉ thêm 1 record mới) nên `videoTrimState` giữ
       // nguyên — chốt signature lại để trạng thái cắt hiện tại được coi là
       // "đã lưu", tránh nhắc user về đúng việc vừa export xong.
-      setVideoSavedSig(trimSig(videoTrimState));
+      setVideoSavedSig(videoTrimSig);
       flash(t("editorMain.videoSavedNew"));
     } catch (e) {
       flash(String(e));

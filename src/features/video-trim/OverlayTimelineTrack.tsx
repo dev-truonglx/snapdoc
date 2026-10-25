@@ -1,4 +1,5 @@
 import React, { useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { type VideoOverlayItem, MIN_OVERLAY_DURATION_MS, clamp } from "./types";
 
 interface OverlayTimelineTrackProps {
@@ -26,6 +27,7 @@ export default function OverlayTimelineTrack({
   onSeek,
   snapPoints = [],
 }: OverlayTimelineTrackProps) {
+  const { t } = useTranslation();
   const trackRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<{
     id: string;
@@ -151,28 +153,28 @@ export default function OverlayTimelineTrack({
             case "rect":
               return {
                 icon: "🔲",
-                label: "Khung",
+                label: t("videoTrimmer.overlayTrackRect"),
                 color: item.strokeColor || "#ef4444",
                 bg: "rgba(239, 68, 68, 0.35)",
               };
             case "blur":
               return {
                 icon: "░",
-                label: item.isBlackout ? "Hộp đen" : "Che mờ",
+                label: item.isBlackout ? t("videoTrimmer.overlayTrackBlackout") : t("videoTrimmer.overlayTrackBlur"),
                 color: "#a855f7",
                 bg: "rgba(168, 85, 247, 0.35)",
               };
             case "text":
               return {
                 icon: "T",
-                label: item.text ? (item.text.length > 8 ? item.text.slice(0, 8) + "…" : item.text) : "Chữ",
+                label: item.text ? (item.text.length > 8 ? item.text.slice(0, 8) + "…" : item.text) : t("videoTrimmer.overlayTrackText"),
                 color: item.textColor || item.strokeColor || "#3b82f6",
                 bg: "rgba(59, 130, 246, 0.35)",
               };
             case "arrow":
               return {
                 icon: "↗",
-                label: "Mũi tên",
+                label: t("videoTrimmer.overlayTrackArrow"),
                 color: item.strokeColor || "#f59e0b",
                 bg: "rgba(245, 158, 11, 0.35)",
               };

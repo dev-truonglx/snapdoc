@@ -46,6 +46,7 @@ import {
   interpolateCamera,
   calculateCameraTransform,
   calculateSmartFocusPoint,
+  telemetryMsToTimeline,
 } from "./mouseFocusEngine";
 import type { MouseTelemetryFile } from "../../lib/ipc";
 import { getVideoSession, saveVideoSession, dropVideoSession } from "./videoSessions";
@@ -80,9 +81,12 @@ export interface VideoTrimmerProps {
     hasChanges: boolean;
     keepRanges: KeepRange[];
     removeAudio: boolean;
+    /** Overlay thô (chưa có `imageData`) — cha gọi `prepareOverlays` lúc lưu. */
     overlays: VideoOverlayItem[];
     zoomSegments: ZoomSegment[];
     crop: VideoCrop | null;
+    /** Rasterize text/arrow → `imageData` (PNG) cho FFmpeg; chỉ gọi khi lưu/xuất. */
+    prepareOverlays: (overlays: VideoOverlayItem[], crop: VideoCrop | null) => VideoOverlayItem[];
   }) => void;
   /** "open-editor" (mặc định): sau khi chụp frame, ingest xong rồi mở/focus
    * cửa sổ Editor riêng — dùng khi VideoTrimmer đang chạy trong 1 cửa sổ KHÁC
@@ -1798,8 +1802,9 @@ export default function VideoTrimmer({
       } else {
         const eff = buildEffectiveSegments(st.segments, st.speedRegions, st.globalSpeed);
         const total = totalTimelineMs(eff);
+        // Truyền eff để quy mốc telemetry (source ms) về timeline ms
         const segs = mouseTelemetry
-          ? generateAutoZoomSegments(mouseTelemetry, total)
+          ? generateAutoZoomSegments(mouseTelemetry, total, undefined, eff)
           : [];
         return {
           ...st,
@@ -1825,9 +1830,18 @@ export default function VideoTrimmer({
       let focusY = 0.5;
       let zone: ZoomSegment["zone"] = "center";
       if (mouseTelemetry && mouseTelemetry.events.length > 0) {
-        const nearest = mouseTelemetry.events.reduce((prev, curr) =>
-          Math.abs(curr.t - start) < Math.abs(prev.t - start) ? curr : prev
-        );
+        // curr.t là source ms → quy về timeline ms trước khi so với `start`
+        let nearest: (typeof mouseTelemetry.events)[number] | null = null;
+        let bestDist = Infinity;
+        for (const curr of mouseTelemetry.events) {
+          const tl = telemetryMsToTimeline(eff, curr.t);
+          if (tl === null) continue;
+          const d = Math.abs(tl - start);
+          if (d < bestDist) {
+            bestDist = d;
+            nearest = curr;
+          }
+        }
         if (nearest) {
           const vw = mouseTelemetry.videoWidth > 0 ? mouseTelemetry.videoWidth : 1920;
           const vh = mouseTelemetry.videoHeight > 0 ? mouseTelemetry.videoHeight : 1080;
@@ -1977,23 +1991,28 @@ export default function VideoTrimmer({
   // Báo cho cha biết trạng thái chỉnh sửa — cha (Editor.tsx) dùng để quyết
   // định tham số truyền vào `onSave`/`onSaveAs`; vô hại nếu không ai lắng
   // (`onStateChange` optional).
-  useEffect(() => {
-    const preparedOverlays = overlays.map((o) => {
+  // Rasterize text/arrow overlay thành PNG CHỈ khi cha lưu/xuất (không làm lại
+  // mỗi lần kéo/sửa overlay hay đổi zoom/crop). Tham chiếu ổn định.
+  const prepareOverlaysRef = useRef((list: VideoOverlayItem[], crop: VideoCrop | null) =>
+    list.map((o) => {
       if (o.type === "text" || o.type === "arrow") {
-        const vw = editState.crop?.width || videoRef.current?.videoWidth || 1920;
-        const vh = editState.crop?.height || videoRef.current?.videoHeight || 1080;
+        const vw = crop?.width || videoRef.current?.videoWidth || 1920;
+        const vh = crop?.height || videoRef.current?.videoHeight || 1080;
         const dataUrl = renderOverlayToDataUrl(o, vw, vh);
         return dataUrl ? { ...o, imageData: dataUrl } : o;
       }
       return o;
-    });
+    }),
+  );
+  useEffect(() => {
     onStateChange?.({
       hasChanges,
       keepRanges,
       removeAudio,
-      overlays: preparedOverlays,
+      overlays,
       zoomSegments,
       crop: editState.crop,
+      prepareOverlays: prepareOverlaysRef.current,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasChanges, keepRanges, removeAudio, overlays, zoomSegments, editState.crop]);
@@ -2263,7 +2282,7 @@ export default function VideoTrimmer({
                       flexShrink: 0,
                     }}
                     onPointerDown={handleFocusPinDragStart}
-                    title="Bấm & kéo để dời tâm thu phóng theo ý muốn"
+                    title={t("videoTrimmer.zoomFocusPinHint")}
                   >
                     {/* Crosshair lines */}
                     <div
@@ -2360,7 +2379,7 @@ export default function VideoTrimmer({
                             letterSpacing: 0.3,
                           }}
                         >
-                          Tâm Zoom:
+                          {t("videoTrimmer.zoomFocusCenter")}
                         </span>
 
                         {/* Nút chọn mức Zoom Scale */}
@@ -2422,7 +2441,7 @@ export default function VideoTrimmer({
                             gap: 2,
                             transition: "all 0.12s ease",
                           }}
-                          title="Xóa mốc zoom này (Delete / Backspace)"
+                          title={t("videoTrimmer.deleteZoomSegment")}
                           onClick={() => handleDeleteZoomSegment(selectedZoom.id)}
                         >
                           🗑
@@ -2481,7 +2500,7 @@ export default function VideoTrimmer({
             }}
           >
             <span style={overlayTimeText}>{fmtDuration(playheadMs)} / {fmtDuration(total)}</span>
-            <button style={overlayPlayBtn} onClick={togglePlay} title={isPlaying ? "Pause" : "Play"}>
+            <button style={overlayPlayBtn} onClick={togglePlay} title={isPlaying ? t("videoTrimmer.pause") : t("videoTrimmer.play")}>
               {isPlaying ? <PauseIcon size={22} /> : <PlayIcon size={22} />}
             </button>
             <div
@@ -2494,7 +2513,7 @@ export default function VideoTrimmer({
               }}
               onMouseLeave={() => setVolumeHover(false)}
             >
-              <button style={overlayIconBtn} onClick={toggleMute} title={isMuted || volume === 0 ? "Unmute" : "Mute"}>
+              <button style={overlayIconBtn} onClick={toggleMute} title={isMuted || volume === 0 ? t("videoTrimmer.unmute") : t("videoTrimmer.mute")}>
                 {isMuted || volume === 0 ? <SpeakerMutedIcon /> : <SpeakerIcon />}
               </button>
               {/* Popover nổi NGANG HÀNG bên PHẢI icon (cùng chiều cao, không
@@ -2625,7 +2644,7 @@ export default function VideoTrimmer({
         <button
           style={{ ...iconToolBtn, ...(isCropMode || crop ? iconToolBtnActive : null) }}
           onClick={() => setIsCropMode((v) => !v)}
-          title={crop ? t("videoTrimmer.cropActiveTitle", `Đã crop (${crop.width}×${crop.height}) — Bấm để chỉnh sửa (C)`) : t("videoTrimmer.cropVideo", "Cắt khung hình (C)")}
+          title={crop ? t("videoTrimmer.cropActiveTitle", { width: Math.round(crop.width), height: Math.round(crop.height) }) : t("videoTrimmer.cropVideo", "Cắt khung hình (C)")}
         >
           <CropIcon />
         </button>
@@ -2643,15 +2662,15 @@ export default function VideoTrimmer({
             width: "auto",
           }}
           onClick={handleToggleAutoZoom}
-          title={autoZoomEnabled || zoomSegments.length > 0 ? "Tắt Zoom Focus chuột" : "Tự động Zoom Focus theo thao tác chuột"}
+          title={autoZoomEnabled || zoomSegments.length > 0 ? t("videoTrimmer.autoZoomOff") : t("videoTrimmer.autoZoomOn")}
         >
           <ZoomFocusIcon />
-          <span style={{ fontSize: 12, fontWeight: 500 }}>Focus</span>
+          <span style={{ fontSize: 12, fontWeight: 500 }}>{t("videoTrimmer.autoZoomLabel")}</span>
         </button>
         <button
           style={iconToolBtn}
           onClick={() => handleAddZoomAtPlayhead()}
-          title="Thêm vùng Zoom Focus tại thời điểm hiện tại"
+          title={t("videoTrimmer.addZoomAtPlayhead")}
         >
           <PlusZoomIcon />
         </button>

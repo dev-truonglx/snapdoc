@@ -333,6 +333,8 @@ export const ipc = {
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (value: Settings) => invoke<void>("set_settings", { value }),
   checkPermission: () => invoke<boolean>("check_screen_permission"),
+  /** Mở prompt cấp quyền Screen Recording (macOS; OS khác luôn true). */
+  requestScreenPermission: () => invoke<boolean>("request_screen_permission"),
   checkAccessibilityPermission: () => invoke<boolean>("check_accessibility_permission"),
   requestAccessibilityPermission: () => invoke<boolean>("request_accessibility_permission"),
   reloadShortcuts: () => invoke<void>("reload_shortcuts"),

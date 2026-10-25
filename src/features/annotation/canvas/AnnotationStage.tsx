@@ -12,16 +12,18 @@ import type Konva from "konva";
 import { useTranslation } from "react-i18next";
 import { useEditor } from "../store";
 import type { Annotation, TextAnn } from "../model";
-import { uid } from "../model";
+import { annotationBounds, translateAnnotation, uid } from "../model";
 import { copyToClipboard } from "../../output/useOutput";
 import { toSafeBlobUrl } from "../../../lib/blobUtils";
-import { getCachedImage, setCachedImage } from "./imageCache";
+import { getCachedImage, setCachedImage, imageAnnCache } from "./imageCache";
 
 export interface StageHandle {
   exportPng: () => string | null;
   exportCropPng: () => string | null;
   hasActiveCrop: () => boolean;
   flattenPng: () => string | null;
+  /** Render nhỏ cho thumbnail lịch sử: cạnh dài ≈ 2×`maxEdge` (không vượt 1:1). */
+  exportThumbPng: (maxEdge: number) => string | null;
   zoomIn: () => void;
   zoomOut: () => void;
   zoomFit: () => void;
@@ -796,12 +798,17 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
    * Xuất ảnh PNG chất lượng gốc 1:1 (Master Resolution).
    * - Nếu không có annotation: vẽ trực tiếp từ `HTMLImageElement` gốc lên canvas 1:1 (chuẩn tuyệt đối 100%, không qua resample).
    * - Nếu có annotation: tạm thời đặt Stage và Layer về đúng kích thước pixel gốc (1:1), vẽ vector sắc nét, lấy snapshot rồi hoàn trả kích thước xem.
+   * - `thumbPixelRatio` (chỉ dùng cho thumbnail): render thu nhỏ theo tỉ lệ này và giữ nguyên Transformer đang chọn.
    */
-  const renderMasterPng = (cropArea?: { x: number; y: number; width: number; height: number } | null): string | null => {
+  const renderMasterPng = (
+    cropArea?: { x: number; y: number; width: number; height: number } | null,
+    thumbPixelRatio?: number,
+  ): string | null => {
     if (!doc || !img) return null;
 
     const imgW = doc.imgW;
     const imgH = doc.imgH;
+    const pr = thumbPixelRatio ?? 1;
 
     // 1. Trường hợp không có annotation nào và không có background: xuất trực tiếp từ ảnh gốc img
     if (doc.annotations.length === 0 && !bgConfig) {
@@ -813,26 +820,26 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         if (rw <= 0 || rh <= 0) return null;
 
         const canvas = document.createElement("canvas");
-        canvas.width = Math.round(rw);
-        canvas.height = Math.round(rh);
+        canvas.width = Math.max(1, Math.round(rw * pr));
+        canvas.height = Math.max(1, Math.round(rh * pr));
         const ctx = canvas.getContext("2d");
         if (!ctx) return null;
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "high";
-        ctx.drawImage(img, rx, ry, rw, rh, 0, 0, rw, rh);
+        ctx.drawImage(img, rx, ry, rw, rh, 0, 0, canvas.width, canvas.height);
         return canvas.toDataURL("image/png");
       } else {
-        if (doc.image.startsWith("data:")) {
+        if (pr >= 1 && doc.image.startsWith("data:")) {
           return doc.image;
         }
         const canvas = document.createElement("canvas");
-        canvas.width = imgW;
-        canvas.height = imgH;
+        canvas.width = Math.max(1, Math.round(imgW * pr));
+        canvas.height = Math.max(1, Math.round(imgH * pr));
         const ctx = canvas.getContext("2d");
         if (!ctx) return null;
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "high";
-        ctx.drawImage(img, 0, 0, imgW, imgH);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         return canvas.toDataURL("image/png");
       }
     }
@@ -848,7 +855,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const prevScaleX = layer.scaleX();
     const prevScaleY = layer.scaleY();
 
-    // Ẩn Transformer và khung chọn crop
+    // Ẩn Transformer và khung chọn crop (thumbnail: nhớ để gắn lại sau)
+    const prevTrNodes = thumbPixelRatio !== undefined ? trRef.current?.nodes() ?? [] : [];
     trRef.current?.nodes([]);
     cropOverlayGroupRef.current?.hide();
 
@@ -869,12 +877,12 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         y: ry,
         width: rw,
         height: rh,
-        pixelRatio: 1,
+        pixelRatio: pr,
         mimeType: "image/png",
       });
     } else {
       dataUrl = stage.toDataURL({
-        pixelRatio: 1,
+        pixelRatio: pr,
         mimeType: "image/png",
       });
     }
@@ -884,6 +892,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     stage.height(prevStageH);
     layer.scale({ x: prevScaleX, y: prevScaleY });
     cropOverlayGroupRef.current?.show();
+    if (prevTrNodes.length > 0) trRef.current?.nodes(prevTrNodes);
     layer.batchDraw();
 
     return dataUrl;
@@ -924,6 +933,12 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     flattenPng: () => {
       if (!doc) return null;
       return renderMasterPng(null);
+    },
+    exportThumbPng: (maxEdge: number) => {
+      if (!doc) return null;
+      // 2× cạnh đích cho nét, không bao giờ vượt 1:1
+      const longest = Math.max(totalW, totalH, 1);
+      return renderMasterPng(null, Math.min(1, (maxEdge * 2) / longest));
     },
     zoomIn:  doZoomIn,
     zoomOut: doZoomOut,
@@ -1225,45 +1240,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
 
       const hitIds = d.annotations
         .filter((a) => {
-          let ax1 = a.x;
-          let ay1 = a.y;
-          let ax2 = a.x;
-          let ay2 = a.y;
-
-          if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect" || a.type === "image") {
-            ax2 = a.x + a.width;
-            ay2 = a.y + a.height;
-          } else if (a.type === "ellipse") {
-            ax2 = a.x + a.width;
-            ay2 = a.y + a.height;
-          } else if (a.type === "arrow" || a.type === "double-arrow" || a.type === "line" || a.type === "numbered-arrow") {
-            ax1 = Math.min(a.x, a.x2);
-            ay1 = Math.min(a.y, a.y2);
-            ax2 = Math.max(a.x, a.x2);
-            ay2 = Math.max(a.y, a.y2);
-          } else if (a.type === "step") {
-            ax1 = a.x - a.radius;
-            ay1 = a.y - a.radius;
-            ax2 = a.x + a.radius;
-            ay2 = a.y + a.radius;
-          } else if (a.type === "text") {
-            const padX = a.bgColor ? Math.max(8, Math.round((a.fontSize || 22) * 0.35)) : 0;
-            const padY = a.bgColor ? Math.max(6, Math.round((a.fontSize || 22) * 0.25)) : 0;
-            const lines = (a.text || "").split("\n");
-            const maxLineLen = Math.max(...lines.map((l) => l.length), 1);
-            const estW = a.width || Math.max(40, maxLineLen * (a.fontSize || 22) * 0.62);
-            const estH = Math.max((a.fontSize || 22) * 1.35, lines.length * (a.fontSize || 22) * 1.35);
-            ax2 = a.x + estW + padX * 2;
-            ay2 = a.y + estH + padY * 2;
-            if (a.hasTargetArrow && a.targetX !== undefined && a.targetY !== undefined) {
-              ax1 = Math.min(ax1, a.targetX);
-              ay1 = Math.min(ay1, a.targetY);
-              ax2 = Math.max(ax2, a.targetX);
-              ay2 = Math.max(ay2, a.targetY);
-            }
-          }
-
-          return !(ax2 < x1 || ax1 > x2 || ay2 < y1 || ay1 > y2);
+          const b = annotationBounds(a);
+          return !(b.x2 < x1 || b.x1 > x2 || b.y2 < y1 || b.y1 > y2);
         })
         .map((a) => a.id);
 
@@ -1427,9 +1405,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const ctx = canvas.getContext("2d")!;
     ctx.drawImage(img, x, y, width, height, 0, 0, width, height);
     const newImage = canvas.toDataURL("image/png");
+    // Giữ annotation còn chạm vào vùng crop (theo khung bao, không chỉ điểm đầu).
     const annotations = doc.annotations
-      .map((a) => ({ ...a, x: a.x - x, y: a.y - y }))
-      .filter((a) => a.x > -50 && a.y > -50 && a.x < width + 50 && a.y < height + 50);
+      .map((a) => translateAnnotation(a, -x, -y))
+      .filter((a) => {
+        const b = annotationBounds(a);
+        return b.x2 > 0 && b.y2 > 0 && b.x1 < width && b.y1 < height;
+      });
     useEditor.getState().applyCrop(newImage, Math.round(width), Math.round(height), annotations);
     setCropRect(null);
     setCropHistory([]); // Reset crop history
@@ -3253,7 +3235,8 @@ interface ImageItemProps {
   onTransformEnd: (node: Konva.Node) => void;
 }
 
-export const imageAnnCache = new Map<string, HTMLImageElement>();
+// LRU giới hạn (xem imageCache.ts) — re-export cho Editor.
+export { imageAnnCache };
 
 function ImageItem({ ann, draggable, isSelected, activeIds, onSelect, onDragEnd, onTransformEnd }: ImageItemProps) {
   const [loadedImg, setLoadedImg] = useState<HTMLImageElement | null>(() => imageAnnCache.get(ann.src) ?? null);

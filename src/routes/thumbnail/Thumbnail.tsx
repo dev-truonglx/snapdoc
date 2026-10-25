@@ -8,32 +8,66 @@ export default function Thumbnail() {
   const { t } = useTranslation();
   const [src, setSrc] = useState("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // `src` hiện tại (để revoke blob: URL cũ) + số thứ tự lần nạp (bỏ kết quả
+  // peekPending đã cũ khi có capture mới hơn).
+  const srcRef = useRef("");
+  const seqRef = useRef(0);
 
-  const dismiss = () => {
+  const revokeIfBlob = (url: string) => {
+    if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+  };
+
+  const replaceSrc = (next: string) => {
+    const prev = srcRef.current;
+    if (prev === next) return;
+    revokeIfBlob(prev);
+    srcRef.current = next;
+    setSrc(next);
+  };
+
+  // Ẩn cửa sổ + giải phóng ảnh (blob: URL) — lần show sau luôn nạp ảnh mới.
+  const hideAndRelease = () => {
     if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
+    seqRef.current++;
+    replaceSrc("");
     ipc.hideThumbnail();
   };
 
+  const dismiss = hideAndRelease;
+
   const startAutoClose = () => {
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => ipc.hideThumbnail(), 6000);
+    timerRef.current = setTimeout(hideAndRelease, 6000);
+  };
+
+  // Đang copy/lưu (dialog có thể mở lâu) → không để auto-close revoke ảnh giữa chừng.
+  const stopAutoClose = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
   };
 
   useEffect(() => {
-    const loadThumbnail = async () => {
+    /** `onlyIfEmpty`: nhánh fallback lúc mount — không đè ảnh event đã nạp. */
+    const loadThumbnail = async (onlyIfEmpty: boolean) => {
+      const seq = ++seqRef.current;
       const p = await ipc.peekPending();
-      if (p?.imageUrl) {
-        setSrc((prev) => prev || p.imageUrl!);
-      } else if (p?.base64) {
-        setSrc((prev) => prev || `data:image/png;base64,${p.base64}`);
+      const next = p?.imageUrl || (p?.base64 ? `data:image/png;base64,${p.base64}` : "");
+      if (!next) return;
+      if (seq !== seqRef.current || (onlyIfEmpty && srcRef.current)) {
+        revokeIfBlob(next);
+        return;
       }
+      replaceSrc(next);
     };
 
     const unlisten = listen<string>("show-thumbnail", (e) => {
+      // Capture mới → luôn thay ảnh cũ.
       if (e.payload) {
-        setSrc(`data:image/png;base64,${e.payload}`);
+        seqRef.current++;
+        replaceSrc(`data:image/png;base64,${e.payload}`);
       } else {
-        loadThumbnail();
+        loadThumbnail(false);
       }
       startAutoClose();
     });
@@ -41,7 +75,7 @@ export default function Thumbnail() {
     // Fallback: window vừa được show nhưng event "show-thumbnail" có thể đến
     // trước listener mount (race condition). Dùng peekPending để lấy ảnh nếu src chưa có.
     const fallbackTimer = setTimeout(() => {
-      loadThumbnail();
+      if (!srcRef.current) loadThumbnail(true);
     }, 100);
 
     startAutoClose();
@@ -50,19 +84,26 @@ export default function Thumbnail() {
       if (timerRef.current) clearTimeout(timerRef.current);
       clearTimeout(fallbackTimer);
       unlisten.then((fn) => fn());
+      seqRef.current++;
+      revokeIfBlob(srcRef.current);
+      srcRef.current = "";
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const edit = async () => {
+    stopAutoClose();
     await ipc.openEditor();
     dismiss();
   };
   const copy = async () => {
-    if (src) await copyToClipboard(src);
+    stopAutoClose();
+    if (src) await copyToClipboard(src).catch((e) => console.error("Thumbnail copy failed:", e));
     dismiss();
   };
   const saveFile = async () => {
-    if (src) await saveToFile(src);
+    stopAutoClose();
+    if (src) await saveToFile(src).catch((e) => console.error("Thumbnail save failed:", e));
     dismiss();
   };
 

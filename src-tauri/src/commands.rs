@@ -255,22 +255,32 @@ pub async fn capture_all_screens(app: AppHandle, output: String) -> Result<(), S
     .map_err(|e| format!("Task join error: {e}"))?
 }
 
+/// async + spawn_blocking: decode base64 + PNG + set clipboard tốn 100-500ms
+/// với ảnh 4K — command sync sẽ chạy trên main thread và khựng UI.
 #[tauri::command]
-pub fn copy_image(data: String) -> Result<(), String> {
-    clipboard::copy_png(&data)
+pub async fn copy_image(data: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || clipboard::copy_png(&data))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[tauri::command]
-pub fn save_image(path: String, data: String) -> Result<String, String> {
+pub async fn save_image(path: String, data: String) -> Result<String, String> {
     // `path` đến từ dialog Save/Save As gốc OS — dialog đã tự hỏi "Replace
     // existing file?" nên ghi đúng path, không dedupe (xem `write_png_exact`).
-    storage::save::write_png_exact(&path, &data)
+    tauri::async_runtime::spawn_blocking(move || storage::save::write_png_exact(&path, &data))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[tauri::command]
-pub fn save_and_copy(path: String, data: String) -> Result<String, String> {
-    clipboard::copy_png(&data)?;
-    storage::save::write_png_exact(&path, &data)
+pub async fn save_and_copy(path: String, data: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        clipboard::copy_png(&data)?;
+        storage::save::write_png_exact(&path, &data)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// async + spawn_blocking: có thể phải `build()` lại webview — làm việc đó
@@ -467,28 +477,29 @@ pub async fn save_snapdoc_file(
     tauri::async_runtime::spawn_blocking(move || {
         let p = std::path::Path::new(&path);
         let preview_bytes = crate::history::decode_image_data(&preview)?;
-        let (base_bytes, created_at) = match &base {
-            Some(d) => (
-                crate::history::decode_image_data(d)?,
-                crate::snapdoc_file::read_snapdoc(p).map(|f| f.created_at).unwrap_or(0),
-            ),
-            None => {
-                let f = crate::snapdoc_file::read_snapdoc(p)?;
-                (f.base_png, f.created_at)
-            }
-        };
-        crate::snapdoc_file::write_snapdoc(
-            p,
-            crate::snapdoc_file::WriteSnapdoc {
-                base_png: &base_bytes,
-                doc_json: &doc_json,
-                // Save = chốt bản nháp thành bản chính.
-                draft_json: None,
-                preview_png: &preview_bytes,
-                created_at,
-                updated_at: crate::history::now_ms_pub(),
-            },
-        )
+        let new_base = base.as_deref().map(crate::history::decode_image_data).transpose()?;
+        // Khoá file suốt đọc-sửa-ghi (xem `snapdoc_file::with_path_lock`).
+        crate::snapdoc_file::with_path_lock(p, || {
+            let (base_bytes, created_at) = match new_base {
+                Some(b) => (b, crate::snapdoc_file::read_snapdoc(p).map(|f| f.created_at).unwrap_or(0)),
+                None => {
+                    let f = crate::snapdoc_file::read_snapdoc(p)?;
+                    (f.base_png, f.created_at)
+                }
+            };
+            crate::snapdoc_file::write_snapdoc(
+                p,
+                crate::snapdoc_file::WriteSnapdoc {
+                    base_png: &base_bytes,
+                    doc_json: &doc_json,
+                    // Save = chốt bản nháp thành bản chính.
+                    draft_json: None,
+                    preview_png: &preview_bytes,
+                    created_at,
+                    updated_at: crate::history::now_ms_pub(),
+                },
+            )
+        })
     })
     .await
     .map_err(|e| format!("Task join error: {e}"))?
@@ -1095,9 +1106,10 @@ pub async fn get_frozen_screen(app: AppHandle, idx: usize) -> Result<tauri::ipc:
                 .map_err(|e| e.to_string())?
                 .0;
         }
-        g.get(&idx)
-            .cloned()
-            .map(tauri::ipc::Response::new)
+        // Clone Arc dưới lock (O(1)), copy bytes SAU khi nhả lock.
+        let jpeg = g.get(&idx).map(|f| f.jpeg.clone());
+        drop(g);
+        jpeg.map(|b| tauri::ipc::Response::new(b.as_ref().clone()))
             .ok_or_else(|| "No frozen screen available".to_string())
     })
     .await
@@ -1145,16 +1157,30 @@ pub async fn export_video_gif(
     tauri::async_runtime::spawn_blocking(move || {
         let in_p = std::path::PathBuf::from(&input_path);
         let out_p = std::path::PathBuf::from(&output_path);
+        // ffmpeg chọn muxer theo đuôi file (không truyền `-f`) nên đuôi khác
+        // `.gif` vốn đã không chạy được — chặn hẳn để `-y` không ghi đè được
+        // file tuỳ ý do webview truyền vào.
+        let is_gif = out_p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("gif"))
+            .unwrap_or(false);
+        if !is_gif {
+            return Err("File xuất GIF phải có đuôi .gif".to_string());
+        }
         if let Some(parent) = out_p.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Không tạo được thư mục lưu: {e}"))?;
-            crate::record::allow_asset_scope(&app_for_blocking, parent);
         }
 
         let progress_app = app_for_blocking.clone();
         crate::record::encoder::export_gif(&in_p, &out_p, &options, move |frac| {
             let _ = progress_app.emit("gif-export-progress", frac);
         })?;
+
+        // Chỉ cấp asset scope cho ĐÚNG file vừa xuất, SAU khi thành công
+        // (webview `fetch(convertFileSrc(...))` để copy clipboard).
+        crate::record::allow_asset_file(&app_for_blocking, &out_p);
 
         Ok(out_p.to_string_lossy().to_string())
     })
@@ -1216,16 +1242,9 @@ pub fn open_video_file_path_sync(app: &AppHandle, path: String) -> Result<(), St
     // Remux sang MP4 nếu là định dạng container không tương thích HTML5 Webview (.mkv, .avi)
     let effective_path = crate::record::probe::remux_to_mp4_if_needed(app, file_path)?;
 
-    // Cấp asset scope cho thư mục chứa video
-    if let Some(parent) = effective_path.parent() {
-        eprintln!("[SnapDoc] Adding asset scope for: {}", parent.display());
-        crate::record::allow_asset_scope(app, parent);
-    }
-    if file_path != effective_path {
-        if let Some(parent) = file_path.parent() {
-            crate::record::allow_asset_scope(app, parent);
-        }
-    }
+    // Cấp asset scope cho ĐÚNG file webview sẽ phát (bản remux nếu có) —
+    // không mở cả thư mục chứa video.
+    crate::record::allow_asset_file(app, &effective_path);
 
     let effective_str = effective_path.to_string_lossy().to_string();
 
@@ -1261,6 +1280,9 @@ pub fn open_video_file_path_sync(app: &AppHandle, path: String) -> Result<(), St
             )?
         }
     };
+    if record.asset_path != effective_str {
+        crate::record::allow_asset_file(app, std::path::Path::new(&record.asset_path));
+    }
 
     let pv = PendingVideo {
         path: record.asset_path.clone(),
