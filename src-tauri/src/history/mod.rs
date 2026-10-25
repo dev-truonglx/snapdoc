@@ -407,7 +407,7 @@ pub fn ingest_quick(
         }
         _ => {}
     }
-    crate::telemetry::capture_done(app, "image");
+    crate::telemetry::capture_done(app, "image", "quick");
 
     // Có ảnh nền riêng → ingest nền sạch, lưu doc_json + preview (đã ghép)
     // vào container để user mở lại sửa annotation được.

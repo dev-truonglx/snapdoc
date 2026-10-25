@@ -68,7 +68,7 @@ pub fn set_pending_image(
         width,
         height,
     };
-    crate::telemetry::capture_done(&app, "image");
+    crate::telemetry::capture_done(&app, "image", "quick");
     let history_id = match crate::history::ingest(&app, &cap, "quick", scale) {
         Ok(rec) => Some(rec.id),
         Err(e) => {

@@ -37,22 +37,25 @@ fn device_id(app: &AppHandle) -> String {
     id
 }
 
-fn track(app: &AppHandle, name: &str, extra: Option<(&str, &str)>) {
+fn track(app: &AppHandle, name: &str, extra: &[(&str, &str)]) {
     if app_key().is_none() {
         return;
     }
     let mut props = json!({ "device": device_id(app) });
-    if let Some((k, v)) = extra {
-        props[k] = json!(v);
+    for (k, v) in extra {
+        props[*k] = json!(v);
     }
     let _ = app.track_event(name, Some(props));
 }
 
 pub fn app_started(app: &AppHandle) {
-    track(app, "app_started", None);
+    track(app, "app_started", &[]);
 }
 
 /// `kind`: "image" | "video".
-pub fn capture_done(app: &AppHandle, kind: &str) {
-    track(app, "capture_done", Some(("kind", kind)));
+/// `mode`: tính năng chụp — "region" | "window" | "full" | "scroll" | "all"
+/// (tất cả màn hình) | "quick" (chụp nhanh); rỗng → "unknown".
+pub fn capture_done(app: &AppHandle, kind: &str, mode: &str) {
+    let mode = if mode.is_empty() { "unknown" } else { mode };
+    track(app, "capture_done", &[("kind", kind), ("mode", mode)]);
 }

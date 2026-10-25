@@ -634,7 +634,7 @@ pub fn finish(
         }
     };
 
-    crate::telemetry::capture_done(app, "image");
+    crate::telemetry::capture_done(app, "image", &mode);
 
     match output {
         "clipboard" => {
