@@ -11,6 +11,7 @@ mod record;
 mod snapdoc_file;
 mod state;
 mod storage;
+mod telemetry;
 mod tray;
 mod update;
 mod windows;
@@ -64,7 +65,11 @@ pub fn run() {
     #[cfg(debug_assertions)]
     redirect_stdio_to_dev_log();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    if let Some(p) = telemetry::plugin() {
+        builder = builder.plugin(p);
+    }
+    builder
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             eprintln!("[SnapDoc] Single instance launched with argv: {:?}", argv);
             let open_with_path: Option<(String, bool)> = argv.get(1).and_then(|path| {
@@ -232,6 +237,7 @@ pub fn run() {
 
         .setup(|app| {
             let handle = app.handle().clone();
+            telemetry::app_started(&handle);
 
             // Mọi `emit("snapdoc-error", ...)` (Rust lẫn webview) → hộp thoại
             // native. Trước đây CaptureBar `alert()` — không hiện gì trên macOS.

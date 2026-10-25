@@ -10,9 +10,9 @@ import { flushSync } from "react-dom";
 import { Stage, Layer, Rect, Line, Ellipse, Text, Circle, Group, Image as KImage, Transformer, Arrow, Path } from "react-konva";
 import type Konva from "konva";
 import { useTranslation } from "react-i18next";
-import { useEditor } from "../store";
-import type { Annotation, TextAnn } from "../model";
-import { annotationBounds, translateAnnotation, uid } from "../model";
+import { useEditor, EDIT_TOOLS } from "../store";
+import type { Annotation, ArrowAnn, DoubleArrowAnn, LineAnn, NumberedArrowAnn, TextAnn } from "../model";
+import { annotationBounds, translateAnnotation, uid, TEXT_BG_PRESETS } from "../model";
 import { copyToClipboard } from "../../output/useOutput";
 import { toSafeBlobUrl } from "../../../lib/blobUtils";
 import { getCachedImage, setCachedImage, imageAnnCache } from "./imageCache";
@@ -109,6 +109,205 @@ function LineEndpoints({ x1, y1, x2, y2 }: { x1: number; y1: number; x2: number;
     <>
       <Circle x={x1} y={y1} radius={4} fill="#ffffff" stroke="#3b82f6" strokeWidth={1.5} listening={false} />
       <Circle x={x2} y={y2} radius={4} fill="#ffffff" stroke="#3b82f6" strokeWidth={1.5} listening={false} />
+    </>
+  );
+}
+
+const linePts = (a: { x: number; y: number; x2: number; y2: number; cx?: number; cy?: number }): number[] =>
+  a.cx !== undefined && a.cy !== undefined ? [a.x, a.y, a.cx, a.cy, a.x2, a.y2] : [a.x, a.y, a.x2, a.y2];
+
+/** Thanh nhỏ nổi cạnh ô chữ: bật/tắt "mũi chỉ đích" (callout) + chọn hướng — áp dụng ngay
+ * cho chữ đang gõ hoặc đang chọn, không cần mở toolbar. */
+function CalloutBar({ ann }: { ann: TextAnn }) {
+  const { t } = useTranslation();
+  const on = !!ann.hasTargetArrow;
+  const toggle = () => {
+    const st = useEditor.getState();
+    if (on) {
+      st.updateAnnotation(ann.id, { hasTargetArrow: false } as Partial<Annotation>);
+      return;
+    }
+    const fs = ann.fontSize || 22;
+    const lightText = ann.color === "#ef4444" || ann.color === "#111827";
+    st.updateAnnotation(ann.id, {
+      hasTargetArrow: true,
+      bgColor: ann.bgColor || "#3b82f6",
+      ...(lightText ? { color: "#ffffff" } : null),
+      targetX: ann.targetX ?? ann.x - 50,
+      targetY: ann.targetY ?? ann.y + (fs * 1.35) / 2 + 8,
+    } as Partial<Annotation>);
+  };
+  const btn = (active: boolean): React.CSSProperties => ({
+    height: 22,
+    minWidth: 22,
+    padding: "0 5px",
+    border: "none",
+    borderRadius: 5,
+    background: active ? "rgba(59,130,246,0.4)" : "transparent",
+    color: active ? "#93c5fd" : "rgba(242,242,245,0.85)",
+    cursor: "pointer",
+    fontSize: 13,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+  });
+  return (
+    <div
+      // Giữ focus ở ô nhập: mousedown mặc định sẽ làm textarea blur → kết thúc nhập
+      onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 2,
+        padding: "3px 4px",
+        borderRadius: 8,
+        background: "rgba(18,18,22,0.92)",
+        border: "1px solid rgba(255,255,255,0.12)",
+        boxShadow: "0 2px 10px rgba(0,0,0,0.4)",
+        whiteSpace: "nowrap",
+      }}
+    >
+      <button type="button" onClick={toggle} style={btn(on)} title={t("editorToolbar.textTargetArrow")}>
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="2" y="2" width="7" height="6" rx="1.5" />
+          <path d="M9 5h3.5v4" />
+          <path d="M10.5 11l2 2 2-2" />
+        </svg>
+        <span style={{ fontSize: 11 }}>{t("annotationCanvas.calloutLabel", "Mũi chỉ")}</span>
+      </button>
+      <span style={{ width: 1, height: 16, margin: "0 4px", background: "rgba(255,255,255,0.15)" }} />
+      {TEXT_BG_PRESETS.map((p) => {
+        const active = p.color === "" ? !ann.bgColor : ann.bgColor === p.color;
+        return (
+          <button
+            type="button"
+            key={p.id}
+            onClick={() => useEditor.getState().setTextBgColor(p.color)}
+            title={t(`editorToolbar.${p.id === "none" ? "textBgNone" : p.id === "white" ? "textBgWhite" : p.id === "dark" ? "textBgDark" : p.id === "yellow" ? "textBgYellow" : p.id === "blue" ? "textBgBlue" : "textBgRed"}`)}
+            style={{
+              width: 18,
+              height: 18,
+              padding: 0,
+              borderRadius: 4,
+              background: p.color || "transparent",
+              border: active ? "2px solid #3b82f6" : "1px solid rgba(255,255,255,0.3)",
+              boxShadow: active ? "0 0 0 1px #fff" : "none",
+              cursor: "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            {p.id === "none" && (
+              <svg width="12" height="12" viewBox="0 0 14 14" aria-hidden>
+                <line x1="3" y1="11" x2="11" y2="3" stroke="#ef4444" strokeWidth="1.6" />
+              </svg>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Tay nắm 2 đầu của line/arrow đang được chọn: kéo từng đầu để đổi độ dài / hướng
+ * (giống Figma/Excalidraw/Skitch). Giữ Shift để khoá góc theo bước 15°. Kích thước
+ * tay nắm cố định theo màn hình (chia cho `scale`). */
+function LineHandles({ ann, scale, showMid, onCursor }: { ann: ArrowAnn | DoubleArrowAnn | LineAnn | NumberedArrowAnn; scale: number; showMid: boolean; onCursor: (c: string | null) => void }) {
+  const orig = useRef<{ x: number; y: number; x2: number; y2: number; cx?: number; cy?: number } | null>(null);
+  const r = 6 / scale;
+  const move = (end: 1 | 2, e: Konva.KonvaEventObject<DragEvent>) => {
+    let px = e.target.x();
+    let py = e.target.y();
+    if (e.evt.shiftKey) {
+      const ox = end === 1 ? ann.x2 : ann.x;
+      const oy = end === 1 ? ann.y2 : ann.y;
+      const dx = px - ox;
+      const dy = py - oy;
+      const len = Math.hypot(dx, dy);
+      const step = Math.PI / 12;
+      const ang = Math.round(Math.atan2(dy, dx) / step) * step;
+      px = ox + Math.cos(ang) * len;
+      py = oy + Math.sin(ang) * len;
+      e.target.x(px);
+      e.target.y(py);
+    }
+    useEditor.getState().updateAnnotationLive(
+      ann.id,
+      (end === 1 ? { x: px, y: py } : { x2: px, y2: py }) as Partial<Annotation>,
+    );
+  };
+  const start = () => {
+    orig.current = { x: ann.x, y: ann.y, x2: ann.x2, y2: ann.y2, cx: ann.cx, cy: ann.cy };
+  };
+  const end = (which: 1 | 2, e: Konva.KonvaEventObject<DragEvent>) => {
+    const o = orig.current;
+    orig.current = null;
+    const px = e.target.x();
+    const py = e.target.y();
+    if (o) useEditor.getState().updateAnnotationLive(ann.id, o as Partial<Annotation>);
+    useEditor.getState().updateAnnotation(
+      ann.id,
+      (which === 1 ? { x: px, y: py } : { x2: px, y2: py }) as Partial<Annotation>,
+    );
+  };
+  const handle = (which: 1 | 2, x: number, y: number) => (
+    <Circle
+      key={which}
+      x={x}
+      y={y}
+      radius={r}
+      fill="#ffffff"
+      stroke="#3b82f6"
+      strokeWidth={1.5 / scale}
+      hitStrokeWidth={8 / scale}
+      draggable
+      name="handle"
+      onMouseEnter={() => onCursor("move")}
+      onMouseLeave={() => onCursor(null)}
+      onMouseDown={(e) => { e.cancelBubble = true; }}
+      onDragStart={start}
+      onDragMove={(e) => move(which, e)}
+      onDragEnd={(e) => end(which, e)}
+    />
+  );
+  const curved = ann.cx !== undefined && ann.cy !== undefined;
+  const mx = curved ? ann.cx! : (ann.x + ann.x2) / 2;
+  const my = curved ? ann.cy! : (ann.y + ann.y2) / 2;
+  return (
+    <>
+      {handle(1, ann.x, ann.y)}
+      {handle(2, ann.x2, ann.y2)}
+      {showMid && (
+        <Circle
+          x={mx}
+          y={my}
+          radius={r * 0.85}
+          fill="#3b82f6"
+          stroke="#ffffff"
+          strokeWidth={1.5 / scale}
+          hitStrokeWidth={8 / scale}
+          draggable
+          name="handle"
+          onMouseEnter={() => onCursor("grab")}
+          onMouseLeave={() => onCursor(null)}
+          onMouseDown={(e) => { e.cancelBubble = true; }}
+          onDragStart={start}
+          onDragMove={(e) =>
+            useEditor.getState().updateAnnotationLive(ann.id, { cx: e.target.x(), cy: e.target.y() } as Partial<Annotation>)
+          }
+          onDragEnd={(e) => {
+            const o = orig.current;
+            orig.current = null;
+            if (o) useEditor.getState().updateAnnotationLive(ann.id, o as Partial<Annotation>);
+            useEditor.getState().updateAnnotation(ann.id, { cx: e.target.x(), cy: e.target.y() } as Partial<Annotation>);
+          }}
+          onDblClick={() =>
+            useEditor.getState().updateAnnotation(ann.id, { cx: undefined, cy: undefined } as Partial<Annotation>)
+          }
+        />
+      )}
     </>
   );
 }
@@ -321,6 +520,10 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const panRef = useRef<{ x: number; y: number; sl: number; st: number } | null>(null);
 
   const [draft, setDraft] = useState<Draft | null>(null);
+  // Con trỏ khi rê vào tay nắm / hình chỉnh được (ghi đè con trỏ mặc định của tool)
+  // Đang kéo THÂN 1 hình → ẩn tay nắm (chúng đứng yên ở toạ độ cũ nên sẽ lệch/nhảy khi hình dời)
+  const [bodyDragging, setBodyDragging] = useState(false);
+  const [hoverCursor, setHoverCursor] = useState<string | null>(null);
   const [arrowDraft, setArrowDraft] = useState<ArrowDraft | null>(null);
   const [marqueeBox, setMarqueeBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [cropRect, setCropRect] = useState<Draft | null>(null);
@@ -499,7 +702,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const layer = layerRef.current;
     if (!tr || !layer) return;
     const activeIds = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
-    if (activeIds.length === 1 && tool === "select" && editing?.id !== activeIds[0]) {
+    if (activeIds.length === 1 && (tool === "select" || tool === "text" || EDIT_TOOLS.has(tool)) && editing?.id !== activeIds[0]) {
       const node = layer.findOne("#" + activeIds[0]);
       tr.nodes(node ? [node] : []);
     } else {
@@ -1257,6 +1460,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const onStageMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
     // Pan mode (Space giữ) hoặc middle-button → nhường cho pointer handler
     if (isPanModeRef.current || e.evt.button === 1) return;
+    // Bấm vào tay nắm / anchor của Transformer → để chúng tự xử lý, không vẽ/bỏ chọn
+    if (e.target.name() === "handle" || e.target.getParent()?.className === "Transformer") return;
     // Crop: bắt đầu vẽ/resize/move được xử lý riêng qua native mousedown trên
     // containerRef (effect ở trên) + window mousemove/mouseup, để không bị
     // "dính/giật" khi kéo sát mép ảnh — xem effect ngay sau phần pan ở trên.
@@ -1276,6 +1481,22 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         beginMarqueeSelection(x, y, isMulti);
       }
       return;
+    }
+
+    if (EDIT_TOOLS.has(tool)) {
+      // Click trúng hình đã vẽ (đang chỉnh được) → chọn nó, để Konva xử lý kéo/resize
+      let n: Konva.Node | null = e.target;
+      let hit: Annotation | undefined;
+      while (n && n !== (stage as Konva.Node)) {
+        const nid = n.id();
+        if (nid && (hit = doc?.annotations.find((x) => x.id === nid))) break;
+        n = n.parent;
+      }
+      if (hit && dragFor(hit)) {
+        useEditor.getState().select(hit.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey);
+        return;
+      }
+      useEditor.getState().select(null);
     }
 
     if (tool === "rect" || tool === "ellipse" || tool === "highlight" || tool === "blur" || tool === "numbered-rect") {
@@ -1312,10 +1533,22 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       // trình duyệt sẽ giật focus về <canvas> của Konva, làm textarea blur ngay
       // (onBlur → commitText rỗng → annotation bị xoá trước khi gõ được chữ).
       e.evt.preventDefault();
+      // Click trúng chữ đã có → chọn nó (click nhả chuột sẽ mở ô sửa, kéo thì di chuyển)
+      {
+        let n: Konva.Node | null = e.target;
+        while (n && n !== (stage as Konva.Node)) {
+          const nid = n.id();
+          const hit = nid ? doc?.annotations.find((x) => x.id === nid) : undefined;
+          if (hit?.type === "text") {
+            useEditor.getState().select(hit.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey);
+            return;
+          }
+          n = n.parent;
+        }
+        useEditor.getState().select(null);
+      }
       const curBgColor = useEditor.getState().textBgColor;
-      const curHasArrow = useEditor.getState().textHasArrow;
-      const assignedBg = curHasArrow ? (curBgColor || "#3b82f6") : (curBgColor || undefined);
-      const assignedColor = curHasArrow && (color === "#ef4444" || color === "#111827") ? "#ffffff" : color;
+      const assignedBg = curBgColor || undefined;
       const id = uid();
       useEditor.getState().addAnnotation({
         id,
@@ -1324,11 +1557,9 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         y,
         text: "",
         fontSize,
-        color: assignedColor,
+        color,
         strokeWidth,
         bgColor: assignedBg,
-        hasTargetArrow: curHasArrow || false,
-        ...(curHasArrow ? { targetX: x - 50, targetY: y + 15 } : null),
       });
       beginEdit(id, "");
     }
@@ -1341,6 +1572,35 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
 
   const onDragEnd = (id: string, e: Konva.KonvaEventObject<DragEvent>) => {
     useEditor.getState().updateAnnotation(id, { x: e.currentTarget.x(), y: e.currentTarget.y() });
+  };
+
+  // Text: kéo cạnh trái/phải → đổi độ rộng khung; kéo 4 góc → đổi cỡ chữ (giống Figma/Canva).
+  const applyTextTransform = (a: TextAnn, node: Konva.Node, commit: boolean) => {
+    const anchor = trRef.current?.getActiveAnchor() ?? "";
+    const isCorner = /^(top|bottom)-(left|right)$/.test(anchor);
+    // Kéo góc: để Konva tự scale hình ảnh trong lúc kéo (đừng reset scale/ghi store
+    // giữa chừng — Transformer sẽ tính lại khung và hình nhảy loạn); chốt ở TransformEnd.
+    if (isCorner && !commit) return;
+    const sx = node.scaleX();
+    const sy = node.scaleY();
+    node.scaleX(1);
+    node.scaleY(1);
+    const st = useEditor.getState();
+    if (isCorner) {
+      const k = Math.max(sx, sy);
+      const patch: Partial<TextAnn> = {
+        x: node.x(),
+        y: node.y(),
+        fontSize: Math.max(8, Math.min(200, Math.round((a.fontSize || 22) * k))),
+      };
+      if (a.width) patch.width = Math.max(30, Math.round(a.width * k));
+      st.updateAnnotation(a.id, patch as Partial<Annotation>);
+      return;
+    }
+    const curW = a.width || Math.max(40, (a.text?.length || 1) * (a.fontSize || 22) * 0.62);
+    const width = Math.max(30, Math.round(curW * sx));
+    if (commit) st.updateAnnotation(a.id, { x: node.x(), y: node.y(), width } as Partial<Annotation>);
+    else st.updateAnnotationLive(a.id, { width } as Partial<Annotation>);
   };
 
   const onTransformEnd = (a: Annotation, node: Konva.Node) => {
@@ -1519,7 +1779,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       }
       useEditor.getState().updateAnnotation(editing.id, patch as Partial<Annotation>);
       useEditor.getState().select(editing.id);
-      useEditor.getState().setTool("select");
     }
     setEditing(null);
   };
@@ -1538,6 +1797,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   commitTextRef.current = commitText;
 
   const draggable = tool === "select";
+  // Tool vẽ hình: click đúng hình đã vẽ → chọn/kéo/resize; click chỗ khác → vẽ hình mới.
+  // Hình tô đặc (highlight/blur/image) chỉ bắt chuột khi đã được chọn, để vẫn vẽ chồng lên được.
+  const dragFor = (a: Annotation) =>
+    draggable ||
+    (tool === "text" && a.type === "text") ||
+    (EDIT_TOOLS.has(tool) &&
+      (a.type !== "highlight" && a.type !== "blur" && a.type !== "image" ? true : activeIds.includes(a.id)));
 
   // % so với pixel gốc của ảnh (scale), KHÔNG phải so với fit — 100% = 1:1 pixel.
   const zoomPct = Math.round(scale * 100);
@@ -1632,8 +1898,26 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
           height={box.h}
           pixelRatio={stagePixelRatio}
           onMouseDown={onStageMouseDown}
+          onDragStart={(e) => {
+            if (e.target.name() === "handle" || e.target.getParent()?.className === "Transformer") return;
+            setBodyDragging(true);
+          }}
+          onDragEnd={() => setBodyDragging(false)}
+          onMouseMove={(e) => {
+            // Tool vẽ: rê vào hình đã vẽ → con trỏ "move" thay vì dấu + (báo hiệu click để chỉnh)
+            if (e.target.name() === "handle" || e.target.getParent()?.className === "Transformer") return;
+            if (!EDIT_TOOLS.has(tool)) { if (hoverCursor) setHoverCursor(null); return; }
+            let n: Konva.Node | null = e.target;
+            let hit: Annotation | undefined;
+            while (n && n !== (e.target.getStage() as Konva.Node)) {
+              const nid = n.id();
+              if (nid && (hit = doc?.annotations.find((x) => x.id === nid))) break;
+              n = n.parent;
+            }
+            setHoverCursor(hit && dragFor(hit) ? "move" : null);
+          }}
           style={{ 
-            cursor: isPanMode 
+            cursor: hoverCursor && !isPanMode ? hoverCursor : isPanMode 
               ? (isPanDrag ? "grabbing" : "grab") 
               : resizingCropHandle && resizingCropHandle !== "move"
               ? getCropCursor(resizingCropHandle)
@@ -1747,7 +2031,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       shadowColor={isSelected ? "#3b82f6" : undefined}
                       shadowBlur={isSelected ? 6 : 0}
                       shadowOpacity={isSelected ? 0.9 : 0}
-                      draggable={draggable}
+                      draggable={dragFor(a)}
                       onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                       onTap={() => useEditor.getState().select(a.id)}
                       onDragEnd={(e) => onDragEnd(a.id, e)}
@@ -1771,7 +2055,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       id={a.id}
                       x={a.x}
                       y={a.y}
-                      draggable={draggable}
+                      draggable={dragFor(a)}
                       onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                       onTap={() => useEditor.getState().select(a.id)}
                       onDragEnd={(e) => onDragEnd(a.id, e)}
@@ -1833,7 +2117,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       shadowColor={isSelected ? "#3b82f6" : undefined}
                       shadowBlur={isSelected ? 6 : 0}
                       shadowOpacity={isSelected ? 0.9 : 0}
-                      draggable={draggable}
+                      draggable={dragFor(a)}
                       onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                       onTap={() => useEditor.getState().select(a.id)}
                       onDragEnd={(e) =>
@@ -1889,8 +2173,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       id={a.id}
                       x={a.x}
                       y={a.y}
-                      draggable={draggable}
-                      onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
+                      draggable={dragFor(a)}
+                      onClick={(e) => {
+                        const multi = e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey;
+                        useEditor.getState().select(a.id, multi);
+                        // Tool Text: click (không kéo) vào chữ đã có → sửa luôn
+                        if (tool === "text" && !multi) beginEdit(a.id, a.text, e.target);
+                      }}
                       onDblClick={(e) => beginEdit(a.id, a.text, e.target)}
                       onMouseEnter={() => setHoveredTextId(a.id)}
                       onMouseLeave={() => setHoveredTextId(null)}
@@ -1909,28 +2198,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                         }
                         useEditor.getState().updateAnnotation(a.id, patch as Partial<Annotation>);
                       }}
-                      onTransform={(e) => {
-                        const node = e.target;
-                        const sx = node.scaleX();
-                        node.scaleX(1);
-                        node.scaleY(1);
-                        const curW = a.width || Math.max(40, (a.text?.length || 1) * (a.fontSize || 22) * 0.62);
-                        const newW = Math.max(30, Math.round(curW * sx));
-                        useEditor.getState().updateAnnotationLive(a.id, { width: newW } as Partial<Annotation>);
-                      }}
-                      onTransformEnd={(e) => {
-                        const node = e.target;
-                        const sx = node.scaleX();
-                        node.scaleX(1);
-                        node.scaleY(1);
-                        const curW = a.width || Math.max(40, (a.text?.length || 1) * (a.fontSize || 22) * 0.62);
-                        const newW = Math.max(30, Math.round(curW * sx));
-                        useEditor.getState().updateAnnotation(a.id, {
-                          x: node.x(),
-                          y: node.y(),
-                          width: newW,
-                        } as Partial<Annotation>);
-                      }}
+                      onTransform={(e) => applyTextTransform(a, e.target, false)}
+                      onTransformEnd={(e) => applyTextTransform(a, e.target, true)}
                       visible={editing?.id !== a.id}
                     >
                       {/* Khung Callout nguyên khối kèm mỏ nhọn (khi có hasTargetArrow) */}
@@ -1981,8 +2250,27 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       />
                     </Group>
 
+                    {/* Đang gõ: Group chữ bị ẩn → vẽ mỏ nhọn thật (nằm dưới ô nhập) + chấm đích để thấy callout trỏ vào đâu */}
+                    {editing?.id === a.id && hasArrow && (() => {
+                      const ew = Math.max(40, textareaSize.width / scale);
+                      const eh = Math.max(20, textareaSize.height / scale);
+                      const er = Math.min(14, Math.max(8, Math.min(ew, eh) * 0.25));
+                      return (
+                        <>
+                          <Path
+                            x={a.x}
+                            y={a.y}
+                            data={getCalloutPath(ew, eh, er, targetX - a.x, targetY - a.y)}
+                            fill={activeBg}
+                            listening={false}
+                          />
+                          <Circle x={targetX} y={targetY} radius={5 / scale} fill="#3b82f6" stroke="#ffffff" strokeWidth={1.5 / scale} listening={false} />
+                        </>
+                      );
+                    })()}
+
                     {/* Vùng mỏ nhọn & Handle điều khiển đỉnh mũi tên (xoay 360 độ linh hoạt khi nhấn giữ) */}
-                    {tool === "select" && hasArrow && (isSelected || hoveredTextId === a.id) && (
+                    {!bodyDragging && (tool === "select" || tool === "text") && hasArrow && (isSelected || hoveredTextId === a.id) && (
                       <Group>
                         {/* Hit-area tam giác thân mỏ nhọn: rê chuột vào đổi con trỏ move, click vào select */}
                         <Line
@@ -1994,14 +2282,9 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                           closed={true}
                           fill="transparent"
                           hitStrokeWidth={16}
-                          onMouseEnter={(e) => {
-                            const c = e.target.getStage()?.container();
-                            if (c) c.style.cursor = "move";
-                          }}
-                          onMouseLeave={(e) => {
-                            const c = e.target.getStage()?.container();
-                            if (c) c.style.cursor = "default";
-                          }}
+                          name="handle"
+                          onMouseEnter={() => setHoverCursor("move")}
+                          onMouseLeave={() => setHoverCursor(null)}
                           onMouseDown={(e) => {
                             e.cancelBubble = true;
                             if (!isSelected) {
@@ -2014,11 +2297,11 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                         <Circle
                           x={targetX}
                           y={targetY}
-                          radius={7}
+                          radius={7 / scale}
                           fill="#ffffff"
                           stroke="#2563eb"
-                          strokeWidth={2.5}
-                          hitStrokeWidth={32}
+                          strokeWidth={2.5 / scale}
+                          hitStrokeWidth={20 / scale}
                           shadowColor="rgba(0,0,0,0.35)"
                           shadowBlur={6}
                           shadowOffset={{ x: 0, y: 1.5 }}
@@ -2030,14 +2313,9 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                               useEditor.getState().select(a.id);
                             }
                           }}
-                          onMouseEnter={(e) => {
-                            const c = e.target.getStage()?.container();
-                            if (c) c.style.cursor = "move";
-                          }}
-                          onMouseLeave={(e) => {
-                            const c = e.target.getStage()?.container();
-                            if (c) c.style.cursor = "default";
-                          }}
+                          name="handle"
+                          onMouseEnter={() => setHoverCursor("move")}
+                          onMouseLeave={() => setHoverCursor(null)}
                           onDragMove={(e) => {
                             const nx = Math.round(e.target.x());
                             const ny = Math.round(e.target.y());
@@ -2080,7 +2358,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       id={a.id}
                       x={a.x}
                       y={a.y}
-                      draggable={draggable}
+                      draggable={dragFor(a)}
                       onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                       onTap={() => useEditor.getState().select(a.id)}
                       onDragEnd={(e) => onDragEnd(a.id, e)}
@@ -2120,7 +2398,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 <Group key={a.id}>
                   <Arrow
                     id={a.id}
-                    points={[a.x, a.y, a.x2, a.y2]}
+                    points={linePts(a)}
+                    tension={a.cx !== undefined ? 0.5 : 0}
                     stroke={a.color}
                     strokeWidth={a.strokeWidth}
                     fill={a.color}
@@ -2132,7 +2411,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                     shadowColor={isSelected ? "#3b82f6" : undefined}
                     shadowBlur={isSelected ? 6 : 0}
                     shadowOpacity={isSelected ? 0.9 : 0}
-                    draggable={draggable}
+                    draggable={dragFor(a)}
                     onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                     onTap={() => useEditor.getState().select(a.id)}
                     onDragEnd={(e) => {
@@ -2157,7 +2436,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 <Group key={a.id}>
                   <Arrow
                     id={a.id}
-                    points={[a.x, a.y, a.x2, a.y2]}
+                    points={linePts(a)}
+                    tension={a.cx !== undefined ? 0.5 : 0}
                     stroke={a.color}
                     strokeWidth={a.strokeWidth}
                     fill={a.color}
@@ -2171,7 +2451,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                     shadowColor={isSelected ? "#3b82f6" : undefined}
                     shadowBlur={isSelected ? 6 : 0}
                     shadowOpacity={isSelected ? 0.9 : 0}
-                    draggable={draggable}
+                    draggable={dragFor(a)}
                     onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                     onTap={() => useEditor.getState().select(a.id)}
                     onDragEnd={(e) => {
@@ -2196,7 +2476,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 <Group key={a.id}>
                   <Line
                     id={a.id}
-                    points={[a.x, a.y, a.x2, a.y2]}
+                    points={linePts(a)}
+                    tension={a.cx !== undefined ? 0.5 : 0}
                     stroke={a.color}
                     strokeWidth={a.strokeWidth}
                     lineCap="round"
@@ -2205,7 +2486,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                     shadowColor={isSelected ? "#3b82f6" : undefined}
                     shadowBlur={isSelected ? 6 : 0}
                     shadowOpacity={isSelected ? 0.9 : 0}
-                    draggable={draggable}
+                    draggable={dragFor(a)}
                     onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                     onTap={() => useEditor.getState().select(a.id)}
                     onDragEnd={(e) => {
@@ -2229,8 +2510,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 const badgeRadius = a.radius || Math.max(Math.round(a.strokeWidth * 2 + 5), 10);
                 const valStr = String(a.value);
                 const fontSize = Math.max(9, Math.round(badgeRadius * (valStr.length > 1 ? 0.78 : 0.88)));
-                const dx = a.x2 - a.x;
-                const dy = a.y2 - a.y;
+                const dx = (a.cx ?? a.x2) - a.x;
+                const dy = (a.cy ?? a.y2) - a.y;
                 const len = Math.sqrt(dx * dx + dy * dy) || 1;
                 // Đặt vòng tròn tại đuôi mũi tên (điểm bắt đầu)
                 const nx = dx / len;
@@ -2242,7 +2523,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                   <Group key={a.id}>
                     <Group
                       id={a.id}
-                      draggable={draggable}
+                      draggable={dragFor(a)}
                       onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                       onTap={() => useEditor.getState().select(a.id)}
                       onDragEnd={(e) => {
@@ -2283,7 +2564,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                       />
                       {/* Mũi tên từ mép vòng tròn đến đầu mũi tên */}
                       <Arrow
-                        points={[startX, startY, a.x2, a.y2]}
+                        points={a.cx !== undefined && a.cy !== undefined ? [startX, startY, a.cx, a.cy, a.x2, a.y2] : [startX, startY, a.x2, a.y2]}
+                        tension={a.cx !== undefined ? 0.5 : 0}
                         stroke={a.color}
                         strokeWidth={a.strokeWidth}
                         fill={a.color}
@@ -2317,7 +2599,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                     opacity={0.38}
                     stroke={isSelected ? "#3b82f6" : undefined}
                     strokeWidth={isSelected ? 1.5 : 0}
-                    draggable={draggable}
+                    draggable={dragFor(a)}
                     onClick={(e) => useEditor.getState().select(a.id, e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey)}
                     onTap={() => useEditor.getState().select(a.id)}
                     onDragEnd={(e) => onDragEnd(a.id, e)}
@@ -2335,7 +2617,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                   <BlurRect
                     ann={a}
                     img={img}
-                    draggable={draggable}
+                    draggable={dragFor(a)}
                     onSelect={(multi) => useEditor.getState().select(a.id, multi)}
                     onDragEnd={(newX, newY) =>
                       useEditor.getState().updateAnnotation(a.id, {
@@ -2355,7 +2637,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 <ImageItem
                   key={a.id}
                   ann={a}
-                  draggable={draggable}
+                  draggable={dragFor(a)}
                   isSelected={isSelected}
                   activeIds={activeIds}
                   onSelect={(multi) => useEditor.getState().select(a.id, multi)}
@@ -2649,17 +2931,23 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               />
             )}
 
+            {!bodyDragging && (tool === "select" || EDIT_TOOLS.has(tool)) && selectedAnns.map((a) =>
+              a.type === "arrow" || a.type === "double-arrow" || a.type === "line" || a.type === "numbered-arrow"
+                ? <LineHandles key={a.id} ann={a} scale={scale} showMid={activeIds.length === 1} onCursor={setHoverCursor} />
+                : null,
+            )}
+
             <Transformer
               ref={trRef}
               rotateEnabled={false}
               ignoreStroke
-              keepRatio={isCircleSelected}
+              keepRatio={isCircleSelected || isTextSelected}
               visible={!isLineSelected}
               enabledAnchors={
                 isCircleSelected || isNumberedRectSelected
                   ? ["top-left", "top-right", "bottom-left", "bottom-right"]
                   : isTextSelected
-                  ? ["middle-left", "middle-right"]
+                  ? ["top-left", "top-right", "bottom-left", "bottom-right", "middle-left", "middle-right"]
                   : ["top-left", "top-center", "top-right", "middle-left", "middle-right", "bottom-left", "bottom-center", "bottom-right"]
               }
               boundBoxFunc={(_old, next) => {
@@ -2692,6 +2980,11 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                 height: textareaSize.height,
               }}
             >
+              {textAnn && (
+                <div style={{ position: "absolute", bottom: "100%", left: 0, marginBottom: 6, zIndex: 20 }}>
+                  <CalloutBar ann={textAnn} />
+                </div>
+              )}
               <textarea
                 ref={textareaRef}
                 autoFocus
@@ -2707,7 +3000,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                     e.preventDefault();
                     cancelText();
                   }
-                  if (e.key === "Enter" && e.shiftKey) {
+                  if (e.key === "Enter" && (e.shiftKey || e.metaKey || e.ctrlKey)) {
                     e.preventDefault();
                     commitText();
                   }
@@ -2768,6 +3061,16 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                   }}
                 />
               ))}
+            </div>
+          );
+        })()}
+
+        {!editing && !bodyDragging && (tool === "select" || tool === "text") && activeIds.length === 1 && selectedAnns[0]?.type === "text" && (() => {
+          const a = selectedAnns[0] as TextAnn;
+          const pos = textPos(a.id);
+          return (
+            <div style={{ position: "absolute", left: pos.x, top: Math.max(4, pos.y - 36), zIndex: 12 }}>
+              <CalloutBar ann={a} />
             </div>
           );
         })()}

@@ -1400,6 +1400,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
         session.remove();
     }
     mark_saved(app);
+    crate::telemetry::capture_done(app, "video");
     if exiting() {
         if let Err(e) = ingested {
             eprintln!("[SnapDoc][record] Ingest bản quay trước khi thoát thất bại (file vẫn ở {path}): {e}");

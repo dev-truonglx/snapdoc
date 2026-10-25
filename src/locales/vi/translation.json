@@ -483,6 +483,7 @@
     "imageCount": "{{count}} ảnh"
   },
   "annotationCanvas": {
+    "calloutLabel": "Mũi chỉ",
     "fitWindow": "Vừa khung — ảnh fill cửa sổ (Ctrl/Cmd 0)",
     "actualSize": "Kích thước thật — 1 pixel ảnh = 1 pixel màn hình",
     "zoomOut": "Thu nhỏ (Ctrl/Cmd −)",

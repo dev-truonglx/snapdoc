@@ -13,6 +13,8 @@ const HISTORY_LIMIT = 30;
  * vẫn mỗi lần 1 entry như cũ. */
 const COALESCE_KEYS = new Set(["color", "strokeWidth", "fontSize", "blurMode", "solidColor", "blurRadius", "bgColor"]);
 const COALESCE_WINDOW_MS = 800;
+/** Các tool vẽ hình cho phép click lại hình đã vẽ để chỉnh ngay, không cần chuyển sang Select. */
+export const EDIT_TOOLS = new Set<string>(["rect", "ellipse", "arrow", "double-arrow", "line", "numbered-arrow", "numbered-rect", "highlight", "blur"]);
 
 interface EditorState {
   doc: Doc | null;
@@ -625,8 +627,9 @@ export const useEditor = create<EditorState>((set, get) => ({
         nextAnnotations = [...s.doc.annotations, a];
       }
       const next = { ...s.doc, annotations: nextAnnotations };
-      // Nếu đang vẽ các tool thông thường (rect, arrow, step...) thì không gán selectedId để người dùng vẽ liên tục mượt mà
-      const shouldSelect = s.tool === "select" || a.type === "image";
+      // Các tool vẽ hình (rect, arrow, line...) chọn luôn hình vừa vẽ để user click lại là chỉnh được
+      // (tay nắm/Transformer); step/text vẫn không chọn để đặt liên tục mượt mà.
+      const shouldSelect = s.tool === "select" || a.type === "image" || EDIT_TOOLS.has(s.tool);
       return {
         ...commit(s, next),
         selectedId: shouldSelect ? a.id : null,

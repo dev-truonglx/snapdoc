@@ -52,24 +52,36 @@ export interface StepAnn extends Base {
 }
 /** Mũi tên có đầu nhọn: từ (x,y) → (x2,y2). */
 export interface ArrowAnn extends Base {
+  /** Điểm điều khiển (đường cong đi qua điểm này). Không có → đường thẳng. */
+  cx?: number;
+  cy?: number;
   type: "arrow";
   x2: number;
   y2: number;
 }
 /** Mũi tên 2 chiều (hai đầu nhọn): từ (x,y) ↔ (x2,y2) dùng chỉ khoảng cách / kích thước. */
 export interface DoubleArrowAnn extends Base {
+  /** Điểm điều khiển (đường cong đi qua điểm này). Không có → đường thẳng. */
+  cx?: number;
+  cy?: number;
   type: "double-arrow";
   x2: number;
   y2: number;
 }
 /** Đường thẳng (không đầu mũi tên): từ (x,y) → (x2,y2). */
 export interface LineAnn extends Base {
+  /** Điểm điều khiển (đường cong đi qua điểm này). Không có → đường thẳng. */
+  cx?: number;
+  cy?: number;
   type: "line";
   x2: number;
   y2: number;
 }
 /** Mũi tên kèm số thứ tự: số hiện tại vị trí đuôi mũi tên. */
 export interface NumberedArrowAnn extends Base {
+  /** Điểm điều khiển (đường cong đi qua điểm này). Không có → đường thẳng. */
+  cx?: number;
+  cy?: number;
   type: "numbered-arrow";
   x2: number;
   y2: number;
@@ -224,6 +236,10 @@ export const translateAnnotation = (a: Annotation, dx: number, dy: number): Anno
   if (moved.type === "arrow" || moved.type === "double-arrow" || moved.type === "line" || moved.type === "numbered-arrow") {
     moved.x2 += dx;
     moved.y2 += dy;
+    if (moved.cx !== undefined && moved.cy !== undefined) {
+      moved.cx += dx;
+      moved.cy += dy;
+    }
   } else if (moved.type === "text") {
     if (moved.targetX !== undefined) moved.targetX += dx;
     if (moved.targetY !== undefined) moved.targetY += dy;
@@ -241,10 +257,12 @@ export const annotationBounds = (a: Annotation): { x1: number; y1: number; x2: n
     x2 = a.x + a.width;
     y2 = a.y + a.height;
   } else if (a.type === "arrow" || a.type === "double-arrow" || a.type === "line" || a.type === "numbered-arrow") {
-    x1 = Math.min(a.x, a.x2);
-    y1 = Math.min(a.y, a.y2);
-    x2 = Math.max(a.x, a.x2);
-    y2 = Math.max(a.y, a.y2);
+    const cx = a.cx ?? a.x;
+    const cy = a.cy ?? a.y;
+    x1 = Math.min(a.x, a.x2, cx);
+    y1 = Math.min(a.y, a.y2, cy);
+    x2 = Math.max(a.x, a.x2, cx);
+    y2 = Math.max(a.y, a.y2, cy);
   } else if (a.type === "step") {
     x1 = a.x - a.radius;
     y1 = a.y - a.radius;

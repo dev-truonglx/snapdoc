@@ -10,10 +10,8 @@ import {
   SOLID_COLORS,
   BACKGROUND_PRESETS,
   DEFAULT_BACKGROUND_CONFIG,
-  TEXT_BG_PRESETS,
   type Tool,
   type Annotation,
-  type TextAnn,
 } from "../../features/annotation/model";
 
 /** Icon 18×18, dùng currentColor để kế thừa màu nút. */
@@ -386,17 +384,6 @@ function ColorStopButton({
   );
 }
 
-const ARROW_DIRECTIONS: Array<{ dir: "left" | "top-left" | "up" | "top-right" | "right" | "bottom-right" | "down" | "bottom-left"; labelKey: string; icon: string }> = [
-  { dir: "left", labelKey: "arrowDirLeft", icon: "←" },
-  { dir: "top-left", labelKey: "arrowDirTopLeft", icon: "↖" },
-  { dir: "up", labelKey: "arrowDirUp", icon: "↑" },
-  { dir: "top-right", labelKey: "arrowDirTopRight", icon: "↗" },
-  { dir: "right", labelKey: "arrowDirRight", icon: "→" },
-  { dir: "bottom-right", labelKey: "arrowDirBottomRight", icon: "↘" },
-  { dir: "down", labelKey: "arrowDirDown", icon: "↓" },
-  { dir: "bottom-left", labelKey: "arrowDirBottomLeft", icon: "↙" },
-];
-
 export default function Toolbar({
   mode, onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy,
 }: Props) {
@@ -434,8 +421,6 @@ export default function Toolbar({
     highlightColor, setHighlightColor,
     strokeWidth, setStrokeWidth,
     fontSize, setFontSize,
-    textBgColor, setTextBgColor,
-    textHasArrow, setTextHasArrow, setTextArrowDirection,
     blurRadius, setBlurRadius, commitBlurRadius,
     blurMode, setBlurMode,
     blurSolidColor, setBlurSolidColor,
@@ -454,8 +439,6 @@ export default function Toolbar({
       highlightColor: s.highlightColor, setHighlightColor: s.setHighlightColor,
       strokeWidth: s.strokeWidth, setStrokeWidth: s.setStrokeWidth,
       fontSize: s.fontSize, setFontSize: s.setFontSize,
-      textBgColor: s.textBgColor, setTextBgColor: s.setTextBgColor,
-      textHasArrow: s.textHasArrow, setTextHasArrow: s.setTextHasArrow, setTextArrowDirection: s.setTextArrowDirection,
       blurRadius: s.blurRadius, setBlurRadius: s.setBlurRadius, commitBlurRadius: s.commitBlurRadius,
       blurMode: s.blurMode, setBlurMode: s.setBlurMode,
       blurSolidColor: s.blurSolidColor, setBlurSolidColor: s.setBlurSolidColor,
@@ -532,32 +515,6 @@ export default function Toolbar({
   const isImage = (!isMultiple && selectedAnn?.type === "image") || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "image"));
   // Tools dùng color + strokeWidth: hiển thị đầy đủ khi ở chế độ vẽ hoặc khi ở chế độ chọn/sửa
   const hasStroke = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop && !isImage && !isBackground);
-
-  const currentTextBg = selectedAnn?.type === "text" ? ((selectedAnn as TextAnn).bgColor || "") : textBgColor;
-  const currentHasArrow = selectedAnn?.type === "text" ? !!(selectedAnn as TextAnn).hasTargetArrow : textHasArrow;
-
-  const currentArrowDir = useMemo(() => {
-    if (selectedAnn?.type !== "text") return null;
-    const t = selectedAnn as TextAnn;
-    if (!t.hasTargetArrow || t.targetX === undefined || t.targetY === undefined) return "left";
-    const lines = (t.text || " ").split("\n");
-    const maxLineLen = Math.max(...lines.map((l) => l.length), 1);
-    const estW = t.width || Math.max(40, Math.round(maxLineLen * (t.fontSize || 22) * 0.62));
-    const estH = Math.max(Math.round((t.fontSize || 22) * 1.35), lines.length * Math.round((t.fontSize || 22) * 1.35));
-    const cx = t.x + estW / 2;
-    const cy = t.y + estH / 2;
-    const dx = t.targetX - cx;
-    const dy = t.targetY - cy;
-    const deg = (Math.atan2(dy, dx) * 180) / Math.PI;
-    if (deg >= -22.5 && deg < 22.5) return "right";
-    if (deg >= 22.5 && deg < 67.5) return "bottom-right";
-    if (deg >= 67.5 && deg < 112.5) return "down";
-    if (deg >= 112.5 && deg < 157.5) return "bottom-left";
-    if (deg >= -67.5 && deg < -22.5) return "top-right";
-    if (deg >= -112.5 && deg < -67.5) return "up";
-    if (deg >= -157.5 && deg < -112.5) return "top-left";
-    return "left";
-  }, [selectedAnn]);
 
   if (mode === "video") return null;
 
@@ -751,91 +708,6 @@ export default function Toolbar({
                     <button onClick={() => setFontSize(clampFont(fontSize - 2))} style={toolBtn(false)} title={t("editorToolbar.fontSizeSmaller")}>−</button>
                     <NumberField value={fontSize} min={FONT_MIN} max={FONT_MAX} onCommit={(n) => setFontSize(clampFont(n))} title={t("editorToolbar.fontSizeInput")} />
                     <button onClick={() => setFontSize(clampFont(fontSize + 2))} style={toolBtn(false)} title={t("editorToolbar.fontSizeLarger")}>+</button>
-                  </div>
-
-                  {/* Màu nền text */}
-                  <div style={sep} />
-                  <div style={group}>
-                    <span style={dimLabel}>{t("editorToolbar.textBgColor")}</span>
-                    {TEXT_BG_PRESETS.map((preset) => {
-                      const isSelected = preset.color === "" ? !currentTextBg : currentTextBg === preset.color;
-                      return (
-                        <button
-                          key={preset.id}
-                          onClick={() => setTextBgColor(preset.color)}
-                          title={t(`editorToolbar.${preset.id === "none" ? "textBgNone" : preset.id === "white" ? "textBgWhite" : preset.id === "dark" ? "textBgDark" : preset.id === "yellow" ? "textBgYellow" : preset.id === "blue" ? "textBgBlue" : "textBgRed"}`)}
-                          style={{
-                            width: 20,
-                            height: 20,
-                            borderRadius: 4,
-                            background: preset.color || "transparent",
-                            border: isSelected ? "2px solid #3b82f6" : "1px solid rgba(255,255,255,0.2)",
-                            boxShadow: isSelected ? "0 0 0 1.5px #3b82f6, 0 1px 3px rgba(0,0,0,0.3)" : "none",
-                            cursor: "pointer",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            position: "relative",
-                            flexShrink: 0,
-                            padding: 0,
-                          }}
-                        >
-                          {preset.id === "none" && (
-                            <svg width="14" height="14" viewBox="0 0 14 14" stroke="currentColor" strokeWidth="1.5">
-                              <circle cx="7" cy="7" r="5" fill="none" opacity="0.6" />
-                              <line x1="3.5" y1="10.5" x2="10.5" y2="3.5" stroke="#ef4444" strokeWidth="1.6" />
-                            </svg>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/* Mũi tên chỉ đích (Callout Target Arrow) */}
-                  <div style={sep} />
-                  <div style={group}>
-                    <button
-                      onClick={() => setTextHasArrow(!currentHasArrow)}
-                      style={toolBtn(currentHasArrow)}
-                      title={t("editorToolbar.textTargetArrow")}
-                    >
-                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                        <rect x="2" y="2" width="7" height="6" rx="1.5" />
-                        <path d="M9 5h3.5v4" />
-                        <path d="M10.5 11l2 2 2-2" />
-                      </svg>
-                    </button>
-                    {currentHasArrow && (
-                      <div style={{ display: "inline-flex", gap: 1, background: "rgba(255,255,255,0.06)", padding: "1px 2px", borderRadius: 5, alignItems: "center" }}>
-                        {ARROW_DIRECTIONS.map((item) => {
-                          const isActive = currentArrowDir === item.dir;
-                          return (
-                            <button
-                              key={item.dir}
-                              onClick={() => setTextArrowDirection(item.dir)}
-                              style={{
-                                width: 20,
-                                height: 20,
-                                border: "none",
-                                background: isActive ? "rgba(59, 130, 246, 0.35)" : "transparent",
-                                color: isActive ? "#60a5fa" : "var(--text)",
-                                cursor: "pointer",
-                                borderRadius: 3,
-                                display: "inline-flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                fontSize: 13,
-                                fontWeight: isActive ? "bold" : "normal",
-                                padding: 0,
-                              }}
-                              title={t(`editorToolbar.${item.labelKey}`)}
-                            >
-                              {item.icon}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
                   </div>
                 </>
               )}

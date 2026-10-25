@@ -634,6 +634,8 @@ pub fn finish(
         }
     };
 
+    crate::telemetry::capture_done(app, "image");
+
     match output {
         "clipboard" => {
             clipboard::copy_png_bytes(&cap.bytes)?;

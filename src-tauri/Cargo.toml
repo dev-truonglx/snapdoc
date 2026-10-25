@@ -1,6 +1,6 @@
 [package]
 name = "snapdoc"
-version = "3.7.12"
+version = "3.8.0"
 description = "SnapDoc — fast screenshot + annotation app"
 authors = ["SnapDoc"]
 edition = "2021"
@@ -59,6 +59,7 @@ cpal = "0.18"
 # Windows/macOS) + UUID cho id bản ghi.
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
+tauri-plugin-aptabase = "1.3.0"
 
 # macOS: đọc trạng thái nút chuột / phím toàn cục để xử lý input cho overlay
 # mà không cần focus cửa sổ.
@@ -150,4 +151,5 @@ lto = true
 opt-level = "s"
 # panic = "abort" đã bỏ: với "abort", catch_unwind không bắt được panic từ xcap/WGC
 # → process bị kill thay vì báo lỗi. Dùng default "unwind" để có thể recover.
-strip = true
+[profile.release.build-override]
+strip = false

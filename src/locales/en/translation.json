@@ -483,6 +483,7 @@
     "imageCount": "{{count}} images"
   },
   "annotationCanvas": {
+    "calloutLabel": "Pointer",
     "fitWindow": "Fit window — image fills viewport (Ctrl/Cmd 0)",
     "actualSize": "Actual size — 1 image pixel = 1 screen pixel",
     "zoomOut": "Zoom out (Ctrl/Cmd −)",
