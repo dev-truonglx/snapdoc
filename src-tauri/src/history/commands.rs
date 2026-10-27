@@ -64,28 +64,26 @@ fn list_history_sync(app: &AppHandle, filter: HistoryFilter) -> Result<HistoryPa
         items.push(row.map_err(|e| e.to_string())?);
     }
 
-    // Video KHÔNG copy vào Library nội bộ — `asset_path` trỏ thẳng vào
-    // saveDir tại thời điểm quay. Scope asset-protocol chỉ được mở cho
-    // saveDir HIỆN TẠI (startup + lúc quay); video quay ở saveDir cũ (user
-    // đã đổi thư mục lưu) sẽ bị chặn `convertFileSrc` (404) khi phát trong
-    // History. Mở scope cho thư mục cha của từng video trong trang kết quả.
-    {
-        let mut seen = std::collections::HashSet::new();
-        for item in items.iter().filter(|i| i.media_type == "video") {
-            if let Some(parent) = std::path::Path::new(&item.asset_path).parent() {
-                if seen.insert(parent.to_path_buf()) {
-                    if let Err(e) = app.asset_protocol_scope().allow_directory(parent, true) {
-                        eprintln!(
-                            "[SnapDoc][history] Không mở được asset scope cho {}: {e}",
-                            parent.display()
-                        );
-                    }
-                }
-            }
-        }
+    // Video/GIF KHÔNG copy vào Library nội bộ — `asset_path` trỏ thẳng vào
+    // saveDir tại thời điểm quay, nằm ngoài scope tĩnh. Mở scope cho ĐÚNG
+    // từng file trong trang kết quả (không mở cả thư mục cha — saveDir do
+    // user chọn, có thể là ~/). Thumbnail nằm trong `library/thumbs` (scope
+    // tĩnh) nên không cần. Nhả khoá DB trước (canonicalize từng file).
+    drop(stmt);
+    drop(conn);
+    for item in &items {
+        grant_media_asset(app, item);
     }
 
     Ok(HistoryPage { items, total })
+}
+
+/// Cấp asset-protocol cho file video/GIF của 1 record (webview phát qua
+/// `convertFileSrc(assetPath)`). Ảnh đọc qua IPC bytes nên bỏ qua.
+fn grant_media_asset(app: &AppHandle, rec: &HistoryRecord) {
+    if rec.media_type != "image" {
+        crate::record::allow_asset_file(app, std::path::Path::new(&rec.asset_path));
+    }
 }
 
 fn get_history_item_sync(app: &AppHandle, id: &str) -> Result<HistoryRecord, String> {
@@ -377,6 +375,7 @@ fn open_history_item_in_editor_sync(app: &AppHandle, id: &str) -> Result<(), Str
         return Err("Không thể mở item đang ở Trash — hãy Restore trước".to_string());
     }
     if rec.media_type == "video" {
+        grant_media_asset(app, &rec);
         let state = app.state::<AppState>();
         let mut g = state.pending_video.lock().map_err(|_| "Lock error".to_string())?;
         *g = Some(PendingVideo {
@@ -445,50 +444,55 @@ fn save_history_doc_sync(
     let preview_bytes = decode_image_data(preview_data)?;
 
     let old_path = std::path::Path::new(&rec.asset_path).to_path_buf();
-    let was_snapdoc = crate::snapdoc_file::is_snapdoc(&old_path);
-
-    // Nền: ưu tiên bản mới do frontend gửi lên, nếu không thì đọc lại nền đang
-    // có. Với PNG cũ thì "nền đang có" chính là cả file.
-    let (base_bytes, created_at) = match base_data {
-        Some(d) => (
-            decode_image_data(d)?,
-            if was_snapdoc {
-                crate::snapdoc_file::read_snapdoc(&old_path)
-                    .map(|f| f.created_at)
-                    .unwrap_or_else(|_| rec.created_at)
-            } else {
-                rec.created_at
-            },
-        ),
-        None if was_snapdoc => {
-            let f = crate::snapdoc_file::read_snapdoc(&old_path)?;
-            (f.base_png, f.created_at)
-        }
-        None => (
-            std::fs::read(&old_path).map_err(|e| format!("Không đọc được asset: {e}"))?,
-            rec.created_at,
-        ),
-    };
-
-    // Kích thước ghi vào DB lấy từ NỀN (không phải preview): đó mới là khung
-    // toạ độ mà annotation trong `doc.json` bám vào, và cũng là thứ Editor nạp.
-    let base_img =
-        image::load_from_memory(&base_bytes).map_err(|e| format!("Ảnh nền không hợp lệ: {e}"))?;
-    let (w, h) = (base_img.width(), base_img.height());
-
     let new_path = super::assets::snapdoc_path_for(app, id)?;
-    crate::snapdoc_file::write_snapdoc(
-        &new_path,
-        crate::snapdoc_file::WriteSnapdoc {
-            base_png: &base_bytes,
-            doc_json,
-            // Save = chốt bản nháp thành bản chính → KHÔNG ghi lại draft.
-            draft_json: None,
-            preview_png: &preview_bytes,
-            created_at,
-            updated_at: now_ms(),
-        },
-    )?;
+
+    // Khoá file đích suốt đọc-sửa-ghi: một autosave draft chạy song song (đã
+    // đọc bản cũ) không được rename SAU lần Save này và đè ngược nó.
+    let (w, h) = crate::snapdoc_file::with_path_lock(&new_path, || -> Result<(u32, u32), String> {
+        let was_snapdoc = crate::snapdoc_file::is_snapdoc(&old_path);
+
+        // Nền: ưu tiên bản mới do frontend gửi lên, nếu không thì đọc lại nền đang
+        // có. Với PNG cũ thì "nền đang có" chính là cả file.
+        let (base_bytes, created_at) = match base_data {
+            Some(d) => (
+                decode_image_data(d)?,
+                if was_snapdoc {
+                    crate::snapdoc_file::read_snapdoc(&old_path)
+                        .map(|f| f.created_at)
+                        .unwrap_or_else(|_| rec.created_at)
+                } else {
+                    rec.created_at
+                },
+            ),
+            None if was_snapdoc => {
+                let f = crate::snapdoc_file::read_snapdoc(&old_path)?;
+                (f.base_png, f.created_at)
+            }
+            None => (
+                std::fs::read(&old_path).map_err(|e| format!("Không đọc được asset: {e}"))?,
+                rec.created_at,
+            ),
+        };
+
+        // Kích thước ghi vào DB lấy từ NỀN (không phải preview): đó mới là khung
+        // toạ độ mà annotation trong `doc.json` bám vào, và cũng là thứ Editor nạp.
+        let base_img =
+            image::load_from_memory(&base_bytes).map_err(|e| format!("Ảnh nền không hợp lệ: {e}"))?;
+
+        crate::snapdoc_file::write_snapdoc(
+            &new_path,
+            crate::snapdoc_file::WriteSnapdoc {
+                base_png: &base_bytes,
+                doc_json,
+                // Save = chốt bản nháp thành bản chính → KHÔNG ghi lại draft.
+                draft_json: None,
+                preview_png: &preview_bytes,
+                created_at,
+                updated_at: now_ms(),
+            },
+        )?;
+        Ok((base_img.width(), base_img.height()))
+    })?;
 
     // Thumbnail sinh từ PREVIEW để lưới History/dải "Gần đây" hiện đúng cái
     // user thấy (có annotation), không phải nền trống.
@@ -542,20 +546,11 @@ fn put_history_draft_sync(app: &AppHandle, id: &str, doc_json: &str) -> Result<b
         // chờ tới lần Save (khi đó `save_history_doc_sync` dựng container).
         return Ok(false);
     }
-    let f = crate::snapdoc_file::read_snapdoc(&path)?;
-    let preview = crate::snapdoc_file::read_snapdoc_entry(&path, crate::snapdoc_file::PREVIEW_PNG)?
-        .unwrap_or_else(|| f.base_png.clone());
-    crate::snapdoc_file::write_snapdoc(
-        &path,
-        crate::snapdoc_file::WriteSnapdoc {
-            base_png: &f.base_png,
-            doc_json: &f.doc_json,
-            draft_json: Some(doc_json),
-            preview_png: &preview,
-            created_at: f.created_at,
-            updated_at: now_ms(),
-        },
-    )?;
+    // Chỉ thay `draft.json`: các entry khác copy thô, mở file 1 lần (xem
+    // `write_snapdoc_draft`). Khoá file để không đè ngược một lần Save.
+    crate::snapdoc_file::with_path_lock(&path, || {
+        crate::snapdoc_file::write_snapdoc_draft(&path, Some(doc_json), now_ms())
+    })?;
     // CỐ TÌNH không emit "snapdoc:changed" ở đây, khác `save_history_doc_sync`
     // và `discard_history_draft_sync`: autosave chạy mỗi ~2s trong lúc user
     // đang vẽ, mà listener của event này cho dải "Gần đây" lại quét lại toàn bộ
@@ -575,23 +570,16 @@ fn discard_history_draft_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     if !crate::snapdoc_file::is_snapdoc(&path) {
         return Ok(());
     }
-    let f = crate::snapdoc_file::read_snapdoc(&path)?;
-    if f.draft_json.is_none() {
+    let changed = crate::snapdoc_file::with_path_lock(&path, || -> Result<bool, String> {
+        if !crate::snapdoc_file::has_draft(&path) {
+            return Ok(false);
+        }
+        crate::snapdoc_file::write_snapdoc_draft(&path, None, now_ms())?;
+        Ok(true)
+    })?;
+    if !changed {
         return Ok(());
     }
-    let preview = crate::snapdoc_file::read_snapdoc_entry(&path, crate::snapdoc_file::PREVIEW_PNG)?
-        .unwrap_or_else(|| f.base_png.clone());
-    crate::snapdoc_file::write_snapdoc(
-        &path,
-        crate::snapdoc_file::WriteSnapdoc {
-            base_png: &f.base_png,
-            doc_json: &f.doc_json,
-            draft_json: None,
-            preview_png: &preview,
-            created_at: f.created_at,
-            updated_at: now_ms(),
-        },
-    )?;
     let _ = app.emit("snapdoc:changed", id);
     Ok(())
 }
@@ -683,14 +671,23 @@ fn trim_history_video_sync(
     let asset_path = std::path::Path::new(&rec.asset_path);
     // `output_path` do user tự chọn qua dropdown "Chọn nơi lưu…" (dialog Save
     // As ở VideoTrimmer) — khác đường mặc định `new_output_path` (auto vào
-    // `saveDir`/Pictures), nên phải tự tạo thư mục + mở asset scope cho ĐÚNG
-    // thư mục đó (khác `saveDir` đã được mở sẵn từ trước).
+    // `saveDir`/Pictures), nên phải tự tạo thư mục. Asset scope chỉ cấp cho
+    // ĐÚNG file kết quả, SAU khi cắt xong (cuối hàm).
     let new_path = match output_path {
         Some(p) => {
             let p = std::path::PathBuf::from(p);
+            // Đường do webview truyền: chỉ nhận đuôi video, để nhánh copy
+            // nhanh (`fs::copy`) không ghi đè được file tuỳ ý.
+            let ok_ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| matches!(e.to_ascii_lowercase().as_str(), "mp4" | "m4v" | "mov"))
+                .unwrap_or(false);
+            if !ok_ext {
+                return Err("File lưu video phải có đuôi .mp4".to_string());
+            }
             if let Some(parent) = p.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("Không tạo được thư mục lưu: {e}"))?;
-                crate::record::allow_asset_scope(app, parent);
             }
             p
         }
@@ -797,6 +794,7 @@ fn trim_history_video_sync(
         )
         .map_err(|e| e.to_string())?;
     }
+    crate::record::allow_asset_file(app, &new_path);
     get_history_item_sync(app, &new_id)
 }
 
@@ -910,6 +908,7 @@ fn overwrite_history_video_sync(
         )
         .map_err(|e| e.to_string())?;
     }
+    crate::record::allow_asset_file(app, asset_path);
     get_history_item_sync(app, id)
 }
 
@@ -973,9 +972,13 @@ pub async fn list_history(app: AppHandle, filter: HistoryFilter) -> Result<Histo
 
 #[tauri::command]
 pub async fn get_history_item(app: AppHandle, id: String) -> Result<HistoryRecord, String> {
-    tauri::async_runtime::spawn_blocking(move || get_history_item_sync(&app, &id))
-        .await
-        .map_err(|e| format!("Task join error: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let rec = get_history_item_sync(&app, &id)?;
+        grant_media_asset(&app, &rec);
+        Ok(rec)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 #[tauri::command]
@@ -1388,6 +1391,7 @@ fn save_gif_to_history_sync(
         .map_err(|e| e.to_string())?;
     }
 
+    crate::record::allow_asset_file(app, p);
     get_history_item_sync(app, &new_id)
 }
 

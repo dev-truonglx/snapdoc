@@ -2566,16 +2566,14 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize, mode: String) {
     let mut focused_idx: Option<usize> = Some(initial_idx);
     let mut drag_idx: Option<usize> = None;
     let mut has_dragged = false;
+    // `overlay-input` lần phát gần nhất: bỏ qua tick không đổi, nhưng vẫn phát
+    // lại định kỳ (HEARTBEAT) cho overlay đăng ký listener muộn / vừa load
+    // xong danh sách cửa sổ (hover gợi ý cần toạ độ con trỏ hiện tại).
+    const HEARTBEAT: Duration = Duration::from_millis(100);
+    let mut last_input: Option<(usize, f64, f64, usize, std::time::Instant)> = None;
 
     loop {
         if app.state::<AppState>().overlay_gen.load(Ordering::SeqCst) != gen {
-            break;
-        }
-        if !app
-            .webview_windows()
-            .keys()
-            .any(|l| l.starts_with("overlay"))
-        {
             break;
         }
 
@@ -2587,6 +2585,11 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize, mode: String) {
             Err(_) => break,
         };
         if snaps.is_empty() {
+            break;
+        }
+        // Tra đúng label `overlay-{i}` thay vì clone cả map `webview_windows()`
+        // mỗi 8ms.
+        if !(0..snaps.len()).any(|i| app.get_webview_window(&format!("overlay-{i}")).is_some()) {
             break;
         }
 
@@ -2625,7 +2628,24 @@ fn input_loop(app: AppHandle, gen: u64, initial_idx: usize, mode: String) {
                 // trỏ vượt biên, khung chỉ dừng lại đúng mép thay vì báo kích
                 // thước tràn ra ngoài màn hình gốc — xem `to_css_clamped`.
                 let (x, y) = if target_idx == i { (x, y) } else { to_css_clamped(&snaps[target_idx], cx, cy) };
-                let _ = app.emit("overlay-input", (target_idx, x, y));
+                // Vẫn broadcast (`emit`): mọi overlay cần biết con trỏ đã rời
+                // khỏi nó (`idx !== MY_IDX`). Tauri chỉ đẩy JS tới webview có
+                // listener `overlay-input` (tức các overlay).
+                let now = std::time::Instant::now();
+                let changed = match last_input {
+                    Some((li, lx, ly, ln, lt)) => {
+                        li != target_idx
+                            || lx != x
+                            || ly != y
+                            || ln != snaps.len()
+                            || now.duration_since(lt) >= HEARTBEAT
+                    }
+                    None => true,
+                };
+                if changed {
+                    let _ = app.emit("overlay-input", (target_idx, x, y));
+                    last_input = Some((target_idx, x, y, snaps.len(), now));
+                }
                 if left && !prev_left {
                     drag_idx = Some(i);
                     has_dragged = true;

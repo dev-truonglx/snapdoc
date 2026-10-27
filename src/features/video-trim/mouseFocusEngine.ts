@@ -6,26 +6,25 @@ import {
   clamp,
 } from "./types";
 import type { MouseTelemetryFile, MouseTelemetryItem } from "../../lib/ipc";
+import { type Segment, sourceMsToTimeline } from "./segments";
 
 export interface SmartFocusResult {
   focusX: number;
   focusY: number;
   zone: FocusZone;
-  label: string;
 }
 
 export const FOCUS_ZONE_PRESETS: {
   zone: FocusZone;
-  label: string;
   icon: string;
   focusX: number;
   focusY: number;
 }[] = [
-  { zone: "center", label: "Giữa (Tâm)", icon: "🎯", focusX: 0.5, focusY: 0.5 },
-  { zone: "left", label: "Cột trái", icon: "⬅", focusX: 0.25, focusY: 0.5 },
-  { zone: "right", label: "Cột phải", icon: "➡", focusX: 0.75, focusY: 0.5 },
-  { zone: "top", label: "Phía trên", icon: "⬆", focusX: 0.5, focusY: 0.22 },
-  { zone: "bottom", label: "Phía dưới", icon: "⬇", focusX: 0.5, focusY: 0.78 },
+  { zone: "center", icon: "🎯", focusX: 0.5, focusY: 0.5 },
+  { zone: "left", icon: "⬅", focusX: 0.25, focusY: 0.5 },
+  { zone: "right", icon: "➡", focusX: 0.75, focusY: 0.5 },
+  { zone: "top", icon: "⬆", focusX: 0.5, focusY: 0.22 },
+  { zone: "bottom", icon: "⬇", focusX: 0.5, focusY: 0.78 },
 ];
 
 /**
@@ -87,7 +86,6 @@ export function calculateSmartFocusPoint(
       focusX: 0.5,
       focusY: 0.5,
       zone: "center",
-      label: "Giữa (Tâm)",
     };
   }
 
@@ -102,7 +100,6 @@ export function calculateSmartFocusPoint(
       focusX: clamp(Number(normX.toFixed(4)), 0.2, 0.3),
       focusY: clamp(Number(normY.toFixed(4)), 0.18, 0.28),
       zone: "top-left",
-      label: "Góc trên trái",
     };
   }
   if (isRight && isTop) {
@@ -110,7 +107,6 @@ export function calculateSmartFocusPoint(
       focusX: clamp(Number(normX.toFixed(4)), 0.7, 0.8),
       focusY: clamp(Number(normY.toFixed(4)), 0.18, 0.28),
       zone: "top-right",
-      label: "Góc trên phải",
     };
   }
   if (isLeft && isBottom) {
@@ -118,7 +114,6 @@ export function calculateSmartFocusPoint(
       focusX: clamp(Number(normX.toFixed(4)), 0.2, 0.3),
       focusY: clamp(Number(normY.toFixed(4)), 0.72, 0.82),
       zone: "bottom-left",
-      label: "Góc dưới trái",
     };
   }
   if (isRight && isBottom) {
@@ -126,7 +121,6 @@ export function calculateSmartFocusPoint(
       focusX: clamp(Number(normX.toFixed(4)), 0.7, 0.8),
       focusY: clamp(Number(normY.toFixed(4)), 0.72, 0.82),
       zone: "bottom-right",
-      label: "Góc dưới phải",
     };
   }
 
@@ -137,7 +131,6 @@ export function calculateSmartFocusPoint(
       focusX: clamp(Number(normX.toFixed(4)), 0.2, 0.32),
       focusY: safeY,
       zone: "left",
-      label: "Cột trái",
     };
   }
   if (isRight) {
@@ -146,7 +139,6 @@ export function calculateSmartFocusPoint(
       focusX: clamp(Number(normX.toFixed(4)), 0.68, 0.8),
       focusY: safeY,
       zone: "right",
-      label: "Cột phải",
     };
   }
 
@@ -157,7 +149,6 @@ export function calculateSmartFocusPoint(
       focusX: safeX,
       focusY: clamp(Number(normY.toFixed(4)), 0.18, 0.28),
       zone: "top",
-      label: "Phía trên",
     };
   }
   if (isBottom) {
@@ -166,7 +157,6 @@ export function calculateSmartFocusPoint(
       focusX: safeX,
       focusY: clamp(Number(normY.toFixed(4)), 0.72, 0.82),
       zone: "bottom",
-      label: "Phía dưới",
     };
   }
 
@@ -175,8 +165,18 @@ export function calculateSmartFocusPoint(
     focusX: clamp(Number(normX.toFixed(4)), 0.2, 0.8),
     focusY: clamp(Number(normY.toFixed(4)), 0.2, 0.8),
     zone: "custom",
-    label: "Tuỳ chỉnh",
   };
+}
+
+/**
+ * Quy đổi mốc telemetry (source ms) sang timeline ms theo `segments` (sau
+ * trim/tốc độ). Trả null nếu mốc rơi vào đoạn đã xoá. Không có `segments`
+ * thì coi source = timeline.
+ */
+export function telemetryMsToTimeline(segments: Segment[] | undefined, srcMs: number): number | null {
+  if (!segments) return srcMs;
+  if (!segments.some((s) => srcMs >= s.srcStart && srcMs <= s.srcEnd)) return null;
+  return sourceMsToTimeline(segments, srcMs);
 }
 
 /**
@@ -194,6 +194,7 @@ export function generateAutoZoomSegments(
   telemetry: MouseTelemetryFile,
   videoDurationMs: number,
   targetScale: number = DEFAULT_ZOOM_SCALE,
+  segments?: Segment[],
 ): ZoomSegment[] {
   if (!telemetry || !telemetry.events || telemetry.events.length === 0) {
     return [];
@@ -203,11 +204,16 @@ export function generateAutoZoomSegments(
   const vh = telemetry.videoHeight > 0 ? telemetry.videoHeight : 1080;
   const totalMs = videoDurationMs > 0 ? videoDurationMs : telemetry.durationMs;
 
-  // 1. Lọc các sự kiện thao tác có chủ đích: click hoặc drag
-  const actionEvents = telemetry.events.filter((e) => {
-    if (e.t < 0 || (totalMs > 0 && e.t > totalMs)) return false;
-    return e.type === "click" || e.type === "drag";
-  });
+  // 1. Lọc các sự kiện thao tác có chủ đích: click hoặc drag. `e.t` là source
+  // ms → quy về timeline ms (bỏ sự kiện nằm trong đoạn đã cắt) trước khi so.
+  const actionEvents: MouseTelemetryItem[] = [];
+  for (const e of telemetry.events) {
+    if (e.type !== "click" && e.type !== "drag") continue;
+    const t = telemetryMsToTimeline(segments, e.t);
+    if (t === null || t < 0 || (totalMs > 0 && t > totalMs)) continue;
+    actionEvents.push(t === e.t ? e : { ...e, t });
+  }
+  actionEvents.sort((a, b) => a.t - b.t);
 
   if (actionEvents.length === 0) {
     return [];

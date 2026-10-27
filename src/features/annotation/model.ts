@@ -5,6 +5,7 @@ export type Tool =
   | "text"
   | "step"
   | "arrow"
+  | "double-arrow"
   | "line"
   | "numbered-arrow"
   | "numbered-rect"
@@ -36,6 +37,13 @@ export interface TextAnn extends Base {
   text: string;
   fontSize: number;
   width?: number;
+  /** Màu nền khung chữ (hex/rgba hoặc undefined cho không nền) */
+  bgColor?: string;
+  /** Bật/tắt mũi tên chỉ đích (Callout) */
+  hasTargetArrow?: boolean;
+  /** Toạ độ đích mũi tên trỏ tới */
+  targetX?: number;
+  targetY?: number;
 }
 export interface StepAnn extends Base {
   type: "step";
@@ -44,18 +52,36 @@ export interface StepAnn extends Base {
 }
 /** Mũi tên có đầu nhọn: từ (x,y) → (x2,y2). */
 export interface ArrowAnn extends Base {
+  /** Điểm điều khiển (đường cong đi qua điểm này). Không có → đường thẳng. */
+  cx?: number;
+  cy?: number;
   type: "arrow";
+  x2: number;
+  y2: number;
+}
+/** Mũi tên 2 chiều (hai đầu nhọn): từ (x,y) ↔ (x2,y2) dùng chỉ khoảng cách / kích thước. */
+export interface DoubleArrowAnn extends Base {
+  /** Điểm điều khiển (đường cong đi qua điểm này). Không có → đường thẳng. */
+  cx?: number;
+  cy?: number;
+  type: "double-arrow";
   x2: number;
   y2: number;
 }
 /** Đường thẳng (không đầu mũi tên): từ (x,y) → (x2,y2). */
 export interface LineAnn extends Base {
+  /** Điểm điều khiển (đường cong đi qua điểm này). Không có → đường thẳng. */
+  cx?: number;
+  cy?: number;
   type: "line";
   x2: number;
   y2: number;
 }
 /** Mũi tên kèm số thứ tự: số hiện tại vị trí đuôi mũi tên. */
 export interface NumberedArrowAnn extends Base {
+  /** Điểm điều khiển (đường cong đi qua điểm này). Không có → đường thẳng. */
+  cx?: number;
+  cy?: number;
   type: "numbered-arrow";
   x2: number;
   y2: number;
@@ -115,6 +141,7 @@ export type Annotation =
   | TextAnn
   | StepAnn
   | ArrowAnn
+  | DoubleArrowAnn
   | LineAnn
   | NumberedArrowAnn
   | NumberedRectAnn
@@ -202,7 +229,74 @@ export const uid = (): string =>
     ? crypto.randomUUID()
     : `id-${Math.floor(Math.random() * 1e9)}`;
 
+/** Dời annotation theo (dx, dy), kể cả các toạ độ tuyệt đối phụ (x2/y2 của
+ * mũi tên/đường thẳng, targetX/targetY của callout). */
+export const translateAnnotation = (a: Annotation, dx: number, dy: number): Annotation => {
+  const moved = { ...a, x: a.x + dx, y: a.y + dy };
+  if (moved.type === "arrow" || moved.type === "double-arrow" || moved.type === "line" || moved.type === "numbered-arrow") {
+    moved.x2 += dx;
+    moved.y2 += dy;
+    if (moved.cx !== undefined && moved.cy !== undefined) {
+      moved.cx += dx;
+      moved.cy += dy;
+    }
+  } else if (moved.type === "text") {
+    if (moved.targetX !== undefined) moved.targetX += dx;
+    if (moved.targetY !== undefined) moved.targetY += dy;
+  }
+  return moved;
+};
+
+/** Khung bao (ước lượng) của annotation trong không gian ảnh. */
+export const annotationBounds = (a: Annotation): { x1: number; y1: number; x2: number; y2: number } => {
+  let x1 = a.x;
+  let y1 = a.y;
+  let x2 = a.x;
+  let y2 = a.y;
+  if (a.type === "rect" || a.type === "ellipse" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect" || a.type === "image") {
+    x2 = a.x + a.width;
+    y2 = a.y + a.height;
+  } else if (a.type === "arrow" || a.type === "double-arrow" || a.type === "line" || a.type === "numbered-arrow") {
+    const cx = a.cx ?? a.x;
+    const cy = a.cy ?? a.y;
+    x1 = Math.min(a.x, a.x2, cx);
+    y1 = Math.min(a.y, a.y2, cy);
+    x2 = Math.max(a.x, a.x2, cx);
+    y2 = Math.max(a.y, a.y2, cy);
+  } else if (a.type === "step") {
+    x1 = a.x - a.radius;
+    y1 = a.y - a.radius;
+    x2 = a.x + a.radius;
+    y2 = a.y + a.radius;
+  } else if (a.type === "text") {
+    const fs = a.fontSize || 22;
+    const padX = a.bgColor ? Math.max(8, Math.round(fs * 0.35)) : 0;
+    const padY = a.bgColor ? Math.max(6, Math.round(fs * 0.25)) : 0;
+    const lines = (a.text || "").split("\n");
+    const maxLineLen = Math.max(...lines.map((l) => l.length), 1);
+    const estW = a.width || Math.max(40, maxLineLen * fs * 0.62);
+    const estH = Math.max(fs * 1.35, lines.length * fs * 1.35);
+    x2 = a.x + estW + padX * 2;
+    y2 = a.y + estH + padY * 2;
+    if (a.hasTargetArrow && a.targetX !== undefined && a.targetY !== undefined) {
+      x1 = Math.min(x1, a.targetX);
+      y1 = Math.min(y1, a.targetY);
+      x2 = Math.max(x2, a.targetX);
+      y2 = Math.max(y2, a.targetY);
+    }
+  }
+  return { x1, y1, x2, y2 };
+};
+
 export const PRESET_COLORS = ["#ef4444", "#f59e0b", "#22c55e", "#3b82f6", "#a855f7", "#111827"];
 export const STROKE_WIDTHS = [1, 2, 4, 6];
 export const HIGHLIGHT_COLORS = ["#facc15", "#4ade80", "#60a5fa", "#f87171", "#e879f9"];
 export const SOLID_COLORS = ["#1a1a1a", "#ef4444", "#111827", "#ffffff", "#0f172a"];
+export const TEXT_BG_PRESETS = [
+  { id: "none", color: "" },
+  { id: "white", color: "#ffffff" },
+  { id: "dark", color: "#18181b" },
+  { id: "yellow", color: "#fef08a" },
+  { id: "blue", color: "#dbeafe" },
+  { id: "red", color: "#fee2e2" },
+];

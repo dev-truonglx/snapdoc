@@ -41,6 +41,7 @@ function OverlayFontSizeInput({
   onChange: (n: number) => void;
   onCommit?: () => void;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState(String(value || 18));
   const isFocusedRef = useRef(false);
 
@@ -76,7 +77,7 @@ function OverlayFontSizeInput({
           onChange(next);
           onCommit?.();
         }}
-        title="Giảm cỡ chữ"
+        title={t("videoTrimmer.fontSizeDecrease")}
       >
         −
       </button>
@@ -129,7 +130,7 @@ function OverlayFontSizeInput({
             (e.target as HTMLInputElement).blur();
           }
         }}
-        title="Cỡ chữ (px)"
+        title={t("videoTrimmer.fontSize")}
       />
 
       <span style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", userSelect: "none" }}>px</span>
@@ -156,7 +157,7 @@ function OverlayFontSizeInput({
           onChange(next);
           onCommit?.();
         }}
-        title="Tăng cỡ chữ"
+        title={t("videoTrimmer.fontSizeIncrease")}
       >
         +
       </button>
@@ -193,6 +194,13 @@ export default function VideoCanvasOverlay({
   const updateRect = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
+    // Chỉ setState khi số đo thực sự đổi (timeupdate/polling gọi liên tục)
+    const commit = (next: { left: number; top: number; width: number; height: number }) =>
+      setVideoRect((prev) =>
+        prev.left === next.left && prev.top === next.top && prev.width === next.width && prev.height === next.height
+          ? prev
+          : next,
+      );
 
     if (crop) {
       // Khi đã crop: VideoCanvasOverlay nằm trong container stage có kích thước đúng tỷ lệ crop.
@@ -201,7 +209,7 @@ export default function VideoCanvasOverlay({
       const sw = stage ? stage.clientWidth : video.clientWidth;
       const sh = stage ? stage.clientHeight : video.clientHeight;
       if (sw > 0 && sh > 0) {
-        setVideoRect({ left: 0, top: 0, width: sw, height: sh });
+        commit({ left: 0, top: 0, width: sw, height: sh });
       }
       return;
     }
@@ -216,7 +224,7 @@ export default function VideoCanvasOverlay({
     }
 
     if (!vw || !vh) {
-      setVideoRect({ left: 0, top: 0, width: cw, height: ch });
+      commit({ left: 0, top: 0, width: cw, height: ch });
       return;
     }
 
@@ -233,7 +241,7 @@ export default function VideoCanvasOverlay({
       h = cw / videoRatio;
       top = (ch - h) / 2;
     }
-    setVideoRect({ left: Math.round(left), top: Math.round(top), width: Math.round(w), height: Math.round(h) });
+    commit({ left: Math.round(left), top: Math.round(top), width: Math.round(w), height: Math.round(h) });
   }, [videoRef, crop]);
 
   useEffect(() => {

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { HistoryItem } from "../../lib/ipc";
-import { MODE_LABEL } from "./HistoryItemCard";
+import { modeLabel } from "./HistoryItemCard";
 import { fmtDateTime, fmtSize, fmtDuration } from "./formatUtils";
 
 interface Props {
@@ -24,7 +24,7 @@ export default function HistoryListRow({ item, selected, onSelect, onToggleCheck
     <div
       style={{ ...row, background: selected ? "var(--accent)" : "transparent" }}
       onClick={onSelect}
-      onDoubleClick={isVideo ? undefined : onOpenEditor}
+      onDoubleClick={onOpenEditor}
       title={item.title ?? undefined}
     >
       <div
@@ -67,7 +67,7 @@ export default function HistoryListRow({ item, selected, onSelect, onToggleCheck
         <span style={titleText}>{item.title || t("history.unnamed")}</span>
       </span>
       <span style={{ ...cell, width: 100, color: selected ? "var(--accent-text)" : "var(--text-dim)" }}>
-        {MODE_LABEL[item.captureMode] ?? item.captureMode}
+        {modeLabel(t, item.captureMode)}
       </span>
       <span style={{ ...cell, width: 130, color: selected ? "var(--accent-text)" : "var(--text-dim)" }}>
         {fmtDateTime(item.createdAt)}

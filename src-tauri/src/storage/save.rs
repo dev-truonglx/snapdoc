@@ -46,15 +46,24 @@ pub fn write_png_exact(path: &str, data: &str) -> Result<String, String> {
     write_png_to(PathBuf::from(path), data)
 }
 
+/// Như `write_png` nhưng nhận raw bytes (ảnh đã encode sẵn) — khỏi vòng
+/// encode/decode base64 thừa. Cũng qua `dedupe`.
+pub fn write_bytes(path: &str, bytes: &[u8]) -> Result<String, String> {
+    write_bytes_to(dedupe(PathBuf::from(path)), bytes)
+}
+
 fn write_png_to(target: PathBuf, data: &str) -> Result<String, String> {
     let b64 = data.split(',').next_back().unwrap_or(data);
     let bytes = STANDARD
         .decode(b64.trim())
         .map_err(|e| format!("Base64 không hợp lệ: {e}"))?;
+    write_bytes_to(target, &bytes)
+}
 
+fn write_bytes_to(target: PathBuf, bytes: &[u8]) -> Result<String, String> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&target, &bytes).map_err(|e| format!("Lỗi ghi file: {e}"))?;
+    std::fs::write(&target, bytes).map_err(|e| format!("Lỗi ghi file: {e}"))?;
     Ok(target.to_string_lossy().to_string())
 }

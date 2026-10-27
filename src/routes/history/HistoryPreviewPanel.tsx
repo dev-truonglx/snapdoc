@@ -3,7 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
 import { useHistory } from "./useHistoryStore";
-import { MODE_LABEL } from "./HistoryItemCard";
+import { modeLabel } from "./HistoryItemCard";
 import { fmtDateTime, fmtSize, fmtDuration } from "./formatUtils";
 
 interface Props {
@@ -266,7 +266,7 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
         <Row label={t("history.imageSize")} value={`${item.width} × ${item.height}px${item.scaleFactor > 1 ? ` (${item.scaleFactor}×)` : ""}`} />
         {isVideo && item.durationMs != null && <Row label={t("history.duration")} value={fmtDuration(item.durationMs)} />}
         <Row label={t("history.fileSize")} value={fmtSize(item.fileSize)} />
-        <Row label={t("history.captureType")} value={MODE_LABEL[item.captureMode] ?? item.captureMode} />
+        <Row label={t("history.captureType")} value={modeLabel(t, item.captureMode)} />
         {item.isEdited && <Row label={t("history.status")} value={t("history.edited")} />}
         {isTrashed && <Row label={t("history.status")} value={t("history.inTrash")} />}
       </div>

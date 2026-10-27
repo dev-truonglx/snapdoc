@@ -53,7 +53,9 @@
     "permGranted": "✓ Granted",
     "permDenied": "✕ Not granted",
     "languageSection": "LANGUAGE",
-    "languageLabel": "Display language"
+    "languageLabel": "Display language",
+    "requestPermission": "Grant access",
+    "requestPermissionHint": "If no prompt appeared, enable SnapDoc in System Settings › Privacy & Security › Screen Recording, then restart SnapDoc."
   },
   "updates": {
     "checkingUpdates": "Checking…",
@@ -109,6 +111,7 @@
     "numberedRect": "Numbered box",
     "circle": "Circle",
     "arrow": "Arrow",
+    "doubleArrow": "Double arrow",
     "line": "Line",
     "blur": "Blur",
     "text": "Text",
@@ -272,7 +275,13 @@
     "permanentDeleteSelected": "Permanently delete ({{count}})",
     "permanentDeleteSelectedConfirm": "Permanently delete {{count}} selected items? This cannot be undone.",
     "batchActions": "Batch actions",
-    "totalSelectedSize": "Total size"
+    "totalSelectedSize": "Total size",
+    "dateRange": "Date range",
+    "rangeAll": "All time",
+    "rangeToday": "Today",
+    "rangeLast7": "Last 7 days",
+    "rangeLast30": "Last 30 days",
+    "rangeCustom": "Custom range"
   },
   "thumbnail": {
     "openEditorTooltip": "Click to open editor",
@@ -314,6 +323,22 @@
     "fontSizeSmaller": "Smaller",
     "fontSizeInput": "Font size (px)",
     "fontSizeLarger": "Larger",
+    "textBgColor": "Background",
+    "textBgNone": "No background",
+    "textBgWhite": "White background",
+    "textBgDark": "Dark background",
+    "textBgYellow": "Yellow background",
+    "textBgBlue": "Blue background",
+    "textBgRed": "Red background",
+    "textTargetArrow": "Pointer arrow (Callout)",
+    "arrowDirLeft": "Point left",
+    "arrowDirTopLeft": "Point top-left",
+    "arrowDirUp": "Point up",
+    "arrowDirTopRight": "Point top-right",
+    "arrowDirRight": "Point right",
+    "arrowDirBottomRight": "Point bottom-right",
+    "arrowDirDown": "Point down",
+    "arrowDirBottomLeft": "Point bottom-left",
     "nextNumber": "Next number",
     "nextNumberToAssign": "Number to assign next",
     "resetCounter": "Reset counter to 1",
@@ -458,6 +483,7 @@
     "imageCount": "{{count}} images"
   },
   "annotationCanvas": {
+    "calloutLabel": "Pointer",
     "fitWindow": "Fit window — image fills viewport (Ctrl/Cmd 0)",
     "actualSize": "Actual size — 1 image pixel = 1 screen pixel",
     "zoomOut": "Zoom out (Ctrl/Cmd −)",
@@ -528,7 +554,27 @@
     "speedZoneTrack": "Speed Track",
     "speedZoneSelected": "Selected Speed Zone",
     "speedRegionsCount": "{{count}} speed zones",
-    "speedZoneThis": "Speed of this segment"
+    "speedZoneThis": "Speed of this segment",
+    "overlayTrackRect": "Box",
+    "overlayTrackBlur": "Blur",
+    "overlayTrackBlackout": "Blackout",
+    "overlayTrackText": "Text",
+    "overlayTrackArrow": "Arrow",
+    "fontSizeDecrease": "Decrease font size",
+    "fontSize": "Font size (px)",
+    "fontSizeIncrease": "Increase font size",
+    "zoomTrackHint": "Zoom track — drag to adjust timing, double-click to add a zoom",
+    "zoomFocusPinHint": "Click & drag to move the zoom focus point",
+    "zoomFocusCenter": "Zoom focus:",
+    "deleteZoomSegment": "Delete this zoom (Delete / Backspace)",
+    "play": "Play",
+    "pause": "Pause",
+    "mute": "Mute",
+    "unmute": "Unmute",
+    "autoZoomOn": "Auto Zoom Focus following mouse actions",
+    "autoZoomOff": "Turn off mouse Zoom Focus",
+    "autoZoomLabel": "Focus",
+    "addZoomAtPlayhead": "Add a Zoom Focus region at the current time"
   },
   "gifExport": {
     "title": "Export Animated GIF",
@@ -563,7 +609,10 @@
     "copiedToast": "Copied GIF image to clipboard",
     "savedToast": "GIF file exported successfully",
     "savedLibraryToast": "Saved GIF to Library",
-    "exportFailed": "GIF export failed"
+    "exportFailed": "GIF export failed",
+    "speedNormal": "1.0x (Normal)",
+    "speedFast": "1.5x (Fast)",
+    "speedDouble": "2.0x (Double)"
   },
   "recordingIndicator": {
     "clickToStop": "Click to stop recording",

@@ -1,6 +1,5 @@
 /** Chuyển "YYYY-MM-DD" (`<input type="date">`, local) sang unix-ms đầu ngày
- * local — dùng cho cả `HistoryToolbar.tsx` (đọc input) và `useHistoryStore.ts`
- * (mặc định lọc theo ngày hiện tại), tách riêng để 2 nơi luôn tính nhất quán. */
+ * local — dùng cho `HistoryToolbar.tsx` (đọc input date + khoảng ngày nhanh). */
 export function dayStartMs(dateStr: string): number {
   const [y, m, d] = dateStr.split("-").map(Number);
   return new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
@@ -14,7 +13,7 @@ export function msToDayStr(ms: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-/** Unix-ms đầu ngày HÔM NAY (local) — mặc định filter "from" khi mở History. */
+/** Unix-ms đầu ngày HÔM NAY (local) — gốc tính khoảng ngày nhanh ở toolbar. */
 export function todayStartMs(): number {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime();

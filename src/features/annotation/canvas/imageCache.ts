@@ -36,3 +36,48 @@ export function evictCachedImage(url: string): void {
 export function clearImageCache(): void {
   cache.clear();
 }
+
+/**
+ * Cache ảnh của annotation kiểu "image" (key = `ann.src`, thường là data URL
+ * rất dài). Giới hạn LRU để không giữ mãi ảnh đã xoá/đổi. Node Konva đang
+ * render vẫn giữ tham chiếu riêng → bị evict chỉ có nghĩa lần sau miss sẽ
+ * load lại.
+ */
+const IMAGE_ANN_CACHE_LIMIT = 20;
+
+class LruImageMap {
+  private map = new Map<string, HTMLImageElement>();
+  constructor(private readonly limit: number) {}
+
+  has(key: string): boolean {
+    return this.map.has(key);
+  }
+
+  get(key: string): HTMLImageElement | undefined {
+    const el = this.map.get(key);
+    if (el) {
+      // Đẩy lên cuối (mới dùng nhất)
+      this.map.delete(key);
+      this.map.set(key, el);
+    }
+    return el;
+  }
+
+  set(key: string, el: HTMLImageElement): this {
+    if (!key) return this;
+    this.map.delete(key);
+    while (this.map.size >= this.limit) {
+      const oldestKey = this.map.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.map.delete(oldestKey);
+    }
+    this.map.set(key, el);
+    return this;
+  }
+
+  delete(key: string): boolean {
+    return this.map.delete(key);
+  }
+}
+
+export const imageAnnCache = new LruImageMap(IMAGE_ANN_CACHE_LIMIT);

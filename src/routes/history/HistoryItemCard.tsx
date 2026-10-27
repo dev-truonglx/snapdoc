@@ -1,17 +1,25 @@
 import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { HistoryItem } from "../../lib/ipc";
 import { fmtTime, fmtDuration } from "./formatUtils";
 
-export const MODE_LABEL: Record<string, string> = {
-  region: "Region",
-  window: "Window",
-  full: "Full screen",
-  all: "All screens",
-  scroll: "Scrolling",
-  quick: "Quick",
+// Key dịch cho loại chụp — dùng chung key với bộ lọc ở `HistoryToolbar.tsx`.
+const MODE_KEY: Record<string, string> = {
+  region: "capture.region",
+  window: "capture.window",
+  full: "capture.full",
+  all: "capture.all",
+  scroll: "capture.scroll",
+  quick: "shortcuts.quick",
 };
+
+/** Nhãn loại chụp theo ngôn ngữ hiện tại (mode lạ thì hiện nguyên giá trị). */
+export function modeLabel(t: TFunction, mode: string): string {
+  const key = MODE_KEY[mode];
+  return key ? t(key) : mode;
+}
 
 interface Props {
   item: HistoryItem;
@@ -123,7 +131,7 @@ export default function HistoryItemCard({ item, selected, onSelect, onToggleChec
         {item.isEdited && <span style={{ ...badge, top: "auto", bottom: 4, left: 4, right: "auto" }}>✎</span>}
       </div>
       <div style={{ ...meta, color: hovered || selected ? "var(--text)" : "var(--text-dim)" }}>
-        <span style={metaMode}>{MODE_LABEL[item.captureMode] ?? item.captureMode}</span>
+        <span style={metaMode}>{modeLabel(t, item.captureMode)}</span>
         <span style={metaTime}>{fmtTime(item.createdAt)}</span>
       </div>
     </div>

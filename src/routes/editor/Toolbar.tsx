@@ -56,6 +56,13 @@ const ICONS: Record<Tool, ReactNode> = {
       <polygon points="14,4 9,5.5 12.5,9" fill="currentColor" />
     </svg>
   ),
+  "double-arrow": (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+      <line x1="4" y1="14" x2="14" y2="4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <polygon points="14.5,3.5 9.5,5 13,8.5" fill="currentColor" />
+      <polygon points="3.5,14.5 8.5,13 5,9.5" fill="currentColor" />
+    </svg>
+  ),
   line: (
     <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
       <line x1="3" y1="15" x2="15" y2="3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
@@ -394,6 +401,7 @@ export default function Toolbar({
 
   const TOOLS_GROUP2: { id: Tool; label: string; hint: string }[] = [
     { id: "arrow", label: t("tools.arrow"), hint: "A" },
+    { id: "double-arrow", label: t("tools.doubleArrow"), hint: "D" },
     { id: "line", label: t("tools.line"), hint: "L" },
     { id: "numbered-arrow", label: t("tools.numberedArrow"), hint: "W" },
     { id: "highlight", label: t("tools.highlight"), hint: "H" },
@@ -691,7 +699,7 @@ export default function Toolbar({
                 </>
               )}
 
-              {/* Cỡ chữ — chỉ khi tool = text */}
+              {/* Cỡ chữ, Màu nền, Mũi tên chỉ đích — khi tool = text hoặc text được chọn */}
               {isText && (
                 <>
                   <div style={sep} />

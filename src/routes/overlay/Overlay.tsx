@@ -1339,7 +1339,7 @@ function QuickAnnotate() {
       }
 
       if (phase !== "annotating") return;
-      if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); s.undo(); return; }
+      if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? s.redo() : s.undo(); return; }
       if ((e.key === "Delete" || e.key === "Backspace") && s.selectedId) { e.preventDefault(); s.removeSelected(); return; }
       if (!mod) {
         const cmap: Record<string, number> = { "1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5 };

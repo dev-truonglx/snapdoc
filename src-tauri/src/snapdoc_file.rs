@@ -29,7 +29,9 @@
 //! `doc.json` thì nút Save và chỉ báo "chưa lưu" trở thành vô nghĩa.
 
 use std::io::{Read, Seek, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use zip::write::SimpleFileOptions;
 
@@ -190,7 +192,130 @@ pub struct WriteSnapdoc<'a> {
     pub updated_at: i64,
 }
 
-/// Ghi container. **Luôn ATOMIC**: dựng ra `<path>.tmp` rồi `rename`.
+// ── Khoá theo file ───────────────────────────────────────────────────────
+
+type PathLocks = std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<std::sync::Mutex<()>>>>;
+
+fn path_locks() -> &'static PathLocks {
+    static LOCKS: std::sync::OnceLock<PathLocks> = std::sync::OnceLock::new();
+    LOCKS.get_or_init(Default::default)
+}
+
+/// Chạy `f` trong lúc giữ khoá RIÊNG của file `path` (khác file thì không chặn
+/// nhau). Mọi đường đọc-sửa-ghi một `.snapdoc` (autosave draft, Save, bỏ
+/// draft, Save file ngoài) PHẢI bọc cả đoạn đọc lẫn ghi trong này: không có
+/// khoá, một autosave đã đọc bản CŨ có thể rename SAU một lần Save → Save bị
+/// đè ngược về trạng thái trước.
+///
+/// Không re-entrant — đừng gọi lồng cho cùng 1 file.
+pub fn with_path_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    // Chuẩn hoá để 2 cách viết cùng 1 file (symlink, `..`) dùng chung khoá;
+    // file chưa tồn tại thì dùng nguyên đường dẫn.
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let lock = {
+        let mut map = path_locks().lock().unwrap_or_else(|p| p.into_inner());
+        // Dọn khoá không còn ai giữ để map không phình theo số file từng ghi.
+        map.retain(|_, l| Arc::strong_count(l) > 1);
+        map.entry(key).or_default().clone()
+    };
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    f()
+}
+
+/// Tên file tạm DUY NHẤT cho mỗi lần ghi (pid + bộ đếm): 2 lần ghi cùng file
+/// chạy chồng nhau (vd 2 process, hoặc caller quên khoá) không ghi chung 1 tmp.
+/// Luôn kết thúc bằng `.tmp` và bắt đầu bằng tên file đích.
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.file_name().map(|s| s.to_os_string()).unwrap_or_default();
+    name.push(format!(".{}-{n}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// `true` nếu `name` là file tạm do `unique_tmp_path` (hoặc bản cũ
+/// `<id>.snapdoc.tmp`) sinh ra.
+fn is_snapdoc_tmp_name(name: &str) -> bool {
+    name.ends_with(".tmp") && name.contains(".snapdoc.")
+}
+
+/// Xoá file tạm `.snapdoc` sót lại (crash giữa lúc ghi) trong `dir`, chỉ những
+/// file cũ hơn `older_than` — không đụng lần ghi đang chạy. Trả số file đã xoá.
+pub fn remove_stale_tmp(dir: &Path, older_than: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for e in entries.flatten() {
+        let name = e.file_name();
+        if !is_snapdoc_tmp_name(&name.to_string_lossy()) {
+            continue;
+        }
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .map(|age| age >= older_than)
+            .unwrap_or(false);
+        if old && std::fs::remove_file(e.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Dựng container vào file tạm qua `build`, rồi `rename` đè lên `path`. Lỗi ở
+/// bất kỳ bước nào → xoá file tạm, `path` giữ nguyên.
+fn write_atomic(
+    path: &Path,
+    build: impl FnOnce(&mut zip::ZipWriter<std::fs::File>) -> Result<(), String>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Không tạo được thư mục chứa .snapdoc: {e}"))?;
+    }
+    let tmp = unique_tmp_path(path);
+    let result = (|| {
+        let f = std::fs::File::create(&tmp).map_err(|e| format!("Không tạo được file tạm: {e}"))?;
+        let mut zip = zip::ZipWriter::new(f);
+        build(&mut zip)?;
+        zip.finish()
+            .map_err(|e| format!("Không hoàn tất được .snapdoc: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("Không thay được file .snapdoc: {e}"))
+    })();
+    if result.is_err() {
+        // Dọn tmp — đừng để lại rác trong thư mục Library.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn stored_opts() -> SimpleFileOptions {
+    SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)
+}
+
+fn put_entry(zip: &mut zip::ZipWriter<std::fs::File>, name: &str, bytes: &[u8]) -> Result<(), String> {
+    zip.start_file(name, stored_opts())
+        .map_err(|e| format!("Không ghi được entry {name}: {e}"))?;
+    zip.write_all(bytes)
+        .map_err(|e| format!("Không ghi được entry {name}: {e}"))
+}
+
+fn manifest_bytes(created_at: i64, updated_at: i64) -> Result<Vec<u8>, String> {
+    let manifest = Manifest {
+        format: "snapdoc".to_string(),
+        format_version: FORMAT_VERSION,
+        kind: "image".to_string(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        created_at,
+        updated_at,
+    };
+    serde_json::to_vec(&manifest).map_err(|e| format!("Không serialize được manifest: {e}"))
+}
+
+/// Ghi container. **Luôn ATOMIC**: dựng ra file tạm cạnh `path` rồi `rename`.
 ///
 /// Bắt buộc phải atomic vì autosave ghi lại file này liên tục: viết đè trực
 /// tiếp mà crash giữa đường là mất CẢ nền lẫn annotation — mất nhiều hơn đúng
@@ -199,54 +324,84 @@ pub struct WriteSnapdoc<'a> {
 ///
 /// Mọi entry nén **level 0 (stored)**: PNG đã nén sẵn nên deflate thêm gần 0%
 /// nhưng tốn CPU ở MỖI lần autosave.
+///
+/// Caller đọc-sửa-ghi phải bọc trong `with_path_lock`.
 pub fn write_snapdoc(path: &Path, data: WriteSnapdoc<'_>) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Không tạo được thư mục chứa .snapdoc: {e}"))?;
-    }
-    // Tên tmp gắn với đúng file đích (không phải tmp dùng chung) để 2 lần ghi
-    // 2 file khác nhau chạy song song không đạp lên nhau.
-    let tmp = path.with_extension("snapdoc.tmp");
-
-    {
-        let f = std::fs::File::create(&tmp).map_err(|e| format!("Không tạo được file tạm: {e}"))?;
-        let mut zip = zip::ZipWriter::new(f);
-        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-
-        let manifest = Manifest {
-            format: "snapdoc".to_string(),
-            format_version: FORMAT_VERSION,
-            kind: "image".to_string(),
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-            created_at: data.created_at,
-            updated_at: data.updated_at,
-        };
-        let manifest_raw = serde_json::to_vec(&manifest)
-            .map_err(|e| format!("Không serialize được manifest: {e}"))?;
-
-        let mut put = |name: &str, bytes: &[u8]| -> Result<(), String> {
-            zip.start_file(name, opts)
-                .map_err(|e| format!("Không ghi được entry {name}: {e}"))?;
-            zip.write_all(bytes)
-                .map_err(|e| format!("Không ghi được entry {name}: {e}"))
-        };
-
-        put(MANIFEST, &manifest_raw)?;
-        put(BASE_PNG, data.base_png)?;
-        put(DOC_JSON, data.doc_json.as_bytes())?;
+    let manifest_raw = manifest_bytes(data.created_at, data.updated_at)?;
+    write_atomic(path, |zip| {
+        put_entry(zip, MANIFEST, &manifest_raw)?;
+        put_entry(zip, BASE_PNG, data.base_png)?;
+        put_entry(zip, DOC_JSON, data.doc_json.as_bytes())?;
         if let Some(draft) = data.draft_json {
-            put(DRAFT_JSON, draft.as_bytes())?;
+            put_entry(zip, DRAFT_JSON, draft.as_bytes())?;
         }
-        put(PREVIEW_PNG, data.preview_png)?;
+        put_entry(zip, PREVIEW_PNG, data.preview_png)
+    })
+}
 
-        zip.finish()
-            .map_err(|e| format!("Không hoàn tất được .snapdoc: {e}"))?;
+/// Chỉ đổi `draft.json` (ghi mới, hoặc `None` = xoá) + `updatedAt` của
+/// manifest, GIỮ NGUYÊN byte các entry còn lại — `base.png`/`doc.json`/
+/// `preview.png` được copy THÔ từ file cũ (`raw_copy_file`, không giải nén /
+/// không nạp vào RAM), mở file 1 lần. Autosave chạy mỗi ~2s nên không được
+/// decode lại vài MB PNG mỗi lượt như `read_snapdoc` + `write_snapdoc`.
+///
+/// Thiếu `preview.png` → dùng `base.png` thay (giống các đường cũ). Caller
+/// phải giữ `with_path_lock`.
+pub fn write_snapdoc_draft(path: &Path, draft_json: Option<&str>, updated_at: i64) -> Result<(), String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("Không mở được file: {e}"))?;
+    let mut src =
+        zip::ZipArchive::new(file).map_err(|e| format!("File .snapdoc không hợp lệ: {e}"))?;
+
+    let manifest_raw = read_entry(&mut src, MANIFEST)?
+        .ok_or_else(|| "File .snapdoc thiếu manifest.json".to_string())?;
+    let manifest: Manifest = serde_json::from_slice(&manifest_raw)
+        .map_err(|e| format!("manifest.json không đọc được: {e}"))?;
+    // Cùng lý do với `read_snapdoc`: không ghi lại (hạ cấp) file bản mới hơn.
+    if manifest.format_version > FORMAT_VERSION {
+        return Err(format!(
+            "File được tạo bởi bản SnapDoc mới hơn (định dạng v{}). Hãy cập nhật SnapDoc.",
+            manifest.format_version
+        ));
     }
+    if src.index_for_name(BASE_PNG).is_none() {
+        return Err("File .snapdoc thiếu base.png".to_string());
+    }
+    let new_manifest = manifest_bytes(manifest.created_at, updated_at)?;
+    // doc.json nhỏ (chỉ JSON annotation) — đọc để so: draft trùng hệt bản đã
+    // lưu nghĩa là KHÔNG còn gì chưa lưu (vd autosave xếp hàng sau một lần
+    // Save cùng nội dung) → bỏ draft thay vì để cờ "chưa lưu" bật sai.
+    let doc_raw = read_entry(&mut src, DOC_JSON)?;
+    let draft_json = draft_json.filter(|d| doc_raw.as_deref() != Some(d.as_bytes()));
+    let has_doc = doc_raw.is_some();
+    let has_preview = src.index_for_name(PREVIEW_PNG).is_some();
 
-    std::fs::rename(&tmp, path).map_err(|e| {
-        // Dọn tmp nếu rename lỗi — đừng để lại rác trong thư mục Library.
-        let _ = std::fs::remove_file(&tmp);
-        format!("Không thay được file .snapdoc: {e}")
+    write_atomic(path, |zip| {
+        let raw_copy = |zip: &mut zip::ZipWriter<std::fs::File>,
+                        src: &mut zip::ZipArchive<std::fs::File>,
+                        from: &str,
+                        to: &str|
+         -> Result<(), String> {
+            let entry = src
+                .by_name(from)
+                .map_err(|e| format!("Không mở được entry {from}: {e}"))?;
+            zip.raw_copy_file_rename(entry, to)
+                .map_err(|e| format!("Không chép được entry {from}: {e}"))
+        };
+        put_entry(zip, MANIFEST, &new_manifest)?;
+        raw_copy(zip, &mut src, BASE_PNG, BASE_PNG)?;
+        if has_doc {
+            raw_copy(zip, &mut src, DOC_JSON, DOC_JSON)?;
+        } else {
+            put_entry(zip, DOC_JSON, b"{}")?;
+        }
+        if let Some(draft) = draft_json {
+            put_entry(zip, DRAFT_JSON, draft.as_bytes())?;
+        }
+        if has_preview {
+            raw_copy(zip, &mut src, PREVIEW_PNG, PREVIEW_PNG)
+        } else {
+            raw_copy(zip, &mut src, BASE_PNG, PREVIEW_PNG)
+        }
     })
 }
 
@@ -418,10 +573,76 @@ mod tests {
     fn no_tmp_file_left_behind() {
         let p = tmp_path("no-tmp");
         write_sample(&p, None);
-        assert!(
-            !p.with_extension("snapdoc.tmp").exists(),
-            "file tạm phải được rename đi, không để lại rác",
-        );
+        write_snapdoc_draft(&p, Some("{}"), 1).unwrap();
+        let prefix = p.file_name().unwrap().to_string_lossy().into_owned();
+        let leftovers: Vec<_> = std::fs::read_dir(p.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&prefix) && n != &prefix)
+            .collect();
+        assert!(leftovers.is_empty(), "file tạm phải được rename đi, không để lại rác: {leftovers:?}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn tmp_names_are_unique_and_recognized() {
+        let p = tmp_path("uniq");
+        let a = unique_tmp_path(&p);
+        let b = unique_tmp_path(&p);
+        assert_ne!(a, b);
+        for t in [&a, &b] {
+            assert!(is_snapdoc_tmp_name(&t.file_name().unwrap().to_string_lossy()), "{t:?}");
+        }
+        assert!(is_snapdoc_tmp_name("abc.snapdoc.tmp"), "tên tmp bản cũ vẫn được dọn");
+        assert!(!is_snapdoc_tmp_name("abc.snapdoc"));
+    }
+
+    #[test]
+    fn draft_write_keeps_other_entries_byte_identical() {
+        let p = tmp_path("draft-raw");
+        write_sample(&p, None);
+        write_snapdoc_draft(&p, Some(r#"{"draft":1}"#), 999).unwrap();
+        let f = read_snapdoc(&p).unwrap();
+        assert_eq!(f.base_png, b"BASEPIXELS");
+        assert_eq!(f.doc_json, r#"{"kind":"image","annotations":[]}"#);
+        assert_eq!(f.draft_json.as_deref(), Some(r#"{"draft":1}"#));
+        assert_eq!(f.created_at, 111, "createdAt giữ nguyên");
+        assert_eq!(read_snapdoc_entry(&p, PREVIEW_PNG).unwrap().unwrap(), b"PREVIEWPIXELS");
+
+        // `None` = bỏ draft.
+        write_snapdoc_draft(&p, None, 1000).unwrap();
+        let f = read_snapdoc(&p).unwrap();
+        assert!(f.draft_json.is_none());
+        assert_eq!(f.base_png, b"BASEPIXELS");
+
+        // Draft trùng hệt doc.json đã lưu → không có gì chưa lưu, không ghi draft.
+        write_snapdoc_draft(&p, Some(r#"{"kind":"image","annotations":[]}"#), 1001).unwrap();
+        assert!(read_snapdoc(&p).unwrap().draft_json.is_none());
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn path_lock_serializes_read_modify_write() {
+        let p = tmp_path("lock");
+        std::fs::write(&p, b"0").unwrap();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        with_path_lock(&p, || {
+                            let n: u32 = std::fs::read_to_string(&p).unwrap().parse().unwrap();
+                            std::fs::write(&p, (n + 1).to_string()).unwrap();
+                        });
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "200");
         std::fs::remove_file(&p).ok();
     }
 }

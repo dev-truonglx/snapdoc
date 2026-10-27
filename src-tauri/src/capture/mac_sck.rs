@@ -38,7 +38,7 @@ unsafe fn err_msg(err: *mut NSError) -> String {
 }
 
 /// CGImage (BGRA, có thể có padding cuối mỗi hàng) → RgbaImage. CHẠY trong
-/// completion block của SCK khi con trỏ ảnh còn sống.
+/// completion block của SCK khi con trỏ ảnh còn sống (hoặc khi đã CFRetain).
 unsafe fn cgimage_to_rgba(img: *mut CGImage) -> CapResult {
     if img.is_null() {
         return Err("ScreenCaptureKit trả ảnh rỗng".to_string());
@@ -253,19 +253,36 @@ pub fn capture_display_excluding_own_app(display_id: u32) -> CapResult {
         .map_err(|_| "Hết thời gian chờ ScreenCaptureKit".to_string())?
 }
 
+/// Kết quả từng phần của 1 màn hình freeze (xem `capture_displays_excluding_own_app_jpeg`).
+pub enum FrozenPart {
+    /// JPEG làm nền overlay — gửi NGAY khi encode xong.
+    Jpeg(Vec<u8>),
+    /// Pixel lossless để crop — chỉ khi `want_rgba`, convert SAU khi đã gửi JPEG.
+    Rgba(RgbaImage),
+}
+
 /// Chụp N màn hình (theo CGDirectDisplayID) SONG SONG trong CÙNG 1 lần fetch
 /// `SCShareableContent` — loại trừ toàn bộ cửa sổ của chính app.
 /// Nén JPEG bằng phần cứng Apple (NSBitmapImageRep / ImageIO) ngay trong completion handler
-/// và gọi `on_result(idx, result)` khi từng màn hình hoàn tất.
+/// và gọi `on_result(idx, Ok(FrozenPart::Jpeg))` khi từng màn hình hoàn tất.
+///
+/// `want_rgba`: giữ lại CGImage (CFRetain) rồi convert sang RGBA trên thread
+/// riêng SAU khi JPEG đã được giao — không làm chậm nền overlay. Mỗi màn có
+/// ảnh hợp lệ sẽ nhận thêm đúng 1 lần `on_result(idx, Ok(Rgba) | Err)`.
 pub fn capture_displays_excluding_own_app_jpeg(
     targets: &[(usize, u32)],
     quality: f32,
-    mut on_result: impl FnMut(usize, Result<Vec<u8>, String>),
+    want_rgba: bool,
+    mut on_result: impl FnMut(usize, Result<FrozenPart, String>),
 ) {
+    use objc2_core_foundation::CFRetained;
+    use std::ptr::NonNull;
+
     if targets.is_empty() {
         return;
     }
-    let (tx, rx) = mpsc::channel::<(usize, Result<Vec<u8>, String>)>();
+    type JpegMsg = (usize, Result<Vec<u8>, String>, Option<CFRetained<CGImage>>);
+    let (tx, rx) = mpsc::channel::<JpegMsg>();
     let my_pid = std::process::id();
     let targets_owned: Vec<(usize, u32)> = targets.to_vec();
     let n = targets_owned.len();
@@ -277,7 +294,7 @@ pub fn capture_displays_excluding_own_app_jpeg(
                 unsafe { err_msg(err) }
             );
             for &(idx, _) in &targets_owned {
-                let _ = tx.send((idx, Err(msg.clone())));
+                let _ = tx.send((idx, Err(msg.clone()), None));
             }
             return;
         }
@@ -294,7 +311,7 @@ pub fn capture_displays_excluding_own_app_jpeg(
 
         for &(idx, display_id) in &targets_owned {
             let Some(display) = displays.iter().find(|d| unsafe { d.displayID() } == display_id) else {
-                let _ = tx.send((idx, Err("Không tìm thấy màn hình để chụp".to_string())));
+                let _ = tx.send((idx, Err("Không tìm thấy màn hình để chụp".to_string()), None));
                 continue;
             };
 
@@ -321,8 +338,8 @@ pub fn capture_displays_excluding_own_app_jpeg(
             let tx_inner = tx.clone();
             let inner = RcBlock::new(move |img: *mut CGImage, err2: *mut NSError| {
                 let t_start = std::time::Instant::now();
-                let r = if img.is_null() {
-                    Err(format!("Chụp màn hình lỗi: {}", unsafe { err_msg(err2) }))
+                let (r, keep) = if img.is_null() {
+                    (Err(format!("Chụp màn hình lỗi: {}", unsafe { err_msg(err2) })), None)
                 } else {
                     let res = unsafe { cgimage_to_jpeg(img, quality) };
                     eprintln!(
@@ -330,9 +347,15 @@ pub fn capture_displays_excluding_own_app_jpeg(
                         idx,
                         t_start.elapsed()
                     );
-                    res
+                    // Giữ CGImage sống qua khỏi completion block để convert RGBA sau.
+                    let keep = if want_rgba {
+                        NonNull::new(img).map(|p| unsafe { CFRetained::retain(p) })
+                    } else {
+                        None
+                    };
+                    (res, keep)
                 };
-                let _ = tx_inner.send((idx, r));
+                let _ = tx_inner.send((idx, r, keep));
             });
             unsafe {
                 SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
@@ -348,9 +371,29 @@ pub fn capture_displays_excluding_own_app_jpeg(
         SCShareableContent::getShareableContentWithCompletionHandler(&handler);
     }
 
+    // Giao JPEG ngay khi tới; RGBA convert song song trên thread riêng.
+    let (rgba_tx, rgba_rx) = mpsc::channel::<(usize, CapResult)>();
+    let mut rgba_pending = 0usize;
     for _ in 0..n {
         match rx.recv_timeout(TIMEOUT) {
-            Ok((idx, res)) => on_result(idx, res),
+            Ok((idx, res, keep)) => {
+                on_result(idx, res.map(FrozenPart::Jpeg));
+                if let Some(img) = keep {
+                    rgba_pending += 1;
+                    let rgba_tx = rgba_tx.clone();
+                    std::thread::spawn(move || {
+                        let r = unsafe { cgimage_to_rgba(CFRetained::as_ptr(&img).as_ptr()) };
+                        let _ = rgba_tx.send((idx, r));
+                    });
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    drop(rgba_tx);
+    for _ in 0..rgba_pending {
+        match rgba_rx.recv_timeout(TIMEOUT) {
+            Ok((idx, r)) => on_result(idx, r.map(FrozenPart::Rgba)),
             Err(_) => break,
         }
     }

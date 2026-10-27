@@ -2,7 +2,9 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
 import { useHistory } from "./useHistoryStore";
-import { dayStartMs, msToDayStr, ONE_DAY_MS } from "./dateUtils";
+import { dayStartMs, msToDayStr, todayStartMs, ONE_DAY_MS } from "./dateUtils";
+
+type DatePreset = "all" | "today" | "7d" | "30d";
 
 export default function HistoryToolbar() {
   const { t } = useTranslation();
@@ -29,6 +31,20 @@ export default function HistoryToolbar() {
   const viewMode = useHistory((s) => s.viewMode);
   const setViewMode = useHistory((s) => s.setViewMode);
   const [emptying, setEmptying] = useState(false);
+
+  // Khoảng ngày nhanh — tính tại thời điểm bấm (không cache) để không bị lệch
+  // ngày khi cửa sổ mở qua nửa đêm. `to` là mốc loại trừ (hết ngày hôm nay).
+  const presetRange = (id: DatePreset): { from?: number; to?: number } => {
+    if (id === "all") return { from: undefined, to: undefined };
+    const today = todayStartMs();
+    const days = id === "today" ? 1 : id === "7d" ? 7 : 30;
+    return { from: today - (days - 1) * ONE_DAY_MS, to: today + ONE_DAY_MS };
+  };
+  const activePreset: DatePreset | "custom" =
+    (["all", "today", "7d", "30d"] as const).find((id) => {
+      const r = presetRange(id);
+      return r.from === filter.from && r.to === filter.to;
+    }) ?? "custom";
 
   const onFromChange = (v: string) => {
     setFilter({ from: v ? dayStartMs(v) : undefined });
@@ -69,7 +85,22 @@ export default function HistoryToolbar() {
         ))}
       </select>
 
-      {/* Controlled — hiện ĐÚNG ngày đang lọc (mặc định hôm nay, xem
+      <select
+        value={activePreset}
+        onChange={(e) => {
+          const v = e.target.value as DatePreset | "custom";
+          if (v !== "custom") setFilter(presetRange(v));
+        }}
+        title={t("history.dateRange")}
+      >
+        <option value="all">{t("history.rangeAll")}</option>
+        <option value="today">{t("history.rangeToday")}</option>
+        <option value="7d">{t("history.rangeLast7")}</option>
+        <option value="30d">{t("history.rangeLast30")}</option>
+        {activePreset === "custom" && <option value="custom">{t("history.rangeCustom")}</option>}
+      </select>
+
+      {/* Controlled — hiện ĐÚNG ngày đang lọc (mặc định không giới hạn, xem
           `useHistoryStore.ts`) thay vì luôn trống như bản input uncontrolled
           cũ. "to" lưu dạng mốc loại trừ (+1 ngày) nên trừ lại 1 ngày khi hiện
           ra cho khớp với ngày người dùng thực sự chọn. */}

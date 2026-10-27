@@ -289,9 +289,7 @@ pub fn recover_orphans(app: &AppHandle, scan_started: std::time::SystemTime) {
 }
 
 fn ingest_recovered(app: &AppHandle, path: &Path, capture_mode: &str) -> bool {
-    if let Some(parent) = path.parent() {
-        super::allow_asset_scope(app, parent);
-    }
+    super::allow_asset_file(app, path);
     let meta = match super::probe::probe_video_metadata(path) {
         Ok(m) => m,
         Err(e) => {

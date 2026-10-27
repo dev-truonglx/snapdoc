@@ -404,8 +404,21 @@ const isTauri = () => "__TAURI_INTERNALS__" in window;
  */
 export async function flushDraft(): Promise<void> {
   const pending = pendingDraftWrite();
-  if (pending) await flushDraftFor(pending.key, pending.json);
+  if (!pending) return;
+  // `blur` + `visibilitychange` thường bắn liền nhau khi rời cửa sổ — cùng
+  // tài liệu, cùng nội dung đang ghi dở thì dùng chung lượt đó, không ghi lại
+  // cả container lần nữa.
+  const cur = draftInFlight;
+  if (cur && cur.key === pending.key && cur.json === pending.json) return cur.promise;
+  const promise = flushDraftFor(pending.key, pending.json).finally(() => {
+    if (draftInFlight?.promise === promise) draftInFlight = null;
+  });
+  draftInFlight = { key: pending.key, json: pending.json, promise };
+  await promise;
 }
+
+/** Lượt ghi draft đang chạy của `flushDraft` (xem chống ghi trùng ở đó). */
+let draftInFlight: { key: SessionKey; json: string; promise: Promise<void> } | null = null;
 
 /** Tính (đồng bộ) xem có gì cần ghi draft không, và ghi cái gì.
  *

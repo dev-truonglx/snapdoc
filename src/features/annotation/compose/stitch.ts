@@ -38,14 +38,30 @@ function alignOffset(extent: number, size: number, align: StitchAlign): number {
   return 0;
 }
 
+/** Cache ảnh đã load theo src — truyền vào `composeStitch` để không decode lại
+ * mỗi lần đổi tuỳ chọn. Load lỗi thì tự xoá khỏi cache để lần sau thử lại. */
+export type StitchImageCache = Map<string, Promise<HTMLImageElement>>;
+
+function loadImageCached(src: string, cache?: StitchImageCache): Promise<HTMLImageElement> {
+  if (!cache) return loadImage(src);
+  let p = cache.get(src);
+  if (!p) {
+    p = loadImage(src);
+    p.catch(() => cache.delete(src));
+    cache.set(src, p);
+  }
+  return p;
+}
+
 /** Nối danh sách ảnh (data URL) theo `opt`. Cần ít nhất 1 ảnh. */
 export async function composeStitch(
   srcs: string[],
   opt: StitchOptions,
+  cache?: StitchImageCache,
 ): Promise<StitchResult> {
   if (srcs.length === 0) throw new Error(i18next.t("errors.noImagesToStitch"));
 
-  const imgs = await Promise.all(srcs.map(loadImage));
+  const imgs = await Promise.all(srcs.map((src) => loadImageCached(src, cache)));
   const n = imgs.length;
   const gap = Math.max(0, Math.round(opt.gap));
   const vertical = opt.direction === "vertical";
