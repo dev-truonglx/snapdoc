@@ -272,7 +272,7 @@ fn ingest_finish_bg(app: &AppHandle, id: String, asset_path: PathBuf, thumb_path
             }
         }
         Err(e) => {
-            eprintln!("[SnapDoc][history] ghi asset/thumbnail nền thất bại, chuyển record vào Trash: {e}");
+            log::warn!("[SnapDoc][history] ghi asset/thumbnail nền thất bại, chuyển record vào Trash: {e}");
             if let Ok(conn) = state.conn.lock() {
                 let _ = conn.execute(
                     "UPDATE history SET deleted_at = ?1 WHERE id = ?2",
@@ -321,7 +321,7 @@ pub fn ingest_video(
     let file_size = std::fs::metadata(mp4_path).ok().map(|m| m.len() as i64);
 
     if let Err(e) = video_thumbnail::generate(mp4_path, &thumb_path) {
-        eprintln!("[SnapDoc][history] Sinh thumbnail video thất bại (record vẫn được lưu): {e}");
+        log::warn!("[SnapDoc][history] Sinh thumbnail video thất bại (record vẫn được lưu): {e}");
     }
 
     // "imported" = video sẵn có của user, Library chỉ THAM CHIẾU tại chỗ —
@@ -427,7 +427,7 @@ pub fn ingest_quick(
     match ingest_with_doc(app, &cap, "quick", 1.0, effective_doc, preview_str) {
         Ok(rec) => Ok(Some(rec.id)),
         Err(e) => {
-            eprintln!("[SnapDoc][history] ingest_quick thất bại (output đã thực hiện xong): {e}");
+            log::warn!("[SnapDoc][history] ingest_quick thất bại (output đã thực hiện xong): {e}");
             Ok(None)
         }
     }

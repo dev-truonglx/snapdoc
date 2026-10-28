@@ -154,7 +154,7 @@ fn may_delete_file(app: &AppHandle, owned: bool, path: &str) -> bool {
 fn remove_file_logged(path: &str) {
     if let Err(e) = std::fs::remove_file(path) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("[SnapDoc][history] Không xoá được file {path} (file sẽ mồ côi trên đĩa): {e}");
+            log::warn!("[SnapDoc][history] Không xoá được file {path} (file sẽ mồ côi trên đĩa): {e}");
         }
     }
 }
@@ -629,8 +629,9 @@ fn get_history_doc_json_sync(app: &AppHandle, id: &str) -> Result<Option<DocLaye
 
 /// Lớp annotation + cờ "đây là bản nháp chưa lưu" — Editor cần cờ này để đánh
 /// dấu tài liệu là chưa lưu và để hỏi user muốn tiếp tục hay bỏ.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct DocLayer {
     pub json: String,
     pub is_draft: bool,
@@ -783,7 +784,7 @@ fn trim_history_video_sync(
     // hợp lệ, chỉ ảnh thu nhỏ hiển thị tạm là fallback trống (giống cách
     // `ingest_video` xử lý lỗi thumbnail).
     if let Err(e) = super::video_thumbnail::generate(&new_path, &thumb_path) {
-        eprintln!("[SnapDoc][history] Sinh thumbnail cho bản đã cắt thất bại: {e}");
+        log::warn!("[SnapDoc][history] Sinh thumbnail cho bản đã cắt thất bại: {e}");
     }
 
     let asset_path_str = new_path.to_string_lossy().to_string();
@@ -918,7 +919,7 @@ fn overwrite_history_video_sync(
         .sum();
     let file_size = std::fs::metadata(asset_path).ok().map(|m| m.len() as i64);
     if let Err(e) = super::video_thumbnail::generate(asset_path, std::path::Path::new(&rec.thumb_path)) {
-        eprintln!("[SnapDoc][history] Sinh lại thumbnail sau khi ghi đè thất bại: {e}");
+        log::warn!("[SnapDoc][history] Sinh lại thumbnail sau khi ghi đè thất bại: {e}");
     }
 
     let final_w = crop.map(|c| (c.width / 2) * 2).unwrap_or(rec.width);
@@ -1351,7 +1352,7 @@ pub async fn update_history_thumb(
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         if let Err(e) = update_history_thumb_sync(&app, &id, &preview_data) {
-            eprintln!("[SnapDoc][history] update_history_thumb thất bại (bỏ qua): {e}");
+            log::warn!("[SnapDoc][history] update_history_thumb thất bại (bỏ qua): {e}");
         }
         Ok(())
     })
@@ -1395,7 +1396,7 @@ fn save_gif_to_history_sync(
     let new_id = uuid::Uuid::new_v4().to_string();
     let thumb_path = super::assets::thumb_path_for(app, &new_id)?;
     if let Err(e) = super::video_thumbnail::generate(p, &thumb_path) {
-        eprintln!("[SnapDoc][history] Sinh thumbnail cho GIF thất bại: {e}");
+        log::warn!("[SnapDoc][history] Sinh thumbnail cho GIF thất bại: {e}");
     }
 
     let asset_path_str = p.to_string_lossy().to_string();

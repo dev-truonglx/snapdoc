@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { useEditor } from "../../features/annotation/store";
+import { addStylePreset, loadStylePresets, MAX_PRESETS, saveStylePresets } from "../../features/annotation/stylePresets";
 import {
   PRESET_COLORS,
   HIGHLIGHT_COLORS,
@@ -10,6 +11,8 @@ import {
   SOLID_COLORS,
   BACKGROUND_PRESETS,
   DEFAULT_BACKGROUND_CONFIG,
+  EMOJI_STICKERS,
+  MAGNIFIER_ZOOMS,
   type Tool,
   type Annotation,
 } from "../../features/annotation/model";
@@ -119,6 +122,32 @@ const ICONS: Record<Tool, ReactNode> = {
     <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
       <rect x="2" y="2" width="14" height="14" rx="3.5" fill="none" stroke="currentColor" strokeWidth="1.6" />
       <rect x="4.5" y="4.5" width="9" height="9" rx="1.5" fill="currentColor" opacity="0.65" />
+    </svg>
+  ),
+  pen: (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+      <path d="M2.5 13.5c2-4 4-5.5 5.5-3.5s3 1.5 4.5-1 2.5-4.5 3-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  ),
+  spotlight: (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+      <rect x="1.5" y="2.5" width="15" height="13" rx="2" fill="currentColor" opacity="0.35" />
+      <ellipse cx="9" cy="9" rx="4.2" ry="3.4" fill="none" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  ),
+  magnifier: (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+      <circle cx="7.5" cy="7.5" r="5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M11.2 11.2L15.5 15.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+      <path d="M5.5 7.5h4M7.5 5.5v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  ),
+  emoji: (
+    <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
+      <circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="6.6" cy="7.4" r="1" fill="currentColor" />
+      <circle cx="11.4" cy="7.4" r="1" fill="currentColor" />
+      <path d="M5.8 10.6c.8 1.4 1.9 2 3.2 2s2.4-.6 3.2-2" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
     </svg>
   ),
 };
@@ -410,6 +439,13 @@ export default function Toolbar({
     { id: "background", label: t("tools.background"), hint: "G" },
   ];
 
+  const TOOLS_GROUP3: { id: Tool; label: string; hint: string }[] = [
+    { id: "pen", label: t("tools.pen"), hint: "P" },
+    { id: "spotlight", label: t("tools.spotlight"), hint: "S" },
+    { id: "magnifier", label: t("tools.magnifier"), hint: "M" },
+    { id: "emoji", label: t("tools.emoji"), hint: "J" },
+  ];
+
   // Selector + useShallow thay vì subscribe cả store: trước đây MỌI thay đổi
   // store (mỗi tick kéo slider blur qua `updateAnnotationLive`, mỗi lần di
   // chuyển annotation) đều re-render toàn bộ toolbar (hàng chục nút SVG).
@@ -431,6 +467,7 @@ export default function Toolbar({
     setStepCounter, setArrowCounter, setRectCounter,
     renumberSteps, renumberArrows, renumberRects,
     setBackground, setBackgroundLive, commitBackground,
+    currentEmoji, setCurrentEmoji, magnifierZoom, setMagnifierZoom, spotlightShape, setSpotlightShape, applyStylePreset,
   } = useEditor(
     useShallow((s) => ({
       tool: s.tool, setTool: s.setTool,
@@ -448,6 +485,10 @@ export default function Toolbar({
       setStepCounter: s.setStepCounter, setArrowCounter: s.setArrowCounter, setRectCounter: s.setRectCounter,
       renumberSteps: s.renumberSteps, renumberArrows: s.renumberArrows, renumberRects: s.renumberRects,
       setBackground: s.setBackground, setBackgroundLive: s.setBackgroundLive, commitBackground: s.commitBackground,
+      currentEmoji: s.currentEmoji, setCurrentEmoji: s.setCurrentEmoji,
+      magnifierZoom: s.magnifierZoom, setMagnifierZoom: s.setMagnifierZoom,
+      spotlightShape: s.spotlightShape, setSpotlightShape: s.setSpotlightShape,
+      applyStylePreset: s.applyStylePreset,
     })),
   );
 
@@ -469,6 +510,11 @@ export default function Toolbar({
   const [customColor, setCustomColor] = useState("#ef4444");
   const [customHighlight, setCustomHighlight] = useState("#fbbf24");
   const [customSolid, setCustomSolid] = useState("#1a1a1a");
+  const [stylePresets, setStylePresets] = useState(loadStylePresets);
+  const updateStylePresets = (next: typeof stylePresets) => {
+    setStylePresets(next);
+    saveStylePresets(next);
+  };
 
   // Popover "Save As…" gắn cạnh nút Save (split button) — đóng khi click ra
   // ngoài, cùng cơ chế với các popover khác trong app (CaptureBar, RecordReview).
@@ -514,8 +560,11 @@ export default function Toolbar({
   const isCrop = tool === "crop";
   const isBackground = tool === "background";
   const isImage = (!isMultiple && selectedAnn?.type === "image") || (isMultiple && selectedAnns.length > 0 && selectedAnns.every((a: Annotation) => a.type === "image"));
+  const isSpotlight = !isMultiple && (tool === "spotlight" || selectedAnn?.type === "spotlight");
+  const isMagnifier = !isMultiple && (tool === "magnifier" || selectedAnn?.type === "magnifier");
+  const isEmoji = !isMultiple && (tool === "emoji" || selectedAnn?.type === "emoji");
   // Tools dùng color + strokeWidth: hiển thị đầy đủ khi ở chế độ vẽ hoặc khi ở chế độ chọn/sửa
-  const hasStroke = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop && !isImage && !isBackground);
+  const hasStroke = isMultiple ? selectedAnns.some((a: Annotation) => "strokeWidth" in a) : (!isHighlight && !isBlur && !isText && !isCrop && !isImage && !isBackground && !isSpotlight && !isEmoji);
 
   if (mode === "video") return null;
 
@@ -582,6 +631,19 @@ export default function Toolbar({
 
               <div style={sep} />
 
+              {/* Nhóm công cụ 3: bút tự do, spotlight, kính lúp, sticker */}
+              <div style={group}>
+                {TOOLS_GROUP3.map((t) => (
+                  <button key={t.id} onClick={() => setTool(t.id)}
+                    title={`${t.label} (${t.hint})`} aria-label={t.label}
+                    style={toolBtn(tool === t.id)}>
+                    {ICONS[t.id]}
+                  </button>
+                ))}
+              </div>
+
+              <div style={sep} />
+
               {/* Undo / redo / xoá / layer order */}
               <div style={group}>
                 <button onClick={undo} disabled={!canUndo()} style={toolBtn(false)} title={t("editorToolbar.undo")}>↩︎</button>
@@ -627,8 +689,8 @@ export default function Toolbar({
 
             {/* DÒNG 2: THUỘC TÍNH CHI TIẾT THEO CÔNG CỤ ĐANG CHỌN (Màu, Nét, Size chữ, Đếm số, Blur, Background...) */}
             <div style={toolbarRow}>
-              {/* Màu stroke — ẩn khi đang dùng highlight/blur/image/background */}
-              {!isHighlight && !isBlur && !isImage && !isBackground && (
+              {/* Màu stroke — ẩn khi đang dùng highlight/blur/image/background/spotlight/emoji */}
+              {!isHighlight && !isBlur && !isImage && !isBackground && !isSpotlight && !isEmoji && (
                 <div style={group}>
                   <span style={dimLabel}>{t("editorToolbar.color")}</span>
                   {PRESET_COLORS.map((c) => (
@@ -1197,6 +1259,81 @@ export default function Toolbar({
                   </>
                 );
               })()}
+
+              {/* Spotlight: hình vùng sáng */}
+              {isSpotlight && (
+                <div style={group}>
+                  <span style={dimLabel}>{t("editorToolbar.spotlightShape")}</span>
+                  {(["rect", "ellipse"] as const).map((sh) => (
+                    <button key={sh} onClick={() => setSpotlightShape(sh)} style={toolBtn(spotlightShape === sh)}
+                      title={t(sh === "rect" ? "editorToolbar.shapeRect" : "editorToolbar.shapeEllipse")}>
+                      {sh === "rect" ? ICONS.rect : ICONS.ellipse}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Kính lúp: độ phóng */}
+              {isMagnifier && (
+                <>
+                  <div style={sep} />
+                  <div style={group}>
+                    <span style={dimLabel}>{t("editorToolbar.magnifierZoom")}</span>
+                    {MAGNIFIER_ZOOMS.map((z) => (
+                      <button key={z} onClick={() => setMagnifierZoom(z)} style={{ ...toolBtn(magnifierZoom === z), width: "auto", padding: "0 6px", fontSize: 12 }}>
+                        {z}×
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {/* Sticker: chọn emoji */}
+              {isEmoji && (
+                <div style={{ ...group, gap: 1 }}>
+                  {EMOJI_STICKERS.map((em) => (
+                    <button key={em} onClick={() => setCurrentEmoji(em)}
+                      style={{ ...toolBtn(currentEmoji === em), width: 26, fontSize: 15, padding: 0 }}>
+                      {em}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Preset style: lưu/áp màu + nét + cỡ chữ */}
+              {(hasStroke || isText) && (
+                <>
+                  <div style={sep} />
+                  <div style={group}>
+                    <span style={dimLabel}>{t("editorToolbar.presets")}</span>
+                    {stylePresets.map((p, i) => (
+                      <button
+                        key={`${p.color}-${p.strokeWidth}-${p.fontSize}`}
+                        onClick={() => applyStylePreset(p)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          updateStylePresets(stylePresets.filter((_, j) => j !== i));
+                        }}
+                        title={t("editorToolbar.presetApply", { color: p.color, width: p.strokeWidth, size: p.fontSize })}
+                        style={{ ...toolBtn(false), width: 26, padding: 0 }}
+                      >
+                        <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                          <span style={{ width: 12, height: 12, borderRadius: "50%", background: p.color, boxShadow: "0 0 0 1px rgba(255,255,255,0.25)" }} />
+                          <span style={{ width: 14, height: Math.min(4, p.strokeWidth), background: p.color, borderRadius: 2 }} />
+                        </span>
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => updateStylePresets(addStylePreset(stylePresets, { color, strokeWidth, fontSize }))}
+                      disabled={stylePresets.length >= MAX_PRESETS && !stylePresets.some((p) => p.color === color && p.strokeWidth === strokeWidth && p.fontSize === fontSize)}
+                      title={t("editorToolbar.presetSave")}
+                      style={{ ...toolBtn(false), width: 24, fontSize: 15 }}
+                    >
+                      +
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 

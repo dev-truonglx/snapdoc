@@ -84,7 +84,7 @@ pub(crate) fn build_pcm_input_stream(
                     let _ = tx.try_send((captured_at, bytes));
                 },
                 move |e: cpal::Error| {
-                    eprintln!("[SnapDoc][record] Lỗi luồng {what}: {e}");
+                    log::warn!("[SnapDoc][record] Lỗi luồng {what}: {e}");
                     device_error.store(true, Ordering::SeqCst);
                 },
                 // Windows: `ActivateAudioInterfaceAsync` không có timeout thì

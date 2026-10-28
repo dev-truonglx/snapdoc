@@ -2,6 +2,7 @@ import React, { Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import "./styles/global.css";
 import "./i18n/config"; // Initialize i18next
+import { forwardConsoleToLog } from "./lib/logForward";
 
 // Chặn context menu mặc định của trình duyệt/WebView2 (Reload, Share, Back, Forward...)
 // để tránh chiếm modal message loop trên Windows, nhưng giữ lại cho input/textarea.
@@ -22,6 +23,7 @@ window.addEventListener(
 );
 
 const which = new URLSearchParams(window.location.search).get("win") ?? "capture-bar";
+forwardConsoleToLog(which);
 
 const routeLoaders: Record<string, () => Promise<{ default: React.ComponentType<any> }>> = {
   "capture-bar": () => import("./routes/capture-bar/CaptureBar"),

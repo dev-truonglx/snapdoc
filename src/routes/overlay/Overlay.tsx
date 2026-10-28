@@ -10,6 +10,7 @@ import { PRESET_COLORS, type Tool } from "../../features/annotation/model";
 import { quickToolFromKey } from "../../lib/toolShortcuts";
 import QuickToolbar, { quickToolbarLayout } from "../quick-capture/QuickToolbar";
 import { serializeDoc } from "../../features/annotation/sessions";
+import { MeasureLine, PixelLoupe } from "./PixelTools";
 
 /**
  * Lấy ảnh "đóng băng màn hình" từ Rust (JPEG base64) khi mount overlay.
@@ -299,6 +300,68 @@ function RegionSelect() {
     return !!r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
   };
 
+  // Công cụ pixel (xem `PixelTools.tsx`): kính lúp + mã màu luôn hiện theo con
+  // trỏ; phím C copy mã màu; phím M bật/tắt thước đo (kéo = đo, KHÔNG chụp).
+  const [measureOn, setMeasureOn] = useState(false);
+  const measureOnRef = useRef(false);
+  measureOnRef.current = measureOn;
+  const measureStartRef = useRef<Vec2 | null>(null);
+  const [measure, setMeasure] = useState<{ a: Vec2; b: Vec2 } | null>(null);
+  const [hex, setHex] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const cursorRef = useRef<Vec2 | null>(null);
+  // Mã màu đọc ở Rust (pixel lossless) — tối đa 1 lệnh đang chạy, vị trí mới
+  // nhất trong lúc chờ được gửi tiếp ngay sau.
+  const hexReq = useRef<{ busy: boolean; next: Vec2 | null }>({ busy: false, next: null });
+  const requestHex = (p: Vec2) => {
+    const r = hexReq.current;
+    if (r.busy) {
+      r.next = p;
+      return;
+    }
+    r.busy = true;
+    ipc
+      .frozenPixel(MY_IDX, p[0] / window.innerWidth, p[1] / window.innerHeight)
+      .then((h) => setHex(h))
+      .catch(() => {})
+      .finally(() => {
+        r.busy = false;
+        const n = r.next;
+        r.next = null;
+        if (n) requestHex(n);
+      });
+  };
+
+  useEffect(() => {
+    let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+    const un = listen<[number, string]>("overlay-key", (e) => {
+      const [idx, key] = e.payload;
+      if (idx !== MY_IDX) return;
+      if (key === "m") {
+        // Đang kéo chọn vùng dở → không đổi chế độ giữa chừng.
+        if (startRef.current) return;
+        measureStartRef.current = null;
+        setMeasure(null);
+        setMeasureOn((v) => !v);
+      } else if (key === "c") {
+        const p = cursorRef.current;
+        if (!p) return;
+        ipc
+          .copyFrozenPixel(MY_IDX, p[0] / window.innerWidth, p[1] / window.innerHeight)
+          .then((h) => {
+            setCopied(h);
+            clearTimeout(copiedTimer);
+            copiedTimer = setTimeout(() => setCopied(null), 1500);
+          })
+          .catch(() => {});
+      }
+    });
+    return () => {
+      clearTimeout(copiedTimer);
+      un.then((f) => f());
+    };
+  }, []);
+
   useEffect(() => {
     ipc.listWindows().then((w) => { winsRef.current = w; }).catch(() => {});
   }, []);
@@ -315,6 +378,13 @@ function RegionSelect() {
       if (scrollRect) return;
       setCursorHere(active);
       setCursorPos(active ? [x, y] : null);
+      cursorRef.current = active ? [x, y] : null;
+      if (active) requestHex([x, y]);
+      if (measureOnRef.current) {
+        const a = measureStartRef.current;
+        if (a && active) setMeasure({ a, b: [x, y] });
+        return;
+      }
       if (startRef.current) {
         if (active) setSel(rectFrom(startRef.current[0], startRef.current[1], x, y));
         return;
@@ -325,7 +395,13 @@ function RegionSelect() {
       setHoverWin(active && !inFsBtn(x, y) ? pickWindow(winsRef.current, x, y) : null);
     },
     (x, y) => {
-      if (scrollRect || inFsBtn(x, y)) return;
+      if (scrollRect) return;
+      if (measureOnRef.current) {
+        measureStartRef.current = [x, y];
+        setMeasure({ a: [x, y], b: [x, y] });
+        return;
+      }
+      if (inFsBtn(x, y)) return;
       startRef.current = [x, y];
       pressWinRef.current = hoverWin;
       setHoverWin(null);
@@ -333,6 +409,13 @@ function RegionSelect() {
     },
     (x, y) => {
       if (scrollRect) return;
+      if (measureOnRef.current) {
+        // Thả chuột: giữ kết quả đo trên màn hình, không chụp.
+        const a = measureStartRef.current;
+        measureStartRef.current = null;
+        if (a) setMeasure({ a, b: [x, y] });
+        return;
+      }
       if (inFsBtn(x, y)) {
         // Click trúng nút "Chụp toàn màn hình" — press đã chặn không cho bắt
         // đầu kéo/chọn cửa sổ (`startRef.current` vẫn null), chỉ cần gọi thẳng
@@ -462,12 +545,12 @@ function RegionSelect() {
             background: cursorHere ? "transparent" : frozenUrl ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.5)",
           }}
         >
-          <div style={banner}>{t("overlay.dragToSelect")}</div>
+          <div style={banner}>{measureOn ? t("overlay.measureHint") : t("overlay.dragToSelect")}</div>
         </div>
       )}
       {/* Gợi ý cửa sổ khi hover — chỉ trước khi press (`sel === null`), ẩn
           ngay khi bắt đầu kéo để không che khung đang chọn. */}
-      {!sel && hoverWin && (
+      {!sel && hoverWin && !measureOn && (
         <div
           style={{
             position: "fixed",
@@ -484,8 +567,12 @@ function RegionSelect() {
           </span>
         </div>
       )}
-      {!sel && (
+      {!sel && !measureOn && (
         <RegionFullscreenButton rectRef={fsBtnRef} />
+      )}
+      {measure && <MeasureLine a={measure.a} b={measure.b} scale={SCALE} />}
+      {cursorHere && cursorPos && frozenUrl && !overFsBtn && (
+        <PixelLoupe pos={cursorPos} frozenUrl={frozenUrl} scale={SCALE} hex={hex} copied={copied} />
       )}
       {/* Đường dóng ngang/dọc nét đứt kéo dài hết màn hình theo vị trí con
           trỏ — giúp canh mép vùng chọn theo nội dung bên dưới, giống vạch

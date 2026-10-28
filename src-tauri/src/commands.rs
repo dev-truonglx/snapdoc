@@ -70,7 +70,7 @@ pub fn set_pending_image(
     let history_id = match crate::history::ingest(&app, &cap, "quick", scale) {
         Ok(rec) => Some(rec.id),
         Err(e) => {
-            eprintln!("[SnapDoc][history] ingest (set_pending_image) thất bại: {e}");
+            log::warn!("[SnapDoc][history] ingest (set_pending_image) thất bại: {e}");
             None
         }
     };
@@ -575,8 +575,9 @@ pub fn open_file_path_sync(app: &AppHandle, path: String) -> Result<(), String> 
 
 /// Kết quả mở file từ dialog. Không còn chỉ là một data URL vì `.snapdoc` mang
 /// thêm lớp annotation và đường dẫn gốc (Save ghi thẳng lại file đó).
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct OpenedFile {
     /// Data URL của pixel NỀN (với ảnh thường: chính nội dung file).
     pub data_url: String,
@@ -585,6 +586,7 @@ pub struct OpenedFile {
     /// Đường dẫn file — chỉ đặt cho `.snapdoc` (tài liệu file-backed).
     pub file_path: Option<String>,
     /// Loại media: "image" hoặc "video"
+    #[ts(type = "\"image\" | \"video\" | null")]
     pub media_type: Option<String>,
 }
 
@@ -840,6 +842,61 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
 /// `async` + thread nền: `finalize_on_exit` có thể phải lưu xong 1 bản quay
 /// (vài giây tới vài chục giây) — command `fn` thường chạy trên MAIN THREAD
 /// sẽ đứng hình toàn app trong lúc đó.
+/// Màu (hex `#RRGGBB`) của pixel trên ảnh đóng băng màn `idx` tại vị trí
+/// tương đối (`fx`, `fy` ∈ [0, 1] theo bề ngang/dọc màn). Đọc pixel LOSSLESS
+/// (ảnh nền overlay là JPEG nên màu lệch vài đơn vị); chưa có thì dùng JPEG.
+fn frozen_pixel_hex(app: &AppHandle, idx: usize, fx: f64, fy: f64) -> Option<String> {
+    let frozen = app.state::<AppState>().frozen_screens.lock().ok()?.get(&idx).cloned()?;
+    let decoded;
+    let img: &image::RgbaImage = match frozen.rgba.as_deref() {
+        Some(img) => img,
+        None => {
+            decoded = image::load_from_memory(&frozen.jpeg).ok()?.to_rgba8();
+            &decoded
+        }
+    };
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 || !fx.is_finite() || !fy.is_finite() {
+        return None;
+    }
+    let x = ((fx.clamp(0.0, 1.0) * w as f64) as u32).min(w - 1);
+    let y = ((fy.clamp(0.0, 1.0) * h as f64) as u32).min(h - 1);
+    let p = img.get_pixel(x, y);
+    Some(format!("#{:02X}{:02X}{:02X}", p[0], p[1], p[2]))
+}
+
+/// Overlay chụp vùng: màu pixel dưới con trỏ cho kính lúp (`frozen_pixel_hex`).
+#[tauri::command]
+pub async fn frozen_pixel(app: AppHandle, idx: usize, fx: f64, fy: f64) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || frozen_pixel_hex(&app, idx, fx, fy)).await.ok().flatten()
+}
+
+/// Overlay chụp vùng, phím C: copy mã màu pixel dưới con trỏ vào clipboard,
+/// trả lại mã đã copy.
+#[tauri::command]
+pub async fn copy_frozen_pixel(app: AppHandle, idx: usize, fx: f64, fy: f64) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let hex = frozen_pixel_hex(&app, idx, fx, fy).ok_or("Không đọc được màu tại vị trí này")?;
+        crate::clipboard::copy_text(&hex)?;
+        Ok(hex)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
+}
+
+/// Mở thư mục chứa file log (`SnapDoc.log`, xem `lib::log_plugin`) — Settings
+/// dùng để người dùng gửi log khi báo lỗi.
+#[tauri::command]
+pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    use tauri_plugin_opener::OpenerExt;
+    let dir = app.path().app_log_dir().map_err(|e| format!("Không xác định được thư mục log: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Không tạo được thư mục log: {e}"))?;
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| format!("Không mở được thư mục log: {e}"))
+}
+
 #[tauri::command]
 pub async fn restart_app(app: AppHandle) {
     let _ = tauri::async_runtime::spawn_blocking(move || {
@@ -1126,7 +1183,7 @@ pub async fn notify_overlay_ready(app: AppHandle, gen: u64, idx: usize) {
         if let Some(tx) = slot.as_ref() {
             let _ = tx.send((gen, idx));
         } else {
-            eprintln!("[SnapDoc Timing] notify_overlay_ready dropped (no receiver): gen={gen}, idx={idx}");
+            log::debug!("[SnapDoc Timing] notify_overlay_ready dropped (no receiver): gen={gen}, idx={idx}");
         }
     };
 }
@@ -1249,7 +1306,7 @@ pub fn open_video_file_path_sync(app: &AppHandle, path: String) -> Result<(), St
     // Kiểm tra xem video này đã từng được ingest vào History DB chưa
     let record = match crate::history::find_history_item_by_asset_path_sync(app, &effective_str)? {
         Some(r) => {
-            eprintln!("[SnapDoc] Video đã có trong History: id={}", r.id);
+            log::info!("[SnapDoc] Video đã có trong History: id={}", r.id);
             r
         }
         None => {
@@ -1262,7 +1319,7 @@ pub fn open_video_file_path_sync(app: &AppHandle, path: String) -> Result<(), St
                 },
             );
 
-            eprintln!(
+            log::info!(
                 "[SnapDoc] Ingest video ngoài vào History: {}x{}, duration={}ms",
                 meta.width, meta.height, meta.duration_ms
             );

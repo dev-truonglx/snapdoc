@@ -5,7 +5,8 @@ use xcap::Window;
 /// Thông tin cửa sổ cho overlay vẽ highlight. Toạ độ theo CSS px (= points),
 /// đã trừ gốc overlay nên dùng thẳng trong overlay. Mảng giữ thứ tự z
 /// FRONT-TO-BACK (cửa sổ trên cùng đứng trước).
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct WindowInfo {
     pub id: u32,
     pub x: f64,

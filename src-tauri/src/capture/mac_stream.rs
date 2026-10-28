@@ -163,7 +163,7 @@ define_class!(
             _stream: &SCStream,
             error: &objc2_foundation::NSError,
         ) {
-            eprintln!(
+            log::warn!(
                 "[SnapDoc][record] SCStream dừng ngoài ý muốn: {}",
                 error.localizedDescription()
             );
@@ -498,7 +498,7 @@ fn query_display_once(display_id: u32, excepting_window_ids: &[u32]) -> Result<D
             })
             .collect();
 
-        eprintln!(
+        log::info!(
             "[SnapDoc][record] SCContentFilter: tìm thấy {} cửa sổ ngoại lệ (phím bấm) (excepting_ids={:?})",
             excepting_windows.len(),
             excepting_ids
@@ -612,7 +612,7 @@ impl Drop for RecordingHandle {
         if self.stopped || self.stopped_externally.load(Ordering::SeqCst) {
             return;
         }
-        eprintln!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng SCStream khẩn cấp");
+        log::warn!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng SCStream khẩn cấp");
         unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
     }
 }

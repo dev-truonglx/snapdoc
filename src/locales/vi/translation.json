@@ -61,6 +61,8 @@
     "checkingUpdates": "Đang kiểm tra…",
     "installing": "Đang cài đặt…",
     "installAvailable": "Cài v",
+    "openLogs": "📄 Log",
+    "openLogsTitle": "Mở thư mục chứa file log (gửi kèm khi báo lỗi)",
     "checkUpdates": "Kiểm tra cập nhật",
     "restart": "↺ Khởi động lại để áp dụng",
     "restartNow": "Khởi động lại ngay",
@@ -105,6 +107,9 @@
     "scrollHint": "Chọn vùng rồi cuộn để ghép ảnh dài"
   },
   "tools": {
+    "spotlight": "Spotlight",
+    "magnifier": "Kính lúp",
+    "emoji": "Sticker",
     "select": "Chọn / sửa",
     "selectHint": "Chọn hoặc sửa đối tượng",
     "rect": "Vẽ khung",
@@ -186,6 +191,9 @@
     "startRecording": "● Bắt đầu quay",
     "startingRecording": "Đang bắt đầu…",
     "selectMonitor": "Click để chụp toàn bộ màn hình này • Esc / chuột phải để huỷ",
+    "pixelHint": "C: copy mã màu • M: thước đo pixel",
+    "colorCopied": "Đã copy {{hex}}",
+    "measureHint": "Thước đo pixel: kéo để đo khoảng cách • M để quay lại chọn vùng • Esc để huỷ",
     "windowLabel": "Cửa sổ",
     "captureFullscreen": "Chụp toàn màn hình",
     "quickDragSelect": "Kéo để chọn vùng • Di chuột qua cửa sổ rồi click để chụp cả cửa sổ • Esc / chuột phải để huỷ"
@@ -314,6 +322,13 @@
     "recordingIconFailed": "Đang quay nhưng không hiện được icon trên tray: {error}"
   },
   "editorToolbar": {
+    "spotlightShape": "Vùng sáng",
+    "shapeRect": "Chữ nhật",
+    "shapeEllipse": "Elip",
+    "magnifierZoom": "Phóng",
+    "presets": "Preset",
+    "presetSave": "Lưu màu + nét + cỡ chữ hiện tại thành preset",
+    "presetApply": "Áp preset: {{color}}, nét {{width}}, chữ {{size}} (chuột phải để xoá)",
     "newCapture": "Chụp mới (chế độ gần nhất + mở thanh chụp) (Ctrl/Cmd+N)",
     "openFile": "Mở ảnh từ file (Ctrl/Cmd+O)",
     "stitchImages": "Nối ảnh dài (ghép nhiều ảnh)",

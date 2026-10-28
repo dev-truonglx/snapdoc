@@ -187,7 +187,7 @@ fn test_encoder(ffmpeg: &Path, kind: H264Kind, w: u32, h: u32, fps: u32, input: 
     let ok = match super::proc::run(&mut cmd, Duration::from_secs(15)) {
         Ok(r) => r.status.success() && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false),
         Err(e) => {
-            eprintln!("[SnapDoc][record] Thử encoder {kind:?} {w}x{h} lỗi: {e}");
+            log::warn!("[SnapDoc][record] Thử encoder {kind:?} {w}x{h} lỗi: {e}");
             false
         }
     };
@@ -214,7 +214,7 @@ fn detected(ffmpeg: &Path) -> &'static [H264Kind] {
         if !ok.contains(&H264Kind::X264) {
             ok.push(H264Kind::X264);
         }
-        eprintln!("[SnapDoc][record] Encoder H.264 khả dụng: {ok:?}");
+        log::info!("[SnapDoc][record] Encoder H.264 khả dụng: {ok:?}");
         ok
     })
 }
@@ -235,7 +235,7 @@ fn validated_at(ffmpeg: &Path, kind: H264Kind, w: u32, h: u32, fps: u32, input: 
     let ok = test_encoder(ffmpeg, kind, w, h, fps, input);
     VALIDATED.lock().unwrap_or_else(|p| p.into_inner()).push((kind, input, w, h, ok, Instant::now()));
     if !ok {
-        eprintln!("[SnapDoc][record] Encoder {kind:?} không chạy được ở {w}x{h}, thử encoder kế tiếp");
+        log::warn!("[SnapDoc][record] Encoder {kind:?} không chạy được ở {w}x{h}, thử encoder kế tiếp");
     }
     ok
 }
@@ -385,7 +385,7 @@ impl Encoder {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-        eprintln!("[SnapDoc][record] Encoder {kind:?}, vào {width}x{height} {format:?}, ra {ow}x{oh} @{fps}fps");
+        log::info!("[SnapDoc][record] Encoder {kind:?}, vào {width}x{height} {format:?}, ra {ow}x{oh} @{fps}fps");
 
         // Phải đọc liên tục stderr — pipe đầy (thường 64KB) sẽ làm ffmpeg
         // treo khi ghi log lỗi, kéo theo cả write_frame() bị chặn.
@@ -393,7 +393,7 @@ impl Encoder {
         let stderr_thread = std::thread::spawn(move || {
             use std::io::{BufRead, BufReader};
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                eprintln!("[ffmpeg] {line}");
+                log::warn!("[ffmpeg] {line}");
             }
         });
 
@@ -1135,12 +1135,16 @@ pub fn trim(
 }
 
 /// Tuỳ chọn xuất video sang ảnh GIF động.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct GifExportOptions {
+    #[ts(as = "f64")]
     pub start_ms: i64,
+    #[ts(as = "f64")]
     pub duration_ms: i64,
     pub fps: u32,
+    #[ts(optional = nullable)]
     pub max_width: Option<u32>,
     pub speed: f64,
     pub loop_count: i32, // 0 = lặp vô hạn, -1 = phát 1 lần

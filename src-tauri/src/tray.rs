@@ -123,7 +123,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
                 let app = app.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = crate::history::commands::open_latest_capture_in_editor_sync(&app) {
-                        eprintln!("[SnapDoc] Mở Editor từ tray thất bại: {e}");
+                        log::warn!("[SnapDoc] Mở Editor từ tray thất bại: {e}");
                     }
                 });
             }
@@ -312,7 +312,7 @@ fn show_recording_tray_on_main(app: &AppHandle) {
     let menu = match build_recording_menu(app) {
         Ok(m) => Some(m),
         Err(e) => {
-            eprintln!("[SnapDoc][record] Không tạo được menu cho recording tray: {e}");
+            log::warn!("[SnapDoc][record] Không tạo được menu cho recording tray: {e}");
             None
         }
     };
@@ -338,7 +338,7 @@ fn show_recording_tray_on_main(app: &AppHandle) {
                         crate::record::pause_recording(&app_clone)
                     };
                     if let Err(e) = result {
-                        eprintln!("[SnapDoc][record] Pause/resume từ tray thất bại: {e}");
+                        log::warn!("[SnapDoc][record] Pause/resume từ tray thất bại: {e}");
                     }
                 });
             }
@@ -347,7 +347,7 @@ fn show_recording_tray_on_main(app: &AppHandle) {
                 // `stop_recording` tự báo lỗi cho người dùng nếu lưu thất bại.
                 std::thread::spawn(move || {
                     if let Err(e) = crate::record::stop_recording(&app_clone) {
-                        eprintln!("[SnapDoc][record] Dừng quay từ tray menu thất bại: {e}");
+                        log::warn!("[SnapDoc][record] Dừng quay từ tray menu thất bại: {e}");
                     }
                 });
             }

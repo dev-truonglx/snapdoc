@@ -11,11 +11,17 @@ import { Stage, Layer, Rect, Line, Ellipse, Text, Circle, Group, Image as KImage
 import type Konva from "konva";
 import { useTranslation } from "react-i18next";
 import { useEditor, EDIT_TOOLS } from "../store";
-import type { Annotation, ArrowAnn, DoubleArrowAnn, LineAnn, NumberedArrowAnn, TextAnn } from "../model";
-import { annotationBounds, translateAnnotation, uid, TEXT_BG_PRESETS } from "../model";
+import type { Annotation, SpotlightAnn, TextAnn } from "../model";
+import { annotationBounds, simplifyPoints, translateAnnotation, uid } from "../model";
 import { copyToClipboard } from "../../output/useOutput";
 import { toSafeBlobUrl } from "../../../lib/blobUtils";
 import { getCachedImage, setCachedImage, imageAnnCache } from "./imageCache";
+import { SelectionFrame, LineEndpoints, linePts, CalloutBar, LineHandles, getPointOnRoundedRect, getCalloutPath, StepSelectionFrame, drawRoundedRect } from "./selectionShapes";
+import { DraftPreview, MarqueePreview, type ArrowDraft, type Box, type Draft, type DraftPreviewHandle, type MarqueePreviewHandle } from "./DraftPreview";
+import { fill, zoomBar, zoomChip, zoomChipActive, zoomIconBtn, zoomPctBtn, zoomBtnDisabled, cropBtn, dpiBadge } from "./stageStyles";
+import { BlurRect } from "./BlurRect";
+import { ImageItem } from "./ImageItem";
+import { EmojiItem, MagnifierItem, PenItem, SpotlightHit, SpotlightOverlay } from "./annotationExtras";
 
 export interface StageHandle {
   exportPng: () => string | null;
@@ -43,657 +49,20 @@ const clampZoom = (z: number, fs: number) => {
   return Math.max(minZ, Math.min(maxZ, z));
 };
 
-interface Draft {
-  type: "rect" | "ellipse" | "crop" | "highlight" | "blur" | "numbered-rect";
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-/** Draft cho mũi tên / đường thẳng đang kéo. */
-interface ArrowDraft {
-  type: "arrow" | "double-arrow" | "line" | "numbered-arrow";
-  x: number;
-  y: number;
-  x2: number;
-  y2: number;
-}
-
 interface AnnotationStageProps {
   /** Ẩn thanh zoom (Fit/100%/±) — dùng cho "Chụp nhanh". Mặc định hiện. */
   hideZoomBar?: boolean;
   onFlash?: (msg: string) => void;
 }
 
-/** Khung viền chọn từng đối tượng khi chọn nhiều */
-function SelectionFrame({ x, y, width, height }: { x: number; y: number; width: number; height: number }) {
-  const pad = 3;
-  const rx = x - pad;
-  const ry = y - pad;
-  const rw = width + pad * 2;
-  const rh = height + pad * 2;
-  const handles = [
-    { x: rx, y: ry },
-    { x: rx + rw, y: ry },
-    { x: rx, y: ry + rh },
-    { x: rx + rw, y: ry + rh },
-  ];
-  return (
-    <>
-      <Rect
-        x={rx}
-        y={ry}
-        width={rw}
-        height={rh}
-        stroke="#3b82f6"
-        strokeWidth={1.5}
-        dash={[4, 3]}
-        listening={false}
-      />
-      {handles.map((h, i) => (
-        <Rect
-          key={i}
-          x={h.x - 3.5}
-          y={h.y - 3.5}
-          width={7}
-          height={7}
-          fill="#ffffff"
-          stroke="#3b82f6"
-          strokeWidth={1.5}
-          listening={false}
-        />
-      ))}
-    </>
-  );
-}
-
-function LineEndpoints({ x1, y1, x2, y2 }: { x1: number; y1: number; x2: number; y2: number }) {
-  return (
-    <>
-      <Circle x={x1} y={y1} radius={4} fill="#ffffff" stroke="#3b82f6" strokeWidth={1.5} listening={false} />
-      <Circle x={x2} y={y2} radius={4} fill="#ffffff" stroke="#3b82f6" strokeWidth={1.5} listening={false} />
-    </>
-  );
-}
-
-const linePts = (a: { x: number; y: number; x2: number; y2: number; cx?: number; cy?: number }): number[] =>
-  a.cx !== undefined && a.cy !== undefined ? [a.x, a.y, a.cx, a.cy, a.x2, a.y2] : [a.x, a.y, a.x2, a.y2];
-
-/** Thanh nhỏ nổi cạnh ô chữ: bật/tắt "mũi chỉ đích" (callout) + chọn hướng — áp dụng ngay
- * cho chữ đang gõ hoặc đang chọn, không cần mở toolbar. */
-function CalloutBar({ ann }: { ann: TextAnn }) {
-  const { t } = useTranslation();
-  const on = !!ann.hasTargetArrow;
-  const toggle = () => {
-    const st = useEditor.getState();
-    if (on) {
-      st.updateAnnotation(ann.id, { hasTargetArrow: false } as Partial<Annotation>);
-      return;
-    }
-    const fs = ann.fontSize || 22;
-    const lightText = ann.color === "#ef4444" || ann.color === "#111827";
-    st.updateAnnotation(ann.id, {
-      hasTargetArrow: true,
-      bgColor: ann.bgColor || "#3b82f6",
-      ...(lightText ? { color: "#ffffff" } : null),
-      targetX: ann.targetX ?? ann.x - 50,
-      targetY: ann.targetY ?? ann.y + (fs * 1.35) / 2 + 8,
-    } as Partial<Annotation>);
-  };
-  const btn = (active: boolean): React.CSSProperties => ({
-    height: 22,
-    minWidth: 22,
-    padding: "0 5px",
-    border: "none",
-    borderRadius: 5,
-    background: active ? "rgba(59,130,246,0.4)" : "transparent",
-    color: active ? "#93c5fd" : "rgba(242,242,245,0.85)",
-    cursor: "pointer",
-    fontSize: 13,
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 4,
-  });
-  return (
-    <div
-      // Giữ focus ở ô nhập: mousedown mặc định sẽ làm textarea blur → kết thúc nhập
-      onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 2,
-        padding: "3px 4px",
-        borderRadius: 8,
-        background: "rgba(18,18,22,0.92)",
-        border: "1px solid rgba(255,255,255,0.12)",
-        boxShadow: "0 2px 10px rgba(0,0,0,0.4)",
-        whiteSpace: "nowrap",
-      }}
-    >
-      <button type="button" onClick={toggle} style={btn(on)} title={t("editorToolbar.textTargetArrow")}>
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-          <rect x="2" y="2" width="7" height="6" rx="1.5" />
-          <path d="M9 5h3.5v4" />
-          <path d="M10.5 11l2 2 2-2" />
-        </svg>
-        <span style={{ fontSize: 11 }}>{t("annotationCanvas.calloutLabel", "Mũi chỉ")}</span>
-      </button>
-      <span style={{ width: 1, height: 16, margin: "0 4px", background: "rgba(255,255,255,0.15)" }} />
-      {TEXT_BG_PRESETS.map((p) => {
-        const active = p.color === "" ? !ann.bgColor : ann.bgColor === p.color;
-        return (
-          <button
-            type="button"
-            key={p.id}
-            onClick={() => useEditor.getState().setTextBgColor(p.color)}
-            title={t(`editorToolbar.${p.id === "none" ? "textBgNone" : p.id === "white" ? "textBgWhite" : p.id === "dark" ? "textBgDark" : p.id === "yellow" ? "textBgYellow" : p.id === "blue" ? "textBgBlue" : "textBgRed"}`)}
-            style={{
-              width: 18,
-              height: 18,
-              padding: 0,
-              borderRadius: 4,
-              background: p.color || "transparent",
-              border: active ? "2px solid #3b82f6" : "1px solid rgba(255,255,255,0.3)",
-              boxShadow: active ? "0 0 0 1px #fff" : "none",
-              cursor: "pointer",
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            {p.id === "none" && (
-              <svg width="12" height="12" viewBox="0 0 14 14" aria-hidden>
-                <line x1="3" y1="11" x2="11" y2="3" stroke="#ef4444" strokeWidth="1.6" />
-              </svg>
-            )}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-/** Tay nắm 2 đầu của line/arrow đang được chọn: kéo từng đầu để đổi độ dài / hướng
- * (giống Figma/Excalidraw/Skitch). Giữ Shift để khoá góc theo bước 15°. Kích thước
- * tay nắm cố định theo màn hình (chia cho `scale`). */
-function LineHandles({ ann, scale, showMid, onCursor }: { ann: ArrowAnn | DoubleArrowAnn | LineAnn | NumberedArrowAnn; scale: number; showMid: boolean; onCursor: (c: string | null) => void }) {
-  const orig = useRef<{ x: number; y: number; x2: number; y2: number; cx?: number; cy?: number } | null>(null);
-  const r = 6 / scale;
-  const move = (end: 1 | 2, e: Konva.KonvaEventObject<DragEvent>) => {
-    let px = e.target.x();
-    let py = e.target.y();
-    if (e.evt.shiftKey) {
-      const ox = end === 1 ? ann.x2 : ann.x;
-      const oy = end === 1 ? ann.y2 : ann.y;
-      const dx = px - ox;
-      const dy = py - oy;
-      const len = Math.hypot(dx, dy);
-      const step = Math.PI / 12;
-      const ang = Math.round(Math.atan2(dy, dx) / step) * step;
-      px = ox + Math.cos(ang) * len;
-      py = oy + Math.sin(ang) * len;
-      e.target.x(px);
-      e.target.y(py);
-    }
-    useEditor.getState().updateAnnotationLive(
-      ann.id,
-      (end === 1 ? { x: px, y: py } : { x2: px, y2: py }) as Partial<Annotation>,
-    );
-  };
-  const start = () => {
-    orig.current = { x: ann.x, y: ann.y, x2: ann.x2, y2: ann.y2, cx: ann.cx, cy: ann.cy };
-  };
-  const end = (which: 1 | 2, e: Konva.KonvaEventObject<DragEvent>) => {
-    const o = orig.current;
-    orig.current = null;
-    const px = e.target.x();
-    const py = e.target.y();
-    if (o) useEditor.getState().updateAnnotationLive(ann.id, o as Partial<Annotation>);
-    useEditor.getState().updateAnnotation(
-      ann.id,
-      (which === 1 ? { x: px, y: py } : { x2: px, y2: py }) as Partial<Annotation>,
-    );
-  };
-  const handle = (which: 1 | 2, x: number, y: number) => (
-    <Circle
-      key={which}
-      x={x}
-      y={y}
-      radius={r}
-      fill="#ffffff"
-      stroke="#3b82f6"
-      strokeWidth={1.5 / scale}
-      hitStrokeWidth={8 / scale}
-      draggable
-      name="handle"
-      onMouseEnter={() => onCursor("move")}
-      onMouseLeave={() => onCursor(null)}
-      onMouseDown={(e) => { e.cancelBubble = true; }}
-      onDragStart={start}
-      onDragMove={(e) => move(which, e)}
-      onDragEnd={(e) => end(which, e)}
-    />
-  );
-  const curved = ann.cx !== undefined && ann.cy !== undefined;
-  const mx = curved ? ann.cx! : (ann.x + ann.x2) / 2;
-  const my = curved ? ann.cy! : (ann.y + ann.y2) / 2;
-  return (
-    <>
-      {handle(1, ann.x, ann.y)}
-      {handle(2, ann.x2, ann.y2)}
-      {showMid && (
-        <Circle
-          x={mx}
-          y={my}
-          radius={r * 0.85}
-          fill="#3b82f6"
-          stroke="#ffffff"
-          strokeWidth={1.5 / scale}
-          hitStrokeWidth={8 / scale}
-          draggable
-          name="handle"
-          onMouseEnter={() => onCursor("grab")}
-          onMouseLeave={() => onCursor(null)}
-          onMouseDown={(e) => { e.cancelBubble = true; }}
-          onDragStart={start}
-          onDragMove={(e) =>
-            useEditor.getState().updateAnnotationLive(ann.id, { cx: e.target.x(), cy: e.target.y() } as Partial<Annotation>)
-          }
-          onDragEnd={(e) => {
-            const o = orig.current;
-            orig.current = null;
-            if (o) useEditor.getState().updateAnnotationLive(ann.id, o as Partial<Annotation>);
-            useEditor.getState().updateAnnotation(ann.id, { cx: e.target.x(), cy: e.target.y() } as Partial<Annotation>);
-          }}
-          onDblClick={() =>
-            useEditor.getState().updateAnnotation(ann.id, { cx: undefined, cy: undefined } as Partial<Annotation>)
-          }
-        />
-      )}
-    </>
-  );
-}
-
-/** Tìm giao điểm của tia từ tâm theo góc theta với chu vi hình chữ nhật bo góc */
-function getPointOnRoundedRect(w: number, h: number, r: number, theta: number): { x: number; y: number } {
-  const hw = w / 2;
-  const hh = h / 2;
-  const cos = Math.cos(theta);
-  const sin = Math.sin(theta);
-  const tx = Math.abs(cos) > 1e-6 ? hw / Math.abs(cos) : Infinity;
-  const ty = Math.abs(sin) > 1e-6 ? hh / Math.abs(sin) : Infinity;
-  const t = Math.min(tx, ty);
-  const x = t * cos;
-  const y = t * sin;
-  if (Math.abs(x) <= hw - r + 1e-4) return { x: hw + x, y: hh + y };
-  if (Math.abs(y) <= hh - r + 1e-4) return { x: hw + x, y: hh + y };
-  const cx = Math.sign(cos) * (hw - r);
-  const cy = Math.sign(sin) * (hh - r);
-  const b = cos * cx + sin * cy;
-  const c = cx * cx + cy * cy - r * r;
-  const disc = b * b - c;
-  const tCircle = b + Math.sqrt(Math.max(0, disc));
-  return { x: hw + tCircle * cos, y: hh + tCircle * sin };
-}
-
-/** Tạo chuỗi SVG path cho khung callout / speech bubble bo góc có mỏ nhọn xoay 360 độ linh hoạt */
-function getCalloutPath(w: number, h: number, r: number, tx: number, ty: number): string {
-  const cx = w / 2;
-  const cy = h / 2;
-  const dx = tx - cx;
-  const dy = ty - cy;
-  const dist = Math.hypot(dx, dy);
-  const angle = Math.atan2(dy, dx);
-  const pMid = getPointOnRoundedRect(w, h, r, angle);
-  const midDist = Math.hypot(pMid.x - cx, pMid.y - cy);
-
-  const safeR = Math.max(4, Math.min(r, w / 2 - 2, h / 2 - 2));
-
-  // Nếu điểm target nằm bên trong hộp hoặc quá sát mép -> vẽ hình chữ nhật bo góc bình thường
-  if (dist <= midDist + 4) {
-    return [
-      `M ${safeR} 0`,
-      `L ${w - safeR} 0`,
-      `A ${safeR} ${safeR} 0 0 1 ${w} ${safeR}`,
-      `L ${w} ${h - safeR}`,
-      `A ${safeR} ${safeR} 0 0 1 ${w - safeR} ${h}`,
-      `L ${safeR} ${h}`,
-      `A ${safeR} ${safeR} 0 0 1 0 ${h - safeR}`,
-      `L 0 ${safeR}`,
-      `A ${safeR} ${safeR} 0 0 1 ${safeR} 0`,
-      `Z`,
-    ].join(" ");
-  }
-
-  const baseWidth = Math.min(26, Math.max(16, Math.min(w, h) * 0.35));
-  const halfAngle = Math.asin(Math.min(0.7, (baseWidth / 2) / Math.max(10, midDist)));
-
-  const angle1 = angle - halfAngle;
-  const angle2 = angle + halfAngle;
-
-  const TWO_PI = Math.PI * 2;
-  let sweep = angle1 - angle2;
-  while (sweep < 0) sweep += TWO_PI;
-
-  const numSteps = Math.max(48, Math.round((sweep / TWO_PI) * 72));
-  let d = "";
-  for (let i = 0; i <= numSteps; i++) {
-    const a = angle2 + (sweep * i) / numSteps;
-    const pt = getPointOnRoundedRect(w, h, safeR, a);
-    d += (i === 0 ? "M " : " L ") + pt.x.toFixed(1) + " " + pt.y.toFixed(1);
-  }
-  d += " L " + tx.toFixed(1) + " " + ty.toFixed(1) + " Z";
-  return d;
-}
-
-function StepSelectionFrame({ x, y, radius }: { x: number; y: number; radius: number }) {
-  const r = radius + 3;
-  const handles = [
-    { x: x - r, y },
-    { x: x + r, y },
-    { x, y: y - r },
-    { x, y: y + r },
-  ];
-  return (
-    <>
-      <Circle x={x} y={y} radius={r} stroke="#3b82f6" strokeWidth={1.5} dash={[4, 3]} listening={false} />
-      {handles.map((h, i) => (
-        <Rect
-          key={i}
-          x={h.x - 3}
-          y={h.y - 3}
-          width={6}
-          height={6}
-          fill="#ffffff"
-          stroke="#3b82f6"
-          strokeWidth={1.5}
-          listening={false}
-        />
-      ))}
-    </>
-  );
-}
-
-function drawRoundedRect(
-  ctx: any,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number,
-) {
-  const radius = Math.max(0, Math.min(r, w / 2, h / 2));
-  if (radius <= 0) {
-    ctx.rect(x, y, w, h);
-    return;
-  }
-  if (typeof ctx.roundRect === "function") {
-    ctx.roundRect(x, y, w, h, radius);
-  } else {
-    ctx.moveTo(x + radius, y);
-    ctx.lineTo(x + w - radius, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
-    ctx.lineTo(x + w, y + h - radius);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
-    ctx.lineTo(x + radius, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
-    ctx.lineTo(x, y + radius);
-    ctx.quadraticCurveTo(x, y, x + radius, y);
-  }
-}
-
-/** Khung chữ nhật đang kéo (toạ độ ảnh). */
-interface Box {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-interface DraftPreviewHandle {
-  setDraft: (d: Draft | null) => void;
-  setArrowDraft: (d: ArrowDraft | null) => void;
-}
-
-/**
- * Hình xem trước đang kéo (rect/ellipse/highlight/blur/crop/mũi tên/đường
- * thẳng). State nằm ở component con này: mỗi mousemove lúc vẽ chỉ re-render
- * khối nhỏ này, không re-render cả `AnnotationStage` (hàng trăm node annotation
- * với props mảng/object inline — mỗi lần render lại bị Konva setAttrs lại).
- * Vẫn nằm ĐÚNG vị trí cũ trong Layer chính (thứ tự vẽ không đổi, không tốn
- * thêm canvas như khi tách Layer riêng).
- */
-const DraftPreview = forwardRef<
-  DraftPreviewHandle,
-  { imgW: number; imgH: number; color: string; strokeWidth: number; highlightColor: string; blurMode: string }
->(({ imgW, imgH, color, strokeWidth, highlightColor, blurMode }, ref) => {
-  const [draft, setDraft] = useState<Draft | null>(null);
-  const [arrowDraft, setArrowDraft] = useState<ArrowDraft | null>(null);
-  useImperativeHandle(ref, () => ({ setDraft, setArrowDraft }), []);
-  return (
-    <>
-      {draft && draft.type === "ellipse" ? (
-        <Ellipse
-          x={draft.x + draft.width / 2}
-          y={draft.y + draft.height / 2}
-          radiusX={Math.abs(draft.width / 2)}
-          radiusY={Math.abs(draft.height / 2)}
-          stroke={color}
-          strokeWidth={strokeWidth}
-          dash={[6, 4]}
-        />
-      ) : draft && draft.type === "highlight" ? (
-        <Rect
-          x={draft.x} y={draft.y} width={draft.width} height={draft.height}
-          fill={highlightColor} opacity={0.38}
-        />
-      ) : draft && draft.type === "blur" ? (
-        <Rect
-          x={draft.x} y={draft.y} width={draft.width} height={draft.height}
-          fill={blurMode === "solid" ? useEditor.getState().blurSolidColor : "#334155"}
-          opacity={blurMode === "solid" ? 0.85 : 0.35}
-          stroke={blurMode === "pixelate" ? "#f59e0b" : blurMode === "solid" ? "#ef4444" : "#94a3b8"}
-          strokeWidth={1.5} dash={[6, 3]}
-        />
-      ) : draft && draft.type === "crop" ? (
-        <>
-          {/* Overlay xám cho vùng ngoài crop khi đang kéo — dải trên/dưới
-              phải trải HẾT chiều ngang ảnh (x=0, width=imgW), không
-              chỉ theo chiều rộng vùng chọn, nếu không 4 góc ảnh (ngoài
-              dải trên/dưới) sẽ không bị phủ mờ, để lộ vùng sáng ở góc
-              đối diện vùng đang chọn. */}
-          <Rect x={0} y={0} width={imgW} height={Math.min(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
-          <Rect x={0} y={Math.min(draft.y, draft.y + draft.height)} width={Math.min(draft.x, draft.x + draft.width)} height={Math.abs(draft.height)} fill="#000000" opacity={0.5} listening={false} />
-          <Rect x={Math.max(draft.x, draft.x + draft.width)} y={Math.min(draft.y, draft.y + draft.height)} width={imgW - Math.max(draft.x, draft.x + draft.width)} height={Math.abs(draft.height)} fill="#000000" opacity={0.5} listening={false} />
-          <Rect x={0} y={Math.max(draft.y, draft.y + draft.height)} width={imgW} height={imgH - Math.max(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
-          
-          {/* Khung crop sáng */}
-          <Rect
-            x={draft.x} y={draft.y} width={draft.width} height={draft.height}
-            stroke="#3b82f6"
-            strokeWidth={2}
-            dash={[6, 4]}
-            listening={false}
-          />
-          {/* Overlay sáng bên trong */}
-          <Rect
-            x={Math.min(draft.x, draft.x + draft.width)} 
-            y={Math.min(draft.y, draft.y + draft.height)} 
-            width={Math.abs(draft.width)} 
-            height={Math.abs(draft.height)}
-            fill="#ffffff"
-            opacity={0.08}
-            listening={false}
-          />
-        </>
-      ) : draft && draft.type === "numbered-rect" ? (() => {
-        const nx = Math.min(draft.x, draft.x + draft.width);
-        const ny = Math.min(draft.y, draft.y + draft.height);
-        const w = Math.abs(draft.width);
-        const h = Math.abs(draft.height);
-        const isLeft = draft.width >= 0;
-        const isTop = draft.height >= 0;
-        const cx = isLeft ? nx : nx + w;
-        const cy = isTop ? ny : ny + h;
-        const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
-        const nextVal = useEditor.getState().rectCounter;
-        const valStr = String(nextVal);
-        const fontSize = Math.max(9, Math.round(radius * (valStr.length > 1 ? 0.78 : 0.88)));
-        return (
-          <Group opacity={0.8}>
-            <Rect
-              x={nx}
-              y={ny}
-              width={w}
-              height={h}
-              stroke={color}
-              strokeWidth={strokeWidth}
-              dash={[6, 4]}
-            />
-            <Circle
-              x={cx}
-              y={cy}
-              radius={radius}
-              fill={color}
-              stroke="#ffffff"
-              strokeWidth={1}
-            />
-            <Text
-              x={cx}
-              y={cy}
-              text={valStr}
-              fontSize={fontSize}
-              fontStyle="bold"
-              fill="#ffffff"
-              width={radius * 2}
-              height={radius * 2}
-              offsetX={radius}
-              offsetY={radius}
-              align="center"
-              verticalAlign="middle"
-            />
-          </Group>
-        );
-      })() : draft ? (
-        <Rect
-          x={draft.x} y={draft.y} width={draft.width} height={draft.height}
-          stroke={color}
-          strokeWidth={strokeWidth}
-          dash={[6, 4]}
-        />
-      ) : null}
-
-      {/* Preview mũi tên / đường thẳng đang kéo */}
-      {arrowDraft && (() => {
-        const dx = arrowDraft.x2 - arrowDraft.x;
-        const dy = arrowDraft.y2 - arrowDraft.y;
-        const len = Math.sqrt(dx * dx + dy * dy) || 1;
-        const nx = dx / len;
-        const ny = dy / len;
-        if (arrowDraft.type === "line") {
-          return (
-            <Line
-              points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
-              stroke={color} strokeWidth={strokeWidth}
-              lineCap="round" opacity={0.7} dash={[8, 4]}
-            />
-          );
-        }
-        if (arrowDraft.type === "arrow") {
-          return (
-            <Arrow
-              points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
-              stroke={color}
-              strokeWidth={strokeWidth}
-              fill={color}
-              pointerLength={Math.max(10, strokeWidth * 3)}
-              pointerWidth={Math.max(8, strokeWidth * 2.5)}
-              lineCap="round"
-              lineJoin="round"
-              opacity={0.7}
-              dash={[8, 4]}
-            />
-          );
-        }
-        if (arrowDraft.type === "double-arrow") {
-          return (
-            <Arrow
-              points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
-              stroke={color}
-              strokeWidth={strokeWidth}
-              fill={color}
-              pointerAtBeginning={true}
-              pointerAtEnding={true}
-              pointerLength={Math.max(10, strokeWidth * 3)}
-              pointerWidth={Math.max(8, strokeWidth * 2.5)}
-              lineCap="round"
-              lineJoin="round"
-              opacity={0.7}
-              dash={[8, 4]}
-            />
-          );
-        }
-        // numbered-arrow preview
-        const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
-        const startX = arrowDraft.x + nx * radius;
-        const startY = arrowDraft.y + ny * radius;
-        return (
-          <Group opacity={0.7}>
-            <Circle x={arrowDraft.x} y={arrowDraft.y} radius={radius} fill={color} />
-            <Arrow
-              points={[startX, startY, arrowDraft.x2, arrowDraft.y2]}
-              stroke={color}
-              strokeWidth={strokeWidth}
-              fill={color}
-              pointerLength={Math.max(10, strokeWidth * 3)}
-              pointerWidth={Math.max(8, strokeWidth * 2.5)}
-              lineCap="round"
-              lineJoin="round"
-              dash={[8, 4]}
-            />
-          </Group>
-        );
-      })()}
-    </>
-  );
-});
-DraftPreview.displayName = "DraftPreview";
-
-interface MarqueePreviewHandle {
-  setBox: (b: Box | null) => void;
-}
-
-/** Khung quét chọn (marquee) — state riêng, cùng lý do với `DraftPreview`. */
-const MarqueePreview = forwardRef<MarqueePreviewHandle, { scale: number }>(({ scale }, ref) => {
-  const [box, setBox] = useState<Box | null>(null);
-  useImperativeHandle(ref, () => ({ setBox }), []);
-  return (
-    <>
-      {box && (
-        <Rect
-          x={box.x}
-          y={box.y}
-          width={box.width}
-          height={box.height}
-          fill="rgba(59, 130, 246, 0.15)"
-          stroke="#3b82f6"
-          strokeWidth={1 / scale}
-          dash={[4 / scale, 4 / scale]}
-          listening={false}
-        />
-      )}
-    </>
-  );
-});
-MarqueePreview.displayName = "MarqueePreview";
-
 /**
  * Component Canvas chỉnh sửa ảnh SnapDoc (React-Konva).
  * Hỗ trợ vẽ vector annotations (text, arrow, rect, ellipse, step counter, highlight, blur)
  * và tương tác chuột mượt mà 60 FPS (zoom quanh con trỏ, pan Space/Middle drag, crop, crop history).
  */
+// LRU giới hạn (xem imageCache.ts) — re-export cho Editor.
+export { imageAnnCache };
+
 const toSafeImageUrl = (src: string) => toSafeBlobUrl(src, 500_000);
 
 const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoomBar, onFlash }, ref) => {
@@ -774,6 +143,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const setDraft = (d: Draft | null) => draftPreviewRef.current?.setDraft(d);
   const setArrowDraft = (d: ArrowDraft | null) => draftPreviewRef.current?.setArrowDraft(d);
   const setMarqueeBox = (b: Box | null) => marqueePreviewRef.current?.setBox(b);
+  const setPenDraft = (pts: number[] | null) => draftPreviewRef.current?.setPenDraft(pts);
   // Con trỏ khi rê vào tay nắm / hình chỉnh được (ghi đè con trỏ mặc định của tool)
   // Đang kéo THÂN 1 hình → ẩn tay nắm (chúng đứng yên ở toạ độ cũ nên sẽ lệch/nhảy khi hình dời)
   const [bodyDragging, setBodyDragging] = useState(false);
@@ -1526,7 +896,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   // bao giờ nhận được mouseup, khiến khung vẽ bị "dính" và tiếp tục bám theo
   // con trỏ ở lần kéo sau. Toạ độ luôn được clamp vào [0, imgW]/[0, imgH].
   const beginShapeDraft = (
-    type: "rect" | "ellipse" | "highlight" | "blur" | "numbered-rect",
+    type: "rect" | "ellipse" | "highlight" | "blur" | "numbered-rect" | "spotlight",
     startX: number,
     startY: number,
   ) => {
@@ -1560,6 +930,15 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
           id: uid(), type: "highlight",
           x: nx, y: ny, width, height,
           color: highlightColor, strokeWidth,
+        });
+        return;
+      }
+      if (type === "spotlight") {
+        useEditor.getState().addAnnotation({
+          id: uid(), type: "spotlight",
+          x: nx, y: ny, width, height,
+          shape: useEditor.getState().spotlightShape,
+          dim: 0.6,
         });
         return;
       }
@@ -1602,6 +981,45 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       useEditor.getState().addAnnotation({
         id: uid(), type,
         x: nx, y: ny, width, height, color, strokeWidth,
+      });
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  // Bút tự do: gom điểm theo window mousemove (như `beginShapeDraft`), thả
+  // chuột thì lưu nét với toạ độ tương đối so với góc trên-trái của nét.
+  const beginPenDraft = (startX: number, startY: number) => {
+    const d = docRef.current;
+    if (!d) return;
+    const clamp = (v: number, max: number) => Math.max(0, Math.min(v, max));
+    const pts = [clamp(startX, d.imgW), clamp(startY, d.imgH)];
+    setPenDraft(pts.slice());
+    const onMove = (me: MouseEvent) => {
+      const p = clientToImg(me.clientX, me.clientY);
+      pts.push(clamp(p.x, d.imgW), clamp(p.y, d.imgH));
+      setPenDraft(pts.slice());
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setPenDraft(null);
+      // Click không kéo → 1 chấm (2 điểm trùng nhau + đầu nét tròn).
+      const simple = simplifyPoints(pts.length >= 4 ? pts : [pts[0], pts[1], pts[0], pts[1]]);
+      let minX = Infinity;
+      let minY = Infinity;
+      for (let i = 0; i + 1 < simple.length; i += 2) {
+        minX = Math.min(minX, simple[i]);
+        minY = Math.min(minY, simple[i + 1]);
+      }
+      useEditor.getState().addAnnotation({
+        id: uid(),
+        type: "pen",
+        x: minX,
+        y: minY,
+        points: simple.map((v, i) => (i % 2 === 0 ? v - minX : v - minY)),
+        color,
+        strokeWidth,
       });
     };
     window.addEventListener("mousemove", onMove);
@@ -1768,8 +1186,29 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       useEditor.getState().select(null);
     }
 
-    if (tool === "rect" || tool === "ellipse" || tool === "highlight" || tool === "blur" || tool === "numbered-rect") {
+    if (tool === "rect" || tool === "ellipse" || tool === "highlight" || tool === "blur" || tool === "numbered-rect" || tool === "spotlight") {
       beginShapeDraft(tool, x, y);
+      return;
+    }
+    if (tool === "pen") {
+      beginPenDraft(x, y);
+      return;
+    }
+    if (tool === "magnifier" || tool === "emoji") {
+      if (!doc) return;
+      // Kích thước mặc định theo cỡ ảnh (ảnh 4K không ra 1 chấm bé, ảnh nhỏ không bị che kín).
+      const base = Math.min(doc.imgW, doc.imgH);
+      const st = useEditor.getState();
+      if (tool === "magnifier") {
+        st.addAnnotation({
+          id: uid(), type: "magnifier", x, y,
+          radius: Math.round(Math.max(40, Math.min(160, base * 0.1))),
+          zoom: st.magnifierZoom, color, strokeWidth,
+        });
+      } else {
+        const size = Math.round(Math.max(28, Math.min(120, base * 0.07)));
+        st.addAnnotation({ id: uid(), type: "emoji", x: x - size / 2, y: y - size / 2, emoji: st.currentEmoji, size });
+      }
       return;
     }
     if (tool === "arrow" || tool === "double-arrow" || tool === "line" || tool === "numbered-arrow") {
@@ -1889,7 +1328,25 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
         width: newW,
         height: newH,
       } as Partial<Annotation>);
-    } else if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect" || a.type === "image") {
+    } else if (a.type === "pen") {
+      useEditor.getState().updateAnnotation(a.id, {
+        x: node.x(),
+        y: node.y(),
+        points: a.points.map((v, i) => (i % 2 === 0 ? v * sx : v * sy)),
+      } as Partial<Annotation>);
+    } else if (a.type === "magnifier") {
+      useEditor.getState().updateAnnotation(a.id, {
+        x: node.x(),
+        y: node.y(),
+        radius: Math.max(12, a.radius * Math.max(sx, sy)),
+      } as Partial<Annotation>);
+    } else if (a.type === "emoji") {
+      useEditor.getState().updateAnnotation(a.id, {
+        x: node.x(),
+        y: node.y(),
+        size: Math.max(12, Math.round(a.size * Math.max(sx, sy))),
+      } as Partial<Annotation>);
+    } else if (a.type === "rect" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect" || a.type === "image" || a.type === "spotlight") {
       useEditor.getState().updateAnnotation(a.id, {
         x: node.x(),
         y: node.y(),
@@ -2072,7 +1529,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     draggable ||
     (tool === "text" && a.type === "text") ||
     (EDIT_TOOLS.has(tool) &&
-      (a.type !== "highlight" && a.type !== "blur" && a.type !== "image" ? true : activeIds.includes(a.id)));
+      (a.type !== "highlight" && a.type !== "blur" && a.type !== "image" && a.type !== "spotlight" ? true : activeIds.includes(a.id)));
 
   // % so với pixel gốc của ảnh (scale), KHÔNG phải so với fit — 100% = 1:1 pixel.
   const zoomPct = Math.round(scale * 100);
@@ -2082,7 +1539,8 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   // Step luôn tròn → keepRatio. Line/arrow/numbered-arrow không dùng transformer bounding box
   const activeIds = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
   const selectedAnns = doc ? doc.annotations.filter((a) => activeIds.includes(a.id)) : [];
-  const isCircleSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "step");
+  const spotlights = (doc?.annotations ?? []).filter((a): a is SpotlightAnn => a.type === "spotlight");
+  const isCircleSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "step" || a.type === "magnifier" || a.type === "emoji");
   const isNumberedRectSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "numbered-rect");
   // Line / arrow / numbered-arrow → Transformer ẩn (kéo di chuyển trực tiếp, không resize bounding box)
   const isLineSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "line" || a.type === "arrow" || a.type === "double-arrow" || a.type === "numbered-arrow");
@@ -2901,6 +2359,25 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
                   )}
                 </Group>
               );
+              const extra = {
+                draggable: dragFor(a),
+                isSelected,
+                onSelect: (multi: boolean) => useEditor.getState().select(a.id, multi),
+                onDragEnd: (e: Konva.KonvaEventObject<DragEvent>) => onDragEnd(a.id, e),
+                onTransformEnd: (node: Konva.Node) => onTransformEnd(a, node),
+              };
+              if (a.type === "pen") return <PenItem key={a.id} ann={a} {...extra} />;
+              if (a.type === "emoji") return <EmojiItem key={a.id} ann={a} {...extra} />;
+              if (a.type === "magnifier")
+                return <MagnifierItem key={a.id} ann={a} img={img} {...extra} />;
+              if (a.type === "spotlight")
+                return (
+                  <Group key={a.id}>
+                    {/* Lớp tối chung của mọi spotlight nằm ở spotlight ĐẦU TIÊN theo thứ tự lớp */}
+                    {a.id === spotlights[0]?.id && <SpotlightOverlay spots={spotlights} imgW={doc.imgW} imgH={doc.imgH} />}
+                    <SpotlightHit ann={a} {...extra} />
+                  </Group>
+                );
               // image — ảnh chèn thêm
               if (a.type === "image")
               return (
@@ -3289,410 +2766,6 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     return { x: (a.x + bgPad) * scale, y: (a.y + bgPad) * scale };
   }
 });
-
-const fill: React.CSSProperties = { width: "100%", height: "100%" };
-
-const zoomBar: React.CSSProperties = {
-  position: "absolute",
-  right: 12,
-  bottom: 12,
-  display: "flex",
-  alignItems: "center",
-  gap: 2,
-  background: "rgba(18,18,22,0.90)",
-  border: "1px solid rgba(255,255,255,0.10)",
-  borderRadius: 10,
-  padding: "3px 5px",
-  backdropFilter: "blur(10px)",
-  boxShadow: "0 2px 12px rgba(0,0,0,0.4)",
-  zIndex: 10,
-};
-
-/** Chip có label: Fit / 100% */
-const zoomChip: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 4,
-  height: 26,
-  padding: "0 8px",
-  borderRadius: 6,
-  background: "transparent",
-  color: "rgba(242,242,245,0.75)",
-  fontSize: 11,
-  fontWeight: 500,
-  cursor: "pointer",
-  whiteSpace: "nowrap",
-  transition: "background 0.12s, color 0.12s",
-};
-
-const zoomChipActive: React.CSSProperties = {
-  background: "rgba(59,130,246,0.22)",
-  color: "#7eb8ff",
-};
-
-/** Nút icon tròn: zoom in / zoom out */
-const zoomIconBtn: React.CSSProperties = {
-  width: 28,
-  height: 28,
-  borderRadius: 6,
-  background: "transparent",
-  color: "rgba(242,242,245,0.75)",
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  cursor: "pointer",
-  flexShrink: 0,
-};
-
-/** Ô hiển thị % zoom — nhấn để toggle Fit / 100% */
-const zoomPctBtn: React.CSSProperties = {
-  height: 26,
-  minWidth: 46,
-  padding: "0 6px",
-  borderRadius: 6,
-  background: "transparent",
-  color: "rgba(242,242,245,0.9)",
-  fontSize: 12,
-  fontWeight: 600,
-  fontVariantNumeric: "tabular-nums",
-  cursor: "pointer",
-  textAlign: "center",
-};
-
-const zoomBtnDisabled: React.CSSProperties = {
-  opacity: 0.3,
-  cursor: "not-allowed",
-};
-
-function cropBtn(primary: boolean): React.CSSProperties {
-  return {
-    background: primary ? "#3b82f6" : "#2a2a30",
-    color: "#fff",
-    padding: "6px 12px",
-    borderRadius: 6,
-    fontSize: 13,
-    whiteSpace: "nowrap",
-    flexShrink: 0,
-  };
-}
-
-/** Badge HiDPI — hiện khi ảnh là Retina 2× trở lên */
-const dpiBadge: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  height: 18,
-  padding: "0 6px",
-  borderRadius: 4,
-  background: "rgba(59,130,246,0.18)",
-  color: "#7eb8ff",
-  fontSize: 10,
-  fontWeight: 700,
-  letterSpacing: "0.04em",
-  cursor: "default",
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BlurRect — render vùng che mờ với 3 mode:
-//
-//  "blur"     — Gaussian blur qua CSS filter (mềm, không phá vỡ cấu trúc ảnh)
-//  "pixelate" — Mosaic: scale ảnh xuống nhỏ (tileSize × tileSize) rồi scale
-//               lại to → hiệu ứng pixel hoá, che chắn mạnh hơn
-//  "solid"    — Hình chữ nhật màu đặc, không thể hoàn tác bằng kỹ thuật xử lý ảnh
-//
-// Pipeline chung: cắt patch từ ảnh gốc (image-space coords) → xử lý → KImage.
-// Mọi mode đều hoạt động đúng với exportPng (toDataURL lấy pixel đã render).
-//
-// Flatten/export an toàn:
-//   BlurAnn được flatten thành pixel trước khi export bằng cách exportPng dùng
-//   pixelRatio = 1/scale → các BlurRect đã được KImage render thật trên canvas
-//   Konva. Để an toàn tối đa với solid redact, Toolbar có nút "Flatten" để
-//   merge toàn bộ annotation vào ảnh nền → không còn layer tách biệt.
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface BlurRectProps {
-  ann: import("../model").BlurAnn;
-  img: HTMLImageElement | null;
-  draggable: boolean;
-  onSelect: (multi: boolean) => void;
-  /** Truyền về tọa độ tuyệt đối mới (x, y) sau khi drag xong. */
-  onDragEnd: (newX: number, newY: number) => void;
-  onTransformEnd: (node: Konva.Node) => void;
-}
-
-/** Pixel hoá một canvas: scale xuống rồi scale lên để tạo mosaic. */
-function pixelateCanvas(src: HTMLCanvasElement, tileSize: number): HTMLCanvasElement {
-  const out = document.createElement("canvas");
-  out.width  = src.width;
-  out.height = src.height;
-  const ctx = out.getContext("2d")!;
-  ctx.imageSmoothingEnabled = false;
-  const ts = Math.max(2, tileSize);
-  const tw = Math.max(1, Math.round(src.width  / ts));
-  const th = Math.max(1, Math.round(src.height / ts));
-  // Bước 1: scale xuống nhỏ
-  ctx.drawImage(src, 0, 0, tw, th);
-  // Bước 2: scale lên to với nearest-neighbor → mosaic
-  ctx.drawImage(out, 0, 0, tw, th, 0, 0, src.width, src.height);
-  return out;
-}
-
-/**
- * Gaussian blur thuần JS — không dùng CSS filter (không đáng tin trong WKWebView).
- * Thuật toán: box blur 3-pass theo cả chiều ngang và dọc ≈ Gaussian.
- * Mỗi "pass" = blur ngang rồi blur dọc → tổng 6 lần scan.
- * radius: 1–20px.
- */
-function gaussianBlurCanvas(src: HTMLCanvasElement, radius: number): HTMLCanvasElement {
-  const r = Math.max(1, Math.round(radius));
-  const w = src.width;
-  const h = src.height;
-  if (w === 0 || h === 0) return src;
-
-  const out = document.createElement("canvas");
-  out.width = w;
-  out.height = h;
-  const ctx = out.getContext("2d")!;
-  ctx.drawImage(src, 0, 0);
-
-  const imageData = ctx.getImageData(0, 0, w, h);
-  let buf = new Float32Array(imageData.data);   // kênh RGBA flattened
-  const tmp = new Float32Array(buf.length);
-
-  // Blur 1 hàng theo chiều ngang
-  const blurH = (s: Float32Array, d: Float32Array) => {
-    const inv = 1 / (2 * r + 1);
-    for (let y = 0; y < h; y++) {
-      for (let c = 0; c < 4; c++) {
-        // Tổng ban đầu
-        let sum = s[(y * w) * 4 + c] * (r + 1);
-        for (let x = 0; x < r; x++) sum += s[(y * w + x) * 4 + c];
-        // Slide window
-        for (let x = 0; x < w; x++) {
-          const lead  = Math.min(x + r,     w - 1);
-          const trail = Math.max(x - r - 1, 0);
-          sum += s[(y * w + lead)  * 4 + c] - s[(y * w + trail) * 4 + c];
-          d[(y * w + x) * 4 + c] = sum * inv;
-        }
-      }
-    }
-  };
-
-  // Blur 1 cột theo chiều dọc
-  const blurV = (s: Float32Array, d: Float32Array) => {
-    const inv = 1 / (2 * r + 1);
-    for (let x = 0; x < w; x++) {
-      for (let c = 0; c < 4; c++) {
-        let sum = s[x * 4 + c] * (r + 1);
-        for (let y = 0; y < r; y++) sum += s[(y * w + x) * 4 + c];
-        for (let y = 0; y < h; y++) {
-          const lead  = Math.min(y + r,     h - 1);
-          const trail = Math.max(y - r - 1, 0);
-          sum += s[(lead  * w + x) * 4 + c] - s[(trail * w + x) * 4 + c];
-          d[(y * w + x) * 4 + c] = sum * inv;
-        }
-      }
-    }
-  };
-
-  // 3 pass box blur (H + V mỗi pass) ≈ Gaussian
-  for (let pass = 0; pass < 3; pass++) {
-    blurH(buf, tmp);
-    blurV(tmp, buf);
-  }
-
-  // Ghi lại vào ImageData
-  const u8 = imageData.data;
-  for (let i = 0; i < buf.length; i++) u8[i] = buf[i] + 0.5;
-  ctx.putImageData(imageData, 0, 0);
-  return out;
-}
-
-/**
- * Trần kích thước (cạnh dài, px) cho ảnh đưa vào `gaussianBlurCanvas` — blur
- * là phép LÀM MẤT chi tiết nên không cần chạy trên độ phân giải gốc: thu nhỏ
- * trước (radius thu cùng tỉ lệ) rồi phóng lại cho kết quả gần như y hệt mà
- * nhanh hơn hàng chục lần trên vùng chọn lớn (ảnh Retina/5K) — blur thuần JS
- * chạy ĐỒNG BỘ trên main thread, vùng lớn từng làm đơ hẳn editor khi kéo
- * slider/resize vùng che.
- */
-const BLUR_MAX_EDGE = 480;
-
-function gaussianBlurDownscaled(src: HTMLCanvasElement, radius: number): HTMLCanvasElement {
-  const maxEdge = Math.max(src.width, src.height);
-  if (maxEdge <= BLUR_MAX_EDGE) return gaussianBlurCanvas(src, radius);
-  const k = BLUR_MAX_EDGE / maxEdge;
-  const small = document.createElement("canvas");
-  small.width  = Math.max(1, Math.round(src.width  * k));
-  small.height = Math.max(1, Math.round(src.height * k));
-  small.getContext("2d")!.drawImage(src, 0, 0, small.width, small.height);
-  const blurred = gaussianBlurCanvas(small, Math.max(1, radius * k));
-  const out = document.createElement("canvas");
-  out.width  = src.width;
-  out.height = src.height;
-  const ctx = out.getContext("2d")!;
-  ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(blurred, 0, 0, src.width, src.height);
-  return out;
-}
-
-function BlurRect({ ann, img, draggable, onSelect, onDragEnd, onTransformEnd }: BlurRectProps) {
-  const [processed, setProcessed] = useState<HTMLCanvasElement | null>(null);
-
-  useEffect(() => {
-    if (ann.blurMode === "solid") {
-      // Solid: không cần xử lý ảnh, render bằng Rect thường
-      setProcessed(null);
-      return;
-    }
-    if (!img || !img.complete || ann.width < 2 || ann.height < 2) return;
-
-    const { x, y, width, height, blurRadius, blurMode } = ann;
-
-    // rAF-coalesce: kéo slider radius / drag-resize vùng che phát ra hàng
-    // loạt thay đổi liên tiếp — chỉ xử lý tối đa 1 lần mỗi frame, lượt chưa
-    // kịp chạy bị huỷ khi có thay đổi mới (hoặc unmount) thay vì tính blur
-    // đồng bộ cho TỪNG tick như trước.
-    const raf = requestAnimationFrame(() => {
-      const outW = Math.max(1, Math.round(width));
-      const outH = Math.max(1, Math.round(height));
-      const iw   = img.naturalWidth  || img.width;
-      const ih   = img.naturalHeight || img.height;
-
-      // Cắt patch chính xác từ ảnh gốc
-      const src = document.createElement("canvas");
-      src.width  = outW;
-      src.height = outH;
-      const sc = src.getContext("2d")!;
-      sc.drawImage(img,
-        Math.max(0, x), Math.max(0, y),
-        Math.min(width,  iw - Math.max(0, x)),
-        Math.min(height, ih - Math.max(0, y)),
-        Math.max(0, -x), Math.max(0, -y),
-        Math.min(outW, iw - Math.max(0, x)),
-        Math.min(outH, ih - Math.max(0, y)),
-      );
-
-      if (blurMode === "pixelate") {
-        setProcessed(pixelateCanvas(src, Math.max(2, blurRadius)));
-        return;
-      }
-
-      // blur mode — Gaussian blur thuần JS (CSS filter không đáng tin trong
-      // WKWebView), chạy trên bản thu nhỏ (xem `gaussianBlurDownscaled`).
-      setProcessed(gaussianBlurDownscaled(src, blurRadius));
-    });
-    return () => cancelAnimationFrame(raf);
-
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img, ann.x, ann.y, ann.width, ann.height, ann.blurRadius, ann.blurMode, ann.solidColor]);
-
-  const sharedProps = {
-    id: ann.id,
-    x: ann.x, y: ann.y, width: ann.width, height: ann.height,
-    draggable,
-    onClick: (e: any) => onSelect(Boolean(e?.evt?.shiftKey || e?.evt?.metaKey || e?.evt?.ctrlKey)),
-    onTap: () => onSelect(false),
-    onDragEnd: (e: Konva.KonvaEventObject<DragEvent>) => {
-      // e.target.x()/y() = tọa độ image-space mới (layer có scaleX=scale
-      // nhưng node position luôn ở image-space — giống onDragEnd chung).
-      onDragEnd(e.target.x(), e.target.y());
-    },
-    onTransformEnd: (e: Konva.KonvaEventObject<Event>) => onTransformEnd(e.target),
-  };
-
-  // Solid mode — hình chữ nhật màu đặc, không liên quan đến dữ liệu ảnh
-  if (ann.blurMode === "solid") {
-    return <Rect {...sharedProps} fill={ann.solidColor || "#1a1a1a"} />;
-  }
-
-  // Chưa render xong → placeholder tối
-  if (!processed) {
-    return <Rect {...sharedProps} fill="rgba(15,20,30,0.5)" />;
-  }
-
-  return <KImage {...sharedProps} image={processed} />;
-}
-
-interface ImageItemProps {
-  ann: import("../model").ImageAnn;
-  draggable: boolean;
-  isSelected: boolean;
-  activeIds: string[];
-  onSelect: (multi: boolean) => void;
-  onDragEnd: (e: Konva.KonvaEventObject<DragEvent>) => void;
-  onTransformEnd: (node: Konva.Node) => void;
-}
-
-// LRU giới hạn (xem imageCache.ts) — re-export cho Editor.
-export { imageAnnCache };
-
-function ImageItem({ ann, draggable, isSelected, activeIds, onSelect, onDragEnd, onTransformEnd }: ImageItemProps) {
-  const [loadedImg, setLoadedImg] = useState<HTMLImageElement | null>(() => imageAnnCache.get(ann.src) ?? null);
-
-  useEffect(() => {
-    if (imageAnnCache.has(ann.src)) {
-      setLoadedImg(imageAnnCache.get(ann.src)!);
-      return;
-    }
-    let cancelled = false;
-    const el = new window.Image();
-    el.crossOrigin = "anonymous";
-    const onDone = () => {
-      imageAnnCache.set(ann.src, el);
-      if (!cancelled) setLoadedImg(el);
-    };
-    if (typeof el.decode === "function") {
-      el.src = ann.src;
-      el.decode().then(onDone).catch(() => {
-        el.onload = onDone;
-        el.onerror = () => console.error("Không thể load ảnh ann:", ann.id);
-        el.src = ann.src;
-      });
-    } else {
-      el.onload = onDone;
-      el.onerror = () => console.error("Không thể load ảnh ann:", ann.id);
-      el.src = ann.src;
-    }
-    return () => {
-      cancelled = true;
-      el.onload = null;
-      el.onerror = null;
-    };
-  }, [ann.src, ann.id]);
-
-  useEffect(() => {
-    if (loadedImg && isSelected) {
-      useEditor.getState().select(ann.id);
-    }
-  }, [loadedImg, isSelected, ann.id]);
-
-  if (!loadedImg) return null;
-
-  return (
-    <Group key={ann.id}>
-      <KImage
-        id={ann.id}
-        image={loadedImg}
-        x={ann.x}
-        y={ann.y}
-        width={ann.width}
-        height={ann.height}
-        shadowColor={isSelected ? "#3b82f6" : undefined}
-        shadowBlur={isSelected ? 6 : 0}
-        shadowOpacity={isSelected ? 0.9 : 0}
-        draggable={draggable}
-        listening={draggable}
-        onClick={(e) => onSelect(Boolean(e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey))}
-        onTap={() => onSelect(false)}
-        onDragEnd={onDragEnd}
-        onTransformEnd={(e) => onTransformEnd(e.target)}
-      />
-      {isSelected && activeIds.length > 1 && (
-        <SelectionFrame x={ann.x} y={ann.y} width={ann.width} height={ann.height} />
-      )}
-    </Group>
-  );
-}
 
 AnnotationStage.displayName = "AnnotationStage";
 export default AnnotationStage;

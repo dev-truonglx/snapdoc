@@ -61,6 +61,8 @@
     "checkingUpdates": "Checking…",
     "installing": "Installing…",
     "installAvailable": "Install v",
+    "openLogs": "📄 Logs",
+    "openLogsTitle": "Open the log folder (attach it when reporting a bug)",
     "checkUpdates": "Check for updates",
     "restart": "↺ Restart to apply",
     "restartNow": "Restart now",
@@ -105,6 +107,9 @@
     "scrollHint": "Select area and scroll to combine long images"
   },
   "tools": {
+    "spotlight": "Spotlight",
+    "magnifier": "Magnifier",
+    "emoji": "Sticker",
     "select": "Select / edit",
     "selectHint": "Select or edit objects",
     "rect": "Draw rectangle",
@@ -186,6 +191,9 @@
     "startRecording": "● Start recording",
     "startingRecording": "Starting…",
     "selectMonitor": "Click to capture entire screen • Esc / right-click to cancel",
+    "pixelHint": "C: copy color • M: pixel ruler",
+    "colorCopied": "Copied {{hex}}",
+    "measureHint": "Pixel ruler: drag to measure • M to go back to selecting • Esc to cancel",
     "windowLabel": "Window",
     "quickDragSelect": "Drag to select area • Hover a window and click to capture it • Esc / right-click to cancel",
     "captureFullscreen": "Capture full screen"
@@ -314,6 +322,13 @@
     "recordingIconFailed": "Recording but couldn't show tray icon: {error}"
   },
   "editorToolbar": {
+    "spotlightShape": "Shape",
+    "shapeRect": "Rectangle",
+    "shapeEllipse": "Ellipse",
+    "magnifierZoom": "Zoom",
+    "presets": "Presets",
+    "presetSave": "Save current color + stroke + font size as a preset",
+    "presetApply": "Apply preset: {{color}}, stroke {{width}}, font {{size}} (right-click to delete)",
     "newCapture": "New capture (last mode + open bar) (Ctrl/Cmd+N)",
     "openFile": "Open image from file (Ctrl/Cmd+O)",
     "stitchImages": "Stitch images (combine multiple)",

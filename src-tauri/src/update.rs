@@ -37,8 +37,9 @@ pub static UPDATE_READY: AtomicBool = AtomicBool::new(false);
 static DOWNLOADED: Mutex<Option<(Update, Vec<u8>)>> = Mutex::new(None);
 
 /// Update summary sent to the frontend.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct UpdateInfo {
     pub available: bool,
     pub version: String,
@@ -76,14 +77,14 @@ pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, St
                 || msg.contains("status code 404")
                 || msg.contains("No releases found")
             {
-                eprintln!("[SnapDoc][update] chưa có release nào được publish (404)");
+                log::info!("[SnapDoc][update] chưa có release nào được publish (404)");
                 return Ok(UpdateInfo {
                     available: false,
                     version: String::new(),
                     current_version: app.package_info().version.to_string(),
                 });
             }
-            eprintln!("[SnapDoc][update] check failed: {e}");
+            log::warn!("[SnapDoc][update] check failed: {e}");
             Err(msg)
         }
     }
@@ -104,15 +105,15 @@ pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
         return Err("No update is pending.".to_string());
     };
     let version = update.version.clone();
-    eprintln!("[SnapDoc][update] silent download+install started for v{version}");
+    log::info!("[SnapDoc][update] silent download+install started for v{version}");
     let bytes = update
         .download(
             |_chunk, _total| {},
-            || { eprintln!("[SnapDoc][update] download finished, installing…"); },
+            || { log::info!("[SnapDoc][update] download finished, installing…"); },
         )
         .await
         .map_err(|e| {
-            eprintln!("[SnapDoc][update] silent download failed: {e}");
+            log::warn!("[SnapDoc][update] silent download failed: {e}");
             e.to_string()
         })?;
     // Windows: KHÔNG cài ở đây (cài = thoát app ngay) — chờ user bấm
@@ -120,7 +121,7 @@ pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         *DOWNLOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some((update, bytes));
-        eprintln!("[SnapDoc][update] v{version} downloaded — waiting for the user to restart");
+        log::info!("[SnapDoc][update] v{version} downloaded — waiting for the user to restart");
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -130,10 +131,10 @@ pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
         update.install(bytes).map_err(|e| {
-                eprintln!("[SnapDoc][update] silent install failed: {e}");
+                log::warn!("[SnapDoc][update] silent install failed: {e}");
                 e.to_string()
             })?;
-        eprintln!("[SnapDoc][update] silent install complete — new version will apply on next launch");
+        log::info!("[SnapDoc][update] silent install complete — new version will apply on next launch");
     }
 
     // Đánh dấu trạng thái toàn cục để Settings có thể query bất cứ lúc nào.
@@ -187,7 +188,7 @@ pub fn restart_to_apply(app: &AppHandle) {
             // Thành công thì process đã thoát bên trong `install`; tới được
             // dòng dưới nghĩa là cài lỗi → vẫn khởi động lại như thường.
             if let Err(e) = update.install(bytes) {
-                eprintln!("[SnapDoc][update] deferred install failed: {e}");
+                log::warn!("[SnapDoc][update] deferred install failed: {e}");
             }
         }
     }
@@ -206,7 +207,7 @@ pub async fn install_pending(app: AppHandle) -> Result<(), String> {
         .download_and_install(|_chunk, _total| {}, || {})
         .await
         .map_err(|e| {
-            eprintln!("[SnapDoc][update] install failed: {e}");
+            log::warn!("[SnapDoc][update] install failed: {e}");
             e.to_string()
         })?;
     // Nếu đang quay, dừng sạch trước khi relaunch — xem `record::finalize_on_exit`.

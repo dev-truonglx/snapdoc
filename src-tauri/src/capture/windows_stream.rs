@@ -355,7 +355,7 @@ impl Drop for RecordingHandle {
     fn drop(&mut self) {
         let Some(control) = self.control.take() else { return };
         if !self.stopped_externally.load(Ordering::SeqCst) {
-            eprintln!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng WGC khẩn cấp");
+            log::warn!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng WGC khẩn cấp");
             let _ = control.stop();
         }
     }

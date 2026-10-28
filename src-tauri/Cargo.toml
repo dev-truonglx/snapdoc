@@ -1,6 +1,6 @@
 [package]
 name = "snapdoc"
-version = "3.8.2"
+version = "3.8.3"
 description = "SnapDoc — fast screenshot + annotation app"
 authors = ["SnapDoc"]
 edition = "2021"
@@ -22,6 +22,13 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"
+# Ghi log ra file (thư mục log của OS, xoay vòng) — bản release không có console,
+# `eprintln!` cũ mất hết khi người dùng báo lỗi.
+tauri-plugin-log = "2"
+log = "0.4"
+# Sinh type TypeScript cho struct trao đổi qua IPC (`cargo test` xuất ra
+# src/lib/bindings/) — đổi field ở Rust là tsc báo lỗi ngay ở frontend.
+ts-rs = { version = "11", features = ["serde-compat", "no-serde-warnings"] }
 tokio = { version = "1", features = ["time"] }
 
 serde = { version = "1", features = ["derive"] }

@@ -348,7 +348,7 @@ fn get_editor_window_monitor_ids(app: &AppHandle) -> Vec<u32> {
                     if let Ok(id) = monitor.id() {
                         if !ids.contains(&id) {
                             ids.push(id);
-                            eprintln!("[SnapDoc] Loại bỏ editor (label={label}) khỏi frozen screens (monitor_id={id})");
+                            log::info!("[SnapDoc] Loại bỏ editor (label={label}) khỏi frozen screens (monitor_id={id})");
                         }
                     }
                 }
@@ -629,7 +629,7 @@ pub fn finish(
             Some(rec.id)
         }
         Err(e) => {
-            eprintln!("[SnapDoc][history] ingest thất bại, luồng capture vẫn tiếp tục: {e}");
+            log::warn!("[SnapDoc][history] ingest thất bại, luồng capture vẫn tiếp tục: {e}");
             None
         }
     };
@@ -663,7 +663,7 @@ pub fn finish(
             // trùng lặp trong `save_dir`).
             if let Some(id) = &ingested_id {
                 if let Err(e) = crate::history::commands::set_history_exported_path_sync(app, id, &saved) {
-                    eprintln!("[SnapDoc] Ghi exported_path thất bại: {e}");
+                    log::warn!("[SnapDoc] Ghi exported_path thất bại: {e}");
                 }
             }
             // Lưu đường dẫn đã ghi vào pending để thumbnail/editor có thể dùng nếu cần
@@ -706,11 +706,11 @@ fn auto_export_copy(app: &AppHandle, cap: &capture::Capture, history_id: Option<
         Ok(saved) => {
             if let Some(id) = history_id {
                 if let Err(e) = crate::history::commands::set_history_exported_path_sync(app, id, &saved) {
-                    eprintln!("[SnapDoc] Ghi exported_path thất bại: {e}");
+                    log::warn!("[SnapDoc] Ghi exported_path thất bại: {e}");
                 }
             }
         }
-        Err(e) => eprintln!("[SnapDoc] Tự động lưu bản sao vào {save_dir} thất bại: {e}"),
+        Err(e) => log::warn!("[SnapDoc] Tự động lưu bản sao vào {save_dir} thất bại: {e}"),
     }
 }
 
@@ -831,7 +831,7 @@ pub fn run(app: &AppHandle, mode: &str, output: &str) {
         windows::open_overlays(app, overlay_mode)
     })();
     let t_overlays = t2.elapsed();
-    eprintln!("[SnapDoc Timing] flow::run total: {:?}, snapshot: {:?}, freeze_launch: {:?}, open_overlays: {:?}", 
+    log::debug!("[SnapDoc Timing] flow::run total: {:?}, snapshot: {:?}, freeze_launch: {:?}, open_overlays: {:?}", 
         t0.elapsed(), t_snap, t_freeze, t_overlays);
     if let Err(e) = result {
         clear_frozen_screens(app);

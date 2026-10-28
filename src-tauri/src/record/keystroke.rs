@@ -221,7 +221,7 @@ mod macos {
         pub fn start(app: AppHandle) -> Result<Self, String> {
             // Kiểm tra quyền Accessibility
             if !crate::permissions::can_use_accessibility() {
-                eprintln!("[SnapDoc][keystroke] Chưa có quyền Accessibility — đang yêu cầu prompt cấp quyền...");
+                log::warn!("[SnapDoc][keystroke] Chưa có quyền Accessibility — đang yêu cầu prompt cấp quyền...");
                 crate::permissions::request_accessibility();
             }
 
@@ -252,7 +252,7 @@ mod macos {
                     );
 
                     if mach_port.is_null() {
-                        eprintln!("[SnapDoc][keystroke] CGEventTapCreate trả về NULL — cần cấp quyền Accessibility (Trợ năng) trong System Settings > Privacy & Security > Accessibility!");
+                        log::warn!("[SnapDoc][keystroke] CGEventTapCreate trả về NULL — cần cấp quyền Accessibility (Trợ năng) trong System Settings > Privacy & Security > Accessibility!");
                         let _ = init_tx.send(Err(
                             "Không tạo được CGEventTap — cần cấp quyền Accessibility (Trợ năng) cho SnapDoc trong Cài đặt hệ thống".to_string(),
                         ));
@@ -506,7 +506,7 @@ mod windows {
                         let _ = handle.join();
                     } else {
                         // Không gửi được WM_QUIT — không join (tránh treo cả luồng dừng quay).
-                        eprintln!("[SnapDoc][keystroke] Không dừng được thread hook bàn phím");
+                        log::warn!("[SnapDoc][keystroke] Không dừng được thread hook bàn phím");
                     }
                 }
             }

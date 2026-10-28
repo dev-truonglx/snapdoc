@@ -18,6 +18,7 @@
     "dialog:default",
     "opener:default",
     "opener:allow-reveal-item-in-dir",
-    "aptabase:allow-track-error"
+    "aptabase:allow-track-error",
+    "log:default"
   ]
 }

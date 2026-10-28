@@ -8,6 +8,13 @@ fn decode(data: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("Base64 không hợp lệ: {e}"))
 }
 
+/// Copy chuỗi văn bản vào clipboard hệ thống.
+pub fn copy_text(text: &str) -> Result<(), String> {
+    arboard::Clipboard::new()
+        .and_then(|mut c| c.set_text(text.to_owned()))
+        .map_err(|e| format!("Không copy được văn bản: {e}"))
+}
+
 /// Copy ảnh PNG (base64) vào clipboard hệ thống dưới dạng bitmap.
 pub fn copy_png(data: &str) -> Result<(), String> {
     copy_png_bytes(&decode(data)?)

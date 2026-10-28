@@ -268,7 +268,7 @@ pub(crate) fn new_output_path(app: &AppHandle) -> Result<PathBuf, String> {
 pub(crate) fn allow_asset_file(app: &AppHandle, file: &std::path::Path) {
     let scope = app.asset_protocol_scope();
     if let Err(e) = scope.allow_file(file) {
-        eprintln!("[SnapDoc][record] Không mở được asset scope cho {}: {e}", file.display());
+        log::warn!("[SnapDoc][record] Không mở được asset scope cho {}: {e}", file.display());
     }
     if let Ok(real) = std::fs::canonicalize(file) {
         if real != file {
@@ -611,7 +611,7 @@ fn spawn_encoder_watchdog(
                 continue;
             }
             if since.elapsed() >= STALL_LIMIT {
-                eprintln!("[SnapDoc][record] ffmpeg không nhận frame suốt {}s — dừng encoder", STALL_LIMIT.as_secs());
+                log::warn!("[SnapDoc][record] ffmpeg không nhận frame suốt {}s — dừng encoder", STALL_LIMIT.as_secs());
                 killer.kill();
                 return;
             }
@@ -924,12 +924,12 @@ fn start_with_target(app: &AppHandle, target: stream_impl::RecordTarget) -> Resu
 
     if let Some((bx, by, bw, bh)) = ui.border_rect {
         if let Err(e) = crate::windows::open_record_border(app, bx, by, bw, bh) {
-            eprintln!("[SnapDoc][record] Không hiện được khung viền đang quay: {e}");
+            log::warn!("[SnapDoc][record] Không hiện được khung viền đang quay: {e}");
         }
     }
     #[cfg(target_os = "windows")]
     if let Err(e) = crate::windows::open_recording_indicator(app, ui.indicator_rect) {
-        eprintln!("[SnapDoc][record] Không hiện được popup đang quay: {e}");
+        log::warn!("[SnapDoc][record] Không hiện được popup đang quay: {e}");
     }
     // Lệnh dừng tới ĐÚNG lúc đang mở khung viền/popup (đóng trước khi chúng
     // kịp tồn tại) → tự đóng lại, không để khung đỏ kẹt trên màn hình.
@@ -952,7 +952,7 @@ fn start_with_target(app: &AppHandle, target: stream_impl::RecordTarget) -> Resu
         // Lỗi lưu file đã được `stop_recording` tự báo cho người dùng.
         std::thread::spawn(move || {
             if let Err(e) = stop_recording(&app) {
-                eprintln!("[SnapDoc][record] Dừng quay (yêu cầu lúc đang khởi động) thất bại: {e}");
+                log::warn!("[SnapDoc][record] Dừng quay (yêu cầu lúc đang khởi động) thất bại: {e}");
             }
         });
     }
@@ -1004,7 +1004,7 @@ fn start_inner(app: &AppHandle, target: stream_impl::RecordTarget) -> Result<(Ac
             let (kx, ky, kw, kh) = record_keystroke_rect(rect, scale);
             match crate::windows::open_record_keystroke(app, kx, ky, kw, kh) {
                 Ok(id) => overlay_ids.extend(id),
-                Err(e) => eprintln!("[SnapDoc][record] Không hiện được overlay phím bấm: {e}"),
+                Err(e) => log::warn!("[SnapDoc][record] Không hiện được overlay phím bấm: {e}"),
             }
         }
         match keystroke::KeystrokeListener::start(app.clone()) {
@@ -1021,7 +1021,7 @@ fn start_inner(app: &AppHandle, target: stream_impl::RecordTarget) -> Result<(Ac
         if let Some((cx, cy, cw, ch)) = target_rect {
             match crate::windows::open_record_clicks(app, cx, cy, cw, ch) {
                 Ok(id) => overlay_ids.extend(id),
-                Err(e) => eprintln!("[SnapDoc][record] Không hiện được overlay click chuột: {e}"),
+                Err(e) => log::warn!("[SnapDoc][record] Không hiện được overlay click chuột: {e}"),
             }
         }
     }
@@ -1038,7 +1038,7 @@ fn start_inner(app: &AppHandle, target: stream_impl::RecordTarget) -> Result<(Ac
         Some(rect) => match mouse_click::MouseClickListener::start(app.clone(), rect.clone(), clock.clone(), scale) {
             Ok(l) => Some(l),
             Err(e) => {
-                eprintln!("[SnapDoc][record] Không bật được theo dõi chuột: {e}");
+                log::warn!("[SnapDoc][record] Không bật được theo dõi chuột: {e}");
                 None
             }
         },
@@ -1161,7 +1161,7 @@ fn spawn_status_ticker(app: AppHandle, generation: u64) {
             crate::notify::warning(&app, reason);
             // Lỗi lưu file đã được `stop_recording` tự báo cho người dùng.
             if let Err(e) = stop_recording(&app) {
-                eprintln!("[SnapDoc][record] Tự dừng quay thất bại: {e}");
+                log::warn!("[SnapDoc][record] Tự dừng quay thất bại: {e}");
             }
             break;
         }
@@ -1206,20 +1206,20 @@ pub fn finalize_on_exit(app: &AppHandle) {
             // File đã an toàn — phần còn lại chỉ là mở Editor.
             Phase::Stopping if saved => return,
             Phase::Starting if on_main_thread => {
-                eprintln!("[SnapDoc][record] Thoát app giữa lúc đang khởi động quay — bỏ qua");
+                log::info!("[SnapDoc][record] Thoát app giữa lúc đang khởi động quay — bỏ qua");
                 return;
             }
             Phase::Recording => {
                 match stop_recording_impl(app, false) {
-                    Ok(p) if !p.is_empty() => eprintln!("[SnapDoc][record] Đã lưu bản quay trước khi thoát: {p}"),
+                    Ok(p) if !p.is_empty() => log::warn!("[SnapDoc][record] Đã lưu bản quay trước khi thoát: {p}"),
                     Ok(_) => {}
-                    Err(e) => eprintln!("[SnapDoc][record] Không dừng sạch được phiên quay trước khi thoát: {e}"),
+                    Err(e) => log::warn!("[SnapDoc][record] Không dừng sạch được phiên quay trước khi thoát: {e}"),
                 }
             }
             Phase::Starting | Phase::Stopping => {
                 let now = Instant::now();
                 if now >= deadline {
-                    eprintln!("[SnapDoc][record] Hết thời gian chờ phiên quay hoàn tất trước khi thoát");
+                    log::warn!("[SnapDoc][record] Hết thời gian chờ phiên quay hoàn tất trước khi thoát");
                     return;
                 }
                 let g = lock_phase(&st);
@@ -1319,7 +1319,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
     let latest_frame = stream.latest();
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Err(e) = stream.stop() {
-        eprintln!("[SnapDoc][record] Cảnh báo dừng nguồn quay: {e}");
+        log::warn!("[SnapDoc][record] Cảnh báo dừng nguồn quay: {e}");
     }
     warnings.extend(audio.stop_and_collect());
     // 4. Đẩy nốt frame còn nợ tới mốc dừng, đóng kênh → writer kết thúc encoder.
@@ -1371,7 +1371,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
 
     if let Some(ml) = mouse_click_listener.as_ref() {
         if let Err(e) = ml.save_telemetry(app, &final_path, width, height, duration_ms as u64) {
-            eprintln!("[SnapDoc][record] Lưu telemetry chuột thất bại: {e}");
+            log::warn!("[SnapDoc][record] Lưu telemetry chuột thất bại: {e}");
         }
     }
 
@@ -1390,7 +1390,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
     crate::telemetry::capture_done(app, "video", capture_mode);
     if exiting() {
         if let Err(e) = ingested {
-            eprintln!("[SnapDoc][record] Ingest bản quay trước khi thoát thất bại (file vẫn ở {path}): {e}");
+            log::warn!("[SnapDoc][record] Ingest bản quay trước khi thoát thất bại (file vẫn ở {path}): {e}");
         }
         return Ok(path);
     }
@@ -1410,7 +1410,7 @@ fn stop_recording_impl(app: &AppHandle, open_editor_after: bool) -> Result<Strin
             }
             // Editor mở lên (chế độ video) tự đọc `PendingVideo` qua `takePendingVideo`.
             if let Err(e) = crate::windows::open_editor(app) {
-                eprintln!("[SnapDoc][record] Không mở được Editor để xem bản quay vừa lưu: {e}");
+                log::warn!("[SnapDoc][record] Không mở được Editor để xem bản quay vừa lưu: {e}");
                 crate::windows::prewarm_overlays(app);
             }
         }

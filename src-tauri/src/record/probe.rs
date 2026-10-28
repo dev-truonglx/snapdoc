@@ -123,7 +123,7 @@ pub fn remux_to_mp4_if_needed(app: &AppHandle, video_path: &Path) -> Result<Path
     let out_path = remux_dir.join(out_name);
 
     if out_path.exists() {
-        eprintln!("[SnapDoc][probe] Sử dụng bản remux MP4 đã có sẵn: {}", out_path.display());
+        log::info!("[SnapDoc][probe] Sử dụng bản remux MP4 đã có sẵn: {}", out_path.display());
         return Ok(out_path);
     }
 
@@ -133,7 +133,7 @@ pub fn remux_to_mp4_if_needed(app: &AppHandle, video_path: &Path) -> Result<Path
     let tmp_path = remux_dir.join(format!("{file_stem}_{size}_{mod_time}.{}.part.mp4", uuid::Uuid::new_v4()));
     let timeout = super::proc::timeout_for_file(video_path);
 
-    eprintln!("[SnapDoc][probe] Đang remux nhanh {} sang MP4 tương thích Webview...", video_path.display());
+    log::info!("[SnapDoc][probe] Đang remux nhanh {} sang MP4 tương thích Webview...", video_path.display());
     let ffmpeg = crate::record::encoder::sidecar_path("ffmpeg")?;
     // Thử remux stream copy (-c:v copy -c:a aac) trước để tốc độ cực nhanh (~0.2s)
     let mut cmd = Command::new(&ffmpeg);
@@ -142,7 +142,7 @@ pub fn remux_to_mp4_if_needed(app: &AppHandle, video_path: &Path) -> Result<Path
         .args(["-c:v", "copy", "-c:a", "aac", "-movflags", "+faststart", "-f", "mp4"])
         .arg(&tmp_path);
     if let Err(e) = super::proc::run_ok(&mut cmd, timeout, "Remux stream copy") {
-        eprintln!("[SnapDoc][probe] {e} — thử transcode nhanh...");
+        log::warn!("[SnapDoc][probe] {e} — thử transcode nhanh...");
         let mut trans_cmd = Command::new(&ffmpeg);
         trans_cmd
             .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])

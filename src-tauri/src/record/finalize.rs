@@ -193,7 +193,7 @@ pub fn finalize(video: &Path, tracks: &[Track], output: &Path) -> Result<Finaliz
         match f().and_then(|_| verify(&part, src_duration_ms)) {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("[SnapDoc][record] Hoàn tất bản quay ({label}) thất bại: {e}");
+                log::warn!("[SnapDoc][record] Hoàn tất bản quay ({label}) thất bại: {e}");
                 let _ = std::fs::remove_file(&part);
                 false
             }
