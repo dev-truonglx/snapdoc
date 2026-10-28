@@ -12,11 +12,13 @@ import { dropVideoSession } from "../../features/video-trim/videoSessions";
 import { useEditor, useIsDirty } from "../../features/annotation/store";
 import {
   beginSwitch,
+  commitActiveDoc,
   isCurrentSwitch,
   noteActiveKey,
   ownBlobUrl,
   initAutosave,
   parseDocPayload,
+  setPreviewProvider,
   suspendActive,
   openLibraryImage,
 } from "../../features/annotation/sessions";
@@ -81,7 +83,6 @@ export default function Editor() {
   const stageRef = useRef<StageHandle>(null);
   const loadDoc = useEditor((s) => s.loadDoc);
   const docHistoryId = useEditor((s) => s.doc?.historyId);
-  const docAnnotations = useEditor((s) => s.doc?.annotations);
   const [toast, setToast] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showFlattenConfirm, setShowFlattenConfirm] = useState(false);
@@ -287,32 +288,51 @@ export default function Editor() {
     historyId: undefined,
     anns: undefined,
   });
+  // Theo dõi qua `useEditor.subscribe` thay vì hook selector: annotations đổi từng
+  // mousemove khi kéo tay nắm (`updateAnnotationLive`) — hook sẽ re-render cả Editor
+  // (kéo theo Toolbar, HistoryStrip...) chỉ để hẹn lại timer này.
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
-    if (thumbTimerRef.current !== null) window.clearTimeout(thumbTimerRef.current);
-    const base = thumbBaseRef.current;
-    if (base.historyId !== docHistoryId) {
-      thumbBaseRef.current = { historyId: docHistoryId, anns: docAnnotations };
-      return;
-    }
-    if (base.anns === docAnnotations) return;
-    thumbTimerRef.current = window.setTimeout(() => {
+    const onDocChange = (docHistoryId: string | null | undefined, docAnnotations: unknown) => {
+      if (thumbTimerRef.current !== null) window.clearTimeout(thumbTimerRef.current);
       thumbTimerRef.current = null;
-      const historyId = useEditor.getState().doc?.historyId;
-      if (!historyId) return;
-      // exportThumbPng (không phải exportPng): exportPng sẽ áp dụng và xoá vùng
-      // crop người dùng đang chọn dở. Render nhỏ (~2×320px) thay vì 1:1 để
-      // không gửi base64 nhiều MB qua IPC rồi Rust lại thu nhỏ.
-      const preview = stageRef.current?.exportThumbPng(320);
-      if (!preview) return;
-      thumbBaseRef.current = { historyId, anns: useEditor.getState().doc?.annotations };
-      ipc.updateHistoryThumb(historyId, preview).catch(() => {});
-    }, 1500);
+      const base = thumbBaseRef.current;
+      if (base.historyId !== docHistoryId) {
+        thumbBaseRef.current = { historyId: docHistoryId, anns: docAnnotations };
+        return;
+      }
+      if (base.anns === docAnnotations) return;
+      thumbTimerRef.current = window.setTimeout(() => {
+        thumbTimerRef.current = null;
+        const historyId = useEditor.getState().doc?.historyId;
+        if (!historyId) return;
+        // exportThumbPng (không phải exportPng): exportPng sẽ áp dụng và xoá vùng
+        // crop người dùng đang chọn dở. Render nhỏ (~2×320px) thay vì 1:1 để
+        // không gửi base64 nhiều MB qua IPC rồi Rust lại thu nhỏ.
+        const preview = stageRef.current?.exportThumbPng(320);
+        if (!preview) return;
+        thumbBaseRef.current = { historyId, anns: useEditor.getState().doc?.annotations };
+        ipc.updateHistoryThumb(historyId, preview).catch(() => {});
+      }, 1500);
+    };
+    const initial = useEditor.getState().doc;
+    onDocChange(initial?.historyId, initial?.annotations);
+    const unsubscribe = useEditor.subscribe((s, prev) => {
+      if (s.doc?.historyId === prev.doc?.historyId && s.doc?.annotations === prev.doc?.annotations) return;
+      onDocChange(s.doc?.historyId, s.doc?.annotations);
+    });
     return () => {
+      unsubscribe();
       if (thumbTimerRef.current !== null) window.clearTimeout(thumbTimerRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docAnnotations, docHistoryId]);
+  }, []);
+
+  // Autosave cần render preview khi phải ghi cả ảnh nền (sau crop/stitch/
+  // flatten) — chỉ Editor giữ Konva stage, xem `setPreviewProvider`.
+  useEffect(() => {
+    setPreviewProvider(() => stageRef.current?.exportPreviewPng() ?? null);
+    return () => setPreviewProvider(null);
+  }, []);
 
   const flash = (msg: string) => {
     setToast(msg);
@@ -335,6 +355,9 @@ export default function Editor() {
     }
     if (!imageUrl) return false;
 
+    // Nạp từ BẢN NHÁP → tài liệu là CHƯA LƯU (cùng quy ước `openLibraryImage`):
+    // để clean thì "•" tắt và lần Save kế tiếp tưởng không có gì để chốt.
+    const fromDraft = !!p.docIsDraft && !!payload;
     loadDoc(
       {
         image: imageUrl,
@@ -342,11 +365,12 @@ export default function Editor() {
         imgH: p.height,
         scaleFactor: p.scale_factor ?? 1,
         annotations: payload?.annotations ?? [],
+        background: payload?.background,
         historyId: p.history_id,
         captureMode: p.capture_mode,
         filePath: p.filePath,
       },
-      true,
+      !fromDraft,
     );
     const sessionKey = p.history_id ?? `file:${uid()}`;
     if (imageUrl.startsWith("blob:")) {
@@ -686,13 +710,44 @@ export default function Editor() {
     }
   };
 
-  /** Save — xuất PNG (ghép annotation vào pixel) ra file/clipboard.
-   * Annotation được tự động lưu non-destructive qua autosave riêng.
-   * Với ảnh mở từ Library (historyId có giá trị): mở dialog chọn nơi lưu PNG.
-   * Với ảnh mở từ file ngoài: mở dialog chọn nơi lưu PNG rồi đóng editor. */
+  /** Sau khi đã xuất PNG thành công: chốt luôn tài liệu vào Library (nền nếu
+   * đã đổi + annotation + preview) để mở lại đúng như vừa lưu và hết "chưa
+   * lưu". Ảnh mở từ file ảnh thường không có chỗ nào để chốt — bản PNG vừa
+   * xuất chính là bản lưu. `.snapdoc` mở từ đĩa thì KHÔNG đụng tới ở đây: chỉ
+   * Save mới ghi lại file đó, xuất PNG không làm nó hết "chưa lưu". */
+  const commitAfterExport = async (docPreview: string) => {
+    if (useEditor.getState().doc?.filePath) return;
+    if (!(await commitActiveDoc(docPreview))) useEditor.getState().markSaved();
+  };
+
+  /** Save — xuất PNG (ghép annotation vào pixel) ra file/clipboard, rồi chốt
+   * tài liệu (`commitAfterExport`). Giữa các lần Save, annotation vẫn được
+   * autosave thành bản nháp.
+   * Tài liệu `.snapdoc` mở từ đĩa: ghi THẲNG lại chính file đó, không dialog
+   * (muốn xuất PNG thì dùng Save As). */
   const doSave = async (alsoCopy = false) => {
     if (videoDoc) return doSaveVideo();
-    const preview = stageRef.current?.exportPng();
+    const stage = stageRef.current;
+    if (!stage) return;
+    if (useEditor.getState().doc?.filePath) {
+      const preview = stage.exportPreviewPng();
+      if (!preview) return;
+      setBusy(true);
+      try {
+        await commitActiveDoc(preview);
+        if (alsoCopy) await copyToClipboard(preview);
+        flash(t("editorMain.saved"));
+      } catch (e) {
+        flash(String(e));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    // Đang chọn dở vùng crop thì `exportPng` xuất ĐÚNG vùng đó — preview chốt
+    // vào tài liệu phải là cả ảnh, nên render riêng trước khi khung chọn bị bỏ.
+    const docPreview = stage.hasActiveCrop() ? stage.exportPreviewPng() : null;
+    const preview = stage.exportPng();
     if (!preview) return;
     setBusy(true);
     try {
@@ -700,6 +755,7 @@ export default function Editor() {
         // Save+Copy: lưu PNG ra thư mục mặc định và copy vào clipboard cùng lúc.
         const { saveToFileAuto } = await import("../../features/output/useOutput");
         await saveToFileAuto(preview, true);
+        await commitAfterExport(docPreview ?? preview);
         flash(t("editorMain.saved"));
         return;
       }
@@ -708,6 +764,7 @@ export default function Editor() {
       if (saved) {
         const historyId = useEditor.getState().doc?.historyId;
         if (historyId) ipc.setHistoryExportedPath(historyId, saved).catch(() => {});
+        await commitAfterExport(docPreview ?? preview);
         flash(t("editorMain.saved"));
       }
     } catch (e) {
@@ -720,7 +777,10 @@ export default function Editor() {
   // "Save As…" — LUÔN mở dialog chọn file, xuất PNG ra vị trí tuỳ chọn.
   const doSaveAs = async () => {
     if (videoDoc) return doSaveAsVideo();
-    const url = stageRef.current?.exportPng();
+    const stage = stageRef.current;
+    if (!stage) return;
+    const docPreview = stage.hasActiveCrop() ? stage.exportPreviewPng() : null;
+    const url = stage.exportPng();
     if (!url) return;
     setBusy(true);
     try {
@@ -728,8 +788,11 @@ export default function Editor() {
       if (saved) {
         const historyId = useEditor.getState().doc?.historyId;
         if (historyId) ipc.setHistoryExportedPath(historyId, saved).catch(() => {});
+        await commitAfterExport(docPreview ?? url);
         flash(t("editorMain.saved"));
       }
+    } catch (e) {
+      flash(String(e));
     } finally {
       setBusy(false);
     }
@@ -1048,6 +1111,8 @@ export default function Editor() {
           imgH: img.naturalHeight,
           scaleFactor: 1,
           annotations: payload?.annotations ?? [],
+          // Thiếu field này thì Save (ghi lại chính file `.snapdoc`) xoá mất khung nền.
+          background: payload?.background,
           filePath: opened.filePath,
         });
         if (payload) {

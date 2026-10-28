@@ -1466,7 +1466,7 @@ pub fn capture_quick_region(
     // khi mở overlay) nên ảnh sạch sẵn. Frozen data chỉ được xoá về sau ở
     // `cancel_overlay` nên vẫn còn ở đây.
     if let Some(cap) = overlay_index(&win).and_then(|i| crop_frozen(app, i, &s, rx, ry, rw, rh)) {
-        return Ok(cap.base64);
+        return Ok(cap.base64());
     }
 
     // Fallback: không có buffer freeze cho màn này → chụp live như trước.
@@ -1483,7 +1483,7 @@ pub fn capture_quick_region(
     #[cfg(not(target_os = "macos"))]
     std::thread::sleep(std::time::Duration::from_millis(200));
     let cap = capture::region::capture_region(&m, rx as u32, ry as u32, rw as u32, rh as u32)?;
-    Ok(cap.base64)
+    Ok(cap.base64())
 }
 
 /// Chuyển số ngày Unix (từ 1970-01-01) sang (year, month, day) UTC.

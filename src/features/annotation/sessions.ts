@@ -1,6 +1,7 @@
 import { useEditor } from "./store";
 import type { Annotation, BackgroundConfig, Doc } from "./model";
 import { ipc } from "../../lib/ipc";
+import { ensureDataUrl } from "../../lib/blobUtils";
 import { evictCachedImage } from "./canvas/imageCache";
 
 /**
@@ -75,6 +76,15 @@ const BACKGROUND_PAST_LIMIT = 10;
 
 const sessions = new Map<SessionKey, ImageSession>();
 
+/** `Doc.image` đang KHỚP với ảnh nền trên đĩa của từng tài liệu — ghi lại lúc
+ * nạp (`noteActiveKey`) và sau mỗi lần ghi nền thành công (`markPersisted`).
+ *
+ * So `doc.image` với giá trị này là cách duy nhất biết nền trong RAM có khác
+ * đĩa hay không: crop/stitch/flatten thay `image`, còn undo/redo xuyên qua các
+ * thao tác đó trả lại đúng string cũ — cờ `baseDirty` của store chỉ bật mà
+ * không bao giờ tắt theo undo. */
+const diskBase = new Map<SessionKey, string>();
+
 /** Key của tài liệu ĐANG mở trong editor.
  *
  * Giữ ở đây thay vì đọc `doc.historyId`: ảnh mở từ file ngoài không có
@@ -109,7 +119,11 @@ export function getActiveKey(): SessionKey | null {
 /** Báo editor vừa nạp xong tài liệu `key` (gọi NGAY SAU `loadDoc`). */
 export function noteActiveKey(key: SessionKey | null): void {
   activeKey = key;
-  if (key) touch(key);
+  if (!key) return;
+  touch(key);
+  // Vừa nạp từ đĩa/Library → nền đang hiển thị chính là nền trên đĩa.
+  const doc = useEditor.getState().doc;
+  if (doc) diskBase.set(key, doc.image);
 }
 
 /** Chuyển quyền sở hữu một object URL cho phiên `key` — nó sẽ được revoke khi
@@ -160,7 +174,7 @@ export function suspendActive(): SuspendResult | null {
   // tự đi đọc `activeKey` sau đó. Không `await` — treo vào RAM đã đủ cứu dữ
   // liệu cho 4/5 đường; ghi đĩa chỉ để sống qua đóng cửa sổ/khởi động lại.
   const draftWrite = pendingDraftWrite();
-  if (draftWrite) void flushDraftFor(draftWrite.key, draftWrite.json);
+  if (draftWrite) void flushDraftFor(draftWrite);
 
   const existing = sessions.get(key);
   const blobUrls = existing?.blobUrls ?? [];
@@ -222,6 +236,7 @@ export function dirtySessionKeys(): SessionKey[] {
 
 /** Bỏ phiên (đã Save xong, hoặc user chủ động bỏ thay đổi) và revoke URL. */
 export function dropSession(key: SessionKey): void {
+  diskBase.delete(key);
   const s = sessions.get(key);
   if (!s) return;
   sessions.delete(key);
@@ -243,6 +258,7 @@ function evictIfNeeded(protectKey: SessionKey): void {
     if (!oldestKey) return; // không còn gì evict được — thà vượt trần
     const s = sessions.get(oldestKey)!;
     sessions.delete(oldestKey);
+    diskBase.delete(oldestKey);
     revokeAll(s, oldestKey);
   }
 }
@@ -409,16 +425,63 @@ export async function flushDraft(): Promise<void> {
   // tài liệu, cùng nội dung đang ghi dở thì dùng chung lượt đó, không ghi lại
   // cả container lần nữa.
   const cur = draftInFlight;
-  if (cur && cur.key === pending.key && cur.json === pending.json) return cur.promise;
-  const promise = flushDraftFor(pending.key, pending.json).finally(() => {
+  if (
+    cur &&
+    cur.write.key === pending.key &&
+    cur.write.json === pending.json &&
+    cur.write.base === pending.base
+  ) {
+    return cur.promise;
+  }
+  const promise = flushDraftFor(pending).finally(() => {
     if (draftInFlight?.promise === promise) draftInFlight = null;
   });
-  draftInFlight = { key: pending.key, json: pending.json, promise };
+  draftInFlight = { write: pending, promise };
   await promise;
 }
 
 /** Lượt ghi draft đang chạy của `flushDraft` (xem chống ghi trùng ở đó). */
-let draftInFlight: { key: SessionKey; json: string; promise: Promise<void> } | null = null;
+let draftInFlight: { write: DraftWrite; promise: Promise<void> } | null = null;
+
+/** Một lượt ghi đã chốt (đồng bộ) nội dung. `base`/`preview` chỉ có khi ảnh
+ * nền đã khác đĩa — khi đó phải ghi CẢ nền chứ không chỉ JSON nháp. */
+interface DraftWrite {
+  key: SessionKey;
+  json: string;
+  doc: Doc;
+  base?: string;
+  preview?: string;
+}
+
+/** Nền trong RAM của `doc` có khác nền trên đĩa không. Chưa từng ghi nhận nền
+ * cho key này thì tin cờ `baseDirty` của store. */
+function baseChanged(key: SessionKey, doc: Doc, baseDirty: boolean): boolean {
+  const onDisk = diskBase.get(key);
+  return onDisk === undefined ? baseDirty : doc.image !== onDisk;
+}
+
+/** Render preview (đã ghép annotation, đủ độ phân giải) của tài liệu ĐANG mở —
+ * `Editor` đăng ký, vì chỉ nó giữ Konva stage. Cần khi autosave phải ghi cả
+ * nền: container `.snapdoc` lưu nền và preview cùng nhau. */
+let previewProvider: (() => string | null) | null = null;
+
+export function setPreviewProvider(fn: (() => string | null) | null): void {
+  previewProvider = fn;
+}
+
+/** Ghi nhận `doc` đã nằm trên đĩa (nền + annotation) cho tài liệu `key`. */
+function markPersisted(key: SessionKey, doc: Doc): void {
+  diskBase.set(key, doc.image);
+  if (key === activeKey) {
+    useEditor.getState().markSaved(doc);
+    return;
+  }
+  const s = sessions.get(key);
+  if (s) {
+    s.savedRef = doc;
+    s.baseDirty = false;
+  }
+}
 
 /** Tính (đồng bộ) xem có gì cần ghi draft không, và ghi cái gì.
  *
@@ -426,7 +489,7 @@ let draftInFlight: { key: SessionKey; json: string; promise: Promise<void> } | n
  * NGAY tại thời điểm treo, rồi mới bắn IPC. Nếu để `flushDraft()` tự đọc
  * `activeKey` thì nó sẽ đọc SAU khi caller đã đổi sang tài liệu khác → ghi
  * nháp của ảnh cũ vào container của ảnh mới. */
-function pendingDraftWrite(): { key: SessionKey; json: string } | null {
+function pendingDraftWrite(): DraftWrite | null {
   if (!isTauri()) return null;
   const key = activeKey;
   // Ảnh mở từ file ngoài chưa có mặt trong Library → chưa có container nào để
@@ -434,23 +497,77 @@ function pendingDraftWrite(): { key: SessionKey; json: string } | null {
   if (!key || key.startsWith("file:")) return null;
   const s = useEditor.getState();
   if (!s.doc) return null;
+  const doc = s.doc;
+  const base = baseChanged(key, doc, s.baseDirty);
   // Chỉ ghi draft khi tài liệu THỰC SỰ có thay đổi chưa lưu (dirty).
   // Tránh việc mỗi lần click đổi xem ảnh lại đọc/ghi file zip 30MB vô ích gây giật lag UI.
-  if (s.doc === s.savedRef && !s.baseDirty) {
+  if (doc === s.savedRef && !base) {
     return null;
   }
   const json = serializeDoc();
-  return json ? { key, json } : null;
+  if (!json) return null;
+  if (!base) return { key, json, doc };
+  // Nền đã đổi (crop/stitch/flatten): toạ độ annotation trong `json` bám nền
+  // MỚI — chỉ ghi JSON thành draft trên nền cũ là mở lại thấy lệch hết. Phải
+  // ghi cả nền + preview; chưa render được preview thì KHÔNG ghi gì (phiên
+  // trong RAM vẫn nguyên, lượt autosave sau sẽ thử lại).
+  const preview = previewProvider?.() ?? null;
+  if (!preview) return null;
+  return { key, json, doc, base: doc.image, preview };
 }
 
-async function flushDraftFor(key: SessionKey, json: string): Promise<void> {
+async function flushDraftFor(w: DraftWrite): Promise<void> {
   try {
-    await ipc.putHistoryDraft(key, json);
+    if (w.base !== undefined && w.preview) {
+      const base = await ensureDataUrl(w.base);
+      await ipc.saveHistoryDoc(w.key, w.json, w.preview, base);
+      markPersisted(w.key, w.doc);
+    } else {
+      await ipc.putHistoryDraft(w.key, w.json);
+    }
   } catch (e) {
     // Autosave là lưới an toàn, không phải đường chính — lỗi ở đây không được
     // làm gián đoạn việc user đang làm. State trong RAM vẫn nguyên.
     console.error("[SnapDoc] Autosave bản nháp thất bại:", e);
   }
+}
+
+/**
+ * Save tường minh: chốt tài liệu đang mở vào đúng nơi lưu của nó — file
+ * `.snapdoc` gốc (`filePath`) hoặc container trong Library (`historyId`) —
+ * gồm annotation, preview, và ảnh nền nếu đã đổi; xoá bản nháp; hết "chưa
+ * lưu". Trả `false` khi tài liệu không có nơi lưu nào như vậy (ảnh mở từ file
+ * ảnh thường — bản PNG user vừa xuất chính là bản lưu).
+ *
+ * `preview` phải là CẢ ảnh đã ghép annotation (không phải vùng crop đang chọn).
+ */
+export async function commitActiveDoc(preview: string): Promise<boolean> {
+  const key = activeKey;
+  const s = useEditor.getState();
+  const doc = s.doc;
+  if (!isTauri() || !key || !doc) return false;
+  const filePath = doc.filePath;
+  const historyId = doc.historyId;
+  if (!filePath && !historyId) return false;
+  const json = serializeDoc();
+  if (!json) return false;
+  const baseSrc = baseChanged(key, doc, s.baseDirty) ? doc.image : undefined;
+
+  // Lượt autosave đang chờ/đang chạy không được ghi đè ngược bản vừa Save.
+  if (autosaveTimer !== null) {
+    window.clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
+  await draftInFlight?.promise;
+
+  const base = baseSrc ? await ensureDataUrl(baseSrc) : undefined;
+  if (filePath) {
+    await ipc.saveSnapdocFile(filePath, json, preview, base);
+  } else if (historyId) {
+    await ipc.saveHistoryDoc(historyId, json, preview, base);
+  }
+  markPersisted(key, doc);
+  return true;
 }
 
 function scheduleAutosave(): void {
@@ -503,5 +620,6 @@ export function resetSessions(): void {
   for (const [key, s] of sessions) revokeAll(s, key);
   sessions.clear();
   pendingBlobUrls.clear();
+  diskBase.clear();
   activeKey = null;
 }

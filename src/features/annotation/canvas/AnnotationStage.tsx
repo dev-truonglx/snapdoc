@@ -24,6 +24,10 @@ export interface StageHandle {
   flattenPng: () => string | null;
   /** Render nhỏ cho thumbnail lịch sử: cạnh dài ≈ 2×`maxEdge` (không vượt 1:1). */
   exportThumbPng: (maxEdge: number) => string | null;
+  /** Cả ảnh đã ghép annotation ở 1:1 để lưu làm preview của tài liệu — khác
+   * `exportPng`: KHÔNG áp dụng/bỏ vùng crop đang chọn và giữ nguyên selection,
+   * nên gọi được ngầm (autosave) giữa lúc user đang thao tác. */
+  exportPreviewPng: () => string | null;
   zoomIn: () => void;
   zoomOut: () => void;
   zoomFit: () => void;
@@ -440,6 +444,251 @@ function drawRoundedRect(
   }
 }
 
+/** Khung chữ nhật đang kéo (toạ độ ảnh). */
+interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface DraftPreviewHandle {
+  setDraft: (d: Draft | null) => void;
+  setArrowDraft: (d: ArrowDraft | null) => void;
+}
+
+/**
+ * Hình xem trước đang kéo (rect/ellipse/highlight/blur/crop/mũi tên/đường
+ * thẳng). State nằm ở component con này: mỗi mousemove lúc vẽ chỉ re-render
+ * khối nhỏ này, không re-render cả `AnnotationStage` (hàng trăm node annotation
+ * với props mảng/object inline — mỗi lần render lại bị Konva setAttrs lại).
+ * Vẫn nằm ĐÚNG vị trí cũ trong Layer chính (thứ tự vẽ không đổi, không tốn
+ * thêm canvas như khi tách Layer riêng).
+ */
+const DraftPreview = forwardRef<
+  DraftPreviewHandle,
+  { imgW: number; imgH: number; color: string; strokeWidth: number; highlightColor: string; blurMode: string }
+>(({ imgW, imgH, color, strokeWidth, highlightColor, blurMode }, ref) => {
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [arrowDraft, setArrowDraft] = useState<ArrowDraft | null>(null);
+  useImperativeHandle(ref, () => ({ setDraft, setArrowDraft }), []);
+  return (
+    <>
+      {draft && draft.type === "ellipse" ? (
+        <Ellipse
+          x={draft.x + draft.width / 2}
+          y={draft.y + draft.height / 2}
+          radiusX={Math.abs(draft.width / 2)}
+          radiusY={Math.abs(draft.height / 2)}
+          stroke={color}
+          strokeWidth={strokeWidth}
+          dash={[6, 4]}
+        />
+      ) : draft && draft.type === "highlight" ? (
+        <Rect
+          x={draft.x} y={draft.y} width={draft.width} height={draft.height}
+          fill={highlightColor} opacity={0.38}
+        />
+      ) : draft && draft.type === "blur" ? (
+        <Rect
+          x={draft.x} y={draft.y} width={draft.width} height={draft.height}
+          fill={blurMode === "solid" ? useEditor.getState().blurSolidColor : "#334155"}
+          opacity={blurMode === "solid" ? 0.85 : 0.35}
+          stroke={blurMode === "pixelate" ? "#f59e0b" : blurMode === "solid" ? "#ef4444" : "#94a3b8"}
+          strokeWidth={1.5} dash={[6, 3]}
+        />
+      ) : draft && draft.type === "crop" ? (
+        <>
+          {/* Overlay xám cho vùng ngoài crop khi đang kéo — dải trên/dưới
+              phải trải HẾT chiều ngang ảnh (x=0, width=imgW), không
+              chỉ theo chiều rộng vùng chọn, nếu không 4 góc ảnh (ngoài
+              dải trên/dưới) sẽ không bị phủ mờ, để lộ vùng sáng ở góc
+              đối diện vùng đang chọn. */}
+          <Rect x={0} y={0} width={imgW} height={Math.min(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
+          <Rect x={0} y={Math.min(draft.y, draft.y + draft.height)} width={Math.min(draft.x, draft.x + draft.width)} height={Math.abs(draft.height)} fill="#000000" opacity={0.5} listening={false} />
+          <Rect x={Math.max(draft.x, draft.x + draft.width)} y={Math.min(draft.y, draft.y + draft.height)} width={imgW - Math.max(draft.x, draft.x + draft.width)} height={Math.abs(draft.height)} fill="#000000" opacity={0.5} listening={false} />
+          <Rect x={0} y={Math.max(draft.y, draft.y + draft.height)} width={imgW} height={imgH - Math.max(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
+          
+          {/* Khung crop sáng */}
+          <Rect
+            x={draft.x} y={draft.y} width={draft.width} height={draft.height}
+            stroke="#3b82f6"
+            strokeWidth={2}
+            dash={[6, 4]}
+            listening={false}
+          />
+          {/* Overlay sáng bên trong */}
+          <Rect
+            x={Math.min(draft.x, draft.x + draft.width)} 
+            y={Math.min(draft.y, draft.y + draft.height)} 
+            width={Math.abs(draft.width)} 
+            height={Math.abs(draft.height)}
+            fill="#ffffff"
+            opacity={0.08}
+            listening={false}
+          />
+        </>
+      ) : draft && draft.type === "numbered-rect" ? (() => {
+        const nx = Math.min(draft.x, draft.x + draft.width);
+        const ny = Math.min(draft.y, draft.y + draft.height);
+        const w = Math.abs(draft.width);
+        const h = Math.abs(draft.height);
+        const isLeft = draft.width >= 0;
+        const isTop = draft.height >= 0;
+        const cx = isLeft ? nx : nx + w;
+        const cy = isTop ? ny : ny + h;
+        const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
+        const nextVal = useEditor.getState().rectCounter;
+        const valStr = String(nextVal);
+        const fontSize = Math.max(9, Math.round(radius * (valStr.length > 1 ? 0.78 : 0.88)));
+        return (
+          <Group opacity={0.8}>
+            <Rect
+              x={nx}
+              y={ny}
+              width={w}
+              height={h}
+              stroke={color}
+              strokeWidth={strokeWidth}
+              dash={[6, 4]}
+            />
+            <Circle
+              x={cx}
+              y={cy}
+              radius={radius}
+              fill={color}
+              stroke="#ffffff"
+              strokeWidth={1}
+            />
+            <Text
+              x={cx}
+              y={cy}
+              text={valStr}
+              fontSize={fontSize}
+              fontStyle="bold"
+              fill="#ffffff"
+              width={radius * 2}
+              height={radius * 2}
+              offsetX={radius}
+              offsetY={radius}
+              align="center"
+              verticalAlign="middle"
+            />
+          </Group>
+        );
+      })() : draft ? (
+        <Rect
+          x={draft.x} y={draft.y} width={draft.width} height={draft.height}
+          stroke={color}
+          strokeWidth={strokeWidth}
+          dash={[6, 4]}
+        />
+      ) : null}
+
+      {/* Preview mũi tên / đường thẳng đang kéo */}
+      {arrowDraft && (() => {
+        const dx = arrowDraft.x2 - arrowDraft.x;
+        const dy = arrowDraft.y2 - arrowDraft.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const nx = dx / len;
+        const ny = dy / len;
+        if (arrowDraft.type === "line") {
+          return (
+            <Line
+              points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
+              stroke={color} strokeWidth={strokeWidth}
+              lineCap="round" opacity={0.7} dash={[8, 4]}
+            />
+          );
+        }
+        if (arrowDraft.type === "arrow") {
+          return (
+            <Arrow
+              points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
+              stroke={color}
+              strokeWidth={strokeWidth}
+              fill={color}
+              pointerLength={Math.max(10, strokeWidth * 3)}
+              pointerWidth={Math.max(8, strokeWidth * 2.5)}
+              lineCap="round"
+              lineJoin="round"
+              opacity={0.7}
+              dash={[8, 4]}
+            />
+          );
+        }
+        if (arrowDraft.type === "double-arrow") {
+          return (
+            <Arrow
+              points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
+              stroke={color}
+              strokeWidth={strokeWidth}
+              fill={color}
+              pointerAtBeginning={true}
+              pointerAtEnding={true}
+              pointerLength={Math.max(10, strokeWidth * 3)}
+              pointerWidth={Math.max(8, strokeWidth * 2.5)}
+              lineCap="round"
+              lineJoin="round"
+              opacity={0.7}
+              dash={[8, 4]}
+            />
+          );
+        }
+        // numbered-arrow preview
+        const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
+        const startX = arrowDraft.x + nx * radius;
+        const startY = arrowDraft.y + ny * radius;
+        return (
+          <Group opacity={0.7}>
+            <Circle x={arrowDraft.x} y={arrowDraft.y} radius={radius} fill={color} />
+            <Arrow
+              points={[startX, startY, arrowDraft.x2, arrowDraft.y2]}
+              stroke={color}
+              strokeWidth={strokeWidth}
+              fill={color}
+              pointerLength={Math.max(10, strokeWidth * 3)}
+              pointerWidth={Math.max(8, strokeWidth * 2.5)}
+              lineCap="round"
+              lineJoin="round"
+              dash={[8, 4]}
+            />
+          </Group>
+        );
+      })()}
+    </>
+  );
+});
+DraftPreview.displayName = "DraftPreview";
+
+interface MarqueePreviewHandle {
+  setBox: (b: Box | null) => void;
+}
+
+/** Khung quét chọn (marquee) — state riêng, cùng lý do với `DraftPreview`. */
+const MarqueePreview = forwardRef<MarqueePreviewHandle, { scale: number }>(({ scale }, ref) => {
+  const [box, setBox] = useState<Box | null>(null);
+  useImperativeHandle(ref, () => ({ setBox }), []);
+  return (
+    <>
+      {box && (
+        <Rect
+          x={box.x}
+          y={box.y}
+          width={box.width}
+          height={box.height}
+          fill="rgba(59, 130, 246, 0.15)"
+          stroke="#3b82f6"
+          strokeWidth={1 / scale}
+          dash={[4 / scale, 4 / scale]}
+          listening={false}
+        />
+      )}
+    </>
+  );
+});
+MarqueePreview.displayName = "MarqueePreview";
+
 /**
  * Component Canvas chỉnh sửa ảnh SnapDoc (React-Konva).
  * Hỗ trợ vẽ vector annotations (text, arrow, rect, ellipse, step counter, highlight, blur)
@@ -519,13 +768,16 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const isPanModeRef = useRef(false);
   const panRef = useRef<{ x: number; y: number; sl: number; st: number } | null>(null);
 
-  const [draft, setDraft] = useState<Draft | null>(null);
+  // Hình xem trước đang kéo: state nằm ở `DraftPreview`/`MarqueePreview` (xem doc ở đó).
+  const draftPreviewRef = useRef<DraftPreviewHandle>(null);
+  const marqueePreviewRef = useRef<MarqueePreviewHandle>(null);
+  const setDraft = (d: Draft | null) => draftPreviewRef.current?.setDraft(d);
+  const setArrowDraft = (d: ArrowDraft | null) => draftPreviewRef.current?.setArrowDraft(d);
+  const setMarqueeBox = (b: Box | null) => marqueePreviewRef.current?.setBox(b);
   // Con trỏ khi rê vào tay nắm / hình chỉnh được (ghi đè con trỏ mặc định của tool)
   // Đang kéo THÂN 1 hình → ẩn tay nắm (chúng đứng yên ở toạ độ cũ nên sẽ lệch/nhảy khi hình dời)
   const [bodyDragging, setBodyDragging] = useState(false);
   const [hoverCursor, setHoverCursor] = useState<string | null>(null);
-  const [arrowDraft, setArrowDraft] = useState<ArrowDraft | null>(null);
-  const [marqueeBox, setMarqueeBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [cropRect, setCropRect] = useState<Draft | null>(null);
   const [cropHistory, setCropHistory] = useState<Draft[]>([]); // Lưu lại crop history
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
@@ -695,6 +947,20 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     if (!doc) return;
     setBox({ w: totalW * scale, h: totalH * scale });
   }, [scale, totalW, totalH]);
+
+  // Trần pixelRatio của canvas (tính lúc render, xem `stagePixelRatio`). Prop
+  // `pixelRatio` của <Stage> KHÔNG có tác dụng ở Konva 10 — canvas của Layer
+  // luôn lấy devicePixelRatio — nên áp thẳng lên canvas của Layer. Konva giữ
+  // tỉ lệ này khi Stage đổi kích thước (zoom).
+  const stagePixelRatioRef = useRef(1);
+  useLayoutEffect(() => {
+    const layer = layerRef.current;
+    if (!layer) return;
+    const canvas = layer.getCanvas();
+    if (Math.abs(canvas.getPixelRatio() - stagePixelRatioRef.current) < 1e-3) return;
+    canvas.setPixelRatio(stagePixelRatioRef.current);
+    layer.batchDraw();
+  });
 
   // Gắn Transformer vào node đang chọn (chỉ khi chọn đơn 1 phần tử)
   useEffect(() => {
@@ -1000,7 +1266,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   /**
    * Xuất ảnh PNG chất lượng gốc 1:1 (Master Resolution).
    * - Nếu không có annotation: vẽ trực tiếp từ `HTMLImageElement` gốc lên canvas 1:1 (chuẩn tuyệt đối 100%, không qua resample).
-   * - Nếu có annotation: tạm thời đặt Stage và Layer về đúng kích thước pixel gốc (1:1), vẽ vector sắc nét, lấy snapshot rồi hoàn trả kích thước xem.
+   * - Nếu có annotation: tạm đặt scale Layer về 1:1 rồi để Konva vẽ vector sắc nét vào 1 canvas RIÊNG đúng kích thước gốc (`toDataURL` với width/height tường minh), xong trả scale xem — KHÔNG đổi kích thước Stage đang hiển thị (đổi = Konva cấp phát lại + vẽ lại mọi canvas của Stage ở full-res, 2 lần mỗi lần xuất/thumbnail).
    * - `thumbPixelRatio` (chỉ dùng cho thumbnail): render thu nhỏ theo tỉ lệ này và giữ nguyên Transformer đang chọn.
    */
   const renderMasterPng = (
@@ -1052,9 +1318,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const layer = layerRef.current;
     if (!stage || !layer) return null;
 
-    // Lưu lại kích thước & scale hiển thị hiện tại của Stage/Layer
-    const prevStageW = stage.width();
-    const prevStageH = stage.height();
+    // Lưu lại scale hiển thị hiện tại của Layer
     const prevScaleX = layer.scaleX();
     const prevScaleY = layer.scaleY();
 
@@ -1063,11 +1327,9 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     trRef.current?.nodes([]);
     cropOverlayGroupRef.current?.hide();
 
-    // Đặt Stage và Layer về kích thước gốc 1:1
-    stage.width(totalW);
-    stage.height(totalH);
+    // Layer về tỉ lệ gốc 1:1 (Stage giữ nguyên kích thước xem — vùng xuất
+    // truyền tường minh bên dưới, Konva vẽ vào canvas riêng của `toDataURL`).
     layer.scale({ x: 1, y: 1 });
-    layer.draw();
 
     let dataUrl: string | null = null;
     if (cropArea) {
@@ -1085,14 +1347,16 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       });
     } else {
       dataUrl = stage.toDataURL({
+        x: 0,
+        y: 0,
+        width: totalW,
+        height: totalH,
         pixelRatio: pr,
         mimeType: "image/png",
       });
     }
 
-    // Hoàn trả lại kích thước và scale viewport của Stage/Layer
-    stage.width(prevStageW);
-    stage.height(prevStageH);
+    // Hoàn trả scale viewport của Layer
     layer.scale({ x: prevScaleX, y: prevScaleY });
     cropOverlayGroupRef.current?.show();
     if (prevTrNodes.length > 0) trRef.current?.nodes(prevTrNodes);
@@ -1142,6 +1406,11 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       // 2× cạnh đích cho nét, không bao giờ vượt 1:1
       const longest = Math.max(totalW, totalH, 1);
       return renderMasterPng(null, Math.min(1, (maxEdge * 2) / longest));
+    },
+    exportPreviewPng: () => {
+      if (!doc) return null;
+      // Truyền pixelRatio tường minh (= 1) để renderMasterPng giữ Transformer.
+      return renderMasterPng(null, 1);
     },
     zoomIn:  doZoomIn,
     zoomOut: doZoomOut,
@@ -1836,6 +2105,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
   const maxDim = Math.max(1, box.w, box.h);
   const stagePixelRatio = Math.max(0.1, Math.min(dpr, 14000 / maxDim));
+  stagePixelRatioRef.current = stagePixelRatio;
 
   return (
     // outer: bao quanh cả scroll area và zoom bar cố định — cũng là điểm đo
@@ -2648,189 +2918,16 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
               return null;
             })}
 
-            {/* Draft preview cho rect/ellipse/highlight/blur/crop */}
-            {draft && draft.type === "ellipse" ? (
-              <Ellipse
-                x={draft.x + draft.width / 2}
-                y={draft.y + draft.height / 2}
-                radiusX={Math.abs(draft.width / 2)}
-                radiusY={Math.abs(draft.height / 2)}
-                stroke={color}
-                strokeWidth={strokeWidth}
-                dash={[6, 4]}
-              />
-            ) : draft && draft.type === "highlight" ? (
-              <Rect
-                x={draft.x} y={draft.y} width={draft.width} height={draft.height}
-                fill={highlightColor} opacity={0.38}
-              />
-            ) : draft && draft.type === "blur" ? (
-              <Rect
-                x={draft.x} y={draft.y} width={draft.width} height={draft.height}
-                fill={blurMode === "solid" ? useEditor.getState().blurSolidColor : "#334155"}
-                opacity={blurMode === "solid" ? 0.85 : 0.35}
-                stroke={blurMode === "pixelate" ? "#f59e0b" : blurMode === "solid" ? "#ef4444" : "#94a3b8"}
-                strokeWidth={1.5} dash={[6, 3]}
-              />
-            ) : draft && draft.type === "crop" ? (
-              <>
-                {/* Overlay xám cho vùng ngoài crop khi đang kéo — dải trên/dưới
-                    phải trải HẾT chiều ngang ảnh (x=0, width=doc.imgW), không
-                    chỉ theo chiều rộng vùng chọn, nếu không 4 góc ảnh (ngoài
-                    dải trên/dưới) sẽ không bị phủ mờ, để lộ vùng sáng ở góc
-                    đối diện vùng đang chọn. */}
-                <Rect x={0} y={0} width={doc.imgW} height={Math.min(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
-                <Rect x={0} y={Math.min(draft.y, draft.y + draft.height)} width={Math.min(draft.x, draft.x + draft.width)} height={Math.abs(draft.height)} fill="#000000" opacity={0.5} listening={false} />
-                <Rect x={Math.max(draft.x, draft.x + draft.width)} y={Math.min(draft.y, draft.y + draft.height)} width={doc.imgW - Math.max(draft.x, draft.x + draft.width)} height={Math.abs(draft.height)} fill="#000000" opacity={0.5} listening={false} />
-                <Rect x={0} y={Math.max(draft.y, draft.y + draft.height)} width={doc.imgW} height={doc.imgH - Math.max(draft.y, draft.y + draft.height)} fill="#000000" opacity={0.5} listening={false} />
-                
-                {/* Khung crop sáng */}
-                <Rect
-                  x={draft.x} y={draft.y} width={draft.width} height={draft.height}
-                  stroke="#3b82f6"
-                  strokeWidth={2}
-                  dash={[6, 4]}
-                  listening={false}
-                />
-                {/* Overlay sáng bên trong */}
-                <Rect
-                  x={Math.min(draft.x, draft.x + draft.width)} 
-                  y={Math.min(draft.y, draft.y + draft.height)} 
-                  width={Math.abs(draft.width)} 
-                  height={Math.abs(draft.height)}
-                  fill="#ffffff"
-                  opacity={0.08}
-                  listening={false}
-                />
-              </>
-            ) : draft && draft.type === "numbered-rect" ? (() => {
-              const nx = Math.min(draft.x, draft.x + draft.width);
-              const ny = Math.min(draft.y, draft.y + draft.height);
-              const w = Math.abs(draft.width);
-              const h = Math.abs(draft.height);
-              const isLeft = draft.width >= 0;
-              const isTop = draft.height >= 0;
-              const cx = isLeft ? nx : nx + w;
-              const cy = isTop ? ny : ny + h;
-              const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
-              const nextVal = useEditor.getState().rectCounter;
-              const valStr = String(nextVal);
-              const fontSize = Math.max(9, Math.round(radius * (valStr.length > 1 ? 0.78 : 0.88)));
-              return (
-                <Group opacity={0.8}>
-                  <Rect
-                    x={nx}
-                    y={ny}
-                    width={w}
-                    height={h}
-                    stroke={color}
-                    strokeWidth={strokeWidth}
-                    dash={[6, 4]}
-                  />
-                  <Circle
-                    x={cx}
-                    y={cy}
-                    radius={radius}
-                    fill={color}
-                    stroke="#ffffff"
-                    strokeWidth={1}
-                  />
-                  <Text
-                    x={cx}
-                    y={cy}
-                    text={valStr}
-                    fontSize={fontSize}
-                    fontStyle="bold"
-                    fill="#ffffff"
-                    width={radius * 2}
-                    height={radius * 2}
-                    offsetX={radius}
-                    offsetY={radius}
-                    align="center"
-                    verticalAlign="middle"
-                  />
-                </Group>
-              );
-            })() : draft ? (
-              <Rect
-                x={draft.x} y={draft.y} width={draft.width} height={draft.height}
-                stroke={color}
-                strokeWidth={strokeWidth}
-                dash={[6, 4]}
-              />
-            ) : null}
-
-            {/* Preview mũi tên / đường thẳng đang kéo */}
-            {arrowDraft && (() => {
-              const dx = arrowDraft.x2 - arrowDraft.x;
-              const dy = arrowDraft.y2 - arrowDraft.y;
-              const len = Math.sqrt(dx * dx + dy * dy) || 1;
-              const nx = dx / len;
-              const ny = dy / len;
-              if (arrowDraft.type === "line") {
-                return (
-                  <Line
-                    points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
-                    stroke={color} strokeWidth={strokeWidth}
-                    lineCap="round" opacity={0.7} dash={[8, 4]}
-                  />
-                );
-              }
-              if (arrowDraft.type === "arrow") {
-                return (
-                  <Arrow
-                    points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
-                    stroke={color}
-                    strokeWidth={strokeWidth}
-                    fill={color}
-                    pointerLength={Math.max(10, strokeWidth * 3)}
-                    pointerWidth={Math.max(8, strokeWidth * 2.5)}
-                    lineCap="round"
-                    lineJoin="round"
-                    opacity={0.7}
-                    dash={[8, 4]}
-                  />
-                );
-              }
-              if (arrowDraft.type === "double-arrow") {
-                return (
-                  <Arrow
-                    points={[arrowDraft.x, arrowDraft.y, arrowDraft.x2, arrowDraft.y2]}
-                    stroke={color}
-                    strokeWidth={strokeWidth}
-                    fill={color}
-                    pointerAtBeginning={true}
-                    pointerAtEnding={true}
-                    pointerLength={Math.max(10, strokeWidth * 3)}
-                    pointerWidth={Math.max(8, strokeWidth * 2.5)}
-                    lineCap="round"
-                    lineJoin="round"
-                    opacity={0.7}
-                    dash={[8, 4]}
-                  />
-                );
-              }
-              // numbered-arrow preview
-              const radius = Math.max(Math.round(strokeWidth * 2 + 5), 10);
-              const startX = arrowDraft.x + nx * radius;
-              const startY = arrowDraft.y + ny * radius;
-              return (
-                <Group opacity={0.7}>
-                  <Circle x={arrowDraft.x} y={arrowDraft.y} radius={radius} fill={color} />
-                  <Arrow
-                    points={[startX, startY, arrowDraft.x2, arrowDraft.y2]}
-                    stroke={color}
-                    strokeWidth={strokeWidth}
-                    fill={color}
-                    pointerLength={Math.max(10, strokeWidth * 3)}
-                    pointerWidth={Math.max(8, strokeWidth * 2.5)}
-                    lineCap="round"
-                    lineJoin="round"
-                    dash={[8, 4]}
-                  />
-                </Group>
-              );
-            })()}
+            {/* Draft preview cho rect/ellipse/highlight/blur/crop + mũi tên/đường thẳng đang kéo */}
+            <DraftPreview
+              ref={draftPreviewRef}
+              imgW={doc.imgW}
+              imgH={doc.imgH}
+              color={color}
+              strokeWidth={strokeWidth}
+              highlightColor={highlightColor}
+              blurMode={blurMode}
+            />
 
             {cropRect && (
               <Group ref={cropOverlayGroupRef}>
@@ -2917,19 +3014,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
             )}
 
             {/* Marquee drag selection box */}
-            {marqueeBox && (
-              <Rect
-                x={marqueeBox.x}
-                y={marqueeBox.y}
-                width={marqueeBox.width}
-                height={marqueeBox.height}
-                fill="rgba(59, 130, 246, 0.15)"
-                stroke="#3b82f6"
-                strokeWidth={1 / scale}
-                dash={[4 / scale, 4 / scale]}
-                listening={false}
-              />
-            )}
+            <MarqueePreview ref={marqueePreviewRef} scale={scale} />
 
             {!bodyDragging && (tool === "select" || EDIT_TOOLS.has(tool)) && selectedAnns.map((a) =>
               a.type === "arrow" || a.type === "double-arrow" || a.type === "line" || a.type === "numbered-arrow"

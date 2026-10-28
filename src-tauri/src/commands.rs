@@ -56,7 +56,6 @@ pub fn set_pending_image(
     use base64::{engine::general_purpose::STANDARD, Engine};
     let base64_str = data.split(',').next_back().unwrap_or(&data);
     let bytes = STANDARD.decode(base64_str).unwrap_or_default();
-    let base64 = base64_str.to_string();
     let scale = scale_factor.unwrap_or(1.0);
 
     // "Mở Editor" từ Quick Capture cũng là một capture hoàn chỉnh (đối xứng với
@@ -64,7 +63,6 @@ pub fn set_pending_image(
     // ghi nhận mọi đường ra editor, không chỉ Copy/Save.
     let cap = crate::capture::Capture {
         bytes: bytes.clone(),
-        base64,
         width,
         height,
     };
@@ -845,10 +843,9 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn restart_app(app: AppHandle) {
     let _ = tauri::async_runtime::spawn_blocking(move || {
-        // Cùng lý do với tray "Quit": nếu đang quay, dừng sạch trước để không
-        // giết ffmpeg giữa chừng — xem `record::finalize_on_exit`.
-        crate::record::finalize_on_exit(&app);
-        app.restart();
+        // Chốt bản quay đang chạy (nếu có) rồi cài bản cập nhật đã tải sẵn
+        // (Windows) / khởi động lại — xem `update::restart_to_apply`.
+        crate::update::restart_to_apply(&app);
     })
     .await;
 }

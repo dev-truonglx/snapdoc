@@ -10,6 +10,7 @@ import {
   timelineMsToSource,
   sourceMsToTimeline,
   nearestValidSourceMs,
+  playbackGapAction,
   segmentBoundariesMs,
   canSplitAt,
   splitSegmentAt,
@@ -134,6 +135,8 @@ const VISIBLE_PADDING_RATIO = 0.25;
  * NGUỒN nên không đổi bất kể segment nào chứa nó — xem `frames` bên dưới). */
 const FRAME_ROUND_MS = 10;
 const FETCH_DEBOUNCE_MS = 120;
+/** Gom các lần tự lưu phiên sửa (RAM + localStorage) — xem effect tự lưu. */
+const SESSION_SAVE_DEBOUNCE_MS = 400;
 /** Số mốc lấy đều trên toàn video, fetch lúc mount (Pha 2 hoàn thiện lớp nền) — CapCut và
  * các NLE khác luôn có sẵn 1 "lớp nền" thumbnail phủ toàn bộ clip trước khi
  * người dùng tương tác, để zoom/cuộn không bao giờ thấy ô trắng hoàn toàn:
@@ -306,6 +309,42 @@ export default function VideoTrimmer({
     speedRegions: st.speedRegions,
     globalSpeed: st.globalSpeed,
   });
+
+  /** Snapshot TRƯỚC khi một chuỗi chỉnh liên tục bắt đầu (kéo trên timeline,
+   * kéo focus pin, gõ text overlay…). Các `handleChange*` không ghi history
+   * từng nhịp; `handleCommit*Snapshot` đẩy ĐÚNG snapshot này lúc thả tay.
+   * Trước đây commit đẩy snapshot SAU khi đã đổi → Cmd+Z lần đầu không làm
+   * gì, lần hai nhảy qua luôn bước trước đó. `pastLen`/`pastTop` để nhận ra
+   * lịch sử đã bị thao tác khác (undo/redo, xoá…) đổi giữa chừng.
+   * Thứ tự gọi phía con: change TRƯỚC, commit SAU (kể cả thao tác 1 cú bấm) —
+   * commit trước thì change bị bỏ treo, không vào lịch sử. */
+  const pendingEditRef = useRef<{
+    snap: HistorySnapshot;
+    pastLen: number;
+    pastTop: HistorySnapshot | undefined;
+  } | null>(null);
+
+  const beginPendingEdit = () => {
+    if (pendingEditRef.current) return;
+    const st = editStateRef.current;
+    pendingEditRef.current = {
+      snap: takeSnapshot(st),
+      pastLen: st.past.length,
+      pastTop: st.past[st.past.length - 1],
+    };
+  };
+
+  const commitPendingEdit = () => {
+    const pending = pendingEditRef.current;
+    pendingEditRef.current = null;
+    if (!pending) return;
+    setEditState((st) => {
+      if (st.past.length !== pending.pastLen || st.past[st.past.length - 1] !== pending.pastTop) {
+        return st;
+      }
+      return { ...st, past: [...st.past, pending.snap], future: [] };
+    });
+  };
 
   const sessionKey = sourceHistoryId
     ? `history:${sourceHistoryId}`
@@ -666,6 +705,7 @@ export default function VideoTrimmer({
   };
 
   const handleChangeSpeedRegion = (item: SpeedRegion) => {
+    beginPendingEdit();
     setEditState((st) => ({
       ...st,
       speedRegions: st.speedRegions.map((r) => (r.id === item.id ? item : r)),
@@ -710,16 +750,14 @@ export default function VideoTrimmer({
   };
 
   const handleCommitSpeedSnapshot = () => {
-    setEditState((st) => ({
-      ...st,
-      past: [...st.past, takeSnapshot(st)],
-      future: [],
-    }));
+    commitPendingEdit();
   };
   const [playheadMs, setPlayheadMs] = useState(() => savedSession?.playheadMs ?? 0);
   const [isPlaying, setIsPlaying] = useState(false);
 
   const [viewportSize, setViewportSize] = useState({ width: 800, height: 450 });
+  const viewportSizeRef = useRef(viewportSize);
+  viewportSizeRef.current = viewportSize;
   useEffect(() => {
     const el = videoWrapRef.current;
     if (!el) return;
@@ -739,6 +777,18 @@ export default function VideoTrimmer({
   const cameraTransform = useMemo(() => {
     return calculateCameraTransform(currentCamera, viewportSize.width, viewportSize.height);
   }, [currentCamera, viewportSize.width, viewportSize.height]);
+  // Lúc phát có zoom, vòng rAF bên dưới là nơi DUY NHẤT ghi transform (theo thời gian đã
+  // nội suy mượt). React giữ nguyên giá trị lúc bắt đầu phát — nếu render theo `playheadMs`
+  // (trễ, chỉ cập nhật theo `timeupdate`) thì mỗi lần re-render lại ghi đè transform cũ 1 frame → giật.
+  const renderedTransformRef = useRef(cameraTransform.transform);
+  if (!isPlaying || zoomSegments.length === 0) renderedTransformRef.current = cameraTransform.transform;
+  // Dừng phát: trả quyền về React — ghi thẳng giá trị đúng của vị trí dừng (React có thể
+  // bỏ qua nếu prop trùng giá trị lúc bắt đầu phát, trong khi DOM đang giữ giá trị của rAF).
+  useLayoutEffect(() => {
+    if (isPlaying && zoomSegments.length > 0) return;
+    const wrap = cameraWrapRef.current;
+    if (wrap) wrap.style.transform = cameraTransform.transform;
+  }, [isPlaying, zoomSegments.length, cameraTransform.transform]);
 
   // Vòng lặp 60 FPS / 120 FPS ProMotion siêu mượt mà cho camera zoom
   useEffect(() => {
@@ -750,8 +800,7 @@ export default function VideoTrimmer({
     const updateCamera = () => {
       const v = videoRef.current;
       const wrap = cameraWrapRef.current;
-      const parent = videoWrapRef.current;
-      if (v && wrap && parent && zoomSegmentsRef.current.length > 0) {
+      if (v && wrap && zoomSegmentsRef.current.length > 0) {
         const now = performance.now();
         const currentSec = v.currentTime;
         if (Math.abs(currentSec - lastVideoSec) > 0.001) {
@@ -763,8 +812,10 @@ export default function VideoTrimmer({
         const smoothSrcMs = lastVideoSec * 1000 + Math.min(elapsedSinceUpdateMs, 80);
         const tlMs = sourceMsToTimeline(effectiveSegmentsRef.current, smoothSrcMs) ?? 0;
         const cam = interpolateCamera(zoomSegmentsRef.current, tlMs);
-        const rect = parent.getBoundingClientRect();
-        const tf = calculateCameraTransform(cam, rect.width, rect.height);
+        // Kích thước khung từ ResizeObserver (videoWrap không padding/viền nên
+        // bằng đúng getBoundingClientRect) — không ép tính layout mỗi frame.
+        const { width, height } = viewportSizeRef.current;
+        const tf = calculateCameraTransform(cam, width, height);
         wrap.style.transform = tf.transform;
       }
       rafId = requestAnimationFrame(updateCamera);
@@ -950,6 +1001,40 @@ export default function VideoTrimmer({
 
   const isInitialMountRef = useRef(true);
 
+  /** Đang phát mà lọt vào phần đã xoá → nhảy sang đầu đoạn giữ lại kế tiếp;
+   * qua cuối phần giữ lại → dừng. Thiếu bước này thì preview phát cả những
+   * đoạn mà bản xuất ra sẽ không có. Chỉ đọc ref nên gọi được từ mọi closure. */
+  const enforcePlaybackRange = (v: HTMLVideoElement) => {
+    if (v.paused || v.seeking) return;
+    const segs = effectiveSegmentsRef.current;
+    const action = playbackGapAction(segs, v.currentTime * 1000, BOUNDARY_EPS_MS);
+    if (action === "end") {
+      v.pause();
+      setPlayheadMs(totalTimelineMs(segs));
+    } else if (action) {
+      const next = segs[action.seekIdx];
+      currentSegIndexRef.current = action.seekIdx;
+      v.currentTime = next.srcStart / 1000;
+      const rate = next.speed != null && next.speed > 0 ? next.speed : 1.0;
+      if (Math.abs(v.playbackRate - rate) > 0.01) v.playbackRate = rate;
+    }
+  };
+
+  // `timeupdate` chỉ bắn ~4 lần/giây — canh mỗi frame trong lúc phát để nhảy
+  // qua phần đã xoá đúng lúc thay vì lố vào đó tới ~250ms.
+  useEffect(() => {
+    if (!isPlaying) return;
+    let rafId = 0;
+    const tick = () => {
+      const v = videoRef.current;
+      if (v) enforcePlaybackRange(v);
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying]);
+
   // Đồng bộ `<video>` với `segments` mỗi khi đổi (split/xoá/undo/redo) HOẶC
   // lúc mount: nếu vị trí đang đứng rơi vào 1 đoạn vừa bị xoá thì snap về mốc
   // hợp lệ gần nhất; đồng thời đăng ký lại listener `timeupdate` để closure
@@ -994,6 +1079,7 @@ export default function VideoTrimmer({
     }
 
     const onTime = () => {
+      enforcePlaybackRange(v);
       const curSrcMs = v.currentTime * 1000;
       let idx = effectiveSegments.findIndex((s) => curSrcMs >= s.srcStart && curSrcMs <= s.srcEnd);
       if (idx < 0 && effectiveSegments.length > 0) {
@@ -1661,10 +1747,19 @@ export default function VideoTrimmer({
       const rect = trackRef.current?.getBoundingClientRect();
       const ms = snapTimelineMs(posToTimelineMs(clientX));
       const pos = timelineMsToSource(effectiveSegments, ms);
-      setHoverInfo({ clientX, trackTop: rect?.top ?? 0, srcMs: pos?.srcMs ?? 0 });
+      const next = { clientX, trackTop: rect?.top ?? 0, srcMs: pos?.srcMs ?? 0 };
+      // Chuột chỉ đi dọc / đứng yên → giữ object cũ, không re-render cả trình sửa.
+      setHoverInfo((prev) =>
+        prev && prev.clientX === next.clientX && prev.trackTop === next.trackTop && prev.srcMs === next.srcMs
+          ? prev
+          : next,
+      );
       if (!draggingRef.current) return;
       seekTo(ms);
-      setEditState((st) => ({ ...st, selectedSegmentId: segmentAtTimelineMs(st.segments, ms)?.id ?? null }));
+      setEditState((st) => {
+        const id = segmentAtTimelineMs(st.segments, ms)?.id ?? null;
+        return id === st.selectedSegmentId ? st : { ...st, selectedSegmentId: id };
+      });
     });
   };
 
@@ -1763,6 +1858,7 @@ export default function VideoTrimmer({
   };
 
   const handleChangeOverlay = (item: VideoOverlayItem) => {
+    beginPendingEdit();
     setEditState((st) => ({
       ...st,
       overlays: st.overlays.map((o) => (o.id === item.id ? item : o)),
@@ -1780,11 +1876,7 @@ export default function VideoTrimmer({
   };
 
   const handleCommitOverlaySnapshot = () => {
-    setEditState((st) => ({
-      ...st,
-      past: [...st.past, takeSnapshot(st)],
-      future: [],
-    }));
+    commitPendingEdit();
   };
 
   // Các thao tác quản lý Zoom Focus
@@ -1873,6 +1965,7 @@ export default function VideoTrimmer({
   };
 
   const handleChangeZoomSegment = (item: ZoomSegment) => {
+    beginPendingEdit();
     setEditState((st) => ({
       ...st,
       zoomSegments: st.zoomSegments.map((z) => (z.id === item.id ? item : z)),
@@ -1890,14 +1983,13 @@ export default function VideoTrimmer({
   };
 
   const handleCommitZoomSnapshot = () => {
-    setEditState((st) => ({
-      ...st,
-      past: [...st.past, takeSnapshot(st)],
-      future: [],
-    }));
+    commitPendingEdit();
   };
 
   const undo = () => {
+    // Chuỗi chỉnh dở (vd đang gõ text overlay, chưa blur) chốt thành 1 bước
+    // trước — undo lùi đúng chuỗi đó thay vì lùi luôn cả bước trước nó.
+    commitPendingEdit();
     setEditState((st) => {
       if (st.past.length === 0) return st;
       const prev = st.past[st.past.length - 1];
@@ -1922,6 +2014,8 @@ export default function VideoTrimmer({
   };
 
   const redo = () => {
+    // Có chỉnh dở = có thay đổi mới → chốt nó (xoá `future`), redo thành no-op.
+    commitPendingEdit();
     setEditState((st) => {
       if (st.future.length === 0) return st;
       const next = st.future[0];
@@ -2022,14 +2116,22 @@ export default function VideoTrimmer({
   const playheadMsRef = useRef(playheadMs);
   playheadMsRef.current = playheadMs;
 
-  // Tự động lưu phiên vào RAM & localStorage khi có thay đổi (chỉ khi không bận lưu đè/lưu mới)
+  // Tự động lưu phiên vào RAM & localStorage khi có thay đổi (chỉ khi không bận lưu đè/lưu mới).
+  // Gom lại (debounce): mỗi lần lưu stringify cả lịch sử undo + ghi localStorage đồng bộ
+  // trên main thread, mà kéo thả đổi `editState` từng frame. Vị trí playhead chỉ kích hoạt
+  // lưu khi ĐANG DỪNG (tua/scrub) — lúc phát nó đổi liên tục, vị trí lúc bấm dừng vẫn được
+  // lưu vì `isPlaying` đổi. Unmount/beforeunload vẫn chốt NGAY ở effect bên dưới.
+  const playheadWhilePaused = isPlaying ? null : playheadMs;
   useEffect(() => {
     if (!sessionKey || busy) return;
-    saveVideoSession(sessionKey, {
-      ...editState,
-      playheadMs,
-    }, durationMs);
-  }, [sessionKey, editState, playheadMs, durationMs, busy]);
+    const timer = setTimeout(() => {
+      saveVideoSession(sessionKey, {
+        ...editStateRef.current,
+        playheadMs: playheadMsRef.current,
+      }, durationMs);
+    }, SESSION_SAVE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [sessionKey, editState, playheadWhilePaused, durationMs, busy]);
 
   // Luôn chốt lưu phiên tại thời điểm unmount (khi mở ảnh khác hoặc đổi video) hoặc trước khi đóng tab/app
   useEffect(() => {
@@ -2150,7 +2252,7 @@ export default function VideoTrimmer({
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              transform: cameraTransform.transform,
+              transform: renderedTransformRef.current,
               transformOrigin: "center center",
               willChange: "transform",
               transition: "none",

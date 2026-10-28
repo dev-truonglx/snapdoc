@@ -74,10 +74,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "restart_update" => {
                 let app = app.clone();
-                std::thread::spawn(move || {
-                    crate::record::finalize_on_exit(&app);
-                    app.restart();
-                });
+                std::thread::spawn(move || crate::update::restart_to_apply(&app));
             }
             
             "full"   => dispatch(app, "full"),

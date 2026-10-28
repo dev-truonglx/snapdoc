@@ -20,7 +20,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::frame::{publish, Frame, LatestFrame};
+use super::frame::{publish, Frame, LatestFrame, PixelFormat};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame as WgcFrame;
 use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
@@ -32,6 +32,9 @@ use windows_capture::settings::{
 use windows_capture::window::Window as WgcWindow;
 use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use std::sync::Arc;
+
+/// Định dạng frame nguồn này đưa vào `LatestFrame` (encoder khai `-pix_fmt` theo đây).
+pub const PIXEL_FORMAT: PixelFormat = PixelFormat::Bgra;
 
 /// Phạm vi quay — cùng hình dạng với `mac_stream::RecordTarget` để
 /// `record/mod.rs` dùng chung 1 kiểu dispatch cho cả 2 nền tảng.
@@ -143,7 +146,7 @@ impl GraphicsCaptureApiHandler for Capturer {
             bgra[dst_off..dst_off + copy_row_bytes].copy_from_slice(&raw[src_off..src_off + copy_row_bytes]);
         }
 
-        let new_frame = Frame { bgra, width: self.target_width, height: self.target_height };
+        let new_frame = Frame { data: bgra, format: PIXEL_FORMAT, width: self.target_width, height: self.target_height };
         if let Some(buf) = publish(&self.latest, new_frame) {
             if buf.len() == needed_len {
                 self.spare_buf = Some(buf);

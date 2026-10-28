@@ -156,7 +156,7 @@ fn shrink_to_thumb(img: &RgbaImage) -> Result<String, String> {
     let tw = ((w as f32 * scale).round() as u32).max(1);
     let th = ((h as f32 * scale).round() as u32).max(1);
     let resized = image::imageops::resize(img, tw, th, image::imageops::FilterType::Triangle);
-    Ok(persist(&resized)?.base64)
+    Ok(persist(&resized)?.base64())
 }
 
 /// Metadata 1 cửa sổ (không kèm ảnh) — bước lọc/liệt kê RẺ (không cần chụp
@@ -219,7 +219,7 @@ pub fn capture_thumbs_streaming(ids: &[u32], on_ready: impl Fn(u32, Option<Strin
     #[cfg(target_os = "macos")]
     {
         super::mac_sck::capture_window_thumbs(ids, THUMB_MAX, |id, r| {
-            let thumb = r.ok().and_then(|img| persist(&img).ok()).map(|c| c.base64);
+            let thumb = r.ok().and_then(|img| persist(&img).ok()).map(|c| c.base64());
             on_ready(id, thumb);
         });
     }

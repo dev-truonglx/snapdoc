@@ -94,8 +94,10 @@ interface EditorState {
     baseDirty: boolean;
     savedRef: Doc | null;
   }) => void;
-  /** Đánh dấu trạng thái hiện tại là đã persist — gọi sau Save thành công. */
-  markSaved: () => void;
+  /** Đánh dấu trạng thái hiện tại là đã persist — gọi sau Save thành công.
+   * `doc`: đúng object đã được ghi, khi user đã sửa tiếp trong lúc chờ ghi
+   * (autosave chạy bất đồng bộ) — mặc định là `doc` hiện tại. */
+  markSaved: (doc?: Doc) => void;
   setVideoDirty: (v: boolean) => void;
   /** Báo ảnh nền vừa bị thay ngoài `applyCrop`/`applyStitch` (hiện chỉ có
    * đường FLATTEN, vốn đi qua `loadDoc` chứ không qua `commit`). */
@@ -243,7 +245,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     }),
 
   // Save xong thì cả annotation LẪN nền đều đã khớp đĩa.
-  markSaved: () => set((s) => ({ savedRef: s.doc, baseDirty: false })),
+  markSaved: (doc) => set((s) => ({ savedRef: doc ?? s.doc, baseDirty: false })),
 
   setVideoDirty: (videoDirty) => set({ videoDirty }),
 

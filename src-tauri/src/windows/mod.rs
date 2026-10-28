@@ -645,6 +645,7 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
         #[cfg(target_os = "windows")]
         let _ = win.set_skip_taskbar(false);
         place_bottom_center(app, &win);
+        ensure_capture_bar_popover(app);
         return Ok(());
     }
     let win = WebviewWindowBuilder::new(app, "capture-bar", url("capture-bar"))
@@ -667,7 +668,18 @@ pub fn open_capture_bar(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| format!("Không tạo được capture bar: {e}"))?;
     place_bottom_center(app, &win);
     let _ = win.set_focus();
+    ensure_capture_bar_popover(app);
     Ok(())
+}
+
+/// Popover "Tuỳ chọn" chỉ dùng được khi capture-bar đang hiện — tạo sẵn (ẩn)
+/// ngay lúc bar hiện thay vì lúc khởi động app, để người chỉ dùng phím tắt
+/// không phải nuôi thêm 1 webview suốt vòng đời app. User nhìn thấy bar rồi
+/// mới bấm Options nên popover vẫn kịp sẵn sàng; tạo rồi thì giữ lại.
+fn ensure_capture_bar_popover(app: &AppHandle) {
+    if let Err(e) = prewarm_capture_bar_popover(app) {
+        eprintln!("[SnapDoc] {e}");
+    }
 }
 
 /// Minimize capture bar ngay trước khi chụp ảnh nền freeze trên Windows.
@@ -2712,6 +2724,25 @@ pub fn close_overlays(app: &AppHandle) {
     close_overlays_internal(app, true);
 }
 
+/// Có phiên overlay nào đang chạy không: payload phiên còn đó, một overlay
+/// đang HIỆN (kể cả overlay giữ lại làm khung viền quay/chụp cuộn), hoặc
+/// dialog "Chọn cửa sổ" đang mở. Không chắc (lock lỗi...) thì coi là CÓ —
+/// caller khi đó đóng overlay như trước, an toàn hơn để sót một phiên.
+fn overlay_session_in_progress(app: &AppHandle) -> bool {
+    let has_session = app
+        .state::<AppState>()
+        .overlay_session
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(true);
+    has_session
+        || app.get_webview_window("window-picker").is_some()
+        || app
+            .webview_windows()
+            .iter()
+            .any(|(label, w)| label.starts_with("overlay") && w.is_visible().unwrap_or(true))
+}
+
 pub fn close_overlays_no_prewarm(app: &AppHandle) {
     close_overlays_internal(app, false);
 }
@@ -3075,7 +3106,14 @@ pub fn open_editor(app: &AppHandle) -> Result<(), String> {
 
     // Đóng toàn bộ overlay trước khi hiển thị/focus Editor để tránh việc overlay
     // đóng sau đó cướp mất active window / keyboard focus trên Windows.
-    close_overlays(app);
+    // Chỉ khi đang có phiên chụp thật: lúc rảnh, overlay chỉ là pool pre-warm
+    // ẨN (`prewarm_overlays`) — đóng nó không tránh được gì mà `close_overlays`
+    // còn dựng lại N webview toàn màn hình mỗi lần mở Editor (Library, tray,
+    // thumbnail, "Open with"...), và lúc khởi động thì đua với chính lượt
+    // `prewarm_overlays` đầu tiên.
+    if overlay_session_in_progress(app) {
+        close_overlays(app);
+    }
 
     if let Some(win) = app.get_webview_window("editor") {
         let _ = win.show();
@@ -3467,18 +3505,24 @@ pub fn open_history(app: &AppHandle) -> Result<(), String> {
 }
 
 
+/// Cạnh dài (px) của ảnh xem trước gửi kèm event `show-thumbnail` — đủ nét
+/// cho cửa sổ 300×210 trên màn Retina 2×.
+const THUMB_POPUP_EDGE: u32 = 640;
+
 /// Thumbnail nổi góc dưới-phải sau khi chụp.
 /// Dùng pre-warmed window: chỉ emit data + show/reposition thay vì tạo mới.
 pub fn open_thumbnail(app: &AppHandle) -> Result<(), String> {
-    // Lấy data từ pending để truyền thẳng qua event (tránh IPC roundtrip từ JS).
-    let base64 = {
+    // Event chỉ mang ảnh XEM TRƯỚC nhỏ (JPEG ~640px) — trước đây là nguyên PNG
+    // full-res dạng base64: hàng chục MB chuỗi qua event, rồi webview decode
+    // cả ảnh 5K chỉ để vẽ một ô 300×210. Copy/Save trên thumbnail tự lấy bản
+    // full-res qua binary IPC (`peek_pending`), xem `Thumbnail.tsx`.
+    let bytes = {
         use crate::state::AppState;
         app.state::<AppState>()
             .pending
             .lock()
             .ok()
-            .and_then(|g| g.as_ref().map(|p| p.base64()))
-            .unwrap_or_default()
+            .and_then(|g| g.as_ref().map(|p| p.bytes.clone()))
     };
 
     let win = if let Some(w) = app.get_webview_window("thumbnail") {
@@ -3500,11 +3544,22 @@ pub fn open_thumbnail(app: &AppHandle) -> Result<(), String> {
     // Trên Windows: đợi WebView2 resume JS sau khi window visible.
     // Emit ngay sau show() có thể vẫn bị drop trong ~1 frame đầu.
     let win2 = win.clone();
-    let b64 = base64;
     std::thread::spawn(move || {
         #[cfg(target_os = "windows")]
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let _ = win2.emit("show-thumbnail", &b64);
+        let shown_at = std::time::Instant::now();
+        // Rỗng (không có pending / decode lỗi) → trang tự nạp qua `peek_pending`.
+        let preview = bytes
+            .and_then(|b| crate::history::thumbnail::generate_with_max_edge(&b, THUMB_POPUP_EDGE).ok())
+            .map(|jpg| {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+                STANDARD.encode(jpg)
+            })
+            .unwrap_or_default();
+        #[cfg(target_os = "windows")]
+        if let Some(rest) = std::time::Duration::from_millis(50).checked_sub(shown_at.elapsed()) {
+            std::thread::sleep(rest);
+        }
+        let _ = win2.emit("show-thumbnail", &preview);
     });
 
     Ok(())

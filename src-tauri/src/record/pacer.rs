@@ -194,7 +194,7 @@ mod tests {
     use std::sync::mpsc::sync_channel;
 
     fn frame() -> Frame {
-        Frame { bgra: vec![0; 16], width: 2, height: 2 }
+        Frame { data: vec![0; 16], format: crate::capture::frame::PixelFormat::Bgra, width: 2, height: 2 }
     }
 
     #[test]

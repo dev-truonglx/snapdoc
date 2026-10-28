@@ -9,10 +9,16 @@ const JPEG_QUALITY: u8 = 78;
 /// dài <= MAX_EDGE trước khi encode — ảnh "all monitors"/scroll dài không bị
 /// giữ nguyên full-res trong bước resize (tốn CPU/RAM không cần thiết).
 pub fn generate(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    generate_with_max_edge(png_bytes, MAX_EDGE)
+}
+
+/// Như `generate` nhưng tự chọn cạnh dài tối đa — popup thumbnail sau khi
+/// chụp (`windows::open_thumbnail`) cần nét hơn ô lưới Library trên màn Retina.
+pub fn generate_with_max_edge(png_bytes: &[u8], max_edge: u32) -> Result<Vec<u8>, String> {
     let img = image::load_from_memory(png_bytes)
         .map_err(|e| format!("Không decode được ảnh để tạo thumbnail: {e}"))?;
     let (w, h) = img.dimensions();
-    let scale = (MAX_EDGE as f32 / w.max(h).max(1) as f32).min(1.0);
+    let scale = (max_edge as f32 / w.max(h).max(1) as f32).min(1.0);
     let (tw, th) = ((w as f32 * scale).round().max(1.0) as u32, (h as f32 * scale).round().max(1.0) as u32);
 
     // Triangle: nhanh, chất lượng đủ tốt cho thumbnail nhỏ (không cần Lanczos3).

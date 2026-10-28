@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { useEditor } from "../../features/annotation/store";
@@ -431,7 +431,6 @@ export default function Toolbar({
     setStepCounter, setArrowCounter, setRectCounter,
     renumberSteps, renumberArrows, renumberRects,
     setBackground, setBackgroundLive, commitBackground,
-    doc,
   } = useEditor(
     useShallow((s) => ({
       tool: s.tool, setTool: s.setTool,
@@ -449,21 +448,23 @@ export default function Toolbar({
       setStepCounter: s.setStepCounter, setArrowCounter: s.setArrowCounter, setRectCounter: s.setRectCounter,
       renumberSteps: s.renumberSteps, renumberArrows: s.renumberArrows, renumberRects: s.renumberRects,
       setBackground: s.setBackground, setBackgroundLive: s.setBackgroundLive, commitBackground: s.commitBackground,
-      doc: s.doc,
     })),
   );
 
-  const safeSelectedIds = selectedIds ?? [];
-  const selectedAnn = useMemo(() => {
-    if (!selectedId || !doc) return null;
-    return doc.annotations.find((a) => a.id === selectedId) ?? null;
-  }, [selectedId, doc]);
-
-  const selectedAnns = useMemo(() => {
-    if (!doc || safeSelectedIds.length === 0) return [];
-    const set = new Set(safeSelectedIds);
-    return doc.annotations.filter((a) => set.has(a.id));
-  }, [doc, safeSelectedIds]);
+  // Không lấy cả `doc` (đổi theo từng mousemove khi kéo/chỉnh annotation BẤT KỲ):
+  // chỉ các annotation đang chọn (so sánh nông theo từng phần tử) + nền ảnh.
+  const selectedAnn = useEditor((s) =>
+    s.selectedId && s.doc ? s.doc.annotations.find((a) => a.id === s.selectedId) ?? null : null,
+  );
+  const selectedAnns = useEditor(
+    useShallow((s) => {
+      const ids = s.selectedIds ?? [];
+      if (!s.doc || ids.length === 0) return [];
+      const set = new Set(ids);
+      return s.doc.annotations.filter((a) => set.has(a.id));
+    }),
+  );
+  const docBackground = useEditor((s) => s.doc?.background);
 
   const [customColor, setCustomColor] = useState("#ef4444");
   const [customHighlight, setCustomHighlight] = useState("#fbbf24");
@@ -851,7 +852,7 @@ export default function Toolbar({
 
               {/* Background controls — khi tool = background */}
               {isBackground && (() => {
-                const bg = doc?.background;
+                const bg = docBackground;
                 const isEnabled = Boolean(bg?.enabled);
                 const currentPresetId = bg?.presetId;
                 const currentPadding = bg?.padding ?? 32;

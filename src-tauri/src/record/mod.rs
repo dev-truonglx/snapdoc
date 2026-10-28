@@ -333,25 +333,6 @@ pub fn cleanup_stale_temp(app: &AppHandle) {
     }
 }
 
-/// Khớp kích thước frame về đúng (dst_w, dst_h) đã khai với encoder khi bắt
-/// đầu quay — cửa sổ bị resize giữa chừng thì crop/pad viền đen thay vì bỏ frame.
-fn fit_frame_to_target(src_bgra: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
-    let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
-    let copy_w = src_w.min(dst_w) as usize;
-    let copy_h = src_h.min(dst_h) as usize;
-    let src_row_len = (src_w * 4) as usize;
-    let dst_row_len = (dst_w * 4) as usize;
-    let copy_bytes = copy_w * 4;
-    for y in 0..copy_h {
-        let src_off = y * src_row_len;
-        let dst_off = y * dst_row_len;
-        if src_off + copy_bytes <= src_bgra.len() && dst_off + copy_bytes <= dst.len() {
-            dst[dst_off..dst_off + copy_bytes].copy_from_slice(&src_bgra[src_off..src_off + copy_bytes]);
-        }
-    }
-    dst
-}
-
 // ── Audio ─────────────────────────────────────────────────────────────────
 
 /// Nguồn audio có thể dừng (mic / WASAPI loopback) — sở hữu `cpal::Stream`
@@ -559,18 +540,24 @@ fn spawn_video_writer(
         .name("snapdoc-record-writer".into())
         .spawn(move || {
             let (w, h) = encoder.in_size();
-            let expected_len = (w as usize) * (h as usize) * 4;
+            let format = encoder.in_format();
+            let expected_len = format.frame_len(w, h);
             let mut frames = 0u64;
             let mut error = None;
             // Frame lệch kích thước (cửa sổ bị resize) → fit 1 lần cho mỗi frame
             // nguồn, giữ Arc để so sánh danh tính an toàn.
             let mut fitted: Option<(Arc<Frame>, Vec<u8>)> = None;
             'outer: while let Ok(msg) = rx.recv() {
-                let data: &[u8] = if msg.frame.width == w && msg.frame.height == h && msg.frame.bgra.len() == expected_len {
-                    &msg.frame.bgra
+                if msg.frame.format != format {
+                    // Không xảy ra (nguồn quay và encoder cùng lấy `stream_impl::PIXEL_FORMAT`)
+                    // — có thì bỏ frame chứ không đẩy byte sai bố cục vào ffmpeg.
+                    continue;
+                }
+                let data: &[u8] = if msg.frame.width == w && msg.frame.height == h && msg.frame.data.len() == expected_len {
+                    &msg.frame.data
                 } else {
                     if !fitted.as_ref().map(|(f, _)| Arc::ptr_eq(f, &msg.frame)).unwrap_or(false) {
-                        let buf = fit_frame_to_target(&msg.frame.bgra, msg.frame.width, msg.frame.height, w, h);
+                        let buf = crate::capture::frame::fit_to_size(&msg.frame, w, h);
                         fitted = Some((msg.frame.clone(), buf));
                     }
                     &fitted.as_ref().expect("vừa gán ở trên").1
@@ -1087,7 +1074,7 @@ fn start_inner(app: &AppHandle, target: stream_impl::RecordTarget) -> Result<(Ac
     }
 
     // Encoder + writer + pacer (+ watchdog).
-    let encoder = encoder::Encoder::start(&session.video_path(), width, height, FPS)?;
+    let encoder = encoder::Encoder::start_with_format(&session.video_path(), width, height, FPS, stream_impl::PIXEL_FORMAT)?;
     let out_size = encoder.out_size();
     let killer = encoder.killer();
     let (tx, rx) = std::sync::mpsc::sync_channel::<PacedFrame>(FRAME_CHANNEL_BOUND);
@@ -1518,7 +1505,8 @@ mod pipeline_tests {
             std::thread::spawn(move || {
                 let mut i = 0u8;
                 while !stop.load(Ordering::SeqCst) {
-                    publish(&latest, Frame { bgra: vec![i; (w * h * 4) as usize], width: w, height: h });
+                    let data = vec![i; (w * h * 4) as usize];
+                    publish(&latest, Frame { data, format: crate::capture::frame::PixelFormat::Bgra, width: w, height: h });
                     i = i.wrapping_add(7);
                     std::thread::sleep(Duration::from_millis(50));
                 }

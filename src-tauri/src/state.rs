@@ -107,11 +107,6 @@ impl PendingCapture {
         buf
     }
 
-    /// Base64 representation (dự phòng tương thích ngược).
-    pub fn base64(&self) -> String {
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        STANDARD.encode(&self.bytes)
-    }
 }
 
 /// Video đang chờ mở trong Editor — đã CÓ SẴN trong History (`history_id`

@@ -6,6 +6,12 @@
       "runtimeExecutable": "/Users/truonglx/.nvm/versions/node/v22.14.0/bin/node",
       "runtimeArgs": ["node_modules/vite/bin/vite.js"],
       "port": 1420
+    },
+    {
+      "name": "vite-npm",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 1420
     }
   ]
 }
