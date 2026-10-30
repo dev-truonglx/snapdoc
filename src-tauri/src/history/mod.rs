@@ -23,10 +23,11 @@ pub struct IngestJob {
     id: String,
     asset_path: PathBuf,
     thumb_path: PathBuf,
-    base64: String,
+    /// Pixel nền đã encode (PNG/JPEG) — bytes thô, không qua base64.
+    bytes: Vec<u8>,
     /// doc.json kèm theo (nếu có annotation) — ghi vào container thay vì EMPTY_DOC_JSON.
     doc_json: Option<String>,
-    /// Preview đã ghép annotation (nếu có) — dùng cho thumbnail. None → dùng base64.
+    /// Preview đã ghép annotation (nếu có) — dùng cho thumbnail. None → dùng `bytes`.
     preview_base64: Option<String>,
 }
 
@@ -42,7 +43,7 @@ pub fn spawn_ingest_worker(app: AppHandle) -> std::sync::mpsc::Sender<IngestJob>
                 job.id,
                 job.asset_path,
                 job.thumb_path,
-                &job.base64,
+                &job.bytes,
                 job.doc_json.as_deref(),
                 job.preview_base64.as_deref(),
             );
@@ -64,7 +65,7 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// Chấp nhận cả base64 trần (quy ước `capture::Capture.base64`) lẫn data URL
+/// Chấp nhận cả base64 trần (quy ước `capture::Capture::base64`) lẫn data URL
 /// đầy đủ (`data:image/png;base64,...` — quy ước phía frontend) — tách phần
 /// sau dấu phẩy cuối nếu có, không ảnh hưởng chuỗi không có dấu phẩy.
 pub(crate) fn decode_image_data(data: &str) -> Result<Vec<u8>, String> {
@@ -147,7 +148,7 @@ pub fn ingest(
             id,
             asset_path,
             thumb_path,
-            base64: cap.base64.clone(),
+            bytes: cap.bytes.clone(),
             doc_json: None,
             preview_base64: None,
         });
@@ -213,7 +214,7 @@ pub fn ingest_with_doc(
             id,
             asset_path,
             thumb_path,
-            base64: cap.base64.clone(),
+            bytes: cap.bytes.clone(),
             doc_json: Some(doc_json.to_string()),
             preview_base64: preview_data.map(|s| s.to_string()),
         });
@@ -224,29 +225,26 @@ pub fn ingest_with_doc(
 
 /// Pha 2 của `ingest`: ghi asset + thumbnail (chạy nền), rồi cập nhật
 /// `file_size`. Lỗi → soft-delete record thay vì để row mồ côi.
-fn ingest_finish_bg(app: &AppHandle, id: String, asset_path: PathBuf, thumb_path: PathBuf, base64: &str, doc_json: Option<&str>, preview_base64: Option<&str>) {
+fn ingest_finish_bg(app: &AppHandle, id: String, asset_path: PathBuf, thumb_path: PathBuf, bytes: &[u8], doc_json: Option<&str>, preview_base64: Option<&str>) {
     let write_result = (|| -> Result<i64, String> {
-        let bytes = decode_image_data(base64)?;
         let effective_doc = doc_json.unwrap_or(EMPTY_DOC_JSON);
         // Preview cho thumbnail: ưu tiên bản đã ghép annotation nếu có,
-        // ngược lại dùng chính ảnh nền (không có annotation).
-        let preview_bytes = match preview_base64 {
-            Some(p) => decode_image_data(p)?,
-            None    => bytes.clone(),
-        };
+        // ngược lại dùng chính ảnh nền (không có annotation) — mượn, không copy.
+        let decoded_preview = preview_base64.map(decode_image_data).transpose()?;
+        let preview_bytes: &[u8] = decoded_preview.as_deref().unwrap_or(bytes);
         let now = now_ms();
         crate::snapdoc_file::write_snapdoc(
             &asset_path,
             crate::snapdoc_file::WriteSnapdoc {
-                base_png: &bytes,
+                base_png: bytes,
                 doc_json: effective_doc,
                 draft_json: None,
-                preview_png: &preview_bytes,
+                preview_png: preview_bytes,
                 created_at: now,
                 updated_at: now,
             },
         )?;
-        let thumb_bytes = thumbnail::generate(&preview_bytes)?;
+        let thumb_bytes = thumbnail::generate(preview_bytes)?;
         std::fs::write(&thumb_path, &thumb_bytes).map_err(|e| format!("Ghi thumbnail thất bại: {e}"))?;
         std::fs::metadata(&asset_path)
             .map(|m| m.len() as i64)
@@ -274,7 +272,7 @@ fn ingest_finish_bg(app: &AppHandle, id: String, asset_path: PathBuf, thumb_path
             }
         }
         Err(e) => {
-            eprintln!("[SnapDoc][history] ghi asset/thumbnail nền thất bại, chuyển record vào Trash: {e}");
+            log::warn!("[SnapDoc][history] ghi asset/thumbnail nền thất bại, chuyển record vào Trash: {e}");
             if let Ok(conn) = state.conn.lock() {
                 let _ = conn.execute(
                     "UPDATE history SET deleted_at = ?1 WHERE id = ?2",
@@ -323,14 +321,18 @@ pub fn ingest_video(
     let file_size = std::fs::metadata(mp4_path).ok().map(|m| m.len() as i64);
 
     if let Err(e) = video_thumbnail::generate(mp4_path, &thumb_path) {
-        eprintln!("[SnapDoc][history] Sinh thumbnail video thất bại (record vẫn được lưu): {e}");
+        log::warn!("[SnapDoc][history] Sinh thumbnail video thất bại (record vẫn được lưu): {e}");
     }
+
+    // "imported" = video sẵn có của user, Library chỉ THAM CHIẾU tại chỗ —
+    // không được xoá file đó khi xoá item (xem `db::migrate_v3`).
+    let owned = capture_mode != "imported";
 
     {
         let conn = state.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
         conn.execute(
-            "INSERT INTO history (id, created_at, updated_at, capture_mode, media_type, width, height, scale_factor, duration_ms, asset_path, thumb_path, file_size) VALUES (?1,?2,?3,?4,'video',?5,?6,1.0,?7,?8,?9,?10)",
-            rusqlite::params![id, now, now, capture_mode, width, height, duration_ms, asset_path_str, thumb_path_str, file_size],
+            "INSERT INTO history (id, created_at, updated_at, capture_mode, media_type, width, height, scale_factor, duration_ms, asset_path, thumb_path, file_size, owned) VALUES (?1,?2,?3,?4,'video',?5,?6,1.0,?7,?8,?9,?10,?11)",
+            rusqlite::params![id, now, now, capture_mode, width, height, duration_ms, asset_path_str, thumb_path_str, file_size, owned],
         )
         .map_err(|e| format!("Insert history thất bại: {e}"))?;
     }
@@ -416,18 +418,16 @@ pub fn ingest_quick(
     let effective_doc = doc_json.unwrap_or(EMPTY_DOC_JSON);
     let preview_str = if base_data.is_some() { Some(data) } else { None };
 
-    let b64 = strip_data_url_prefix(base_str).to_string();
-    let bytes = STANDARD.decode(&b64).unwrap_or_default();
+    let bytes = STANDARD.decode(strip_data_url_prefix(base_str).trim()).unwrap_or_default();
     let cap = capture::Capture {
         bytes,
-        base64: b64,
         width,
         height,
     };
     match ingest_with_doc(app, &cap, "quick", 1.0, effective_doc, preview_str) {
         Ok(rec) => Ok(Some(rec.id)),
         Err(e) => {
-            eprintln!("[SnapDoc][history] ingest_quick thất bại (output đã thực hiện xong): {e}");
+            log::warn!("[SnapDoc][history] ingest_quick thất bại (output đã thực hiện xong): {e}");
             Ok(None)
         }
     }

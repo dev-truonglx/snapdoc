@@ -2,9 +2,12 @@
 // Rust; the UI lives in the webview. `check_update` returns structured data
 // (no native dialogs).
 //
-// Startup behavior: silently check → download → install in background.
-// The new version is applied on the NEXT app launch (no restart, no popup).
-// Manual update via Settings is preserved.
+// Startup behavior: silently check → download in background, no popup.
+// macOS: also installs right away (the .app bundle is replaced in place, the
+// running process is untouched) — the new version applies on the next launch.
+// Windows: installing exits the process immediately, so the downloaded update
+// waits until the user picks "Restart to update" (tray / Settings), see
+// `restart_to_apply`. Manual update via Settings is preserved.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -26,9 +29,17 @@ pub struct PendingUpdate(pub Mutex<Option<Update>>);
 /// window was opened after the event was emitted.
 pub static UPDATE_READY: AtomicBool = AtomicBool::new(false);
 
+/// Windows: bản cập nhật đã TẢI xong nhưng CHƯA cài. `Update::install` trên
+/// Windows chạy installer rồi `std::process::exit(0)` NGAY — cài ngầm vài giây
+/// sau khi mở app là đóng sập app giữa lúc user đang chỉnh ảnh (mất việc chưa
+/// lưu). Giữ lại tới khi user chủ động "Khởi động lại để cập nhật".
+#[cfg(target_os = "windows")]
+static DOWNLOADED: Mutex<Option<(Update, Vec<u8>)>> = Mutex::new(None);
+
 /// Update summary sent to the frontend.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct UpdateInfo {
     pub available: bool,
     pub version: String,
@@ -66,21 +77,22 @@ pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, St
                 || msg.contains("status code 404")
                 || msg.contains("No releases found")
             {
-                eprintln!("[SnapDoc][update] chưa có release nào được publish (404)");
+                log::info!("[SnapDoc][update] chưa có release nào được publish (404)");
                 return Ok(UpdateInfo {
                     available: false,
                     version: String::new(),
                     current_version: app.package_info().version.to_string(),
                 });
             }
-            eprintln!("[SnapDoc][update] check failed: {e}");
+            log::warn!("[SnapDoc][update] check failed: {e}");
             Err(msg)
         }
     }
 }
 
-/// Silently download and install the update in the background WITHOUT restarting.
-/// The new version will be applied the next time the user launches the app.
+/// Silently download (and, except on Windows, install) the update in the
+/// background WITHOUT restarting. macOS: the new version applies on the next
+/// launch. Windows: it is installed by `restart_to_apply`.
 /// Called automatically on startup when an update is found.
 /// Chỉ được gọi trong `lib.rs` bên trong `#[cfg(not(debug_assertions))]` — nên
 /// `cargo check` (debug profile) báo "never used" dù hàm này CÓ dùng thật ở
@@ -93,28 +105,37 @@ pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
         return Err("No update is pending.".to_string());
     };
     let version = update.version.clone();
-    eprintln!("[SnapDoc][update] silent download+install started for v{version}");
+    log::info!("[SnapDoc][update] silent download+install started for v{version}");
     let bytes = update
         .download(
             |_chunk, _total| {},
-            || { eprintln!("[SnapDoc][update] download finished, installing…"); },
+            || { log::info!("[SnapDoc][update] download finished, installing…"); },
         )
         .await
         .map_err(|e| {
-            eprintln!("[SnapDoc][update] silent download failed: {e}");
+            log::warn!("[SnapDoc][update] silent download failed: {e}");
             e.to_string()
         })?;
-    // Trên Windows, `install` chạy installer rồi `std::process::exit(0)` NGAY
-    // LẬP TỨC — cài giữa lúc đang quay là mất bản quay. Chờ phiên quay (nếu có)
-    // kết thúc hẳn rồi mới cài.
-    while crate::record::is_busy(&app) {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Windows: KHÔNG cài ở đây (cài = thoát app ngay) — chờ user bấm
+    // "Khởi động lại để cập nhật", xem `restart_to_apply`.
+    #[cfg(target_os = "windows")]
+    {
+        *DOWNLOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some((update, bytes));
+        log::info!("[SnapDoc][update] v{version} downloaded — waiting for the user to restart");
     }
-    update.install(bytes).map_err(|e| {
-            eprintln!("[SnapDoc][update] silent install failed: {e}");
-            e.to_string()
-        })?;
-    eprintln!("[SnapDoc][update] silent install complete — new version will apply on next launch");
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Thay bundle giữa lúc đang quay vẫn rủi ro (ffmpeg sidecar nằm trong
+        // bundle) — chờ phiên quay (nếu có) kết thúc hẳn rồi mới cài.
+        while crate::record::is_busy(&app) {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        update.install(bytes).map_err(|e| {
+                log::warn!("[SnapDoc][update] silent install failed: {e}");
+                e.to_string()
+            })?;
+        log::info!("[SnapDoc][update] silent install complete — new version will apply on next launch");
+    }
 
     // Đánh dấu trạng thái toàn cục để Settings có thể query bất cứ lúc nào.
     UPDATE_READY.store(true, Ordering::Relaxed);
@@ -154,6 +175,26 @@ pub fn pending_info(app: &AppHandle) -> Option<UpdateInfo> {
         })
 }
 
+/// "Khởi động lại để cập nhật" (tray / Settings): chốt bản quay đang chạy, rồi
+/// - Windows: cài bản đã tải ngầm — installer thoát app và tự mở lại bản mới;
+/// - nơi khác (hoặc chưa có bản tải sẵn): bản mới đã nằm sẵn trên đĩa, chỉ
+///   cần khởi động lại.
+pub fn restart_to_apply(app: &AppHandle) {
+    crate::record::finalize_on_exit(app);
+    #[cfg(target_os = "windows")]
+    {
+        let downloaded = DOWNLOADED.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some((update, bytes)) = downloaded {
+            // Thành công thì process đã thoát bên trong `install`; tới được
+            // dòng dưới nghĩa là cài lỗi → vẫn khởi động lại như thường.
+            if let Err(e) = update.install(bytes) {
+                log::warn!("[SnapDoc][update] deferred install failed: {e}");
+            }
+        }
+    }
+    app.restart();
+}
+
 /// Download + install the cached pending update, then relaunch.
 /// Used by the manual install flow in Settings. Errors bubble up to the webview.
 pub async fn install_pending(app: AppHandle) -> Result<(), String> {
@@ -166,7 +207,7 @@ pub async fn install_pending(app: AppHandle) -> Result<(), String> {
         .download_and_install(|_chunk, _total| {}, || {})
         .await
         .map_err(|e| {
-            eprintln!("[SnapDoc][update] install failed: {e}");
+            log::warn!("[SnapDoc][update] install failed: {e}");
             e.to_string()
         })?;
     // Nếu đang quay, dừng sạch trước khi relaunch — xem `record::finalize_on_exit`.

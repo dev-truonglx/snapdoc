@@ -21,26 +21,33 @@ pub struct MouseClickPayload {
     pub count: u32,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct MouseTelemetryItem {
+    #[ts(as = "f64")]
     pub t: u64, // ms relative to recording start
     pub x: f64, // pixel position relative to recorded area
     pub y: f64,
     #[serde(rename = "type")]
+    #[ts(type = "\"click\" | \"move\" | \"drag\"")]
     pub event_type: String, // "click" | "move" | "drag"
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(type = "\"left\" | \"right\" | \"middle\"", optional)]
     pub button: Option<String>, // "left" | "right" | "middle"
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub count: Option<u32>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct MouseTelemetryFile {
     pub version: u32,
     pub video_width: u32,
     pub video_height: u32,
+    #[ts(as = "f64")]
     pub duration_ms: u64,
     pub events: Vec<MouseTelemetryItem>,
 }
@@ -244,7 +251,7 @@ fn write_telemetry(
     if legacy_path.exists() && legacy_path != out_path {
         let _ = std::fs::remove_file(&legacy_path);
     }
-    eprintln!(
+    log::info!(
         "[SnapDoc][mouse_tracker] Đã lưu telemetry ({} sự kiện) tại: {}",
         file.events.len(),
         out_path.display()
@@ -723,7 +730,7 @@ mod windows {
                     let _ = handle.join();
                 } else {
                     // Không gửi được WM_QUIT — không join (tránh treo cả luồng dừng quay).
-                    eprintln!("[SnapDoc][mouse_click] Không dừng được thread hook chuột");
+                    log::warn!("[SnapDoc][mouse_click] Không dừng được thread hook chuột");
                 }
             }
         }

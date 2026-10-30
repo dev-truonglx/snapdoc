@@ -107,6 +107,25 @@ export function nearestValidSourceMs(segments: Segment[], srcMs: number): number
   return best;
 }
 
+/** Khi ĐANG PHÁT: vị trí `srcMs` có lọt ra ngoài phần giữ lại không.
+ * - `"end"`: đã tới/qua cuối đoạn cuối → phải dừng.
+ * - `{ seekIdx }`: đang ở khoảng đã xoá ngay trước đoạn `seekIdx` → nhảy tới
+ *   đầu đoạn đó.
+ * - `null`: vẫn trong một đoạn giữ lại. Các đoạn liền nhau (chỉ bị tách vì
+ *   khác tốc độ, xem `buildEffectiveSegments`) không có khoảng trống nên
+ *   không bao giờ phải seek — seek ở đó làm khựng hình.
+ * `segments` theo thứ tự nguồn tăng dần (không có thao tác đảo đoạn). */
+export function playbackGapAction(
+  segments: Segment[],
+  srcMs: number,
+  epsMs: number,
+): "end" | { seekIdx: number } | null {
+  if (segments.length === 0) return null;
+  const idx = segments.findIndex((s) => srcMs < s.srcEnd - epsMs);
+  if (idx < 0) return "end";
+  return srcMs < segments[idx].srcStart - epsMs ? { seekIdx: idx } : null;
+}
+
 /** Mốc timeline-ms của MỌI ranh giới đoạn hiện có (0, cuối, và từng điểm nối
  * giữa 2 đoạn liên tiếp) — dùng để "hút" (snap) playhead/điểm chia vào đúng
  * ranh giới đã có khi kéo gần đó, xem `snapTimelineMs` ở `VideoTrimmer.tsx`. */

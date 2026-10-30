@@ -495,6 +495,8 @@ export default function SpeedTimelineTrack({
               }}
               onMouseUp={() => onCommitSnapshot?.()}
               onTouchEnd={() => onCommitSnapshot?.()}
+              // Chỉnh bằng phím mũi tên không có mouseup — chốt mỗi lần nhả phím.
+              onKeyUp={() => onCommitSnapshot?.()}
               style={{
                 width: "100%",
                 accentColor: "#f59e0b",

@@ -12,7 +12,11 @@ export type Tool =
   | "highlight"
   | "blur"
   | "crop"
-  | "background";
+  | "background"
+  | "pen"
+  | "spotlight"
+  | "magnifier"
+  | "emoji";
 
 interface Base {
   id: string;
@@ -123,6 +127,42 @@ export interface BlurAnn extends Base {
   solidColor: string;
 }
 
+/** Nét vẽ tự do: `points` = [x0, y0, x1, y1, …] TƯƠNG ĐỐI so với (x, y). */
+export interface PenAnn extends Base {
+  type: "pen";
+  points: number[];
+}
+
+/** Spotlight: làm tối CẢ ẢNH trừ vùng này (nhiều spotlight → chừa hợp các vùng). */
+export interface SpotlightAnn {
+  id: string;
+  type: "spotlight";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  shape: "rect" | "ellipse";
+  /** Độ tối phần ngoài vùng (0..1). */
+  dim: number;
+}
+
+/** Kính lúp: hình tròn tâm (x, y) bán kính `radius`, phóng to ảnh nền ngay tại chỗ. */
+export interface MagnifierAnn extends Base {
+  type: "magnifier";
+  radius: number;
+  zoom: number;
+}
+
+/** Sticker emoji: góc trên-trái (x, y), cỡ chữ `size`. */
+export interface EmojiAnn {
+  id: string;
+  type: "emoji";
+  x: number;
+  y: number;
+  emoji: string;
+  size: number;
+}
+
 /** Ảnh chèn thêm vào tài liệu (từ kéo thả hoặc dán clipboard). */
 export interface ImageAnn {
   id: string;
@@ -147,7 +187,11 @@ export type Annotation =
   | NumberedRectAnn
   | HighlightAnn
   | BlurAnn
-  | ImageAnn;
+  | ImageAnn
+  | PenAnn
+  | SpotlightAnn
+  | MagnifierAnn
+  | EmojiAnn;
 
 /** Cấu hình khung nền gradient / solid (Mockup / Beautifier) */
 export interface BackgroundConfig {
@@ -253,9 +297,24 @@ export const annotationBounds = (a: Annotation): { x1: number; y1: number; x2: n
   let y1 = a.y;
   let x2 = a.x;
   let y2 = a.y;
-  if (a.type === "rect" || a.type === "ellipse" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect" || a.type === "image") {
+  if (a.type === "rect" || a.type === "ellipse" || a.type === "highlight" || a.type === "blur" || a.type === "numbered-rect" || a.type === "image" || a.type === "spotlight") {
     x2 = a.x + a.width;
     y2 = a.y + a.height;
+  } else if (a.type === "pen") {
+    for (let i = 0; i + 1 < a.points.length; i += 2) {
+      x1 = Math.min(x1, a.x + a.points[i]);
+      y1 = Math.min(y1, a.y + a.points[i + 1]);
+      x2 = Math.max(x2, a.x + a.points[i]);
+      y2 = Math.max(y2, a.y + a.points[i + 1]);
+    }
+  } else if (a.type === "magnifier") {
+    x1 = a.x - a.radius;
+    y1 = a.y - a.radius;
+    x2 = a.x + a.radius;
+    y2 = a.y + a.radius;
+  } else if (a.type === "emoji") {
+    x2 = a.x + a.size * 1.25;
+    y2 = a.y + a.size * 1.25;
   } else if (a.type === "arrow" || a.type === "double-arrow" || a.type === "line" || a.type === "numbered-arrow") {
     const cx = a.cx ?? a.x;
     const cy = a.cy ?? a.y;
@@ -286,6 +345,26 @@ export const annotationBounds = (a: Annotation): { x1: number; y1: number; x2: n
     }
   }
   return { x1, y1, x2, y2 };
+};
+
+/** Bảng sticker emoji cho công cụ "emoji". */
+export const EMOJI_STICKERS = [
+  "👉", "👈", "👆", "👇", "✅", "❌", "⚠️", "❗", "❓", "💡",
+  "⭐", "🔥", "🎯", "📌", "🔍", "👍", "👎", "👀", "😀", "😂",
+  "😮", "🤔", "😡", "🎉", "❤️", "💯", "🚀", "🐞",
+];
+export const MAGNIFIER_ZOOMS = [1.5, 2, 3, 4];
+
+/** Nét vẽ tự do: bỏ điểm sát nhau (< `minDist`) để giảm dữ liệu, luôn giữ điểm cuối. */
+export const simplifyPoints = (pts: number[], minDist = 1.5): number[] => {
+  if (pts.length <= 4) return pts.slice();
+  const out = [pts[0], pts[1]];
+  for (let i = 2; i + 1 < pts.length; i += 2) {
+    const lx = out[out.length - 2];
+    const ly = out[out.length - 1];
+    if (Math.hypot(pts[i] - lx, pts[i + 1] - ly) >= minDist || i + 2 >= pts.length) out.push(pts[i], pts[i + 1]);
+  }
+  return out;
 };
 
 export const PRESET_COLORS = ["#ef4444", "#f59e0b", "#22c55e", "#3b82f6", "#a855f7", "#111827"];

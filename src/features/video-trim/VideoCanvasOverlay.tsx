@@ -1113,12 +1113,12 @@ export default function VideoCanvasOverlay({
                               boxShadow: isCurrentColor ? "0 0 0 1px #3b82f6" : "none",
                             }}
                             onClick={() => {
-                              onCommitSnapshot?.();
                               if (item.type === "text") {
                                 onChangeOverlay({ ...item, textColor: c, strokeColor: c });
                               } else {
                                 onChangeOverlay({ ...item, strokeColor: c });
                               }
+                              onCommitSnapshot?.();
                             }}
                             title={c}
                           />
@@ -1146,8 +1146,8 @@ export default function VideoCanvasOverlay({
                               fontWeight: item.strokeWidth === w ? 600 : 400,
                             }}
                             onClick={() => {
-                              onCommitSnapshot?.();
                               onChangeOverlay({ ...item, strokeWidth: w });
+                              onCommitSnapshot?.();
                             }}
                             title={`${w}px`}
                           >
@@ -1180,8 +1180,8 @@ export default function VideoCanvasOverlay({
                           fontWeight: 500,
                         }}
                         onClick={() => {
-                          onCommitSnapshot?.();
                           onChangeOverlay({ ...item, hasBackground: item.hasBackground === false });
+                          onCommitSnapshot?.();
                         }}
                         title={t("videoTrimmer.toggleBackground", "Bật/Tắt nền mờ")}
                       >
@@ -1205,8 +1205,8 @@ export default function VideoCanvasOverlay({
                           fontWeight: 500,
                         }}
                         onClick={() => {
-                          onCommitSnapshot?.();
                           onChangeOverlay({ ...item, isBlackout: false });
+                          onCommitSnapshot?.();
                         }}
                       >
                         {t("videoTrimmer.blurSoft", "Mờ sương")}
@@ -1223,8 +1223,8 @@ export default function VideoCanvasOverlay({
                           fontWeight: 500,
                         }}
                         onClick={() => {
-                          onCommitSnapshot?.();
                           onChangeOverlay({ ...item, isBlackout: true });
+                          onCommitSnapshot?.();
                         }}
                       >
                         {t("videoTrimmer.blurBlackout", "Hộp đen")}

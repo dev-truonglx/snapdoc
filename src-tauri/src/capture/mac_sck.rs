@@ -342,7 +342,7 @@ pub fn capture_displays_excluding_own_app_jpeg(
                     (Err(format!("Chụp màn hình lỗi: {}", unsafe { err_msg(err2) })), None)
                 } else {
                     let res = unsafe { cgimage_to_jpeg(img, quality) };
-                    eprintln!(
+                    log::debug!(
                         "[SnapDoc Timing] display {} hardware jpeg encode took: {:?}",
                         idx,
                         t_start.elapsed()

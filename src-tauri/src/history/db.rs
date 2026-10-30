@@ -4,7 +4,7 @@ use std::sync::Mutex;
 /// Version schema hiện tại — tăng lên + thêm nhánh trong `migrate()` khi cần
 /// thay đổi schema (không dùng crate migration ngoài, tự quản lý qua
 /// `PRAGMA user_version`).
-pub const CURRENT_VERSION: i32 = 2;
+pub const CURRENT_VERSION: i32 = 3;
 
 /// State quản lý bởi Tauri — chỉ `.manage()` khi `open()` thành công. Nếu
 /// History DB không khởi tạo được (đĩa lỗi, quyền ghi...), state này KHÔNG
@@ -65,6 +65,7 @@ fn migrate(conn: &rusqlite::Connection) -> Result<(), String> {
         match version {
             0 => migrate_v1(&tx)?,
             1 => migrate_v2(&tx)?,
+            2 => migrate_v3(&tx)?,
             _ => return Err(format!("Không có migration cho version {version}")),
         }
         version += 1;
@@ -114,6 +115,23 @@ fn migrate_v2(tx: &rusqlite::Transaction) -> Result<(), String> {
         .map_err(|e| format!("Migration v2 thất bại: {e}"))
 }
 
+/// Schema v3 — thêm `owned`: 1 nếu file `asset_path` do chính SnapDoc tạo ra
+/// (ảnh chụp, bản quay, video đã cắt, GIF xuất), 0 nếu chỉ là THAM CHIẾU tới
+/// file sẵn có của user (video mở từ ngoài — `capture_mode = 'imported'`,
+/// xem `commands::open_video_file_path_sync`). Xoá vĩnh viễn / dọn Trash chỉ
+/// được xoá file trên đĩa khi `owned = 1` — trước đây xoá item "imported"
+/// khỏi Library là xoá luôn video GỐC của user.
+///
+/// Row "imported" cũ đều đánh 0 (an toàn: tệ nhất để lại 1 file mồ côi do app
+/// tạo — vd bản cắt từ video imported — thay vì xoá nhầm file của user).
+fn migrate_v3(tx: &rusqlite::Transaction) -> Result<(), String> {
+    tx.execute_batch(
+        "ALTER TABLE history ADD COLUMN owned INTEGER NOT NULL DEFAULT 1;
+         UPDATE history SET owned = 0 WHERE capture_mode = 'imported';",
+    )
+    .map_err(|e| format!("Migration v3 thất bại: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,7 +149,7 @@ mod tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        for expected in ["id", "created_at", "capture_mode", "media_type", "duration_ms", "deleted_at", "is_edited", "exported_path"] {
+        for expected in ["id", "created_at", "capture_mode", "media_type", "duration_ms", "deleted_at", "is_edited", "exported_path", "owned"] {
             assert!(cols.contains(&expected.to_string()), "missing column: {expected}");
         }
     }
@@ -142,6 +160,28 @@ mod tests {
         migrate(&conn).unwrap();
         migrate(&conn).unwrap(); // chạy lần 2 không được lỗi / không vượt CURRENT_VERSION
         assert_eq!(user_version(&conn).unwrap(), CURRENT_VERSION);
+    }
+
+    #[test]
+    fn migrate_v3_marks_imported_rows_not_owned() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        // Dựng DB ở v2 (trước khi có cột `owned`) rồi chạy tiếp lên v3.
+        for (v, step) in [(0, migrate_v1 as fn(&rusqlite::Transaction) -> Result<(), String>), (1, migrate_v2)] {
+            let tx = conn.unchecked_transaction().unwrap();
+            step(&tx).unwrap();
+            tx.pragma_update(None, "user_version", v + 1).unwrap();
+            tx.commit().unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO history (id, created_at, updated_at, capture_mode, width, height, asset_path, thumb_path) VALUES ('rec',1,1,'region',10,10,'/r.mp4','/r.jpg');
+             INSERT INTO history (id, created_at, updated_at, capture_mode, width, height, asset_path, thumb_path) VALUES ('imp',1,1,'imported',10,10,'/u.mp4','/u.jpg');",
+        ).unwrap();
+        migrate(&conn).unwrap();
+        let owned = |id: &str| -> i64 {
+            conn.query_row("SELECT owned FROM history WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(owned("rec"), 1);
+        assert_eq!(owned("imp"), 0);
     }
 
     #[test]

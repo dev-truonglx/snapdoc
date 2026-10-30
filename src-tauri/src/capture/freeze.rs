@@ -90,7 +90,7 @@ pub fn capture_frozen_screens_streaming(
     let monitors = match Monitor::all() {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[SnapDoc][freeze] Không liệt kê được màn hình: {e}");
+            log::warn!("[SnapDoc][freeze] Không liệt kê được màn hình: {e}");
             return;
         }
     };
@@ -114,20 +114,20 @@ pub fn capture_frozen_screens_streaming(
             match res {
                 Ok(FrozenPart::Jpeg(buf)) => {
                     store_frozen(&state, gen, idx, buf, None, true);
-                    eprintln!("[SnapDoc Timing] stream display {idx} ready (hardware jpeg)");
+                    log::debug!("[SnapDoc Timing] stream display {idx} ready (hardware jpeg)");
                 }
                 Ok(FrozenPart::Rgba(img)) => {
                     store_frozen_rgba(&state, gen, idx, Some(img));
-                    eprintln!("[SnapDoc Timing] stream display {idx} lossless ready");
+                    log::debug!("[SnapDoc Timing] stream display {idx} lossless ready");
                 }
                 Err(e) => {
-                    eprintln!("[SnapDoc][freeze] Màn hình {idx} lỗi: {e}");
+                    log::warn!("[SnapDoc][freeze] Màn hình {idx} lỗi: {e}");
                     // Lỗi phía RGBA (JPEG đã có) → bỏ cờ chờ; chưa có entry thì no-op.
                     store_frozen_rgba(&state, gen, idx, None);
                 }
             }
         });
-        eprintln!("[SnapDoc Timing] capture_frozen_screens_streaming total: {:?}", t_total.elapsed());
+        log::debug!("[SnapDoc Timing] capture_frozen_screens_streaming total: {:?}", t_total.elapsed());
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -139,7 +139,7 @@ pub fn capture_frozen_screens_streaming(
             match (m.x(), m.y(), m.id()) {
                 (Ok(x), Ok(y), Ok(id)) => {
                     if exclude_monitor_ids.contains(&id) {
-                        eprintln!("[SnapDoc][freeze] Bỏ qua màn hình {i} (display_id={id}) vì chứa cửa sổ editor");
+                        log::info!("[SnapDoc][freeze] Bỏ qua màn hình {i} (display_id={id}) vì chứa cửa sổ editor");
                         store_frozen(&state, gen, i, Vec::new(), None, false);
                     } else {
                         points.push((i, x, y, id));
@@ -162,7 +162,7 @@ pub fn capture_frozen_screens_streaming(
                         // Giữ luôn ảnh raw (lossless) để crop — không tốn thêm gì.
                         Ok((bytes, raw)) => store_frozen(state_ref, gen, i, bytes, Some(raw), false),
                         Err(e) => {
-                            eprintln!("[SnapDoc][freeze] Màn hình {i} lỗi: {e}");
+                            log::warn!("[SnapDoc][freeze] Màn hình {i} lỗi: {e}");
                             store_frozen(state_ref, gen, i, Vec::new(), None, false);
                         }
                     }
@@ -178,7 +178,7 @@ pub fn capture_frozen_screens_ex(exclude_monitor_ids: &[u32]) -> HashMap<usize, 
     let monitors = match Monitor::all() {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[SnapDoc][freeze] Không liệt kê được màn hình: {e}");
+            log::warn!("[SnapDoc][freeze] Không liệt kê được màn hình: {e}");
             return HashMap::new();
         }
     };
@@ -201,7 +201,7 @@ pub fn capture_frozen_screens_ex(exclude_monitor_ids: &[u32]) -> HashMap<usize, 
                 }
                 Ok(super::mac_sck::FrozenPart::Rgba(_)) => {}
                 Err(e) => {
-                    eprintln!("[SnapDoc][freeze] Màn hình {idx} lỗi: {e}");
+                    log::warn!("[SnapDoc][freeze] Màn hình {idx} lỗi: {e}");
                 }
             }
         });
@@ -216,13 +216,13 @@ pub fn capture_frozen_screens_ex(exclude_monitor_ids: &[u32]) -> HashMap<usize, 
             .filter_map(|(i, m)| match (m.x(), m.y(), m.id()) {
                 (Ok(x), Ok(y), Ok(id)) => {
                     if exclude_monitor_ids.contains(&id) {
-                        eprintln!("[SnapDoc][freeze] Bỏ qua màn hình {i} (display_id={id}) vì chứa cửa sổ editor");
+                        log::info!("[SnapDoc][freeze] Bỏ qua màn hình {i} (display_id={id}) vì chứa cửa sổ editor");
                         return None;
                     }
                     Some((i, x, y, id))
                 }
                 _ => {
-                    eprintln!("[SnapDoc][freeze] Màn hình {i}: không đọc được toạ độ hoặc id");
+                    log::warn!("[SnapDoc][freeze] Màn hình {i}: không đọc được toạ độ hoặc id");
                     None
                 }
             })
@@ -238,7 +238,7 @@ pub fn capture_frozen_screens_ex(exclude_monitor_ids: &[u32]) -> HashMap<usize, 
                     match result {
                         Ok((bytes, _raw)) => (i, Some(bytes)),
                         Err(e) => {
-                            eprintln!("[SnapDoc][freeze] Màn hình {i} lỗi: {e}");
+                            log::warn!("[SnapDoc][freeze] Màn hình {i} lỗi: {e}");
                             (i, None)
                         }
                     }
@@ -281,7 +281,7 @@ fn capture_one_jpeg(m: &Monitor) -> Result<(Vec<u8>, RgbaImage), String> {
         .map_err(|e| format!("Lỗi encode JPEG: {e}"))?;
     let t_jpeg = t2.elapsed();
 
-    eprintln!("[SnapDoc Timing] freeze capture_one_jpeg: total={:?}, raw={:?}, into_rgb8={:?}, jpeg_encode={:?}",
+    log::debug!("[SnapDoc Timing] freeze capture_one_jpeg: total={:?}, raw={:?}, into_rgb8={:?}, jpeg_encode={:?}",
         t0.elapsed(), t_raw, t_rgb, t_jpeg);
 
     Ok((buf, raw))

@@ -19,13 +19,23 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder, RgbaImage};
 
-/// Kết quả chụp: PNG raw bytes + base64 PNG + kích thước pixel vật lý.
+/// Kết quả chụp: PNG raw bytes + kích thước pixel vật lý.
+///
+/// Không còn mang sẵn bản base64: hầu hết đường đi (clipboard, ghi file,
+/// Library, Editor qua binary IPC) chỉ cần bytes — encode trước cho MỌI lần
+/// chụp tốn thêm ~1/3 dung lượng ảnh trong RAM và CPU vô ích. Nơi nào thật sự
+/// cần chuỗi (trả về webview qua JSON) thì gọi `base64()`.
 #[derive(Clone)]
 pub struct Capture {
     pub bytes: Vec<u8>,
-    pub base64: String,
     pub width: u32,
     pub height: u32,
+}
+
+impl Capture {
+    pub fn base64(&self) -> String {
+        STANDARD.encode(&self.bytes)
+    }
 }
 
 /// Mã hoá PNG ưu tiên TỐC ĐỘ (CompressionType::Fast + NoFilter) thay vì kích
@@ -40,10 +50,8 @@ pub fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
 
 pub fn persist(img: &RgbaImage) -> Result<Capture, String> {
     let bytes = encode_png(img)?;
-    let base64 = STANDARD.encode(&bytes);
     Ok(Capture {
         bytes,
-        base64,
         width: img.width(),
         height: img.height(),
     })
@@ -151,10 +159,8 @@ pub fn encode_jpeg_cpu(img: &RgbaImage, quality: u8) -> Result<Vec<u8>, String> 
 /// giúp WebKit decode trong <100ms thay vì 2-3 giây.
 pub fn persist_scroll(img: &RgbaImage) -> Result<Capture, String> {
     let bytes = encode_jpeg(img, 92)?;
-    let base64 = STANDARD.encode(&bytes);
     Ok(Capture {
         bytes,
-        base64,
         width: img.width(),
         height: img.height(),
     })

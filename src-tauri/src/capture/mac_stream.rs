@@ -1,20 +1,22 @@
 //! macOS: quay video liên tục bằng ScreenCaptureKit `SCStream` — khác với
 //! `mac_sck.rs` (chụp MỘT lần qua `SCScreenshotManager`), module này giữ một
-//! `SCStream` chạy liên tục, đẩy frame (BGRA thô) qua channel cho tới khi gọi
+//! `SCStream` chạy liên tục, đẩy frame (NV12 thô) qua channel cho tới khi gọi
 //! `stop()`.
 //!
 //! Luồng hoạt động:
 //! 1. `start()` liệt kê `SCShareableContent` để tìm đúng `SCDisplay` theo
 //!    `CGDirectDisplayID`, dựng `SCContentFilter` bao trọn màn hình đó.
 //! 2. Tạo `SCStreamConfiguration` (kích thước = pixel vật lý, pixelFormat =
-//!    BGRA32, fps qua `minimumFrameInterval`, có con trỏ chuột).
+//!    NV12 `420v` — GPU tự chuyển RGB→YUV, encoder nhận thẳng không cần
+//!    swscale trên CPU —, fps qua `minimumFrameInterval`, có con trỏ chuột).
 //! 3. Tạo `SCStream` với delegate là `StreamOutputHandler` — 1 class Objective-C
 //!    tự định nghĩa (`define_class!`) implement `SCStreamOutput` +
 //!    `SCStreamDelegate`. Frame callback chạy trên 1 dispatch queue serial
 //!    RIÊNG (không phải main queue) để không bị chặn bởi UI thread.
 //! 4. Mỗi `CMSampleBuffer` video nhận được → lock `CVPixelBuffer` (readonly),
-//!    copy đúng phần dữ liệu hữu ích (bỏ padding cuối hàng do IOSurface)
-//!    thành `Vec<u8>` BGRA rồi ghi vào `latest` (KHÔNG đẩy thẳng vào channel).
+//!    copy đúng phần dữ liệu hữu ích của 2 mặt phẳng Y + CbCr (bỏ padding cuối
+//!    hàng do IOSurface) thành `Vec<u8>` NV12 rồi ghi vào `latest` (KHÔNG đẩy
+//!    thẳng vào channel).
 //!
 //! KIẾN TRÚC FRAME PACING: SCStream chỉ THỰC SỰ gọi callback khi nội dung
 //! màn hình đổi (`setMinimumFrameInterval` chỉ giới hạn tốc độ TỐI ĐA) — module
@@ -32,7 +34,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::frame::{copy_rows, fit_even, publish, Frame, LatestFrame};
+use super::frame::{copy_rows_into, fit_even, publish, Frame, LatestFrame, PixelFormat};
 use crate::record::pcm_writer::PcmChunk;
 
 use block2::RcBlock;
@@ -50,9 +52,10 @@ use objc2_core_media::{
     CMTimeFlags,
 };
 use objc2_core_video::{
-    kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
-    CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
-    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    kCVImageBufferYCbCrMatrix_ITU_R_601_4, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
+    CVPixelBufferGetPlaneCount, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+    CVPixelBufferUnlockBaseAddress,
 };
 use objc2_foundation::{NSArray, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
@@ -82,6 +85,9 @@ pub enum RecordTarget {
     /// 1 cửa sổ theo `CGWindowID`.
     Window(u32),
 }
+
+/// Định dạng frame nguồn này đưa vào `LatestFrame` (encoder khai `-pix_fmt` theo đây).
+pub const PIXEL_FORMAT: PixelFormat = PixelFormat::Nv12;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// readonly lock — ta chỉ đọc, không sửa buffer của SCK.
@@ -157,7 +163,7 @@ define_class!(
             _stream: &SCStream,
             error: &objc2_foundation::NSError,
         ) {
-            eprintln!(
+            log::warn!(
                 "[SnapDoc][record] SCStream dừng ngoài ý muốn: {}",
                 error.localizedDescription()
             );
@@ -182,10 +188,10 @@ impl StreamOutputHandler {
     }
 }
 
-/// `CMSampleBuffer` (BGRA, IOSurface-backed `CVPixelBuffer`) → `Frame`, tái
-/// dùng `spare` làm bộ nhớ đích nếu đúng kích thước. Chạy trong dispatch queue
-/// riêng của stream (KHÔNG phải main queue). Sample buffer "idle" (màn hình
-/// không đổi) không có image buffer → `None`, giữ nguyên frame cũ.
+/// `CMSampleBuffer` (NV12 `420v`, IOSurface-backed `CVPixelBuffer`) → `Frame`,
+/// tái dùng `spare` làm bộ nhớ đích nếu đúng kích thước. Chạy trong dispatch
+/// queue riêng của stream (KHÔNG phải main queue). Sample buffer "idle" (màn
+/// hình không đổi) không có image buffer → `None`, giữ nguyên frame cũ.
 unsafe fn sample_buffer_to_frame(sample_buffer: &CMSampleBuffer, spare: Option<Vec<u8>>) -> Option<Frame> {
     let pixel_buffer = unsafe { sample_buffer.image_buffer() }?;
 
@@ -194,15 +200,40 @@ unsafe fn sample_buffer_to_frame(sample_buffer: &CMSampleBuffer, spare: Option<V
     unsafe { CVPixelBufferLockBaseAddress(&pixel_buffer, LOCK_READONLY) };
     let width = CVPixelBufferGetWidth(&pixel_buffer);
     let height = CVPixelBufferGetHeight(&pixel_buffer);
-    let bytes_per_row = CVPixelBufferGetBytesPerRow(&pixel_buffer);
-    let base = CVPixelBufferGetBaseAddress(&pixel_buffer);
+    let planes = CVPixelBufferGetPlaneCount(&pixel_buffer);
+    let y_base = CVPixelBufferGetBaseAddressOfPlane(&pixel_buffer, 0);
+    let y_stride = CVPixelBufferGetBytesPerRowOfPlane(&pixel_buffer, 0);
+    let uv_base = CVPixelBufferGetBaseAddressOfPlane(&pixel_buffer, 1);
+    let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(&pixel_buffer, 1);
 
-    let frame = if base.is_null() || width == 0 || height == 0 || bytes_per_row < width * 4 {
+    // Kích thước luôn chẵn (`fit_even` khi cấu hình) — lẻ/thiếu mặt phẳng là
+    // buffer bất thường → bỏ frame (giữ frame cũ) thay vì đọc tràn.
+    let valid = planes == 2
+        && !y_base.is_null()
+        && !uv_base.is_null()
+        && width > 0
+        && height > 0
+        && width % 2 == 0
+        && height % 2 == 0
+        && y_stride >= width
+        && uv_stride >= width;
+    let frame = if !valid {
         None
     } else {
-        // IOSurface pad bytes_per_row >= width*4 — copy đúng width*4 mỗi hàng.
-        let bgra = unsafe { copy_rows(base as *const u8, bytes_per_row, width * 4, height, spare) };
-        Some(Frame { bgra, width: width as u32, height: height as u32 })
+        let (w, h) = (width as u32, height as u32);
+        let needed = PIXEL_FORMAT.frame_len(w, h);
+        let mut data = match spare {
+            Some(v) if v.len() == needed => v,
+            _ => vec![0u8; needed],
+        };
+        let (dst_y, dst_uv) = data.split_at_mut(width * height);
+        // IOSurface pad bytes_per_row >= width — copy đúng `width` byte mỗi
+        // hàng: Y đủ `height` hàng, CbCr (mỗi hàng = width/2 cặp Cb,Cr) nửa số hàng.
+        unsafe {
+            copy_rows_into(y_base as *const u8, y_stride, width, height, dst_y);
+            copy_rows_into(uv_base as *const u8, uv_stride, width, height / 2, dst_uv);
+        }
+        Some(Frame { data, format: PIXEL_FORMAT, width: w, height: h })
     };
 
     unsafe { CVPixelBufferUnlockBaseAddress(&pixel_buffer, LOCK_READONLY) };
@@ -467,7 +498,7 @@ fn query_display_once(display_id: u32, excepting_window_ids: &[u32]) -> Result<D
             })
             .collect();
 
-        eprintln!(
+        log::info!(
             "[SnapDoc][record] SCContentFilter: tìm thấy {} cửa sổ ngoại lệ (phím bấm) (excepting_ids={:?})",
             excepting_windows.len(),
             excepting_ids
@@ -581,7 +612,7 @@ impl Drop for RecordingHandle {
         if self.stopped || self.stopped_externally.load(Ordering::SeqCst) {
             return;
         }
-        eprintln!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng SCStream khẩn cấp");
+        log::warn!("[SnapDoc][record] RecordingHandle bị drop khi chưa stop() — dừng SCStream khẩn cấp");
         unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
     }
 }
@@ -672,7 +703,11 @@ pub fn start(
     unsafe {
         config.setWidth(px_w);
         config.setHeight(px_h);
-        config.setPixelFormat(kCVPixelFormatType_32BGRA);
+        // NV12 dải "video" + ma trận BT.601 — đúng phép chuyển màu swscale
+        // của ffmpeg mặc định dùng khi còn nhận BGRA, nên màu video ra (và mọi
+        // bước xử lý sau: cắt, xuất, GIF) giữ y như trước; chỉ khác là GPU làm.
+        config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+        config.setColorMatrix(kCVImageBufferYCbCrMatrix_ITU_R_601_4);
         config.setShowsCursor(true);
         config.setQueueDepth(5);
         config.setMinimumFrameInterval(CMTime {
@@ -794,12 +829,11 @@ mod tests {
         handle.stop().expect("stop() thất bại");
 
         let frame = frame.expect("không nhận được frame nào");
-        assert_eq!(frame.bgra.len(), (frame.width * frame.height * 4) as usize);
-        let mut rgba = frame.bgra.clone();
-        for px in rgba.chunks_exact_mut(4) {
-            px.swap(0, 2);
-        }
-        let img = image::RgbaImage::from_raw(frame.width, frame.height, rgba).unwrap();
+        assert_eq!(frame.format, PixelFormat::Nv12);
+        assert_eq!(frame.data.len(), PIXEL_FORMAT.frame_len(frame.width, frame.height));
+        // Chỉ lấy mặt phẳng Y (ảnh xám) — đủ để nhìn bằng mắt là frame đúng.
+        let luma = frame.data[..(frame.width * frame.height) as usize].to_vec();
+        let img = image::GrayImage::from_raw(frame.width, frame.height, luma).unwrap();
         let out = std::env::temp_dir().join("snapdoc_mac_stream_test.png");
         img.save(&out).unwrap();
         eprintln!("[test] đã lưu frame cuối tại {}", out.display());

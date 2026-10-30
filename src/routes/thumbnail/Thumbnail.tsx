@@ -12,6 +12,10 @@ export default function Thumbnail() {
   // peekPending đã cũ khi có capture mới hơn).
   const srcRef = useRef("");
   const seqRef = useRef(0);
+  // Ảnh FULL-RES cho Copy/Save khi `src` chỉ là ảnh xem trước nhỏ do Rust gửi
+  // kèm event (`null` = `src` đã là full-res). Lấy ngay lúc hiện, không đợi
+  // tới lúc bấm: pending có thể bị Editor lấy mất trong lúc thumbnail còn mở.
+  const fullRef = useRef<Promise<string> | null>(null);
 
   const revokeIfBlob = (url: string) => {
     if (url.startsWith("blob:")) URL.revokeObjectURL(url);
@@ -25,12 +29,29 @@ export default function Thumbnail() {
     setSrc(next);
   };
 
+  const releaseFull = () => {
+    const full = fullRef.current;
+    fullRef.current = null;
+    void full?.then(revokeIfBlob);
+  };
+
+  const fetchFull = async (): Promise<string> => {
+    const p = await ipc.peekPending().catch(() => null);
+    return p?.imageUrl || (p?.base64 ? `data:image/png;base64,${p.base64}` : "");
+  };
+
+  /** Ảnh dùng cho Copy/Save — luôn là bản full-res của đúng lần chụp đang hiện
+   * (không lấy được thì trả rỗng, KHÔNG lùi về ảnh xem trước nhỏ). */
+  const fullImage = async (): Promise<string> =>
+    fullRef.current ? await fullRef.current : srcRef.current;
+
   // Ẩn cửa sổ + giải phóng ảnh (blob: URL) — lần show sau luôn nạp ảnh mới.
   const hideAndRelease = () => {
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = null;
     seqRef.current++;
     replaceSrc("");
+    releaseFull();
     ipc.hideThumbnail();
   };
 
@@ -63,9 +84,12 @@ export default function Thumbnail() {
 
     const unlisten = listen<string>("show-thumbnail", (e) => {
       // Capture mới → luôn thay ảnh cũ.
+      releaseFull();
       if (e.payload) {
+        // Payload = ảnh xem trước JPEG nhỏ (xem `windows::open_thumbnail`).
         seqRef.current++;
-        replaceSrc(`data:image/png;base64,${e.payload}`);
+        replaceSrc(`data:image/jpeg;base64,${e.payload}`);
+        fullRef.current = fetchFull();
       } else {
         loadThumbnail(false);
       }
@@ -87,6 +111,7 @@ export default function Thumbnail() {
       seqRef.current++;
       revokeIfBlob(srcRef.current);
       srcRef.current = "";
+      releaseFull();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -98,12 +123,14 @@ export default function Thumbnail() {
   };
   const copy = async () => {
     stopAutoClose();
-    if (src) await copyToClipboard(src).catch((e) => console.error("Thumbnail copy failed:", e));
+    const img = await fullImage();
+    if (img) await copyToClipboard(img).catch((e) => console.error("Thumbnail copy failed:", e));
     dismiss();
   };
   const saveFile = async () => {
     stopAutoClose();
-    if (src) await saveToFile(src).catch((e) => console.error("Thumbnail save failed:", e));
+    const img = await fullImage();
+    if (img) await saveToFile(img).catch((e) => console.error("Thumbnail save failed:", e));
     dismiss();
   };
 

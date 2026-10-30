@@ -121,12 +121,12 @@ fn run_action(app: &AppHandle, action: &str) {
                     crate::record::Phase::Recording => {
                         // Lỗi lưu file đã được `stop_recording` tự báo cho người dùng.
                         if let Err(e) = crate::record::stop_recording(&app) {
-                            eprintln!("[SnapDoc] Dừng quay (phím tắt) thất bại: {e}");
+                            log::warn!("[SnapDoc] Dừng quay (phím tắt) thất bại: {e}");
                         }
                         return;
                     }
                     crate::record::Phase::Starting | crate::record::Phase::Stopping => {
-                        eprintln!("[SnapDoc] Bỏ qua phím tắt quay: phiên quay đang khởi động/đang lưu");
+                        log::info!("[SnapDoc] Bỏ qua phím tắt quay: phiên quay đang khởi động/đang lưu");
                         return;
                     }
                     crate::record::Phase::Idle => {}

@@ -1,25 +1,33 @@
 /// Một bản ghi trong Library — trả về nguyên vẹn qua IPC cho React (camelCase
 /// qua `serde(rename_all = "camelCase")` để khớp field TS `HistoryItem`).
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, rename = "HistoryItem")]
 pub struct HistoryRecord {
     pub id: String,
+    #[ts(as = "f64")]
     pub created_at: i64,
+    #[ts(as = "f64")]
     pub updated_at: i64,
+    /// "region" | "window" | "full" | "all" | "scroll" | "quick" | "imported"…
     pub capture_mode: String,
+    #[ts(type = "\"image\" | \"video\" | \"gif\"")]
     pub media_type: String,
     pub width: u32,
     pub height: u32,
     pub scale_factor: f64,
+    #[ts(as = "Option<f64>")]
     pub duration_ms: Option<i64>,
     /// Đường dẫn TUYỆT ĐỐI (không phải path tương đối lưu trong DB) — để
     /// frontend dùng thẳng `convertFileSrc()` mà không cần round-trip thêm.
     pub asset_path: String,
     pub thumb_path: String,
+    #[ts(as = "Option<f64>")]
     pub file_size: Option<i64>,
     pub source_app: Option<String>,
     pub title: Option<String>,
     pub is_edited: bool,
+    #[ts(as = "Option<f64>")]
     pub deleted_at: Option<i64>,
     /// Đường dẫn TUYỆT ĐỐI của bản sao gần nhất đã Save/Save As ra thư mục
     /// tuỳ chọn — `None` nếu chưa từng export ra ngoài. Xem
@@ -53,22 +61,31 @@ impl HistoryRecord {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, optional_fields)]
 pub struct HistoryFilter {
+    #[ts(as = "Option<f64>")]
     pub from: Option<i64>,
+    #[ts(as = "Option<f64>")]
     pub to: Option<i64>,
     pub capture_mode: Option<String>,
+    #[ts(type = "\"image\" | \"video\"", optional)]
     pub media_type: Option<String>,
     #[serde(default)]
+    #[ts(as = "Option<bool>", optional)]
     pub trash_only: bool,
+    #[ts(as = "f64")]
     pub limit: i64,
+    #[ts(as = "f64")]
     pub offset: i64,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct HistoryPage {
     pub items: Vec<HistoryRecord>,
+    #[ts(as = "f64")]
     pub total: i64,
 }

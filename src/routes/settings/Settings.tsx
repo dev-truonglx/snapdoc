@@ -223,6 +223,13 @@ export default function Settings() {
           <span style={versionBadge}>{appVersion ? `v${appVersion}` : "…"}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            style={updateBtn}
+            title={t("updates.openLogsTitle")}
+            onClick={() => ipc.openLogDir().catch((e) => console.error("Open log dir failed:", e))}
+          >
+            {t("updates.openLogs")}
+          </button>
           {updateInfo?.available && (
             <span style={updateDot} title={t("updates.updateAvailable", { version: updateInfo.version })}>🆕</span>
           )}

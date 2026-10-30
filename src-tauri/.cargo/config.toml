@@ -1,0 +1,4 @@
+# ts-rs: `cargo test` xuất type TS của các struct IPC (`#[derive(TS)]`) vào
+# frontend — xem src/lib/bindings/.
+[env]
+TS_RS_EXPORT_DIR = { value = "../src/lib/bindings", relative = true }

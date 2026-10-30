@@ -80,7 +80,7 @@ impl Session {
     pub fn mark_finalized(&self, path: &Path) {
         let json = serde_json::json!({ "path": path.to_string_lossy() }).to_string();
         if let Err(e) = std::fs::write(self.dir.join(DONE_FILE), json) {
-            eprintln!("[SnapDoc][record] Không ghi được marker hoàn tất: {e}");
+            log::warn!("[SnapDoc][record] Không ghi được marker hoàn tất: {e}");
         }
     }
 
@@ -98,7 +98,7 @@ impl Session {
         let meta = TrackMeta { sample_rate, channels, is_mic };
         if let Ok(json) = serde_json::to_vec(&meta) {
             if let Err(e) = std::fs::write(self.dir.join(format!("{name}.json")), json) {
-                eprintln!("[SnapDoc][record] Không ghi được thông tin track {name}: {e}");
+                log::warn!("[SnapDoc][record] Không ghi được thông tin track {name}: {e}");
             }
         }
     }
@@ -109,7 +109,7 @@ impl Session {
 
     pub fn remove(&self) {
         if let Err(e) = std::fs::remove_dir_all(&self.dir) {
-            eprintln!("[SnapDoc][record] Không xoá được thư mục phiên {}: {e}", self.dir.display());
+            log::warn!("[SnapDoc][record] Không xoá được thư mục phiên {}: {e}", self.dir.display());
         }
     }
 }
@@ -236,13 +236,13 @@ pub fn recover_orphans(app: &AppHandle, scan_started: std::time::SystemTime) {
         let video = dir.join(VIDEO_FILE);
         match check_video(&video) {
             Readable::Unknown => {
-                eprintln!("[SnapDoc][record] Chưa kiểm tra được phiên quay {} — thử lại lần sau", dir.display());
+                log::warn!("[SnapDoc][record] Chưa kiểm tra được phiên quay {} — thử lại lần sau", dir.display());
                 continue;
             }
             Readable::No => {
                 // Video không cứu được — vẫn giữ lại audio (nếu có) rồi mới dọn.
                 audio_only += salvage_audio(app, &dir, output_hint.as_deref());
-                eprintln!("[SnapDoc][record] Bỏ phiên quay không có video đọc được: {}", dir.display());
+                log::warn!("[SnapDoc][record] Bỏ phiên quay không có video đọc được: {}", dir.display());
                 let _ = std::fs::remove_dir_all(&dir);
                 continue;
             }
@@ -255,7 +255,7 @@ pub fn recover_orphans(app: &AppHandle, scan_started: std::time::SystemTime) {
             _ => match super::new_output_path(app) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("[SnapDoc][record] Không có thư mục lưu để khôi phục bản quay: {e}");
+                    log::warn!("[SnapDoc][record] Không có thư mục lưu để khôi phục bản quay: {e}");
                     continue;
                 }
             },
@@ -269,7 +269,7 @@ pub fn recover_orphans(app: &AppHandle, scan_started: std::time::SystemTime) {
                 let _ = std::fs::remove_dir_all(&dir);
             }
             // Lỗi I/O tạm thời (đầy đĩa, ổ lưu chưa mount...) — giữ nguyên để thử lại lần sau.
-            Err(e) => eprintln!("[SnapDoc][record] Khôi phục bản quay {} thất bại, thử lại lần sau: {e}", dir.display()),
+            Err(e) => log::warn!("[SnapDoc][record] Khôi phục bản quay {} thất bại, thử lại lần sau: {e}", dir.display()),
         }
     }
     if recovered > 0 {
@@ -293,14 +293,14 @@ fn ingest_recovered(app: &AppHandle, path: &Path, capture_mode: &str) -> bool {
     let meta = match super::probe::probe_video_metadata(path) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[SnapDoc][record] Không đọc được bản quay đã khôi phục {}: {e}", path.display());
+            log::warn!("[SnapDoc][record] Không đọc được bản quay đã khôi phục {}: {e}", path.display());
             return false;
         }
     };
     match crate::history::ingest_video(app, path, meta.width, meta.height, meta.duration_ms, capture_mode) {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("[SnapDoc][record] Đưa bản quay khôi phục vào Thư viện thất bại (file vẫn ở {}): {e}", path.display());
+            log::warn!("[SnapDoc][record] Đưa bản quay khôi phục vào Thư viện thất bại (file vẫn ở {}): {e}", path.display());
             true
         }
     }
@@ -336,12 +336,12 @@ pub fn migrate_legacy_temp(app: &AppHandle, dir: &Path) -> bool {
                 }
                 Err(e) => {
                     // Không copy được (đầy đĩa...) → KHÔNG xoá, thử lại lần sau.
-                    eprintln!("[SnapDoc][record] Không chuyển được video tạm cũ {}: {e}", video.display());
+                    log::warn!("[SnapDoc][record] Không chuyển được video tạm cũ {}: {e}", video.display());
                     return false;
                 }
             },
             Err(e) => {
-                eprintln!("[SnapDoc][record] Không có thư mục lưu để chuyển video tạm cũ: {e}");
+                log::warn!("[SnapDoc][record] Không có thư mục lưu để chuyển video tạm cũ: {e}");
                 return false;
             }
         }

@@ -14,7 +14,14 @@ const HISTORY_LIMIT = 30;
 const COALESCE_KEYS = new Set(["color", "strokeWidth", "fontSize", "blurMode", "solidColor", "blurRadius", "bgColor"]);
 const COALESCE_WINDOW_MS = 800;
 /** Các tool vẽ hình cho phép click lại hình đã vẽ để chỉnh ngay, không cần chuyển sang Select. */
-export const EDIT_TOOLS = new Set<string>(["rect", "ellipse", "arrow", "double-arrow", "line", "numbered-arrow", "numbered-rect", "highlight", "blur"]);
+export const EDIT_TOOLS = new Set<string>(["rect", "ellipse", "arrow", "double-arrow", "line", "numbered-arrow", "numbered-rect", "highlight", "blur", "spotlight", "magnifier", "emoji"]);
+
+/** Bộ style lưu sẵn (xem `applyStylePreset`, `features/annotation/stylePresets.ts`). */
+export interface StylePreset {
+  color: string;
+  strokeWidth: number;
+  fontSize: number;
+}
 
 interface EditorState {
   doc: Doc | null;
@@ -61,6 +68,12 @@ interface EditorState {
   blurMode: "blur" | "pixelate" | "solid";
   /** Màu dùng cho solid redact. */
   blurSolidColor: string;
+  /** Emoji sẽ đặt bằng tool "emoji". */
+  currentEmoji: string;
+  /** Độ phóng của kính lúp mới đặt. */
+  magnifierZoom: number;
+  /** Hình vùng sáng của spotlight mới vẽ. */
+  spotlightShape: "rect" | "ellipse";
   selectedId: string | null;
   selectedIds: string[];
   /** Bộ đếm số thứ tự cho tool "step" (số bước) — độc lập với mũi tên số. */
@@ -94,8 +107,10 @@ interface EditorState {
     baseDirty: boolean;
     savedRef: Doc | null;
   }) => void;
-  /** Đánh dấu trạng thái hiện tại là đã persist — gọi sau Save thành công. */
-  markSaved: () => void;
+  /** Đánh dấu trạng thái hiện tại là đã persist — gọi sau Save thành công.
+   * `doc`: đúng object đã được ghi, khi user đã sửa tiếp trong lúc chờ ghi
+   * (autosave chạy bất đồng bộ) — mặc định là `doc` hiện tại. */
+  markSaved: (doc?: Doc) => void;
   setVideoDirty: (v: boolean) => void;
   /** Báo ảnh nền vừa bị thay ngoài `applyCrop`/`applyStitch` (hiện chỉ có
    * đường FLATTEN, vốn đi qua `loadDoc` chứ không qua `commit`). */
@@ -117,6 +132,12 @@ interface EditorState {
   commitBlurRadius: () => void;
   setBlurMode: (m: "blur" | "pixelate" | "solid") => void;
   setBlurSolidColor: (c: string) => void;
+  /** Ba setter dưới đây cũng áp ngay lên annotation cùng loại đang chọn (1 bước undo). */
+  setCurrentEmoji: (emoji: string) => void;
+  setMagnifierZoom: (zoom: number) => void;
+  setSpotlightShape: (shape: "rect" | "ellipse") => void;
+  /** Áp màu + nét + cỡ chữ của preset — cho tool hiện tại VÀ các annotation đang chọn, gộp 1 bước undo. */
+  applyStylePreset: (p: StylePreset) => void;
   select: (id: string | null, multi?: boolean) => void;
   selectMany: (ids: string[], append?: boolean) => void;
   selectAll: () => void;
@@ -168,6 +189,22 @@ interface EditorState {
   renumberRects: () => void;
 }
 
+/** Áp `fn` lên các annotation đang chọn — 1 bước undo; không có gì thay đổi
+ * (không chọn gì / không annotation nào hợp) thì không tạo bước undo. */
+function patchSelected(state: EditorState, fn: (a: Annotation) => Annotation): Partial<EditorState> {
+  const { doc, selectedIds, selectedId } = state;
+  const targets = new Set(selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : []);
+  if (!doc || targets.size === 0) return {};
+  let changed = false;
+  const annotations = doc.annotations.map((a) => {
+    if (!targets.has(a.id)) return a;
+    const n = fn(a);
+    if (n !== a) changed = true;
+    return n;
+  });
+  return changed ? commit(state, { ...doc, annotations }) : {};
+}
+
 function commit(state: EditorState, nextDoc: Doc): Partial<EditorState> {
   if (!state.doc) return {};
   const past = [...state.past, state.doc].slice(-HISTORY_LIMIT);
@@ -194,6 +231,9 @@ export const useEditor = create<EditorState>((set, get) => ({
   blurRadius: 10,
   blurMode: "blur" as const,
   blurSolidColor: "#1a1a1a",
+  currentEmoji: "👉",
+  magnifierZoom: 2,
+  spotlightShape: "rect",
   selectedId: null,
   selectedIds: [],
   stepCounter: 1,
@@ -243,7 +283,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     }),
 
   // Save xong thì cả annotation LẪN nền đều đã khớp đĩa.
-  markSaved: () => set((s) => ({ savedRef: s.doc, baseDirty: false })),
+  markSaved: (doc) => set((s) => ({ savedRef: doc ?? s.doc, baseDirty: false })),
 
   setVideoDirty: (videoDirty) => set({ videoDirty }),
 
@@ -513,6 +553,33 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     set({ blurSolidColor });
   },
+
+  setCurrentEmoji: (currentEmoji) =>
+    set((s) => ({ ...patchSelected(s, (a) => (a.type === "emoji" ? { ...a, emoji: currentEmoji } : a)), currentEmoji })),
+
+  setMagnifierZoom: (magnifierZoom) =>
+    set((s) => ({ ...patchSelected(s, (a) => (a.type === "magnifier" ? { ...a, zoom: magnifierZoom } : a)), magnifierZoom })),
+
+  setSpotlightShape: (spotlightShape) =>
+    set((s) => ({ ...patchSelected(s, (a) => (a.type === "spotlight" ? { ...a, shape: spotlightShape } : a)), spotlightShape })),
+
+  applyStylePreset: ({ color, strokeWidth, fontSize }) =>
+    set((s) => {
+      const sw = Math.max(1, strokeWidth);
+      const patched = patchSelected(s, (a) => {
+        let next = a;
+        if ("color" in next && next.type !== "highlight" && next.type !== "blur") next = { ...next, color } as Annotation;
+        if ("strokeWidth" in next && next.type !== "highlight" && next.type !== "blur") {
+          next = { ...next, strokeWidth: sw } as Annotation;
+          if (next.type === "numbered-rect" || next.type === "numbered-arrow" || next.type === "step") {
+            next = { ...next, radius: Math.max(Math.round(sw * 2 + 5), 10) };
+          }
+        }
+        if (next.type === "text") next = { ...next, fontSize };
+        return next;
+      });
+      return { ...patched, color, strokeWidth: sw, fontSize };
+    }),
 
   select: (id, multi = false) => {
     const { doc } = get();

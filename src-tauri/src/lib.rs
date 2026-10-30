@@ -46,6 +46,36 @@ fn redirect_stdio_to_dev_log() {
     }
 }
 
+/// Logger toàn app (`log::info!`/`warn!`/`debug!` ở Rust + console.warn/error
+/// của webview chuyển sang qua `src/lib/logForward.ts`).
+/// - Dev: chỉ stdout — `redirect_stdio_to_dev_log` đã đưa stdout vào
+///   `~/Library/Logs/com.snapdoc.app/SnapDoc.log`, ghi thêm file sẽ trùng dòng.
+/// - Release: file `SnapDoc.log` trong thư mục log của OS (macOS
+///   `~/Library/Logs/<identifier>`, Windows `%LOCALAPPDATA%\<identifier>\logs`),
+///   tối đa 5MB/file, giữ 3 file gần nhất.
+fn log_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
+    let targets = if cfg!(debug_assertions) {
+        vec![Target::new(TargetKind::Stdout)]
+    } else {
+        vec![
+            Target::new(TargetKind::Stderr),
+            Target::new(TargetKind::LogDir { file_name: Some("SnapDoc".into()) }),
+        ]
+    };
+    tauri_plugin_log::Builder::new()
+        .clear_targets()
+        .targets(targets)
+        .level(if cfg!(debug_assertions) { log::LevelFilter::Debug } else { log::LevelFilter::Info })
+        // Log nội bộ của webview/runtime rất ồn — chỉ giữ cảnh báo trở lên.
+        .level_for("tao", log::LevelFilter::Warn)
+        .level_for("wry", log::LevelFilter::Warn)
+        .level_for("tracing", log::LevelFilter::Warn)
+        .max_file_size(5_000_000)
+        .rotation_strategy(RotationStrategy::KeepSome(3))
+        .build()
+}
+
 /// Mở History DB + worker ingest. Lỗi init KHÔNG chặn khởi động app — chỉ
 /// tắt tính năng Library (mọi command History trả lỗi rõ qua `try_state`).
 fn init_history(handle: &tauri::AppHandle) {
@@ -55,7 +85,7 @@ fn init_history(handle: &tauri::AppHandle) {
             handle.manage(history::db::HistoryState::new(conn, ingest_tx));
         }
         Err(e) => {
-            eprintln!("[SnapDoc][history] init thất bại, tính năng Library sẽ tắt: {e}");
+            log::warn!("[SnapDoc][history] init thất bại, tính năng Library sẽ tắt: {e}");
         }
     }
 }
@@ -65,13 +95,14 @@ pub fn run() {
     #[cfg(debug_assertions)]
     redirect_stdio_to_dev_log();
 
-    let mut builder = tauri::Builder::default();
+    // Plugin log đăng ký ĐẦU TIÊN để log của các plugin/setup phía sau cũng được ghi.
+    let mut builder = tauri::Builder::default().plugin(log_plugin());
     if let Some(p) = telemetry::plugin() {
         builder = builder.plugin(p);
     }
     builder
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            eprintln!("[SnapDoc] Single instance launched with argv: {:?}", argv);
+            log::info!("[SnapDoc] Single instance launched with argv: {:?}", argv);
             let open_with_path: Option<(String, bool)> = argv.get(1).and_then(|path| {
                 let ext = std::path::Path::new(path)
                     .extension()
@@ -186,6 +217,9 @@ pub fn run() {
             commands::get_update_ready,
             commands::install_update,
             commands::restart_app,
+            commands::open_log_dir,
+            commands::frozen_pixel,
+            commands::copy_frozen_pixel,
             commands::start_scroll_session,
             commands::scroll_tick,
             commands::scroll_bridge,
@@ -294,7 +328,7 @@ pub fn run() {
                             commands::open_file_path_sync(&h, path)
                         };
                         if let Err(e) = r {
-                            eprintln!("[SnapDoc] Open with thất bại: {e}");
+                            log::warn!("[SnapDoc] Open with thất bại: {e}");
                         }
                     });
                 }
@@ -317,17 +351,17 @@ pub fn run() {
                 std::thread::spawn(move || {
                     match history::commands::purge_old_trash(&h) {
                         Ok(n) if n > 0 => {
-                            eprintln!("[SnapDoc][history] Đã tự xoá {n} mục trong Trash quá hạn 30 ngày")
+                            log::warn!("[SnapDoc][history] Đã tự xoá {n} mục trong Trash quá hạn 30 ngày")
                         }
                         Ok(_) => {}
-                        Err(e) => eprintln!("[SnapDoc][history] Tự dọn Trash quá hạn thất bại: {e}"),
+                        Err(e) => log::warn!("[SnapDoc][history] Tự dọn Trash quá hạn thất bại: {e}"),
                     }
                     // File tạm `.snapdoc` sót lại do crash giữa lúc ghi (tên tmp giờ
                     // là duy nhất mỗi lần ghi nên không còn tự bị ghi đè lần sau).
                     if let Ok(dir) = history::assets::assets_dir(&h) {
                         let n = snapdoc_file::remove_stale_tmp(&dir, std::time::Duration::from_secs(3600));
                         if n > 0 {
-                            eprintln!("[SnapDoc][history] Đã dọn {n} file tạm .snapdoc sót lại");
+                            log::info!("[SnapDoc][history] Đã dọn {n} file tạm .snapdoc sót lại");
                         }
                     }
                 });
@@ -347,7 +381,7 @@ pub fn run() {
 
             tray::build(&handle)?;
             if let Err(e) = hotkey::register_all(&handle) {
-                eprintln!("[SnapDoc] {e}");
+                log::warn!("[SnapDoc] {e}");
                 use tauri::Manager;
                 if let Ok(mut g) = handle.state::<AppState>().hotkey_warning.lock() {
                     *g = Some(e);
@@ -367,7 +401,7 @@ pub fn run() {
                             let _ = windows::prewarm_editor(&h);
                         }
                         Err(e) => {
-                            eprintln!("[SnapDoc] Mở editor với ảnh gần nhất lúc khởi động thất bại: {e}");
+                            log::warn!("[SnapDoc] Mở editor với ảnh gần nhất lúc khởi động thất bại: {e}");
                             let _ = windows::prewarm_editor(&h);
                         }
                     }
@@ -396,8 +430,9 @@ pub fn run() {
             // Pre-warm capture-bar (ẩn) NGAY khi app khởi động — giữ icon Dock
             // (macOS)/Taskbar (Windows) hiện diện xuyên suốt vòng đời app kể
             // từ lúc mở app, không còn im lặng ở tray như trước.
+            // Popover "Tuỳ chọn" của bar KHÔNG tạo ở đây nữa — tạo lúc bar hiện
+            // lần đầu (`windows::open_capture_bar`).
             let _ = windows::prewarm_capture_bar(&handle);
-            let _ = windows::prewarm_capture_bar_popover(&handle);
 
             // Lần đầu chạy sau khi cài: tự động bật "khởi động cùng hệ thống".
             // Phát hiện "lần đầu" bằng việc FILE settings.json đã tồn tại
@@ -462,7 +497,7 @@ pub fn run() {
                             tray::set_update_badge(&app_handle);
                             // Tự động tải và cài — không restart, không hiện cửa sổ.
                             if let Err(e) = update::silent_download_and_install(app_handle.clone()).await {
-                                eprintln!("[SnapDoc][update] background install failed: {e}");
+                                log::warn!("[SnapDoc][update] background install failed: {e}");
                             }
                         }
                     }
@@ -492,7 +527,7 @@ pub fn run() {
                 // và rẻ nên chạy vô điều kiện mỗi lần đóng Settings.
                 if label == "settings" {
                     if let Err(e) = hotkey::reload(_window.app_handle()) {
-                        eprintln!("[SnapDoc][hotkey] reload sau khi đóng Settings thất bại: {e}");
+                        log::warn!("[SnapDoc][hotkey] reload sau khi đóng Settings thất bại: {e}");
                     }
                 }
                 // "editor" (capture) lẫn "editor-ow-N" ("Open with") + "settings"
@@ -550,7 +585,7 @@ pub fn run() {
                 // lẫn runtime (app đang chạy, user chọn "Open with" lần nữa).
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Opened { urls } => {
-                    eprintln!("[SnapDoc] RunEvent::Opened nhận {} url", urls.len());
+                    log::info!("[SnapDoc] RunEvent::Opened nhận {} url", urls.len());
                     // Mở MỌI file được chọn (mỗi file một cửa sổ editor riêng),
                     // không chỉ file đầu tiên — hỗ trợ chọn nhiều file → Open with.
                     for url in &urls {

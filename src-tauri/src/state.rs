@@ -107,11 +107,6 @@ impl PendingCapture {
         buf
     }
 
-    /// Base64 representation (dự phòng tương thích ngược).
-    pub fn base64(&self) -> String {
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        STANDARD.encode(&self.bytes)
-    }
 }
 
 /// Video đang chờ mở trong Editor — đã CÓ SẴN trong History (`history_id`
@@ -119,12 +114,14 @@ impl PendingCapture {
 /// `history::commands::open_history_item_in_editor_sync`) hoặc vừa quay xong
 /// (ingest ngay lập tức, xem `record::stop_recording_impl`) — không còn
 /// khái niệm "video chưa lưu" nữa.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct PendingVideo {
     pub path: String,
     pub width: u32,
     pub height: u32,
+    #[ts(as = "f64")]
     pub duration_ms: i64,
     pub history_id: String,
     pub thumb_path: Option<String>,

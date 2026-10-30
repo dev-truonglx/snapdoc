@@ -39,7 +39,7 @@ pub fn info(app: &AppHandle, msg: &str) {
 /// người dùng cần biết ngay (mic hỏng, có thể quay nhầm màn hình...), không
 /// đợi tới khi quay xong cả tiếng đồng hồ mới biết.
 pub fn warning_now(app: &AppHandle, msg: &str) {
-    eprintln!("[SnapDoc][notify:Warning] {msg}");
+    log::warn!("[SnapDoc][notify:Warning] {msg}");
     show(app, Level::Warning, msg);
 }
 
@@ -47,7 +47,7 @@ pub fn warning_now(app: &AppHandle, msg: &str) {
 /// người dùng vừa làm (vd bấm chụp trong lúc đang quay): hoãn tới lúc dừng
 /// quay thì thông báo mất ý nghĩa.
 pub fn info_now(app: &AppHandle, msg: &str) {
-    eprintln!("[SnapDoc][notify:Info] {msg}");
+    log::info!("[SnapDoc][notify:Info] {msg}");
     show(app, Level::Info, msg);
 }
 
@@ -56,7 +56,7 @@ fn notify(app: &AppHandle, level: Level, msg: &str) {
     if msg.is_empty() {
         return;
     }
-    eprintln!("[SnapDoc][notify:{level:?}] {msg}");
+    log::info!("[SnapDoc][notify:{level:?}] {msg}");
     {
         // Kiểm tra "đang quay" và đẩy vào hàng chờ TRONG CÙNG 1 lần giữ lock —
         // `flush_deferred` (chạy ngay sau khi phiên quay về rảnh) lấy cùng

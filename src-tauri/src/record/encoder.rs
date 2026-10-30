@@ -1,6 +1,7 @@
 //! Encode video quay màn hình: chạy `ffmpeg` như sidecar binary (đóng gói
 //! cùng app qua `tauri.conf.json` → `bundle.externalBin`), nhận raw frame
-//! BGRA qua stdin, xuất H.264.
+//! (BGRA trên Windows, NV12 trên macOS — xem `capture::frame::PixelFormat`)
+//! qua stdin, xuất H.264.
 //!
 //! KHÔNG dùng `tauri-plugin-shell` cho việc này: API sidecar cấp cao của
 //! plugin (`CommandChild`) không cho đóng RIÊNG stdin (chỉ có `write()` và
@@ -24,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use crate::capture::frame::PixelFormat;
 
 /// Tham số muxer của file ghi trong lúc quay (xem doc-comment đầu module).
 const LIVE_MUX_ARGS: [&str; 6] =
@@ -139,6 +142,19 @@ fn kind_args(kind: H264Kind, w: u32, h: u32, fps: u32) -> Vec<String> {
     }
 }
 
+/// `kind_args` cho đầu vào rawvideo `input`. Nhận NV12 thì encoder macOS
+/// (VideoToolbox lẫn libx264 đều nhận NV12) ra thẳng NV12 — ffmpeg không phải
+/// chuyển định dạng pixel trên CPU. Encoder khác/BGRA giữ nguyên tham số cũ.
+fn kind_args_for_input(kind: H264Kind, w: u32, h: u32, fps: u32, input: PixelFormat) -> Vec<String> {
+    let mut a = kind_args(kind, w, h, fps);
+    if input == PixelFormat::Nv12 && matches!(kind, H264Kind::VideoToolbox | H264Kind::X264) {
+        if let Some(i) = a.iter().position(|x| x == "-pix_fmt") {
+            a[i + 1] = "nv12".into();
+        }
+    }
+    a
+}
+
 fn candidates() -> &'static [H264Kind] {
     #[cfg(target_os = "windows")]
     {
@@ -154,23 +170,24 @@ fn candidates() -> &'static [H264Kind] {
     }
 }
 
-/// Encode thử vài frame đen `w×h` bằng `kind`, ghi ra ĐÚNG muxer MP4 phân
-/// mảnh như lúc quay thật (vài encoder chỉ lỗi khi muxer cần global header) —
-/// có timeout (driver lỗi có thể treo vô hạn).
-fn test_encoder(ffmpeg: &Path, kind: H264Kind, w: u32, h: u32, fps: u32) -> bool {
+/// Encode thử vài frame đen `w×h` bằng `kind` với ĐÚNG tham số encoder sẽ
+/// dùng cho đầu vào `input`, ghi ra ĐÚNG muxer MP4 phân mảnh như lúc quay thật
+/// (vài encoder chỉ lỗi khi muxer cần global header) — có timeout (driver lỗi
+/// có thể treo vô hạn).
+fn test_encoder(ffmpeg: &Path, kind: H264Kind, w: u32, h: u32, fps: u32, input: PixelFormat) -> bool {
     let out = std::env::temp_dir().join(format!("snapdoc-enc-test-{}.mp4", uuid::Uuid::new_v4()));
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i"])
         .arg(format!("color=c=black:s={w}x{h}:r={fps}"))
         .args(["-frames:v", "3"])
-        .args(kind_args(kind, w, h, fps))
+        .args(kind_args_for_input(kind, w, h, fps, input))
         .args(["-g", &(fps.max(1) * 2).to_string()])
         .args(LIVE_MUX_ARGS)
         .arg(&out);
     let ok = match super::proc::run(&mut cmd, Duration::from_secs(15)) {
         Ok(r) => r.status.success() && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false),
         Err(e) => {
-            eprintln!("[SnapDoc][record] Thử encoder {kind:?} {w}x{h} lỗi: {e}");
+            log::warn!("[SnapDoc][record] Thử encoder {kind:?} {w}x{h} lỗi: {e}");
             false
         }
     };
@@ -184,7 +201,7 @@ static DETECTED: std::sync::OnceLock<Vec<H264Kind>> = std::sync::OnceLock::new()
 /// kích thước riêng, chạy được 320×240 chưa chắc chạy được 5120×1440). Kết quả
 /// THẤT BẠI chỉ giữ 10 phút — có thể chỉ là tạm thời (vd NVENC hết phiên do
 /// app khác đang dùng), không được khoá encoder phần cứng cả phiên app.
-static VALIDATED: Mutex<Vec<(H264Kind, u32, u32, bool, Instant)>> = Mutex::new(Vec::new());
+static VALIDATED: Mutex<Vec<(H264Kind, PixelFormat, u32, u32, bool, Instant)>> = Mutex::new(Vec::new());
 const FAILED_RETRY_AFTER: Duration = Duration::from_secs(600);
 
 fn detected(ffmpeg: &Path) -> &'static [H264Kind] {
@@ -192,31 +209,33 @@ fn detected(ffmpeg: &Path) -> &'static [H264Kind] {
         let mut ok: Vec<H264Kind> = candidates()
             .iter()
             .copied()
-            .filter(|&k| k == H264Kind::X264 || test_encoder(ffmpeg, k, 320, 240, 30))
+            .filter(|&k| k == H264Kind::X264 || test_encoder(ffmpeg, k, 320, 240, 30, PixelFormat::Bgra))
             .collect();
         if !ok.contains(&H264Kind::X264) {
             ok.push(H264Kind::X264);
         }
-        eprintln!("[SnapDoc][record] Encoder H.264 khả dụng: {ok:?}");
+        log::info!("[SnapDoc][record] Encoder H.264 khả dụng: {ok:?}");
         ok
     })
 }
 
-fn validated_at(ffmpeg: &Path, kind: H264Kind, w: u32, h: u32, fps: u32) -> bool {
+fn validated_at(ffmpeg: &Path, kind: H264Kind, w: u32, h: u32, fps: u32, input: PixelFormat) -> bool {
     if kind == H264Kind::X264 {
         return true;
     }
     {
         let mut g = VALIDATED.lock().unwrap_or_else(|p| p.into_inner());
-        g.retain(|&(_, _, _, ok, at)| ok || at.elapsed() < FAILED_RETRY_AFTER);
-        if let Some(&(_, _, _, ok, _)) = g.iter().find(|(k, kw, kh, _, _)| *k == kind && *kw == w && *kh == h) {
+        g.retain(|&(_, _, _, _, ok, at)| ok || at.elapsed() < FAILED_RETRY_AFTER);
+        if let Some(&(_, _, _, _, ok, _)) =
+            g.iter().find(|(k, f, kw, kh, _, _)| *k == kind && *f == input && *kw == w && *kh == h)
+        {
             return ok;
         }
     }
-    let ok = test_encoder(ffmpeg, kind, w, h, fps);
-    VALIDATED.lock().unwrap_or_else(|p| p.into_inner()).push((kind, w, h, ok, Instant::now()));
+    let ok = test_encoder(ffmpeg, kind, w, h, fps, input);
+    VALIDATED.lock().unwrap_or_else(|p| p.into_inner()).push((kind, input, w, h, ok, Instant::now()));
     if !ok {
-        eprintln!("[SnapDoc][record] Encoder {kind:?} không chạy được ở {w}x{h}, thử encoder kế tiếp");
+        log::warn!("[SnapDoc][record] Encoder {kind:?} không chạy được ở {w}x{h}, thử encoder kế tiếp");
     }
     ok
 }
@@ -254,6 +273,7 @@ pub struct Encoder {
     stdin: Option<ChildStdin>,
     stderr_thread: Option<std::thread::JoinHandle<()>>,
     in_size: (u32, u32),
+    in_format: PixelFormat,
     out_size: (u32, u32),
     finished: bool,
 }
@@ -311,22 +331,34 @@ impl Drop for Encoder {
 }
 
 impl Encoder {
-    /// Bắt đầu 1 tiến trình ffmpeg nhận rawvideo BGRA (`width`×`height`, `fps`
-    /// khung/giây) qua stdin, encode H.264 (phần cứng nếu chạy được ở đúng
-    /// kích thước này, không thì libx264), ghi MP4 PHÂN MẢNH tại `output_path`.
-    /// Khung lớn hơn `MAX_LONG_EDGE×MAX_SHORT_EDGE` được ffmpeg thu nhỏ — xem
-    /// `out_size()` để biết kích thước thật của video.
+    /// Như `start_with_format` với đầu vào BGRA (test dựng frame BGRA tay).
+    #[cfg(test)]
     pub fn start(output_path: &Path, width: u32, height: u32, fps: u32) -> Result<Self, String> {
+        Self::start_with_format(output_path, width, height, fps, PixelFormat::Bgra)
+    }
+
+    /// Bắt đầu 1 tiến trình ffmpeg nhận rawvideo `format` (`width`×`height`,
+    /// `fps` khung/giây) qua stdin, encode H.264 (phần cứng nếu chạy được ở
+    /// đúng kích thước này, không thì libx264), ghi MP4 PHÂN MẢNH tại
+    /// `output_path`. Khung lớn hơn `MAX_LONG_EDGE×MAX_SHORT_EDGE` được ffmpeg
+    /// thu nhỏ — xem `out_size()` để biết kích thước thật của video.
+    pub fn start_with_format(
+        output_path: &Path,
+        width: u32,
+        height: u32,
+        fps: u32,
+        format: PixelFormat,
+    ) -> Result<Self, String> {
         let ffmpeg = sidecar_path("ffmpeg")?;
         let (ow, oh) = crate::capture::frame::fit_even(width, height, MAX_LONG_EDGE, MAX_SHORT_EDGE);
         let kind = detected(&ffmpeg)
             .iter()
             .copied()
-            .find(|&k| validated_at(&ffmpeg, k, ow, oh, fps))
+            .find(|&k| validated_at(&ffmpeg, k, ow, oh, fps, format))
             .unwrap_or(H264Kind::X264);
 
         let mut cmd = Command::new(&ffmpeg);
-        cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgra", "-s"])
+        cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", format.ffmpeg_name(), "-s"])
             .arg(format!("{width}x{height}"))
             .arg("-r")
             .arg(fps.to_string())
@@ -334,7 +366,7 @@ impl Encoder {
         if (ow, oh) != (width, height) {
             cmd.args(["-vf", &format!("scale={ow}:{oh}:flags=bilinear")]);
         }
-        cmd.args(kind_args(kind, ow, oh, fps))
+        cmd.args(kind_args_for_input(kind, ow, oh, fps, format))
             // Keyframe mỗi 2 giây: mỗi keyframe mở 1 fragment mới (giới hạn
             // phần mất khi crash ~2s) và giúp cắt/tua chính xác hơn.
             .args(["-g", &(fps.max(1) * 2).to_string()])
@@ -353,7 +385,7 @@ impl Encoder {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Không khởi chạy ffmpeg ({}): {e}", ffmpeg.display()))?;
-        eprintln!("[SnapDoc][record] Encoder {kind:?}, vào {width}x{height}, ra {ow}x{oh} @{fps}fps");
+        log::info!("[SnapDoc][record] Encoder {kind:?}, vào {width}x{height} {format:?}, ra {ow}x{oh} @{fps}fps");
 
         // Phải đọc liên tục stderr — pipe đầy (thường 64KB) sẽ làm ffmpeg
         // treo khi ghi log lỗi, kéo theo cả write_frame() bị chặn.
@@ -361,7 +393,7 @@ impl Encoder {
         let stderr_thread = std::thread::spawn(move || {
             use std::io::{BufRead, BufReader};
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                eprintln!("[ffmpeg] {line}");
+                log::warn!("[ffmpeg] {line}");
             }
         });
 
@@ -371,6 +403,7 @@ impl Encoder {
             stdin,
             stderr_thread: Some(stderr_thread),
             in_size: (width, height),
+            in_format: format,
             out_size: (ow, oh),
             finished: false,
         })
@@ -385,12 +418,17 @@ impl Encoder {
         self.in_size
     }
 
+    /// Định dạng pixel đầu vào (đúng `-pix_fmt` đã khai với ffmpeg).
+    pub fn in_format(&self) -> PixelFormat {
+        self.in_format
+    }
+
     /// Kích thước thật của video ghi ra (đã thu nhỏ nếu vượt giới hạn).
     pub fn out_size(&self) -> (u32, u32) {
         self.out_size
     }
 
-    /// Ghi 1 frame BGRA thô (đúng `width*height*4` byte) vào stdin ffmpeg.
+    /// Ghi 1 frame thô (đúng `in_format().frame_len(in_size)` byte) vào stdin ffmpeg.
     pub fn write_frame(&mut self, data: &[u8]) -> Result<(), String> {
         let stdin = self.stdin.as_mut().ok_or_else(|| "ffmpeg đã đóng stdin".to_string())?;
         stdin
@@ -1097,12 +1135,16 @@ pub fn trim(
 }
 
 /// Tuỳ chọn xuất video sang ảnh GIF động.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct GifExportOptions {
+    #[ts(as = "f64")]
     pub start_ms: i64,
+    #[ts(as = "f64")]
     pub duration_ms: i64,
     pub fps: u32,
+    #[ts(optional = nullable)]
     pub max_width: Option<u32>,
     pub speed: f64,
     pub loop_count: i32, // 0 = lặp vô hạn, -1 = phát 1 lần
@@ -1110,9 +1152,13 @@ pub struct GifExportOptions {
 
 /// Xuất 1 đoạn video (hoặc toàn bộ) ra file ảnh GIF chất lượng cao.
 ///
-/// Dùng ffmpeg filter 2-pass (palettegen + paletteuse với Bayer dithering)
-/// để bảng màu 256 màu đạt độ mịn tối đa, hạn chế răng cưa và giảm kích thước
-/// file so với bộ encoder mặc định.
+/// 2 lượt ffmpeg THẬT (palettegen + paletteuse với Bayer dithering) để bảng
+/// màu 256 màu đạt độ mịn tối đa, hạn chế răng cưa và giảm kích thước file so
+/// với bộ encoder mặc định. Lượt 1 chỉ ghi bảng màu ra PNG tạm; lượt 2 áp bảng
+/// màu đó lên từng frame. Kết quả y hệt cách gộp `split → palettegen →
+/// paletteuse` trong 1 lệnh, nhưng cách gộp bắt ffmpeg giữ MỌI frame (đã
+/// scale, RGB) trong RAM chờ palettegen đọc hết đoạn — GIF 4K vài chục giây
+/// là hàng chục GB.
 pub fn export_gif(
     input_path: &Path,
     output_path: &Path,
@@ -1142,34 +1188,64 @@ pub fn export_gif(
         Some(w) if w > 0 => format!("scale='min({w},iw)':-2:flags=lanczos"),
         _ => "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=lanczos".to_string(),
     };
+    // Cả 2 lượt dùng CHUNG đoạn cắt + chuỗi filter → đúng cùng 1 dãy frame.
+    let frames_filter = format!("{pts_filter}fps={fps},{scale_filter}");
+    let input_args = |cmd: &mut Command| {
+        cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
+            .arg("-ss")
+            .arg(format!("{:.3}", start_s))
+            .arg("-t")
+            .arg(format!("{:.3}", dur_s))
+            .arg("-i")
+            .arg(input_path);
+    };
+    let total_us = ((dur_s / speed) * 1_000_000.0) as i64;
 
-    let filter_complex = format!(
-        "[0:v] {pts_filter}fps={fps},{scale_filter},split [s0][s1]; [s0] palettegen=stats_mode=diff [p]; [s1][p] paletteuse=dither=bayer:bayer_scale=3"
-    );
+    let palette = std::env::temp_dir().join(format!("snapdoc-gif-palette-{}.png", uuid::Uuid::new_v4()));
+    on_progress(0.0);
 
-    let mut cmd = Command::new(&ffmpeg);
-    cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
-        .arg("-ss")
-        .arg(format!("{:.3}", start_s))
-        .arg("-t")
-        .arg(format!("{:.3}", dur_s))
-        .arg("-i")
-        .arg(input_path)
-        .args(["-filter_complex", &filter_complex])
-        .args(["-loop", &options.loop_count.to_string()])
+    // Lượt 1 (~30% tiến độ): bảng màu.
+    let mut pass1 = Command::new(&ffmpeg);
+    input_args(&mut pass1);
+    pass1
+        .args(["-vf", &format!("{frames_filter},palettegen=stats_mode=diff")])
         .args(["-progress", "pipe:1"])
-        .arg(output_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg(&palette);
+    let r = run_gif_pass(&ffmpeg, pass1, total_us, &mut |f| on_progress(f * 0.3));
+
+    // Lượt 2 (~70%): áp bảng màu.
+    let r = r.and_then(|()| {
+        let mut pass2 = Command::new(&ffmpeg);
+        input_args(&mut pass2);
+        pass2
+            .arg("-i")
+            .arg(&palette)
+            .args([
+                "-filter_complex",
+                &format!("[0:v] {frames_filter} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=3"),
+            ])
+            .args(["-loop", &options.loop_count.to_string()])
+            .args(["-progress", "pipe:1"])
+            .arg(output_path);
+        run_gif_pass(&ffmpeg, pass2, total_us, &mut |f| on_progress(0.3 + f * 0.7))
+    });
+    let _ = std::fs::remove_file(&palette);
+    r?;
+
+    on_progress(1.0);
+    Ok(())
+}
+
+/// Chạy 1 lượt ffmpeg của `export_gif` (đã có `-progress pipe:1`), báo tiến
+/// độ 0..0.99 theo `out_time_us` / `total_us`.
+fn run_gif_pass(ffmpeg: &Path, mut cmd: Command, total_us: i64, on_progress: &mut dyn FnMut(f64)) -> Result<(), String> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-
-    on_progress(0.0);
 
     let mut child = cmd
         .spawn()
@@ -1183,7 +1259,6 @@ pub fn export_gif(
         buf
     });
 
-    let total_us = ((dur_s / speed) * 1_000_000.0) as i64;
     let stdout = child.stdout.take().expect("stdout đã piped");
     {
         use std::io::{BufRead, BufReader};
@@ -1204,8 +1279,6 @@ pub fn export_gif(
     if !status.success() {
         return Err(format!("Xuất GIF thất bại: {status} — {stderr}"));
     }
-
-    on_progress(1.0);
     Ok(())
 }
 
@@ -1254,6 +1327,89 @@ mod tests {
             out.display(),
             meta.len()
         );
+    }
+
+    /// Giải mã frame đầu của `path` thành RGB24, trả về pixel ở giữa khung.
+    fn center_rgb(path: &Path, w: u32, h: u32) -> [u8; 3] {
+        let ffmpeg = sidecar_path("ffmpeg").unwrap();
+        let out = Command::new(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(path)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let i = (((h / 2) * w + w / 2) * 3) as usize;
+        [out.stdout[i], out.stdout[i + 1], out.stdout[i + 2]]
+    }
+
+    /// Đường quay macOS (NV12 từ SCK, ma trận BT.601) ra cùng màu với đường
+    /// BGRA cũ (swscale mặc định BT.601) — cắt/xuất/GIF phía sau không đổi màu.
+    #[test]
+    fn nv12_input_keeps_same_colors_as_bgra() {
+        if sidecar_path("ffmpeg").is_err() {
+            return;
+        }
+        let (w, h, fps) = (64u32, 48u32, 10u32);
+        let dir = std::env::temp_dir().join(format!("snapdoc_nv12_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Đỏ thuần: BGRA (0,0,255) ⇔ YCbCr BT.601 dải video (81, 90, 240).
+        let bgra_path = dir.join("bgra.mp4");
+        let mut enc = Encoder::start(&bgra_path, w, h, fps).unwrap();
+        let bgra = [0u8, 0, 255, 255].repeat((w * h) as usize);
+        for _ in 0..5 {
+            enc.write_frame(&bgra).unwrap();
+        }
+        enc.finish().unwrap();
+
+        let nv12_path = dir.join("nv12.mp4");
+        let mut enc = Encoder::start_with_format(&nv12_path, w, h, fps, PixelFormat::Nv12).unwrap();
+        assert_eq!(enc.in_format(), PixelFormat::Nv12);
+        let mut nv12 = vec![81u8; (w * h) as usize];
+        nv12.extend([90u8, 240].repeat((w * h / 4) as usize));
+        assert_eq!(nv12.len(), PixelFormat::Nv12.frame_len(w, h));
+        for _ in 0..5 {
+            enc.write_frame(&nv12).unwrap();
+        }
+        enc.finish().unwrap();
+
+        let a = center_rgb(&bgra_path, w, h);
+        let b = center_rgb(&nv12_path, w, h);
+        let _ = std::fs::remove_dir_all(&dir);
+        for c in 0..3 {
+            assert!((a[c] as i32 - b[c] as i32).abs() <= 6, "màu lệch: bgra {a:?} vs nv12 {b:?}");
+        }
+        assert!(b[0] > 230 && b[1] < 25 && b[2] < 25, "nv12 không ra đỏ: {b:?}");
+    }
+
+    /// GIF 2 lượt: ra file GIF hợp lệ, tiến độ tăng dần và kết thúc ở 1.0.
+    #[test]
+    fn export_gif_two_pass() {
+        if sidecar_path("ffmpeg").is_err() {
+            return;
+        }
+        let (w, h, fps) = (64u32, 48u32, 10u32);
+        let dir = std::env::temp_dir().join(format!("snapdoc_gif_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.mp4");
+        let mut enc = Encoder::start(&src, w, h, fps).unwrap();
+        for i in 0..20u8 {
+            enc.write_frame(&[i * 12, 255 - i * 12, 128, 255].repeat((w * h) as usize)).unwrap();
+        }
+        enc.finish().unwrap();
+
+        let out = dir.join("out.gif");
+        let opts = GifExportOptions { start_ms: 0, duration_ms: 2000, fps: 10, max_width: Some(32), speed: 1.0, loop_count: 0 };
+        let mut progress = Vec::new();
+        export_gif(&src, &out, &opts, |f| progress.push(f)).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(bytes.starts_with(b"GIF89a"), "không phải GIF");
+        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 32, "max_width không được áp");
+        assert_eq!(progress.last(), Some(&1.0));
+        assert!(progress.windows(2).all(|p| p[0] <= p[1]), "tiến độ lùi: {progress:?}");
     }
 
     /// Encode 1 video 5s (10fps × 50 frame) rồi cắt giữ lại 2 đoạn

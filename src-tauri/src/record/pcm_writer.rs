@@ -138,7 +138,7 @@ pub fn spawn(
             let file = match std::fs::File::create(&path) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("[SnapDoc][record] Không tạo được file audio tạm {}: {e}", path.display());
+                    log::warn!("[SnapDoc][record] Không tạo được file audio tạm {}: {e}", path.display());
                     // Vẫn phải xả kênh tới khi dừng, không thì phía capture đầy kênh.
                     while !stop.load(Ordering::SeqCst) {
                         match rx.recv_timeout(Duration::from_millis(50)) {
@@ -154,7 +154,7 @@ pub fn spawn(
                 // Thu trước mốc 0 (pre-roll), trong lúc pause hoặc sau mốc dừng → bỏ.
                 let Position::At(elapsed) = clock.position(captured_at) else { return true };
                 if let Err(e) = sink.push(&chunk, elapsed) {
-                    eprintln!("[SnapDoc][record] Lỗi ghi file audio tạm {}: {e}", path.display());
+                    log::warn!("[SnapDoc][record] Lỗi ghi file audio tạm {}: {e}", path.display());
                     sink.stats.io_error = true;
                     return false;
                 }

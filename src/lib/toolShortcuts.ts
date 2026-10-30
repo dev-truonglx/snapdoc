@@ -18,6 +18,10 @@ export function editorToolFromKey(e: KeyboardEvent): Tool | null {
     case "KeyW": return "numbered-arrow";
     case "KeyD": return "double-arrow";
     case "KeyA": return e.shiftKey ? "numbered-arrow" : "arrow";
+    case "KeyP": return "pen";
+    case "KeyS": return "spotlight";
+    case "KeyM": return "magnifier";
+    case "KeyJ": return "emoji";
     default: return null;
   }
 }

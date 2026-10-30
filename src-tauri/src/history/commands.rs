@@ -140,25 +140,51 @@ fn restore_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// File trên đĩa có được xoá cùng item không: chỉ khi SnapDoc tự tạo ra nó
+/// (`owned`, xem `db::migrate_v3`) hoặc nó nằm trong thư mục dữ liệu của app
+/// (vd bản remux `library/remux` của video imported). File sẵn có của user
+/// (video mở từ ngoài) chỉ được gỡ khỏi Library, KHÔNG bị xoá.
+fn may_delete_file(app: &AppHandle, owned: bool, path: &str) -> bool {
+    owned
+        || super::assets::root_dir(app)
+            .map(|root| std::path::Path::new(path).starts_with(root))
+            .unwrap_or(false)
+}
+
+fn remove_file_logged(path: &str) {
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("[SnapDoc][history] Không xoá được file {path} (file sẽ mồ côi trên đĩa): {e}");
+        }
+    }
+}
+
 fn permanently_delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(), String> {
     let rec = get_history_item_sync(app, id)?;
+    let owned: bool = {
+        let st = state(app)?;
+        let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+        conn.query_row("SELECT owned FROM history WHERE id = ?1", [id], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+    };
+    let delete_asset = may_delete_file(app, owned, &rec.asset_path);
     // Lỗi xoá file (đang bị app khác giữ, quyền...) KHÔNG chặn xoá row DB —
     // giữ row sẽ làm thùng rác không bao giờ dọn được — nhưng phải log lại:
     // trước đây nuốt im lặng, file mồ côi nằm lại trên đĩa mà không dấu vết.
-    for path in [&rec.asset_path, &rec.thumb_path] {
-        if let Err(e) = std::fs::remove_file(path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("[SnapDoc][history] Không xoá được file {path} (file sẽ mồ côi trên đĩa): {e}");
-            }
+    if delete_asset {
+        remove_file_logged(&rec.asset_path);
+    }
+    remove_file_logged(&rec.thumb_path);
+    // Dò CHẶT (không quét theo tiền tên): `Recording_T` không được xoá nhầm
+    // telemetry của `Recording_T_1`. Telemetry kiểu cũ nằm CẠNH file video →
+    // cùng quy tắc với asset: không đụng vào thư mục của user.
+    if let Some(telem_path) = crate::record::mouse_click::telemetry_path_strict(app, std::path::Path::new(&rec.asset_path)) {
+        if may_delete_file(app, delete_asset, &telem_path.to_string_lossy()) {
+            let _ = std::fs::remove_file(&telem_path);
         }
     }
-    // Dò CHẶT (không quét theo tiền tên): `Recording_T` không được xoá nhầm
-    // telemetry của `Recording_T_1`.
-    if let Some(telem_path) = crate::record::mouse_click::telemetry_path_strict(app, std::path::Path::new(&rec.asset_path)) {
-        let _ = std::fs::remove_file(&telem_path);
-    }
     let legacy_telem = std::path::Path::new(&rec.asset_path).with_extension("mouse.json");
-    if legacy_telem.exists() {
+    if delete_asset && legacy_telem.exists() {
         let _ = std::fs::remove_file(&legacy_telem);
     }
     let st = state(app)?;
@@ -216,18 +242,20 @@ fn permanently_delete_history_items_sync(app: &AppHandle, ids: &[String]) -> Res
 struct TrashFile {
     asset_path: String,
     thumb_path: String,
+    owned: bool,
 }
 
 fn delete_trash_items_batch(app: &AppHandle, where_clause: &str, params: &[&dyn ToSql]) -> Result<u32, String> {
     let items: Vec<TrashFile> = {
         let st = state(app)?;
         let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
-        let sql = format!("SELECT asset_path, thumb_path FROM history WHERE {where_clause}");
+        let sql = format!("SELECT asset_path, thumb_path, owned FROM history WHERE {where_clause}");
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(params, |r| {
             Ok(TrashFile {
                 asset_path: r.get(0)?,
                 thumb_path: r.get(1)?,
+                owned: r.get(2)?,
             })
         }).map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
@@ -240,13 +268,10 @@ fn delete_trash_items_batch(app: &AppHandle, where_clause: &str, params: &[&dyn 
     let count = items.len() as u32;
 
     for item in &items {
-        for path in [&item.asset_path, &item.thumb_path] {
-            if let Err(e) = std::fs::remove_file(path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!("[SnapDoc][history] Không xoá được file {path} (file sẽ mồ côi trên đĩa): {e}");
-                }
-            }
+        if may_delete_file(app, item.owned, &item.asset_path) {
+            remove_file_logged(&item.asset_path);
         }
+        remove_file_logged(&item.thumb_path);
     }
 
     let st = state(app)?;
@@ -604,8 +629,9 @@ fn get_history_doc_json_sync(app: &AppHandle, id: &str) -> Result<Option<DocLaye
 
 /// Lớp annotation + cờ "đây là bản nháp chưa lưu" — Editor cần cờ này để đánh
 /// dấu tài liệu là chưa lưu và để hỏi user muốn tiếp tục hay bỏ.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct DocLayer {
     pub json: String,
     pub is_draft: bool,
@@ -758,7 +784,7 @@ fn trim_history_video_sync(
     // hợp lệ, chỉ ảnh thu nhỏ hiển thị tạm là fallback trống (giống cách
     // `ingest_video` xử lý lỗi thumbnail).
     if let Err(e) = super::video_thumbnail::generate(&new_path, &thumb_path) {
-        eprintln!("[SnapDoc][history] Sinh thumbnail cho bản đã cắt thất bại: {e}");
+        log::warn!("[SnapDoc][history] Sinh thumbnail cho bản đã cắt thất bại: {e}");
     }
 
     let asset_path_str = new_path.to_string_lossy().to_string();
@@ -893,7 +919,7 @@ fn overwrite_history_video_sync(
         .sum();
     let file_size = std::fs::metadata(asset_path).ok().map(|m| m.len() as i64);
     if let Err(e) = super::video_thumbnail::generate(asset_path, std::path::Path::new(&rec.thumb_path)) {
-        eprintln!("[SnapDoc][history] Sinh lại thumbnail sau khi ghi đè thất bại: {e}");
+        log::warn!("[SnapDoc][history] Sinh lại thumbnail sau khi ghi đè thất bại: {e}");
     }
 
     let final_w = crop.map(|c| (c.width / 2) * 2).unwrap_or(rec.width);
@@ -1326,7 +1352,7 @@ pub async fn update_history_thumb(
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         if let Err(e) = update_history_thumb_sync(&app, &id, &preview_data) {
-            eprintln!("[SnapDoc][history] update_history_thumb thất bại (bỏ qua): {e}");
+            log::warn!("[SnapDoc][history] update_history_thumb thất bại (bỏ qua): {e}");
         }
         Ok(())
     })
@@ -1341,6 +1367,16 @@ fn save_gif_to_history_sync(
     duration_ms: i64,
 ) -> Result<HistoryRecord, String> {
     let p = std::path::Path::new(gif_path);
+    // Đường do webview truyền và về sau sẽ bị XOÁ cùng item (owned = 1) —
+    // chỉ nhận đúng file .gif, không cho đăng ký file tuỳ ý vào Library.
+    let is_gif = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gif"))
+        .unwrap_or(false);
+    if !is_gif {
+        return Err("File lưu vào Library phải có đuôi .gif".to_string());
+    }
     if !p.exists() {
         return Err(format!("File GIF không tồn tại: {gif_path}"));
     }
@@ -1360,7 +1396,7 @@ fn save_gif_to_history_sync(
     let new_id = uuid::Uuid::new_v4().to_string();
     let thumb_path = super::assets::thumb_path_for(app, &new_id)?;
     if let Err(e) = super::video_thumbnail::generate(p, &thumb_path) {
-        eprintln!("[SnapDoc][history] Sinh thumbnail cho GIF thất bại: {e}");
+        log::warn!("[SnapDoc][history] Sinh thumbnail cho GIF thất bại: {e}");
     }
 
     let asset_path_str = p.to_string_lossy().to_string();

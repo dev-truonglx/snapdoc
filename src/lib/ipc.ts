@@ -1,35 +1,32 @@
 import { invoke } from "@tauri-apps/api/core";
 import { type VideoOverlayItem, type VideoCrop, type ZoomSegment, sanitizeCrop } from "../features/video-trim/types";
 export type { VideoCrop, ZoomSegment };
-
-export interface MouseTelemetryItem {
-  t: number;
-  x: number;
-  y: number;
-  type: "click" | "move" | "drag";
-  button?: "left" | "right" | "middle";
-  count?: number;
-}
-
-export interface MouseTelemetryFile {
-  version: number;
-  videoWidth: number;
-  videoHeight: number;
-  durationMs: number;
-  events: MouseTelemetryItem[];
-}
-
-/** Video đang chờ mở trong Editor — đã CÓ SẴN trong History (`historyId`
- * luôn là id thật): mở từ Library hoặc vừa quay xong (ingest ngay lập tức,
- * xem `record::stop_recording_impl`) — không còn khái niệm "video chưa lưu". */
-export interface PendingVideo {
-  path: string;
-  width: number;
-  height: number;
-  durationMs: number;
-  historyId: string;
-  thumbPath?: string;
-}
+// Type sinh tự động từ struct Rust (ts-rs, `cargo test` trong src-tauri) —
+// KHÔNG sửa tay; đổi ở Rust rồi chạy lại test để cập nhật.
+import type { DocLayer } from "./bindings/DocLayer";
+import type { GifExportOptions } from "./bindings/GifExportOptions";
+import type { HistoryFilter } from "./bindings/HistoryFilter";
+import type { HistoryItem } from "./bindings/HistoryItem";
+import type { HistoryPage } from "./bindings/HistoryPage";
+import type { MouseTelemetryFile } from "./bindings/MouseTelemetryFile";
+import type { MouseTelemetryItem } from "./bindings/MouseTelemetryItem";
+import type { OpenedFile } from "./bindings/OpenedFile";
+import type { PendingVideo } from "./bindings/PendingVideo";
+import type { UpdateInfo } from "./bindings/UpdateInfo";
+import type { WindowInfo } from "./bindings/WindowInfo";
+export type {
+  DocLayer,
+  GifExportOptions,
+  HistoryFilter,
+  HistoryItem,
+  HistoryPage,
+  MouseTelemetryFile,
+  MouseTelemetryItem,
+  OpenedFile,
+  PendingVideo,
+  UpdateInfo,
+  WindowInfo,
+};
 
 export interface Pending {
   /** Blob URL được tạo trực tiếp từ Binary IPC — không qua base64. */
@@ -84,74 +81,10 @@ function parseBinaryPending(buf: ArrayBuffer | null): Pending | null {
   };
 }
 
-/** Lớp annotation kèm cờ "là bản nháp chưa lưu". */
-export interface DocLayer {
-  json: string;
-  isDraft: boolean;
-}
-
 // ── History / Library ────────────────────────────────────────────────────────
-
-export interface HistoryItem {
-  id: string;
-  createdAt: number;
-  updatedAt: number;
-  captureMode: "region" | "window" | "full" | "all" | "scroll" | "quick";
-  mediaType: "image" | "video" | "gif";
-  width: number;
-  height: number;
-  scaleFactor: number;
-  durationMs: number | null;
-  assetPath: string;
-  thumbPath: string;
-  fileSize: number | null;
-  sourceApp: string | null;
-  title: string | null;
-  isEdited: boolean;
-  deletedAt: number | null;
-  /** Đường dẫn bản Save/Save As gần nhất ra thư mục tuỳ chọn — `null` nếu
-   * chưa từng export ra ngoài (khi đó "Xem file trong Thư mục" mở `assetPath`
-   * — file gốc trong thư mục dữ liệu nội bộ). Xem `setHistoryExportedPath`. */
-  exportedPath: string | null;
-}
-
-export interface HistoryFilter {
-  from?: number;
-  to?: number;
-  captureMode?: string;
-  mediaType?: "image" | "video";
-  trashOnly?: boolean;
-  limit: number;
-  offset: number;
-}
-
-export interface HistoryPage {
-  items: HistoryItem[];
-  total: number;
-}
-
-export interface GifExportOptions {
-  startMs: number;
-  durationMs: number;
-  fps: number;
-  maxWidth?: number | null;
-  speed: number;
-  loopCount: number; // 0 = loop vô hạn, -1 = phát 1 lần
-}
 
 export type CaptureMode = "full" | "window" | "region" | "all" | "scroll";
 export type OutputMode = "editor" | "clipboard" | "save" | "save_copy" | "copy_editor";
-
-
-export interface WindowInfo {
-  id: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  title: string;
-  app: string;
-}
 
 /** Metadata 1 cửa sổ cho dialog "Chọn cửa sổ" dạng lưới (`WindowPickerDialog`) —
  * KHÔNG kèm ảnh (trả về ngay để vẽ khung lưới trước), không có toạ độ overlay
@@ -206,25 +139,6 @@ export interface Settings {
    * xuống settings.json để tray menu (native, Rust-side) đọc được, xem
    * `Settings.tsx` language switcher + `tray::current_lang`. */
   language?: string;
-}
-
-/** Kết quả mở file từ dialog. Không chỉ là data URL vì `.snapdoc` mang thêm lớp
- * annotation và đường dẫn gốc (Save ghi thẳng lại file đó). */
-export interface OpenedFile {
-  /** Data URL của pixel NỀN (với ảnh thường: chính nội dung file). */
-  dataUrl: string;
-  /** Lớp annotation — chỉ có với `.snapdoc`. */
-  docJson: string | null;
-  /** Đường dẫn file — chỉ có với `.snapdoc` (tài liệu file-backed). */
-  filePath: string | null;
-  /** Loại media: "image" hoặc "video". */
-  mediaType?: "image" | "video";
-}
-
-export interface UpdateInfo {
-  available: boolean;
-  version: string;
-  currentVersion: string;
 }
 
 export const ipc = {
@@ -349,6 +263,12 @@ export const ipc = {
   getUpdateReady: () => invoke<boolean>("get_update_ready"),
   installUpdate: () => invoke<void>("install_update"),
   restartApp: () => invoke<void>("restart_app"),
+  /** Mã màu `#RRGGBB` của pixel ảnh đóng băng màn `idx` tại vị trí tương đối (0..1). */
+  frozenPixel: (idx: number, fx: number, fy: number) => invoke<string | null>("frozen_pixel", { idx, fx, fy }),
+  /** Như `frozenPixel` nhưng copy luôn mã màu vào clipboard; trả mã đã copy. */
+  copyFrozenPixel: (idx: number, fx: number, fy: number) => invoke<string>("copy_frozen_pixel", { idx, fx, fy }),
+  /** Mở thư mục chứa `SnapDoc.log` (xem `commands::open_log_dir`). */
+  openLogDir: () => invoke<void>("open_log_dir"),
   // Scroll
   startScrollSession: () =>
     invoke<void>("start_scroll_session"),
@@ -507,7 +427,6 @@ export const ipc = {
       durationMs: Math.round(durationMs),
     }),
 };
-
 
 export type KeepRange = [number, number] | [number, number, number];
 
