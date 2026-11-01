@@ -53,6 +53,7 @@ interface AnnotationStageProps {
   /** Ẩn thanh zoom (Fit/100%/±) — dùng cho "Chụp nhanh". Mặc định hiện. */
   hideZoomBar?: boolean;
   onFlash?: (msg: string) => void;
+  onOpenResize?: () => void;
 }
 
 /**
@@ -65,7 +66,7 @@ export { imageAnnCache };
 
 const toSafeImageUrl = (src: string) => toSafeBlobUrl(src, 500_000);
 
-const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoomBar, onFlash }, ref) => {
+const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoomBar, onFlash, onOpenResize }, ref) => {
   const { t } = useTranslation();
   const doc = useEditor((s) => s.doc);
   const tool = useEditor((s) => s.tool);
@@ -150,6 +151,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const [hoverCursor, setHoverCursor] = useState<string | null>(null);
   const [cropRect, setCropRect] = useState<Draft | null>(null);
   const [cropHistory, setCropHistory] = useState<Draft[]>([]); // Lưu lại crop history
+  const [isExporting, setIsExporting] = useState(false);
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
   const [textareaSize, setTextareaSize] = useState({ width: 120, height: 60 });
   const hasResizedTextareaRef = useRef(false);
@@ -337,7 +339,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const tr = trRef.current;
     const layer = layerRef.current;
     if (!tr || !layer) return;
-    const activeIds = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+    const activeIds = isExporting ? [] : (selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []));
     if (activeIds.length === 1 && (tool === "select" || tool === "text" || EDIT_TOOLS.has(tool)) && editing?.id !== activeIds[0]) {
       const node = layer.findOne("#" + activeIds[0]);
       tr.nodes(node ? [node] : []);
@@ -345,7 +347,7 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
       tr.nodes([]);
     }
     layer.batchDraw();
-  }, [selectedId, selectedIds, tool, doc, editing?.id]);
+  }, [selectedId, selectedIds, tool, doc, editing?.id, isExporting]);
 
   // Zoom giữ nguyên điểm (vx,vy) — toạ độ trong viewport container (px từ mép
   // trái/trên). Dùng chung cho wheel/pinch, nút bấm và phím tắt nên mọi đường
@@ -688,51 +690,70 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     const layer = layerRef.current;
     if (!stage || !layer) return null;
 
-    // Lưu lại scale hiển thị hiện tại của Layer
-    const prevScaleX = layer.scaleX();
-    const prevScaleY = layer.scaleY();
+    // Lưu lại Transformer nodes và kiểm tra xem có đối tượng nào đang được focus/select không
+    const prevTrNodes = trRef.current?.nodes() ?? [];
+    const hasSelection = (selectedIds.length > 0 || !!selectedId || prevTrNodes.length > 0);
 
-    // Ẩn Transformer và khung chọn crop (thumbnail: nhớ để gắn lại sau)
-    const prevTrNodes = thumbPixelRatio !== undefined ? trRef.current?.nodes() ?? [] : [];
-    trRef.current?.nodes([]);
-    cropOverlayGroupRef.current?.hide();
-
-    // Layer về tỉ lệ gốc 1:1 (Stage giữ nguyên kích thước xem — vùng xuất
-    // truyền tường minh bên dưới, Konva vẽ vào canvas riêng của `toDataURL`).
-    layer.scale({ x: 1, y: 1 });
-
-    let dataUrl: string | null = null;
-    if (cropArea) {
-      const rx = (cropArea.width < 0 ? cropArea.x + cropArea.width : cropArea.x) + bgPad;
-      const ry = (cropArea.height < 0 ? cropArea.y + cropArea.height : cropArea.y) + bgPad;
-      const rw = Math.abs(cropArea.width);
-      const rh = Math.abs(cropArea.height);
-      dataUrl = stage.toDataURL({
-        x: rx,
-        y: ry,
-        width: rw,
-        height: rh,
-        pixelRatio: pr,
-        mimeType: "image/png",
-      });
-    } else {
-      dataUrl = stage.toDataURL({
-        x: 0,
-        y: 0,
-        width: totalW,
-        height: totalH,
-        pixelRatio: pr,
-        mimeType: "image/png",
+    // Tạm thời tắt focus/selection (viền sáng, tay nắm, transformer) để xuất ảnh sạch 100%
+    if (hasSelection) {
+      flushSync(() => {
+        setIsExporting(true);
       });
     }
 
-    // Hoàn trả scale viewport của Layer
-    layer.scale({ x: prevScaleX, y: prevScaleY });
-    cropOverlayGroupRef.current?.show();
-    if (prevTrNodes.length > 0) trRef.current?.nodes(prevTrNodes);
-    layer.batchDraw();
+    try {
+      // Lưu lại scale hiển thị hiện tại của Layer
+      const prevScaleX = layer.scaleX();
+      const prevScaleY = layer.scaleY();
 
-    return dataUrl;
+      // Ẩn Transformer và khung chọn crop
+      trRef.current?.nodes([]);
+      cropOverlayGroupRef.current?.hide();
+
+      // Layer về tỉ lệ gốc 1:1 (Stage giữ nguyên kích thước xem — vùng xuất
+      // truyền tường minh bên dưới, Konva vẽ vào canvas riêng của `toDataURL`).
+      layer.scale({ x: 1, y: 1 });
+
+      let dataUrl: string | null = null;
+      if (cropArea) {
+        const rx = (cropArea.width < 0 ? cropArea.x + cropArea.width : cropArea.x) + bgPad;
+        const ry = (cropArea.height < 0 ? cropArea.y + cropArea.height : cropArea.y) + bgPad;
+        const rw = Math.abs(cropArea.width);
+        const rh = Math.abs(cropArea.height);
+        dataUrl = stage.toDataURL({
+          x: rx,
+          y: ry,
+          width: rw,
+          height: rh,
+          pixelRatio: pr,
+          mimeType: "image/png",
+        });
+      } else {
+        dataUrl = stage.toDataURL({
+          x: 0,
+          y: 0,
+          width: totalW,
+          height: totalH,
+          pixelRatio: pr,
+          mimeType: "image/png",
+        });
+      }
+
+      // Hoàn trả scale viewport của Layer
+      layer.scale({ x: prevScaleX, y: prevScaleY });
+      cropOverlayGroupRef.current?.show();
+
+      return dataUrl;
+    } finally {
+      // Khôi phục lại trạng thái focus/selection trên màn hình cho người dùng
+      if (hasSelection) {
+        flushSync(() => {
+          setIsExporting(false);
+        });
+        if (prevTrNodes.length > 0) trRef.current?.nodes(prevTrNodes);
+        layerRef.current?.batchDraw();
+      }
+    }
   };
 
   const exportCropDataUrl = (): string | null => {
@@ -1537,7 +1558,13 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
   const atZoomMax = scale >= SCALE_MAX - 1e-4;
 
   // Step luôn tròn → keepRatio. Line/arrow/numbered-arrow không dùng transformer bounding box
-  const activeIds = selectedIds.length > 0 ? selectedIds : (selectedId ? [selectedId] : []);
+  const activeIds = isExporting
+    ? []
+    : selectedIds.length > 0
+    ? selectedIds
+    : selectedId
+    ? [selectedId]
+    : [];
   const selectedAnns = doc ? doc.annotations.filter((a) => activeIds.includes(a.id)) : [];
   const spotlights = (doc?.annotations ?? []).filter((a): a is SpotlightAnn => a.type === "spotlight");
   const isCircleSelected = selectedAnns.length > 0 && selectedAnns.every((a) => a.type === "step" || a.type === "magnifier" || a.type === "emoji");
@@ -2682,6 +2709,24 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     {/* Zoom bar — absolute trên outer wrapper, không bị cuộn. Ẩn ở Chụp nhanh. */}
     {!hideZoomBar && (
     <div style={zoomBar}>
+      {/* Kích thước ảnh — click để mở ResizeDialog */}
+      {doc && onOpenResize && (
+        <>
+          <button
+            onClick={onOpenResize}
+            style={{
+              ...zoomChip,
+              fontVariantNumeric: "tabular-nums",
+              padding: "0 6px",
+              color: "rgba(242,242,245,0.85)",
+            }}
+            title={t("annotationCanvas.resizeHint", "Kích thước ảnh — Bấm để đổi cỡ")}
+          >
+            {doc.imgW} × {doc.imgH}
+          </button>
+          <span style={{ width: 1, height: 16, background: "rgba(255,255,255,0.12)", margin: "0 2px" }} />
+        </>
+      )}
       {/* DPI badge — chỉ hiện khi HiDPI (Retina 2×, 3×, ...) */}
       {dpiLabel && (
         <>

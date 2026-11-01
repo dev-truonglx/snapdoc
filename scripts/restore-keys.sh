@@ -43,5 +43,11 @@ echo "Restoring to $TAURI_DIR …"
 decrypt "$ENC_UPDATER"  "$TAURI_DIR/snapdoc-updater.key"
 decrypt "$ENC_CODESIGN" "$TAURI_DIR/snapdoc-codesign.p12"
 
+if [ "$(uname -s)" = "Darwin" ] && [ -f "$TAURI_DIR/snapdoc-codesign.p12" ]; then
+  echo
+  echo "Syncing restored macOS code-signing identity into Keychain…"
+  bash scripts/macos-codesign.sh --ensure-only --require-existing
+fi
+
 echo
-echo "Done. Next build/release will re-import the macOS identity from the .p12."
+echo "Done. macOS code-signing identity and updater key are synced."

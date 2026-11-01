@@ -97,7 +97,7 @@ VERSION="$VERSION" node -e '
 # the Screen Recording / Accessibility (TCC) grant when the app auto-updates.
 echo "==> [2/6] Building macOS universal bundle (a few minutes)"
 export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-SnapDoc Dev}"
-bash scripts/macos-codesign.sh --ensure-only
+bash scripts/macos-codesign.sh --ensure-only --require-existing
 
 # Release-only: a stale ffmpeg sidecar under src-tauri/binaries can survive
 # across local rebuilds even when `beforeBuildCommand` exists. Purge the macOS
@@ -139,7 +139,9 @@ check_signed() { # $1 = .app path, $2 = label
   fi
   codesign --verify --deep --strict "$1" >/dev/null 2>&1 \
     || { echo "ERROR: $2 failed signature verification."; exit 1; }
-  echo "    OK ($2): $(codesign -dvvv "$1" 2>&1 | grep '^Authority=' | head -1)"
+  local dreq
+  dreq="$(codesign -dr - "$1" 2>&1 | grep 'designated =>' || true)"
+  echo "    OK ($2): $(codesign -dvvv "$1" 2>&1 | grep '^Authority=' | head -1) | $dreq"
 }
 
 echo "==> Verifying macOS code signature (on-disk bundle + updater payload)"

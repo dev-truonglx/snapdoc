@@ -333,6 +333,8 @@
     "openFile": "Open image from file (Ctrl/Cmd+O)",
     "stitchImages": "Stitch images (combine multiple)",
     "stitchButton": "Combine",
+    "resizeImage": "Resize image (Ctrl/Cmd+Shift+R)",
+    "resizeBtn": "Resize",
     "customColor": "Select custom color",
     "fontSize": "Font size",
     "fontSizeSmaller": "Smaller",
@@ -418,6 +420,7 @@
     "savingVideoFinalizing": "Finalizing video file...",
     "noImagesToStitch": "No images to stitch",
     "imageStitched": "Images stitched — Ctrl/Cmd+Z to undo",
+    "imageResized": "Image resized — Ctrl/Cmd+Z to undo",
     "flattened": "Flattened — annotations applied to image",
     "flattenConfirmTitle": "Flatten image?",
     "flattenDescription": "This will <1>write all annotations to the original image</1> and cannot be undone (Undo history will be cleared).",
@@ -507,7 +510,29 @@
     "zoomInLabel": "Zoom in",
     "toggleZoom": "Click to toggle Fit ↔ 100%",
     "hidpiInfo": "HiDPI {{label}} — {{physicalW}}×{{physicalH}}px physical ({{logicalW}}×{{logicalH}} pts)",
+    "resizeHint": "Image dimensions — Click to resize",
     "loadingImage": "Loading image…"
+  },
+  "resizeDialog": {
+    "title": "Resize image",
+    "close": "Close (Esc)",
+    "originalSize": "Original size",
+    "newSize": "New size",
+    "quickPresets": "Quick presets",
+    "retinaPresetHint": "Downscale 2× to 1× for Retina image",
+    "presetOriginal": "Original",
+    "presetWidth": "Width:",
+    "customDimensions": "Custom dimensions",
+    "unitPercent": "Percentage (%)",
+    "width": "Width",
+    "height": "Height",
+    "aspectLocked": "Aspect ratio locked (Click to unlock)",
+    "aspectUnlocked": "Aspect ratio unlocked (Click to lock)",
+    "scalePercent": "Scale percentage",
+    "scaleAnnotations": "Scale drawn annotations proportionally (arrows, text, boxes...)",
+    "cancel": "Cancel",
+    "apply": "Apply",
+    "applying": "Processing…"
   },
   "videoTrimmer": {
     "volume": "Volume",
@@ -661,5 +686,15 @@
     "apply": "Apply crop",
     "copy": "Copy",
     "cancel": "Cancel"
+  },
+  "editorUpdate": {
+    "updateReadyMsg": "SnapDoc v{{version}} is ready to install! Restart to apply.",
+    "updateAvailableMsg": "A new version of SnapDoc v{{version}} is available.",
+    "restartNow": "Restart now",
+    "updateNow": "Update now",
+    "updating": "Updating…",
+    "restartToolbar": "Restart (v{{version}})",
+    "updateToolbar": "Update (v{{version}})",
+    "dismiss": "Dismiss notification"
   }
 }

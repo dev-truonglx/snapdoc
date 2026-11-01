@@ -333,6 +333,8 @@
     "openFile": "Mở ảnh từ file (Ctrl/Cmd+O)",
     "stitchImages": "Nối ảnh dài (ghép nhiều ảnh)",
     "stitchButton": "Ghép",
+    "resizeImage": "Đổi kích thước ảnh (Ctrl/Cmd+Shift+R)",
+    "resizeBtn": "Đổi cỡ",
     "customColor": "Chọn màu tùy chỉnh",
     "fontSize": "Cỡ chữ",
     "fontSizeSmaller": "Nhỏ hơn",
@@ -418,6 +420,7 @@
     "savingVideoFinalizing": "Đang hoàn tất lưu file...",
     "noImagesToStitch": "Chưa có ảnh để nối",
     "imageStitched": "Đã nối ảnh — Ctrl/Cmd+Z để hoàn tác",
+    "imageResized": "Đã đổi kích thước ảnh — Ctrl/Cmd+Z để hoàn tác",
     "flattened": "Đã flatten — annotation đã được ghi vào ảnh",
     "flattenConfirmTitle": "Flatten ảnh?",
     "flattenDescription": "Thao tác này sẽ <1>ghi tất cả annotation vào ảnh gốc</1> và không thể hoàn tác (Undo sẽ bị xóa).",
@@ -507,7 +510,29 @@
     "zoomInLabel": "Phóng to",
     "toggleZoom": "Bấm để đổi Fit ↔ 100%",
     "hidpiInfo": "HiDPI {{label}} — {{physicalW}}×{{physicalH}}px vật lý ({{logicalW}}×{{logicalH}} pts)",
+    "resizeHint": "Kích thước ảnh — Bấm để đổi cỡ",
     "loadingImage": "Đang tải ảnh…"
+  },
+  "resizeDialog": {
+    "title": "Đổi kích thước ảnh",
+    "close": "Đóng (Esc)",
+    "originalSize": "Kích thước gốc",
+    "newSize": "Kích thước mới",
+    "quickPresets": "Tùy chọn nhanh",
+    "retinaPresetHint": "Thu nhỏ 2× về 1× cho ảnh Retina",
+    "presetOriginal": "Gốc",
+    "presetWidth": "Bề rộng:",
+    "customDimensions": "Kích thước tùy chỉnh",
+    "unitPercent": "Phần trăm (%)",
+    "width": "Chiều rộng",
+    "height": "Chiều cao",
+    "aspectLocked": "Đang khóa tỉ lệ khung hình (Click để mở khóa)",
+    "aspectUnlocked": "Đang mở khóa tỉ lệ (Click để khóa)",
+    "scalePercent": "Tỉ lệ phần trăm",
+    "scaleAnnotations": "Tỉ lệ lại các chú thích đã vẽ (mũi tên, chữ, khung...)",
+    "cancel": "Hủy",
+    "apply": "Áp dụng",
+    "applying": "Đang xử lý…"
   },
   "videoTrimmer": {
     "volume": "Âm lượng",
@@ -661,5 +686,15 @@
     "apply": "Áp dụng crop",
     "copy": "Sao chép",
     "cancel": "Huỷ"
+  },
+  "editorUpdate": {
+    "updateReadyMsg": "Đã tải xong bản cập nhật SnapDoc v{{version}}! Khởi động lại để áp dụng.",
+    "updateAvailableMsg": "Có bản cập nhật mới SnapDoc v{{version}}.",
+    "restartNow": "Khởi động lại ngay",
+    "updateNow": "Cập nhật ngay",
+    "updating": "Đang cập nhật…",
+    "restartToolbar": "Khởi động lại (v{{version}})",
+    "updateToolbar": "Cập nhật (v{{version}})",
+    "dismiss": "Đóng thông báo"
   }
 }

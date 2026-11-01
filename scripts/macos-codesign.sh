@@ -60,28 +60,75 @@ EOF
   echo "    persisted to $PERSIST_P12 — BACK THIS UP; reuse for all future builds."
 }
 
-# Guarantee the keychain holds EXACTLY the persisted identity (cert + private
+# Extract the uppercase hex SHA-1 fingerprint of the certificate inside $PERSIST_P12.
+p12_sha1() {
+  local OPENSSL=openssl
+  [ -x /usr/bin/openssl ] && OPENSSL=/usr/bin/openssl
+  "$OPENSSL" pkcs12 -in "$PERSIST_P12" -passin "pass:$P12PASS" -nokeys 2>/dev/null \
+    | "$OPENSSL" x509 -noout -fingerprint -sha1 2>/dev/null \
+    | sed 's/.*=//; s/://g' \
+    | tr '[:lower:]' '[:upper:]'
+}
+
+# Guarantee the keychain holds40-char SHA-1 matching $PERSIST_P12 (cert + private
 # key). The persisted PKCS#12 is the single source of truth.
+# Previously `ensure_identity` only checked `grep -q "$IDENTITY"`, so if a machine
+# had an older auto-generated "SnapDoc Dev" cert in Keychain (different SHA-1),
+# even after `restore-keys.sh` wrote `~/.tauri/snapdoc-codesign.p12`, Keychain kept
+# using the wrong cert — causing `tccd` (`csreq matched status: 0`) to revoke
+# Screen Recording permission on update!
 ensure_identity() {
+  local require_existing="${1:-0}"
   if [ ! -f "$PERSIST_P12" ]; then
-    security delete-certificate -c "$IDENTITY" "$KEYCHAIN" >/dev/null 2>&1 || true
+    if [ "$require_existing" = "1" ]; then
+      echo "ERROR: macOS code-signing identity missing at $PERSIST_P12" >&2
+      echo "       Cutting a release with a newly generated certificate changes the" >&2
+      echo "       certificate leaf SHA-1 and forces ALL macOS users to re-grant" >&2
+      echo "       Screen & System Audio Recording permissions on update!" >&2
+      echo "       Restore your keys first: npm run restore:keys" >&2
+      exit 1
+    fi
+    while security delete-certificate -c "$IDENTITY" "$KEYCHAIN" >/dev/null 2>&1; do :; done
     create_and_persist
     # -A lets codesign use the key non-interactively.
     security import "$PERSIST_P12" -k "$KEYCHAIN" -P "$P12PASS" -A >/dev/null
     return 0
   fi
-  if security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null | grep -q "$IDENTITY"; then
+
+  local expected_sha1
+  expected_sha1="$(p12_sha1)"
+  if [ -z "$expected_sha1" ]; then
+    echo "ERROR: could not read certificate SHA-1 from $PERSIST_P12" >&2
+    exit 1
+  fi
+
+  local keychain_hashes
+  keychain_hashes="$(
+    security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null \
+      | grep "\"$IDENTITY\"" \
+      | awk '{print $2}' \
+      | tr '[:lower:]' '[:upper:]' \
+      | sort -u || true
+  )"
+
+  if [ "$keychain_hashes" = "$expected_sha1" ]; then
     return 0
   fi
-  security delete-certificate -c "$IDENTITY" "$KEYCHAIN" >/dev/null 2>&1 || true
+
+  echo "==> Syncing Keychain identity '$IDENTITY' to match $PERSIST_P12 (SHA-1: $expected_sha1)"
+  while security delete-certificate -c "$IDENTITY" "$KEYCHAIN" >/dev/null 2>&1; do :; done
   security import "$PERSIST_P12" -k "$KEYCHAIN" -P "$P12PASS" -A >/dev/null
 }
 
-# `--ensure-only`: make the identity available (used before `tauri build` so
-# Tauri signs the bundle with it), then exit without signing anything here.
+# `--ensure-only [--require-existing]`: make the identity available (used before
+# `tauri build` so Tauri signs the bundle with it), then exit without signing anything here.
 if [ "${1:-}" = "--ensure-only" ]; then
-  ensure_identity
-  echo "==> Identity '$IDENTITY' ready."
+  REQUIRE_EXISTING=0
+  if [ "${2:-}" = "--require-existing" ]; then
+    REQUIRE_EXISTING=1
+  fi
+  ensure_identity "$REQUIRE_EXISTING"
+  echo "==> Identity '$IDENTITY' ready (SHA-1: $(p12_sha1))."
   exit 0
 fi
 
@@ -96,11 +143,20 @@ if [ -z "$APP" ] || [ ! -d "$APP" ]; then
   exit 1
 fi
 
-ensure_identity
-echo "==> Signing: $APP"
-codesign --force --deep --sign "$IDENTITY" "$APP"
+ensure_identity 0
+ACTIVE_SHA1="$(p12_sha1)"
+ENTITLEMENTS="$(dirname "$0")/../src-tauri/Entitlements.plist"
+echo "==> Signing: $APP (identity: $IDENTITY, SHA-1: $ACTIVE_SHA1)"
+if [ -f "$APP/Contents/MacOS/ffmpeg" ]; then
+  codesign --force --sign "$ACTIVE_SHA1" "$APP/Contents/MacOS/ffmpeg"
+fi
+if [ -f "$ENTITLEMENTS" ]; then
+  codesign --force --deep --entitlements "$ENTITLEMENTS" --sign "$ACTIVE_SHA1" "$APP"
+else
+  codesign --force --deep --sign "$ACTIVE_SHA1" "$APP"
+fi
 codesign --verify --deep --strict --verbose=2 "$APP"
-echo "==> OK: signed with '$IDENTITY' and signature verified."
+echo "==> OK: signed with '$IDENTITY' ($ACTIVE_SHA1) and signature verified."
 echo
 echo "Next: grant Screen Recording once (System Settings > Privacy & Security >"
 echo "Screen Recording), fully quit SnapDoc (pkill -f SnapDoc.app), then relaunch."

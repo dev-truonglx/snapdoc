@@ -568,6 +568,8 @@ pub fn run() {
                 // thì mất (no-op nếu không quay hoặc đã chốt ở "Quit").
                 tauri::RunEvent::Exit => {
                     record::finalize_on_exit(_app);
+                    #[cfg(target_os = "macos")]
+                    update::install_downloaded_on_exit();
                 }
                 // macOS: click dock icon / Spotlight search khi app đang chạy.
                 #[cfg(target_os = "macos")]
