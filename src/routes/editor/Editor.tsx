@@ -38,6 +38,7 @@ import StitchDialog from "../../features/annotation/compose/StitchDialog";
 import type { StitchResult } from "../../features/annotation/compose/stitch";
 import ResizeDialog, { type ResizeResult } from "../../features/annotation/compose/ResizeDialog";
 import { base64ToBlob } from "../../lib/blobUtils";
+import { createEditorDragPointerDownHandler } from "../history/nativeDrag";
 
 interface VideoDoc {
   historyId: string;
@@ -45,6 +46,7 @@ interface VideoDoc {
   src: string;
   durationMs: number;
   thumbUrl?: string;
+  thumbPath?: string;
 }
 
 import type { ZoomSegment } from "../../features/video-trim/types";
@@ -490,6 +492,7 @@ export default function Editor() {
             src: convertFileSrc(pv.path),
             durationMs: pv.durationMs,
             thumbUrl: pv.thumbPath ? convertFileSrc(pv.thumbPath) : undefined,
+            thumbPath: pv.thumbPath ?? undefined,
           });
           setVideoTrimState(EMPTY_TRIM_STATE);
           setVideoSavedSig(null);
@@ -535,6 +538,7 @@ export default function Editor() {
             src: convertFileSrc(pv.path),
             durationMs: pv.durationMs,
             thumbUrl: pv.thumbPath ? convertFileSrc(pv.thumbPath) : undefined,
+            thumbPath: pv.thumbPath ?? undefined,
           });
           setVideoTrimState(EMPTY_TRIM_STATE);
           setVideoSavedSig(null);
@@ -562,6 +566,7 @@ export default function Editor() {
                     src: convertFileSrc(latest.assetPath),
                     durationMs: latest.durationMs ?? 0,
                     thumbUrl: latest.thumbPath ? convertFileSrc(latest.thumbPath) : undefined,
+                    thumbPath: latest.thumbPath || undefined,
                   });
                   setVideoTrimState(EMPTY_TRIM_STATE);
                   setVideoSavedSig(null);
@@ -687,6 +692,8 @@ export default function Editor() {
         filePath: updated.assetPath,
         src: convertFileSrc(updated.assetPath),
         durationMs: updated.durationMs ?? 0,
+        thumbUrl: updated.thumbPath ? convertFileSrc(updated.thumbPath) : undefined,
+        thumbPath: updated.thumbPath || undefined,
       });
       setVideoTrimState(EMPTY_TRIM_STATE);
       setVideoSavedSig(null);
@@ -988,6 +995,9 @@ export default function Editor() {
     return () => window.removeEventListener("paste", handlePaste);
   }, [videoDoc]);
 
+  const insertHistoryImageByIdRef = useRef(insertHistoryImageById);
+  insertHistoryImageByIdRef.current = insertHistoryImageById;
+
   // Lắng nghe kéo thả file từ hệ điều hành (Tauri drag drop event)
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -1010,29 +1020,44 @@ export default function Editor() {
           }
 
           if (videoDoc || !useEditor.getState().doc) return;
-          const historyId = (window as any).__snapdocDraggingHistoryId;
-          if (historyId) {
-            (window as any).__snapdocDraggingHistoryId = null;
-            const dpr = window.devicePixelRatio || 1;
-            insertHistoryImageById(historyId, {
-              clientX: payload.position.x / dpr,
-              clientY: payload.position.y / dpr,
-            });
-            return;
-          }
-
-          const imagePaths = payload.paths.filter((p) =>
-            /\.(png|jpe?g|webp|bmp|gif|svg|ico|tiff?|avif)$/i.test(p),
-          );
-          if (imagePaths.length === 0) return;
-
           const dpr = window.devicePixelRatio || 1;
           const clientX = payload.position.x / dpr;
           const clientY = payload.position.y / dpr;
 
-          for (let i = 0; i < imagePaths.length; i++) {
+          const historyId = (window as any).__snapdocDraggingHistoryId;
+          if (historyId) {
+            (window as any).__snapdocDraggingHistoryId = null;
+            void insertHistoryImageByIdRef.current(historyId, { clientX, clientY });
+            return;
+          }
+
+          // Nhận diện file kéo từ HistoryStrip / HistoryWindow (nằm trong library/drag_cache/<id>/...)
+          const dragCacheIds: string[] = [];
+          const externalImagePaths: string[] = [];
+          for (const p of payload.paths) {
+            const m = p.match(/[/\\]library[/\\]drag_cache[/\\]([0-9a-fA-F-]{36})[/\\]/);
+            if (m && m[1]) {
+              dragCacheIds.push(m[1]);
+            } else if (/\.(png|jpe?g|webp|bmp|gif|svg|ico|tiff?|avif)$/i.test(p)) {
+              externalImagePaths.push(p);
+            }
+          }
+
+          if (dragCacheIds.length > 0) {
+            for (let i = 0; i < dragCacheIds.length; i++) {
+              await insertHistoryImageByIdRef.current(dragCacheIds[i], {
+                clientX: clientX + i * 20,
+                clientY: clientY + i * 20,
+              });
+            }
+            return;
+          }
+
+          if (externalImagePaths.length === 0) return;
+
+          for (let i = 0; i < externalImagePaths.length; i++) {
             try {
-              const dataUrl = await loadFilePathAsDataUrl(imagePaths[i]);
+              const dataUrl = await loadFilePathAsDataUrl(externalImagePaths[i]);
               insertImageAnnotation(dataUrl, { clientX: clientX + i * 20, clientY: clientY + i * 20 });
             } catch (err) {
               console.error("Lỗi load ảnh từ đường dẫn:", err);
@@ -1058,8 +1083,7 @@ export default function Editor() {
     const onCustomDrop = (e: Event) => {
       const customEvt = e as CustomEvent<{ id: string; clientX: number; clientY: number }>;
       if (!customEvt.detail?.id) return;
-      console.log("[SnapDoc Drag] custom event snapdoc:insert-history-item received:", customEvt.detail);
-      insertHistoryImageById(customEvt.detail.id, {
+      void insertHistoryImageByIdRef.current(customEvt.detail.id, {
         clientX: customEvt.detail.clientX,
         clientY: customEvt.detail.clientY,
       });
@@ -1284,6 +1308,23 @@ export default function Editor() {
     }
   };
 
+  const handleEditorDragStartOut = createEditorDragPointerDownHandler(() => {
+    if (videoDoc) {
+      return {
+        type: "video",
+        filePath: videoDoc.filePath,
+        thumbPath: videoDoc.thumbPath,
+      };
+    }
+    const currentDoc = useEditor.getState().doc;
+    if (!currentDoc) return null;
+    return {
+      type: "image",
+      getDataUrl: () => stageRef.current?.exportPng(),
+      title: currentDoc.filePath ? undefined : "SnapDoc_Annotation",
+    };
+  });
+
   return (
     <div
       className="solid-bg"
@@ -1304,6 +1345,7 @@ export default function Editor() {
           onOpen={doOpen}
           onStitch={doStitch}
           onResize={doResize}
+          onDragStartOut={handleEditorDragStartOut}
           busy={busy}
         />
       )}
@@ -1366,6 +1408,7 @@ export default function Editor() {
             src: convertFileSrc(item.assetPath),
             durationMs: item.durationMs ?? 0,
             thumbUrl: item.thumbPath ? convertFileSrc(item.thumbPath) : undefined,
+            thumbPath: item.thumbPath || undefined,
           });
           setVideoTrimState(EMPTY_TRIM_STATE);
           setVideoSavedSig(null);

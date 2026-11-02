@@ -144,6 +144,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -267,6 +268,12 @@ pub fn run() {
             commands::copy_gif_to_clipboard,
             history::commands::save_gif_to_history,
             commands::get_video_mouse_telemetry,
+            history::commands::export_history_images,
+            history::commands::reveal_path,
+            history::commands::get_history_counts,
+            history::commands::prepare_history_drag_items,
+            history::commands::prepare_editor_drag_file,
+            history::commands::batch_rename_history_items,
         ])
 
         .setup(|app| {

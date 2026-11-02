@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { HistoryItem } from "../../lib/ipc";
 import { modeLabel } from "./HistoryItemCard";
 import { fmtDateTime, fmtSize, fmtDuration } from "./formatUtils";
+import { createItemPointerDownHandler, wasJustDragged } from "./nativeDrag";
 
 interface Props {
   item: HistoryItem;
@@ -19,16 +20,26 @@ export default function HistoryListRow({ item, selected, onSelect, onToggleCheck
   const { t } = useTranslation();
   const [broken, setBroken] = useState(false);
   const isVideo = item.mediaType === "video";
+  const handlePointerDown = useMemo(() => createItemPointerDownHandler(item), [item]);
 
   return (
     <div
       style={{ ...row, background: selected ? "var(--accent)" : "transparent" }}
-      onClick={onSelect}
-      onDoubleClick={onOpenEditor}
+      onPointerDown={handlePointerDown}
+      onDragStart={(e) => e.preventDefault()}
+      onClick={(e) => {
+        if (wasJustDragged()) return;
+        onSelect(e);
+      }}
+      onDoubleClick={() => {
+        if (wasJustDragged()) return;
+        onOpenEditor();
+      }}
       title={item.title ?? undefined}
     >
       <div
         style={checkCol}
+        onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
           onToggleCheck(e);
@@ -47,7 +58,11 @@ export default function HistoryListRow({ item, selected, onSelect, onToggleCheck
           <img
             src={`${convertFileSrc(item.thumbPath)}?v=${item.updatedAt}`}
             alt=""
-            style={thumbImg}
+            draggable={false}
+            style={{
+              ...thumbImg,
+              userSelect: "none",
+            }}
             onError={() => setBroken(true)}
             loading="lazy"
           />

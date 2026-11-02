@@ -1,10 +1,12 @@
 import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
+import HistorySidebar from "./HistorySidebar";
 import HistoryToolbar from "./HistoryToolbar";
 import HistoryGrid from "./HistoryGrid";
 import HistoryList from "./HistoryList";
 import HistoryPreviewPanel from "./HistoryPreviewPanel";
+import Settings from "../settings/Settings";
 import { useHistory } from "./useHistoryStore";
 import { ipc, type HistoryItem } from "../../lib/ipc";
 import { showError } from "../../lib/notify";
@@ -14,6 +16,33 @@ export default function HistoryWindow() {
   const reload = useHistory((s) => s.reload);
   const addItem = useHistory((s) => s.addItem);
   const viewMode = useHistory((s) => s.viewMode);
+  const activeNav = useHistory((s) => s.activeNav);
+  const setActiveNav = useHistory((s) => s.setActiveNav);
+  const isRightPanelCollapsed = useHistory((s) => s.isRightPanelCollapsed);
+
+  // Điều hướng từ Tray hoặc URL params (?nav=settings)
+  useEffect(() => {
+    const navParam = new URLSearchParams(window.location.search).get("nav");
+    if (navParam === "settings") {
+      setActiveNav("settings");
+    } else if (navParam === "all" || navParam === "library") {
+      setActiveNav("all");
+    }
+
+    const unlisten = listen<string>("history:navigate", (e) => {
+      if (e.payload === "settings") {
+        setActiveNav("settings");
+      } else if (e.payload === "all" || e.payload === "library") {
+        setActiveNav("all");
+      } else if (e.payload === "trash") {
+        setActiveNav("trash");
+      }
+    });
+
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, [setActiveNav]);
 
   useEffect(() => {
     reload();
@@ -51,6 +80,7 @@ export default function HistoryWindow() {
       const el = e.target as HTMLElement | null;
       const tag = el?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+      if (useHistory.getState().activeNav === "settings") return;
       const st = useHistory.getState();
       const ids = st.selectedIds.length > 0 ? st.selectedIds : st.selectedId ? [st.selectedId] : [];
       const mod = e.metaKey || e.ctrlKey;
@@ -95,16 +125,26 @@ export default function HistoryWindow() {
   }, [t]);
 
   return (
-    <div className="solid-bg" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <HistoryToolbar />
-      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-        {viewMode === "grid" ? (
-          <HistoryGrid onOpenEditor={openEditor} />
-        ) : (
-          <HistoryList onOpenEditor={openEditor} />
-        )}
-        <HistoryPreviewPanel onOpenEditor={openEditor} />
-      </div>
+    <div className="solid-bg" style={{ display: "flex", height: "100%", width: "100%", overflow: "hidden" }}>
+      <HistorySidebar />
+
+      {activeNav === "settings" ? (
+        <div style={{ flex: 1, minWidth: 0, height: "100%", overflow: "hidden" }}>
+          <Settings inline />
+        </div>
+      ) : (
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", height: "100%" }}>
+          <HistoryToolbar />
+          <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+            {viewMode === "grid" ? (
+              <HistoryGrid onOpenEditor={openEditor} />
+            ) : (
+              <HistoryList onOpenEditor={openEditor} />
+            )}
+            {!isRightPanelCollapsed && <HistoryPreviewPanel onOpenEditor={openEditor} />}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

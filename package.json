@@ -26,6 +26,7 @@
     "stats": "bash scripts/install-stats.sh"
   },
   "dependencies": {
+    "@crabnebula/tauri-plugin-drag": "^2.1.0",
     "@tanstack/react-virtual": "^3.13.6",
     "@tauri-apps/api": "~2.11.1",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",

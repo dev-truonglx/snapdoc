@@ -174,6 +174,7 @@ interface Props {
   onOpen: () => void;
   onStitch: () => void;
   onResize?: () => void;
+  onDragStartOut?: (e: React.PointerEvent) => void;
   busy: boolean;
 }
 
@@ -415,7 +416,7 @@ function ColorStopButton({
 }
 
 export default function Toolbar({
-  mode, onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, onResize, busy,
+  mode, onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, onResize, onDragStartOut, busy,
 }: Props) {
   const { t } = useTranslation();
 
@@ -1406,6 +1407,21 @@ export default function Toolbar({
               </svg>
               <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.copyBtn")}</span>
             </button>
+
+            {onDragStartOut && (
+              <button
+                onPointerDown={onDragStartOut}
+                onDragStart={(e) => e.preventDefault()}
+                disabled={busy}
+                style={{ ...actionBtn, cursor: "grab" }}
+                title={t("editorToolbar.dragOutTooltip")}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M15 3h6v6M10 14L21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                </svg>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.dragOutBtn")}</span>
+              </button>
+            )}
           </div>
     </div>
   );

@@ -1,13 +1,27 @@
 import { create } from "zustand";
-import { ipc, type HistoryFilter, type HistoryItem } from "../../lib/ipc";
+import { ipc, type HistoryFilter, type HistoryItem, type HistoryCounts } from "../../lib/ipc";
 
 const PAGE_SIZE = 60;
 
 export type ViewMode = "grid" | "list";
+export type ActiveNav = "all" | "images" | "videos" | "trash" | "settings";
+
+export function filterHistoryItems(items: HistoryItem[], searchQuery: string): HistoryItem[] {
+  const q = searchQuery.trim().toLowerCase();
+  if (!q) return items;
+  return items.filter(
+    (it) =>
+      it.title?.toLowerCase().includes(q) ||
+      it.sourceApp?.toLowerCase().includes(q) ||
+      it.captureMode.toLowerCase().includes(q),
+  );
+}
 
 interface HistoryState {
   items: HistoryItem[];
   filter: HistoryFilter;
+  counts: HistoryCounts;
+  refreshCounts: () => Promise<void>;
   selectedId: string | null;
   selectedIds: string[];
   loading: boolean;
@@ -15,6 +29,12 @@ interface HistoryState {
   error: string | null;
   viewMode: ViewMode;
   setViewMode: (mode: ViewMode) => void;
+  activeNav: ActiveNav;
+  setActiveNav: (nav: ActiveNav) => void;
+  searchQuery: string;
+  setSearchQuery: (q: string) => void;
+  isRightPanelCollapsed: boolean;
+  toggleRightPanel: () => void;
   /** Tăng mỗi lần filter đổi/reload — dùng để bỏ qua kết quả của request cũ
    * (setFilter) trả về sau khi user đã đổi sang filter khác, tránh trộn
    * nhầm kết quả của 2 filter khác nhau vào cùng danh sách hiển thị. */
@@ -28,6 +48,8 @@ interface HistoryState {
   loadMore: () => Promise<void>;
   /** Cập nhật 1 item tại chỗ (sau update_history_asset/rename) không reload cả trang. */
   patchItem: (id: string, patch: Partial<HistoryItem>) => void;
+  /** Cập nhật tên của nhiều item cùng lúc (sau batch rename). */
+  batchRenameItems: (renames: { id: string; title: string }[]) => void;
   /** Bỏ 1 item khỏi danh sách hiện tại (sau delete/restore đổi view). */
   removeItem: (id: string) => void;
   /** Bỏ nhiều item khỏi danh sách hiện tại (sau batch delete/restore). */
@@ -59,20 +81,52 @@ export const useHistory = create<HistoryState>((set, get) => ({
   error: null,
   generation: 0,
   viewMode: "grid",
+  activeNav: "all",
+  searchQuery: "",
+  isRightPanelCollapsed: false,
+  counts: { all: 0, images: 0, videos: 0, trash: 0, totalSize: 0 },
+
+  refreshCounts: async () => {
+    try {
+      const counts = await ipc.getHistoryCounts();
+      set({ counts });
+    } catch {
+      // Best-effort
+    }
+  },
 
   setViewMode: (mode) => set({ viewMode: mode }),
+  setSearchQuery: (q) => set({ searchQuery: q }),
+  toggleRightPanel: () => set((s) => ({ isRightPanelCollapsed: !s.isRightPanelCollapsed })),
+  setActiveNav: (nav) => {
+    if (nav === "settings") {
+      set({ activeNav: "settings" });
+      return;
+    }
+    set({ activeNav: nav });
+    if (nav === "all") {
+      get().setFilter({ mediaType: undefined, trashOnly: false });
+    } else if (nav === "images") {
+      get().setFilter({ mediaType: "image", trashOnly: false });
+    } else if (nav === "videos") {
+      get().setFilter({ mediaType: "video", trashOnly: false });
+    } else if (nav === "trash") {
+      get().setFilter({ mediaType: undefined, trashOnly: true });
+    }
+  },
 
   setSelected: (id) => set({ selectedId: id, selectedIds: id ? [id] : [] }),
 
   toggleSelect: (id, isShift, isMetaOrCtrl) => {
-    const { items, selectedIds, selectedId } = get();
+    const { items, searchQuery, selectedIds, selectedId } = get();
+    const visibleItems = filterHistoryItems(items, searchQuery);
     if (isShift && selectedId) {
-      const idx1 = items.findIndex((it) => it.id === selectedId);
-      const idx2 = items.findIndex((it) => it.id === id);
+      const idx1 = visibleItems.findIndex((it) => it.id === selectedId);
+      const idx2 = visibleItems.findIndex((it) => it.id === id);
       if (idx1 !== -1 && idx2 !== -1) {
         const start = Math.min(idx1, idx2);
         const end = Math.max(idx1, idx2);
-        const rangeIds = items.slice(start, end + 1).map((it) => it.id);
+        const rangeIds = visibleItems.slice(start, end + 1).map((it) => it.id);
         const newSelected = isMetaOrCtrl
           ? Array.from(new Set([...selectedIds, ...rangeIds]))
           : rangeIds;
@@ -102,7 +156,8 @@ export const useHistory = create<HistoryState>((set, get) => ({
   },
 
   selectAll: () => {
-    const allIds = get().items.map((it) => it.id);
+    const visibleItems = filterHistoryItems(get().items, get().searchQuery);
+    const allIds = visibleItems.map((it) => it.id);
     set({ selectedIds: allIds, selectedId: allIds[0] ?? null });
   },
 
@@ -126,6 +181,7 @@ export const useHistory = create<HistoryState>((set, get) => ({
   },
 
   reload: async () => {
+    get().refreshCounts();
     const generation = get().generation + 1;
     set({ items: [], hasMore: true, selectedId: null, selectedIds: [], error: null, generation, loading: false });
     await get().loadMore();
@@ -157,12 +213,24 @@ export const useHistory = create<HistoryState>((set, get) => ({
     set((s) => ({ items: s.items.map((it) => (it.id === id ? { ...it, ...patch } : it)) }));
   },
 
+  batchRenameItems: (renames) => {
+    const map = new Map(renames.map((r) => [r.id, r.title]));
+    const now = Date.now();
+    set((s) => ({
+      items: s.items.map((it) => {
+        const newTitle = map.get(it.id);
+        return newTitle !== undefined ? { ...it, title: newTitle || null, updatedAt: now } : it;
+      }),
+    }));
+  },
+
   removeItem: (id) => {
     set((s) => ({
       items: s.items.filter((it) => it.id !== id),
       selectedIds: s.selectedIds.filter((x) => x !== id),
       selectedId: s.selectedId === id ? null : s.selectedId,
     }));
+    get().refreshCounts();
   },
 
   removeItems: (ids) => {
@@ -172,9 +240,11 @@ export const useHistory = create<HistoryState>((set, get) => ({
       selectedIds: s.selectedIds.filter((x) => !idSet.has(x)),
       selectedId: idSet.has(s.selectedId ?? "") ? null : s.selectedId,
     }));
+    get().refreshCounts();
   },
 
   addItem: (item) => {
     set((s) => ({ items: [item, ...s.items], selectedId: item.id, selectedIds: [item.id] }));
+    get().refreshCounts();
   },
 }));

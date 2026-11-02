@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ipc, type Settings as S, type UpdateInfo } from "../../lib/ipc";
 
-export default function Settings() {
+export default function Settings({ inline }: { inline?: boolean } = {}) {
   const { t, i18n } = useTranslation();
   const [s, setS] = useState<S | null>(null);
   const [perm, setPerm] = useState<boolean | null>(null);
@@ -217,9 +217,9 @@ export default function Settings() {
     <div className="solid-bg" style={page}>
 
       {/* ── Header ── */}
-      <div style={header}>
+      <div style={{ ...header, borderTop: inline ? "none" : undefined }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={appName}>SnapDoc</span>
+          <span style={appName}>{inline ? t("settings.title") : "SnapDoc"}</span>
           <span style={versionBadge}>{appVersion ? `v${appVersion}` : "…"}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

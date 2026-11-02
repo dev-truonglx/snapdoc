@@ -19,17 +19,15 @@ export default function HistoryToolbar() {
     { id: "quick", label: t("shortcuts.quick") },
   ] as const;
 
-  const MEDIA_TYPES = [
-    { id: "", label: t("history.allTypes") },
-    { id: "image", label: t("history.images") },
-    { id: "video", label: t("history.videos") },
-  ] as const;
-
   const filter = useHistory((s) => s.filter);
   const setFilter = useHistory((s) => s.setFilter);
   const reload = useHistory((s) => s.reload);
   const viewMode = useHistory((s) => s.viewMode);
   const setViewMode = useHistory((s) => s.setViewMode);
+  const searchQuery = useHistory((s) => s.searchQuery);
+  const setSearchQuery = useHistory((s) => s.setSearchQuery);
+  const isRightPanelCollapsed = useHistory((s) => s.isRightPanelCollapsed);
+  const toggleRightPanel = useHistory((s) => s.toggleRightPanel);
   const [emptying, setEmptying] = useState(false);
 
   // Khoảng ngày nhanh — tính tại thời điểm bấm (không cache) để không bị lệch
@@ -67,14 +65,24 @@ export default function HistoryToolbar() {
 
   return (
     <div style={bar}>
-      <select
-        value={filter.mediaType ?? ""}
-        onChange={(e) => setFilter({ mediaType: (e.target.value || undefined) as "image" | "video" | undefined })}
-      >
-        {MEDIA_TYPES.map((m) => (
-          <option key={m.id} value={m.id}>{m.label}</option>
-        ))}
-      </select>
+      <div style={searchWrap}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" style={{ color: "var(--text-dim)", flexShrink: 0 }}>
+          <circle cx="11" cy="11" r="8" />
+          <line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+        <input
+          style={searchInput}
+          type="text"
+          placeholder={t("history.searchPlaceholder")}
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
+        {searchQuery && (
+          <button style={clearSearchBtn} onClick={() => setSearchQuery("")} title={t("common.cancel")}>
+            ✕
+          </button>
+        )}
+      </div>
 
       <select
         value={filter.captureMode ?? ""}
@@ -100,10 +108,6 @@ export default function HistoryToolbar() {
         {activePreset === "custom" && <option value="custom">{t("history.rangeCustom")}</option>}
       </select>
 
-      {/* Controlled — hiện ĐÚNG ngày đang lọc (mặc định không giới hạn, xem
-          `useHistoryStore.ts`) thay vì luôn trống như bản input uncontrolled
-          cũ. "to" lưu dạng mốc loại trừ (+1 ngày) nên trừ lại 1 ngày khi hiện
-          ra cho khớp với ngày người dùng thực sự chọn. */}
       <input
         type="date"
         value={filter.from != null ? msToDayStr(filter.from) : ""}
@@ -147,17 +151,16 @@ export default function HistoryToolbar() {
       </div>
 
       <button
-        style={toggleBtn(!filter.trashOnly)}
-        onClick={() => setFilter({ trashOnly: false })}
+        style={viewIconBtn(!isRightPanelCollapsed)}
+        title={isRightPanelCollapsed ? t("history.showDetails") : t("history.hideDetails")}
+        onClick={toggleRightPanel}
       >
-        {t("history.library")}
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <line x1="15" y1="3" x2="15" y2="21" />
+        </svg>
       </button>
-      <button
-        style={toggleBtn(!!filter.trashOnly)}
-        onClick={() => setFilter({ trashOnly: true })}
-      >
-        {t("history.trash")}
-      </button>
+
       {filter.trashOnly && (
         <button style={dangerBtn} disabled={emptying} onClick={onEmptyTrash}>
           {t("history.emptyTrash")}
@@ -198,16 +201,6 @@ function viewIconBtn(active: boolean): React.CSSProperties {
   };
 }
 
-function toggleBtn(active: boolean): React.CSSProperties {
-  return {
-    padding: "6px 12px",
-    borderRadius: 6,
-    background: active ? "var(--accent)" : "transparent",
-    color: active ? "var(--accent-text)" : "var(--text-dim)",
-    fontSize: 13,
-  };
-}
-
 const dangerBtn: React.CSSProperties = {
   padding: "6px 12px",
   borderRadius: 6,
@@ -216,3 +209,35 @@ const dangerBtn: React.CSSProperties = {
   color: "#fca5a5",
   fontSize: 13,
 };
+
+const searchWrap: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "4px 8px",
+  borderRadius: 6,
+  background: "var(--bg)",
+  border: "1px solid var(--border)",
+  width: 200,
+};
+
+const searchInput: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  border: "none",
+  background: "transparent",
+  color: "var(--text)",
+  fontSize: 12,
+  outline: "none",
+  padding: 0,
+};
+
+const clearSearchBtn: React.CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: "var(--text-dim)",
+  cursor: "pointer",
+  fontSize: 11,
+  padding: 0,
+};
+

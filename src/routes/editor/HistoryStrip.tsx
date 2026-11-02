@@ -13,6 +13,7 @@ import {
 import { dropVideoSession } from "../../features/video-trim/videoSessions";
 import { useEditor } from "../../features/annotation/store";
 import { fmtDuration } from "../history/formatUtils";
+import { createItemPointerDownHandler, wasJustDragged } from "../history/nativeDrag";
 
 const LIMIT = 20;
 
@@ -48,7 +49,6 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const stripRef = useRef<HTMLDivElement>(null);
-  const isDraggingRef = useRef(false);
   // Id của lần bấm gần nhất — chỉ để quản spinner theo id. Việc chống race
   // "2 promise resolve sai thứ tự bấm" (từng gây hiện sai ảnh + gắn nhầm
   // `historyId`, khiến Save ghi đè nhầm record) nay do bộ đếm thế hệ DÙNG
@@ -273,39 +273,9 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                   : t("historyStrip.reopenEditor")
               }
               aria-current={isCurrent ? "true" : undefined}
-              draggable={!isVideo}
-              onDragStart={(e) => {
-                isDraggingRef.current = true;
-                console.log("[SnapDoc Drag] onDragStart triggered for item:", item.id, "isVideo:", isVideo);
-                if (isVideo) {
-                  e.preventDefault();
-                  return;
-                }
-                (window as any).__snapdocDraggingHistoryId = item.id;
-                e.dataTransfer.setData("application/snapdoc-history-id", item.id);
-                e.dataTransfer.setData("text/plain", `snapdoc-history:${item.id}`);
-                e.dataTransfer.effectAllowed = "copy";
-
-                console.log("[SnapDoc Drag] onDragStart setData finished, global ID set to:", item.id);
-              }}
-              onDragEnd={(e) => {
-                console.log("[SnapDoc Drag] onDragEnd dropEffect:", e.dataTransfer?.dropEffect, "pos:", { x: e.clientX, y: e.clientY });
-                (window as any).__snapdocDraggingHistoryId = null;
-                setTimeout(() => {
-                  isDraggingRef.current = false;
-                }, 250);
-
-                const stripEl = stripRef.current;
-                const stripTop = stripEl ? stripEl.getBoundingClientRect().top : window.innerHeight - 90;
-                if (e.clientY < stripTop && e.clientY > 0 && e.clientX > 0 && e.clientX < window.innerWidth) {
-                  console.log("[SnapDoc Drag] Dispatched snapdoc:insert-history-item from onDragEnd:", item.id, { clientX: e.clientX, clientY: e.clientY });
-                  window.dispatchEvent(
-                    new CustomEvent("snapdoc:insert-history-item", {
-                      detail: { id: item.id, clientX: e.clientX, clientY: e.clientY },
-                    }),
-                  );
-                }
-              }}
+              draggable={false}
+              onPointerDown={createItemPointerDownHandler(item, [item.id])}
+              onDragStart={(e) => e.preventDefault()}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
@@ -321,14 +291,10 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                 zIndex: isCurrent ? 2 : 1,
                 opacity: isOpening ? 0.6 : isCurrent ? 1 : 0.75,
                 filter: isCurrent ? "brightness(1.02)" : "brightness(0.92)",
-                cursor: openingId ? "wait" : "pointer",
+                cursor: openingId ? "wait" : "grab",
               }}
               onClick={() => {
-                if (isDraggingRef.current) {
-                  console.log("[SnapDoc Drag] click ignored because dragging occurred");
-                  return;
-                }
-                console.log("[SnapDoc Drag] history thumb clicked:", item.id);
+                if (wasJustDragged()) return;
                 openItem(item);
               }}
               onContextMenu={(e) => {
@@ -337,8 +303,8 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
               }}
               title={
                 isVideo
-                  ? t("historyStrip.openVideoEditor")
-                  : t("historyStrip.reopenEditor")
+                  ? t("history.dragToShare")
+                  : t("historyStrip.dragTooltip")
               }
             >
               <img
@@ -346,7 +312,8 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                   ? `${convertFileSrc(item.thumbPath)}?v=${thumbVersions[item.id]}`
                   : convertFileSrc(item.thumbPath)}
                 alt=""
-                style={thumbImg}
+                draggable={false}
+                style={{ ...thumbImg, userSelect: "none" }}
                 loading="lazy"
               />
               {/* `.history-thumb-action`: ẩn mặc định, chỉ hiện khi hover vào
@@ -357,6 +324,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                 className="history-thumb-action"
                 style={deleteBtn}
                 disabled={deletingId === item.id}
+                onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => quickDelete(e, item.id)}
                 title={isVideo ? t("historyStrip.deleteVideo") : t("historyStrip.deleteImage")}
               >
@@ -379,6 +347,7 @@ export default function HistoryStrip({ onFlash, currentId, onOpenVideo, onOpenIm
                   className="history-thumb-action"
                   style={copyBtn}
                   disabled={copyingId === item.id}
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => quickCopy(e, item.id)}
                   title={t("historyStrip.quickCopy")}
                 >

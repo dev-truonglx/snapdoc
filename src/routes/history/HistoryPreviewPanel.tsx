@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
 import { useHistory } from "./useHistoryStore";
 import { modeLabel } from "./HistoryItemCard";
 import { fmtDateTime, fmtSize, fmtDuration } from "./formatUtils";
+import ExportProgressModal from "./ExportProgressModal";
+import BatchRenameModal from "./BatchRenameModal";
+import { createItemPointerDownHandler } from "./nativeDrag";
 
 interface Props {
   onOpenEditor: (id: string) => void;
@@ -26,6 +30,8 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
   const [renaming, setRenaming] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [exportTarget, setExportTarget] = useState<{ ids: string[]; dir: string } | null>(null);
+  const [showBatchRename, setShowBatchRename] = useState(false);
 
   useEffect(() => {
     setRenaming(false);
@@ -104,15 +110,46 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
       }
     };
 
+    const handleStartBatchExport = async () => {
+      const imageItems = selectedItems.filter((it) => it.mediaType !== "video");
+      if (imageItems.length === 0) return;
+      const settings = await ipc.getSettings().catch(() => null);
+      const defaultDir =
+        settings?.lastImageSaveAsDir ||
+        settings?.saveDir ||
+        (await ipc.defaultSaveDir().catch(() => undefined));
+      const dir = await open({
+        directory: true,
+        multiple: false,
+        title: t("history.exportSelectFolder"),
+        defaultPath: defaultDir,
+      });
+      if (typeof dir === "string" && dir) {
+        if (settings) {
+          ipc.setSettings({ ...settings, lastImageSaveAsDir: dir }).catch(() => {});
+        }
+        setExportTarget({
+          ids: selectedIds,
+          dir,
+        });
+      }
+    };
+
     return (
       <div style={panel}>
-        <div style={batchThumbGrid}>
+        <div
+          style={{ ...batchThumbGrid, cursor: "grab" }}
+          title={t("history.dragToShare")}
+          onPointerDown={selectedItems[0] ? createItemPointerDownHandler(selectedItems[0], selectedIds) : undefined}
+          onDragStart={(e) => e.preventDefault()}
+        >
           {selectedItems.slice(0, 4).map((it) => (
             <div key={it.id} style={batchThumbCell}>
               <img
                 src={`${convertFileSrc(it.thumbPath)}?v=${it.updatedAt}`}
                 alt=""
-                style={previewImg}
+                draggable={false}
+                style={{ ...previewImg, userSelect: "none" }}
                 loading="lazy"
               />
               {it.mediaType === "video" && (
@@ -140,9 +177,36 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
 
         <div style={actions}>
           {!isTrash ? (
-            <button style={dangerBtn} disabled={busy} onClick={doBatchDelete}>
-              {t("history.deleteSelected", { count: selectedIds.length })}
-            </button>
+            <>
+              <button
+                style={exportBtn}
+                disabled={busy || imageCount === 0}
+                onClick={handleStartBatchExport}
+                title={t("history.exportImagesTitle")}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                {t("history.exportImages", { count: imageCount })}
+              </button>
+              <button
+                style={renameBatchBtn}
+                disabled={busy}
+                onClick={() => setShowBatchRename(true)}
+                title={t("history.batchRename.buttonTitle")}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 20h9" />
+                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                </svg>
+                {t("history.batchRename.buttonLabel")}
+              </button>
+              <button style={dangerBtn} disabled={busy} onClick={doBatchDelete}>
+                {t("history.deleteSelected", { count: selectedIds.length })}
+              </button>
+            </>
           ) : (
             <>
               <button style={primaryBtn} disabled={busy} onClick={doBatchRestore}>
@@ -160,6 +224,21 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
             {t("history.deselectAll")}
           </button>
         </div>
+
+        {exportTarget && (
+          <ExportProgressModal
+            imageIds={exportTarget.ids}
+            targetDir={exportTarget.dir}
+            onClose={() => setExportTarget(null)}
+          />
+        )}
+
+        {showBatchRename && (
+          <BatchRenameModal
+            items={selectedItems}
+            onClose={() => setShowBatchRename(false)}
+          />
+        )}
       </div>
     );
   }
@@ -235,7 +314,19 @@ export default function HistoryPreviewPanel({ onOpenEditor }: Props) {
           // Object URL mới mỗi lần đổi item/`updatedAt` nên KHÔNG cần `?v=`
           // bust cache như trước (asset ghi đè tại chỗ từng khiến webview hiện
           // bản cũ trong cache).
-          <img src={previewUrl} alt="" style={previewImg} />
+          <img
+            src={previewUrl}
+            alt=""
+            draggable={false}
+            title={t("history.dragToShare")}
+            onPointerDown={createItemPointerDownHandler(item)}
+            onDragStart={(e) => e.preventDefault()}
+            style={{
+              ...previewImg,
+              cursor: "grab",
+              userSelect: "none",
+            }}
+          />
         ) : (
           <div style={{ ...previewImg, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
             …
@@ -400,4 +491,35 @@ const playBadge: React.CSSProperties = {
   justifyContent: "center",
   pointerEvents: "none",
 };
+
+const exportBtn: React.CSSProperties = {
+  padding: "8px 12px",
+  borderRadius: 7,
+  background: "var(--accent)",
+  color: "var(--accent-text)",
+  fontSize: 13,
+  fontWeight: 600,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 6,
+  border: "none",
+  cursor: "pointer",
+};
+
+const renameBatchBtn: React.CSSProperties = {
+  padding: "8px 12px",
+  borderRadius: 7,
+  border: "1px solid var(--border, rgba(255,255,255,0.15))",
+  background: "rgba(255,255,255,0.06)",
+  color: "var(--text, #f1f5f9)",
+  fontSize: 13,
+  fontWeight: 600,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 6,
+  cursor: "pointer",
+};
+
 

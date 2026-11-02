@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTranslation } from "react-i18next";
-import { useHistory } from "./useHistoryStore";
+import { useHistory, filterHistoryItems } from "./useHistoryStore";
 import HistoryItemCard from "./HistoryItemCard";
 
 const CARD_MIN_WIDTH = 160;
@@ -18,6 +18,7 @@ interface Props {
 export default function HistoryGrid({ onOpenEditor }: Props) {
   const { t } = useTranslation();
   const items = useHistory((s) => s.items);
+  const searchQuery = useHistory((s) => s.searchQuery);
   const selectedIds = useHistory((s) => s.selectedIds);
   const toggleSelect = useHistory((s) => s.toggleSelect);
   const loadMore = useHistory((s) => s.loadMore);
@@ -26,6 +27,12 @@ export default function HistoryGrid({ onOpenEditor }: Props) {
 
   const parentRef = useRef<HTMLDivElement>(null);
   const [columns, setColumns] = useState(4);
+
+  const filteredItems = useMemo(
+    () => filterHistoryItems(items, searchQuery),
+    [items, searchQuery],
+  );
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
   useEffect(() => {
     const el = parentRef.current;
@@ -38,7 +45,7 @@ export default function HistoryGrid({ onOpenEditor }: Props) {
     return () => ro.disconnect();
   }, []);
 
-  const rowCount = Math.max(1, Math.ceil(items.length / columns));
+  const rowCount = Math.max(1, Math.ceil(filteredItems.length / columns));
 
   const virtualizer = useVirtualizer({
     count: rowCount,
@@ -50,22 +57,23 @@ export default function HistoryGrid({ onOpenEditor }: Props) {
   const virtualRows = virtualizer.getVirtualItems();
 
   useEffect(() => {
+    if (!hasMore || loading) return;
     const last = virtualRows[virtualRows.length - 1];
-    if (last && last.index >= rowCount - 3 && hasMore && !loading) {
+    if ((last && last.index >= rowCount - 3) || (searchQuery.trim() && filteredItems.length < 24)) {
       loadMore();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [virtualRows.map((r) => r.index).join(","), rowCount, hasMore, loading]);
+  }, [virtualRows.map((r) => r.index).join(","), rowCount, filteredItems.length, searchQuery, hasMore, loading]);
 
   return (
     <div ref={parentRef} style={scrollArea}>
-      {items.length === 0 && !loading ? (
+      {filteredItems.length === 0 && !loading ? (
         <div style={emptyState}>{t("historyView.noCaptures")}</div>
       ) : (
         <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
           {virtualRows.map((vRow) => {
             const start = vRow.index * columns;
-            const rowItems = items.slice(start, start + columns);
+            const rowItems = filteredItems.slice(start, start + columns);
             return (
               <div
                 key={vRow.key}
@@ -87,7 +95,7 @@ export default function HistoryGrid({ onOpenEditor }: Props) {
                   <HistoryItemCard
                     key={item.id}
                     item={item}
-                    selected={selectedIds.includes(item.id)}
+                    selected={selectedSet.has(item.id)}
                     onSelect={(e) => toggleSelect(item.id, e.shiftKey, e.metaKey || e.ctrlKey)}
                     onToggleCheck={() => toggleSelect(item.id, false, true)}
                     onOpenEditor={() => onOpenEditor(item.id)}

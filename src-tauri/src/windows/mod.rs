@@ -2115,26 +2115,41 @@ pub fn on_editor_closed(app: &AppHandle) {
     }
 }
 
-/// History/Library — cửa sổ browse capture đã lưu (theo đúng pattern `open_settings`).
+/// History/Library/Hub — cửa sổ browse capture đã lưu và cài đặt tích hợp.
 pub fn open_history(app: &AppHandle) -> Result<(), String> {
+    open_history_with_nav(app, None)
+}
+
+pub fn open_history_with_nav(app: &AppHandle, nav: Option<&str>) -> Result<(), String> {
+    use tauri::Emitter;
     if let Some(win) = app.get_webview_window("history") {
         let _ = win.show();
         let _ = win.unminimize();
         place_center_on_monitor(app, &win);
         bring_to_front(app, &win);
+        if let Some(n) = nav {
+            let _ = app.emit("history:navigate", n);
+        }
         return Ok(());
     }
-    let win = WebviewWindowBuilder::new(app, "history", url("history"))
-        .title("SnapDoc — Library")
-        .inner_size(1024.0, 680.0)
-        .min_inner_size(720.0, 480.0)
+    let win_param = match nav {
+        Some(n) => format!("history&nav={n}"),
+        None => "history".to_string(),
+    };
+    let win = WebviewWindowBuilder::new(app, "history", url(&win_param))
+        .title("SnapDoc — Hub")
+        .inner_size(1080.0, 720.0)
+        .min_inner_size(760.0, 480.0)
         .resizable(true)
         .center()
         .skip_taskbar(false)
         .build()
-        .map_err(|e| format!("Không tạo được cửa sổ History: {e}"))?;
+        .map_err(|e| format!("Không tạo được cửa sổ Hub: {e}"))?;
     place_center_on_monitor(app, &win);
     bring_to_front(app, &win);
+    if let Some(n) = nav {
+        let _ = app.emit("history:navigate", n);
+    }
     Ok(())
 }
 
@@ -2243,26 +2258,10 @@ pub fn prewarm_thumbnail(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Settings.
+/// Settings — đã chuyển hướng sang màn hình Hub tích hợp (mở tab "settings").
 pub fn open_settings(app: &AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("settings") {
-        let _ = win.show();
-        let _ = win.unminimize();
-        place_center_on_monitor(app, &win);
-        bring_to_front(app, &win);
-        return Ok(());
+    if let Some(old_win) = app.get_webview_window("settings") {
+        let _ = old_win.close();
     }
-    let win = WebviewWindowBuilder::new(app, "settings", url("settings"))
-        .title("SnapDoc — Cài đặt")
-        .inner_size(560.0, 700.0)
-        .min_inner_size(560.0, 400.0)
-        .max_inner_size(560.0, 10000.0)  // khóa chiều ngang = 560, chỉ resize dọc
-        .resizable(true)
-        .center()
-        .skip_taskbar(false)  // Windows: hiển thị icon trên taskbar
-        .build()
-        .map_err(|e| format!("Không tạo được settings: {e}"))?;
-    place_center_on_monitor(app, &win);
-    bring_to_front(app, &win);
-    Ok(())
+    open_history_with_nav(app, Some("settings"))
 }

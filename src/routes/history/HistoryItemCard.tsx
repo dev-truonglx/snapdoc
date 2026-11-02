@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import type { HistoryItem } from "../../lib/ipc";
 import { fmtTime, fmtDuration } from "./formatUtils";
+import { createItemPointerDownHandler, wasJustDragged } from "./nativeDrag";
 
 // Key dịch cho loại chụp — dùng chung key với bộ lọc ở `HistoryToolbar.tsx`.
 const MODE_KEY: Record<string, string> = {
@@ -34,6 +35,7 @@ export default function HistoryItemCard({ item, selected, onSelect, onToggleChec
   const [broken, setBroken] = useState(false);
   const [hovered, setHovered] = useState(false);
   const isVideo = item.mediaType === "video";
+  const handlePointerDown = useMemo(() => createItemPointerDownHandler(item), [item]);
 
   return (
     <div
@@ -52,8 +54,16 @@ export default function HistoryItemCard({ item, selected, onSelect, onToggleChec
           : "none",
         transition: "outline 0.15s ease, background 0.15s ease, box-shadow 0.15s ease",
       }}
-      onClick={onSelect}
-      onDoubleClick={onOpenEditor}
+      onPointerDown={handlePointerDown}
+      onDragStart={(e) => e.preventDefault()}
+      onClick={(e) => {
+        if (wasJustDragged()) return;
+        onSelect(e);
+      }}
+      onDoubleClick={() => {
+        if (wasJustDragged()) return;
+        onOpenEditor();
+      }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       title={item.title ?? undefined}
@@ -81,6 +91,7 @@ export default function HistoryItemCard({ item, selected, onSelect, onToggleChec
             zIndex: 3,
             boxShadow: "0 2px 5px rgba(0,0,0,0.4)",
           }}
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
             onToggleCheck(e);
@@ -104,10 +115,12 @@ export default function HistoryItemCard({ item, selected, onSelect, onToggleChec
             // chỗ) — bust cache để hiện đúng thumbnail mới sau khi cắt.
             src={`${convertFileSrc(item.thumbPath)}?v=${item.updatedAt}`}
             alt=""
+            draggable={false}
             style={{
               ...thumbImg,
               filter: hovered ? "brightness(1.05)" : "none",
               transition: "filter 0.15s ease",
+              userSelect: "none",
             }}
             onError={() => setBroken(true)}
             loading="lazy"

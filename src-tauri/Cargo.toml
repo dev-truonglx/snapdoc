@@ -22,6 +22,7 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-drag = "2"
 # Ghi log ra file (thư mục log của OS, xoay vòng) — bản release không có console,
 # `eprintln!` cũ mất hết khi người dùng báo lỗi.
 tauri-plugin-log = "2"

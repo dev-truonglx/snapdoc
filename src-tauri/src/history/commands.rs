@@ -187,6 +187,12 @@ fn permanently_delete_history_item_sync(app: &AppHandle, id: &str) -> Result<(),
     if delete_asset && legacy_telem.exists() {
         let _ = std::fs::remove_file(&legacy_telem);
     }
+    if let Ok(root) = super::assets::root_dir(app) {
+        let item_drag_dir = root.join("library").join("drag_cache").join(id);
+        if item_drag_dir.exists() {
+            let _ = std::fs::remove_dir_all(&item_drag_dir);
+        }
+    }
     let st = state(app)?;
     let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
     conn.execute("DELETE FROM history WHERE id = ?1", [id])
@@ -240,6 +246,7 @@ fn permanently_delete_history_items_sync(app: &AppHandle, ids: &[String]) -> Res
 }
 
 struct TrashFile {
+    id: String,
     asset_path: String,
     thumb_path: String,
     owned: bool,
@@ -249,13 +256,14 @@ fn delete_trash_items_batch(app: &AppHandle, where_clause: &str, params: &[&dyn 
     let items: Vec<TrashFile> = {
         let st = state(app)?;
         let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
-        let sql = format!("SELECT asset_path, thumb_path, owned FROM history WHERE {where_clause}");
+        let sql = format!("SELECT id, asset_path, thumb_path, owned FROM history WHERE {where_clause}");
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(params, |r| {
             Ok(TrashFile {
-                asset_path: r.get(0)?,
-                thumb_path: r.get(1)?,
-                owned: r.get(2)?,
+                id: r.get(0)?,
+                asset_path: r.get(1)?,
+                thumb_path: r.get(2)?,
+                owned: r.get(3)?,
             })
         }).map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
@@ -266,12 +274,21 @@ fn delete_trash_items_batch(app: &AppHandle, where_clause: &str, params: &[&dyn 
     }
 
     let count = items.len() as u32;
+    let drag_cache_base = super::assets::root_dir(app)
+        .ok()
+        .map(|r| r.join("library").join("drag_cache"));
 
     for item in &items {
         if may_delete_file(app, item.owned, &item.asset_path) {
             remove_file_logged(&item.asset_path);
         }
         remove_file_logged(&item.thumb_path);
+        if let Some(base) = &drag_cache_base {
+            let item_drag_dir = base.join(&item.id);
+            if item_drag_dir.exists() {
+                let _ = std::fs::remove_dir_all(&item_drag_dir);
+            }
+        }
     }
 
     let st = state(app)?;
@@ -1449,4 +1466,480 @@ pub async fn save_gif_to_history(
     let _ = app.emit("history:item-added", &result);
     Ok(result)
 }
+
+#[derive(Clone, Debug, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExportProgressPayload {
+    pub current: usize,
+    pub total: usize,
+    pub filename: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExportHistoryImagesResult {
+    pub exported_count: usize,
+    pub skipped_count: usize,
+    pub target_dir: String,
+    pub first_exported_path: Option<String>,
+}
+
+fn sanitize_export_filename(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = clean.trim().trim_matches('.').trim();
+    if trimmed.chars().count() > 100 {
+        trimmed.chars().take(100).collect()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn strip_png_ext(s: &str) -> &str {
+    if s.len() >= 4 && s.as_bytes()[s.len() - 4..].eq_ignore_ascii_case(b".png") {
+        &s[..s.len() - 4]
+    } else {
+        s
+    }
+}
+
+fn local_tz_offset_secs(app: &AppHandle) -> i64 {
+    if let Ok(st) = state(app) {
+        if let Ok(conn) = st.conn.lock() {
+            if let Ok(offset) = conn.query_row(
+                "SELECT CAST(strftime('%s', 'now', 'localtime') AS INTEGER) - CAST(strftime('%s', 'now') AS INTEGER)",
+                [],
+                |r| r.get::<_, i64>(0),
+            ) {
+                return offset;
+            }
+        }
+    }
+    0
+}
+
+fn format_item_timestamp_name(prefix: &str, timestamp_ms: i64, tz_offset_secs: i64) -> String {
+    let raw_secs = (timestamp_ms / 1000) + tz_offset_secs;
+    let secs = if raw_secs > 0 { raw_secs as u64 } else { 0 };
+    let time_secs = secs % 86400;
+    let days = secs / 86400;
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z % 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    let hh = time_secs / 3600;
+    let mm = (time_secs % 3600) / 60;
+    let ss = time_secs % 60;
+    format!("{prefix}_{y:04}-{m:02}-{d:02}_{hh:02}{mm:02}{ss:02}")
+}
+
+pub fn export_history_images_sync(
+    app: &AppHandle,
+    ids: &[String],
+    target_dir: &str,
+) -> Result<ExportHistoryImagesResult, String> {
+    let target_path = std::path::Path::new(target_dir);
+    if !target_path.exists() {
+        std::fs::create_dir_all(target_path)
+            .map_err(|e| format!("Không thể tạo thư mục lưu: {e}"))?;
+    }
+
+    let tz_offset_secs = local_tz_offset_secs(app);
+    let mut records: Vec<HistoryRecord> = Vec::new();
+    let mut skipped_count = 0;
+
+    for id in ids {
+        if let Ok(rec) = get_history_item_sync(app, id) {
+            if rec.media_type != "video" {
+                records.push(rec);
+            } else {
+                skipped_count += 1;
+            }
+        }
+    }
+
+    let total = records.len();
+    let mut exported_count = 0;
+    let mut first_exported_path: Option<String> = None;
+    let mut exported_updates: Vec<(String, String)> = Vec::with_capacity(total);
+
+    for (idx, rec) in records.iter().enumerate() {
+        let bytes = load_asset_preview(rec)
+            .map_err(|e| format!("Lỗi nạp ảnh {}: {e}", rec.id))?;
+
+        let raw_stem = match &rec.title {
+            Some(t) => {
+                let sanitized = sanitize_export_filename(t);
+                if sanitized.is_empty() {
+                    format_item_timestamp_name("Screenshot", rec.created_at, tz_offset_secs)
+                } else {
+                    sanitized
+                }
+            }
+            None => format_item_timestamp_name("Screenshot", rec.created_at, tz_offset_secs),
+        };
+
+        let file_stem = strip_png_ext(&raw_stem);
+
+        let initial_dest = target_path.join(format!("{file_stem}.png"));
+        let final_dest = crate::storage::save::dedupe(initial_dest);
+        let final_dest_str = final_dest.to_string_lossy().to_string();
+
+        std::fs::write(&final_dest, &bytes)
+            .map_err(|e| format!("Không thể ghi file {final_dest_str}: {e}"))?;
+
+        exported_updates.push((rec.id.clone(), final_dest_str.clone()));
+
+        if first_exported_path.is_none() {
+            first_exported_path = Some(final_dest_str.clone());
+        }
+
+        exported_count += 1;
+
+        let display_name = final_dest
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("{file_stem}.png"));
+
+        let _ = app.emit(
+            "history:export-progress",
+            ExportProgressPayload {
+                current: idx + 1,
+                total,
+                filename: display_name,
+            },
+        );
+    }
+
+    if !exported_updates.is_empty() {
+        if let Ok(st) = state(app) {
+            if let Ok(mut conn) = st.conn.lock() {
+                if let Ok(tx) = conn.transaction() {
+                    if let Ok(mut stmt) = tx.prepare("UPDATE history SET exported_path = ?1 WHERE id = ?2") {
+                        for (id, path) in &exported_updates {
+                            let _ = stmt.execute(rusqlite::params![path, id]);
+                        }
+                    }
+                    let _ = tx.commit();
+                }
+            }
+        }
+    }
+
+    Ok(ExportHistoryImagesResult {
+        exported_count,
+        skipped_count,
+        target_dir: target_dir.to_string(),
+        first_exported_path,
+    })
+}
+
+#[tauri::command]
+pub async fn export_history_images(
+    app: AppHandle,
+    ids: Vec<String>,
+    target_dir: String,
+) -> Result<ExportHistoryImagesResult, String> {
+    tauri::async_runtime::spawn_blocking(move || export_history_images_sync(&app, &ids, &target_dir))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let p = std::path::Path::new(&path);
+    if p.exists() {
+        app.opener()
+            .reveal_item_in_dir(&path)
+            .map_err(|e| format!("Không mở được thư mục: {e}"))
+    } else {
+        Err("Đường dẫn không tồn tại".to_string())
+    }
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct HistoryCounts {
+    pub all: i64,
+    pub images: i64,
+    pub videos: i64,
+    pub trash: i64,
+    pub total_size: i64,
+}
+
+pub fn get_history_counts_sync(app: &AppHandle) -> Result<HistoryCounts, String> {
+    let st = state(app)?;
+    let conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+    let sql = "SELECT \
+        COUNT(CASE WHEN deleted_at IS NULL THEN 1 END), \
+        COUNT(CASE WHEN deleted_at IS NULL AND media_type != 'video' THEN 1 END), \
+        COUNT(CASE WHEN deleted_at IS NULL AND media_type = 'video' THEN 1 END), \
+        COUNT(CASE WHEN deleted_at IS NOT NULL THEN 1 END), \
+        COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN file_size ELSE 0 END), 0) \
+        FROM history";
+    conn.query_row(sql, [], |r| {
+        Ok(HistoryCounts {
+            all: r.get(0)?,
+            images: r.get(1)?,
+            videos: r.get(2)?,
+            trash: r.get(3)?,
+            total_size: r.get(4)?,
+        })
+    })
+    .map_err(|e| format!("Lỗi đếm số lượng history: {e}"))
+}
+
+#[tauri::command]
+pub async fn get_history_counts(app: AppHandle) -> Result<HistoryCounts, String> {
+    tauri::async_runtime::spawn_blocking(move || get_history_counts_sync(&app))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+pub fn prepare_history_drag_items_sync(
+    app: &AppHandle,
+    ids: &[String],
+) -> Result<Vec<String>, String> {
+    let drag_cache_dir = super::assets::root_dir(app)?.join("library").join("drag_cache");
+    if !drag_cache_dir.exists() {
+        let _ = std::fs::create_dir_all(&drag_cache_dir);
+    }
+
+    let tz_offset_secs = local_tz_offset_secs(app);
+    let mut result_paths = Vec::new();
+
+    for id in ids {
+        let Ok(rec) = get_history_item_sync(app, id) else {
+            continue;
+        };
+
+        if rec.media_type == "video" {
+            let path = std::path::Path::new(&rec.asset_path);
+            if path.exists() {
+                result_paths.push(rec.asset_path);
+                continue;
+            }
+            if let Some(exp) = &rec.exported_path {
+                if std::path::Path::new(exp).exists() {
+                    result_paths.push(exp.clone());
+                    continue;
+                }
+            }
+            continue;
+        }
+
+        // Ảnh:
+        let asset_path = std::path::Path::new(&rec.asset_path);
+        let is_snapdoc = crate::snapdoc_file::is_snapdoc(asset_path);
+
+        if !is_snapdoc && asset_path.exists() {
+            result_paths.push(rec.asset_path);
+            continue;
+        }
+
+        let raw_stem = match &rec.title {
+            Some(t) => {
+                let sanitized = sanitize_export_filename(t);
+                if sanitized.is_empty() {
+                    format_item_timestamp_name("Screenshot", rec.created_at, tz_offset_secs)
+                } else {
+                    sanitized
+                }
+            }
+            None => format_item_timestamp_name("Screenshot", rec.created_at, tz_offset_secs),
+        };
+
+        let file_stem = strip_png_ext(&raw_stem);
+
+        let item_drag_dir = drag_cache_dir.join(&rec.id);
+        if !item_drag_dir.exists() {
+            let _ = std::fs::create_dir_all(&item_drag_dir);
+        }
+
+        let target_filename = format!("{file_stem}.png");
+        let drag_file_path = item_drag_dir.join(&target_filename);
+
+        let need_write = if drag_file_path.exists() {
+            let cache_mtime = drag_file_path.metadata().and_then(|m| m.modified()).ok();
+            let asset_mtime = asset_path.metadata().and_then(|m| m.modified()).ok();
+            match (cache_mtime, asset_mtime) {
+                (Some(cm), Some(am)) => cm < am,
+                _ => true,
+            }
+        } else {
+            true
+        };
+
+        if need_write {
+            // Dọn các file tên cũ trong cùng thư mục item_drag_dir (nếu user từng đổi tên item)
+            if let Ok(entries) = std::fs::read_dir(&item_drag_dir) {
+                for entry in entries.flatten() {
+                    if entry.file_name().to_string_lossy() != target_filename {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+            if let Ok(bytes) = load_asset_preview(&rec) {
+                if std::fs::write(&drag_file_path, &bytes).is_ok() {
+                    result_paths.push(drag_file_path.to_string_lossy().to_string());
+                }
+            }
+        } else {
+            result_paths.push(drag_file_path.to_string_lossy().to_string());
+        }
+    }
+
+    if result_paths.is_empty() {
+        return Err("Không tìm thấy file hợp lệ để kéo thả".to_string());
+    }
+
+    Ok(result_paths)
+}
+
+#[tauri::command]
+pub async fn prepare_history_drag_items(
+    app: AppHandle,
+    ids: Vec<String>,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || prepare_history_drag_items_sync(&app, &ids))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+pub fn prepare_editor_drag_file_sync(
+    app: &AppHandle,
+    image_data: &str,
+    file_name: Option<String>,
+) -> Result<String, String> {
+    let drag_cache_dir = super::assets::root_dir(app)?
+        .join("library")
+        .join("drag_cache")
+        .join("editor");
+    if !drag_cache_dir.exists() {
+        let _ = std::fs::create_dir_all(&drag_cache_dir);
+    } else if let Ok(entries) = std::fs::read_dir(&drag_cache_dir) {
+        // Dọn các file tạm kéo thả cũ hơn 60 giây để tránh rò rỉ dung lượng đĩa
+        let cutoff = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(60));
+        for entry in entries.flatten() {
+            if let Some(c) = cutoff {
+                let is_old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|mtime| mtime < c)
+                    .unwrap_or(false);
+                if is_old {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    let bytes = decode_image_data(image_data)?;
+    let tz_offset_secs = local_tz_offset_secs(app);
+
+    let clean_stem = match file_name {
+        Some(t) => {
+            let s = sanitize_export_filename(&t);
+            if s.is_empty() {
+                format_item_timestamp_name("SnapDoc", now_ms(), tz_offset_secs)
+            } else {
+                strip_png_ext(&s).to_string()
+            }
+        }
+        None => format_item_timestamp_name("SnapDoc", now_ms(), tz_offset_secs),
+    };
+
+    let file_path = drag_cache_dir.join(format!("{clean_stem}.png"));
+    std::fs::write(&file_path, &bytes)
+        .map_err(|e| format!("Không thể ghi file kéo thả từ Editor: {e}"))?;
+
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn prepare_editor_drag_file(
+    app: AppHandle,
+    image_data: String,
+    file_name: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        prepare_editor_drag_file_sync(&app, &image_data, file_name)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {e}"))?
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchRenameEntry {
+    pub id: String,
+    pub title: String,
+}
+
+pub fn batch_rename_history_items_sync(
+    app: &AppHandle,
+    entries: &[BatchRenameEntry],
+) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let st = state(app)?;
+    let mut conn = st.conn.lock().map_err(|_| "History DB lock poisoned".to_string())?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Không thể bắt đầu transaction: {e}"))?;
+    let now = now_ms();
+    {
+        let mut stmt = tx
+            .prepare("UPDATE history SET title = ?1, updated_at = ?2 WHERE id = ?3")
+            .map_err(|e| e.to_string())?;
+        for entry in entries {
+            let safe_title = entry.title.trim();
+            let db_title: Option<&str> = if safe_title.is_empty() {
+                None
+            } else {
+                Some(safe_title)
+            };
+            stmt.execute(rusqlite::params![db_title, now, entry.id])
+                .map_err(|e| format!("Lỗi đổi tên item {}: {e}", entry.id))?;
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("Không thể commit transaction đổi tên: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn batch_rename_history_items(
+    app: AppHandle,
+    entries: Vec<BatchRenameEntry>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || batch_rename_history_items_sync(&app, &entries))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+}
+
+
+
+
+
 

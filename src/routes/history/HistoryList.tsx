@@ -1,7 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTranslation } from "react-i18next";
-import { useHistory } from "./useHistoryStore";
+import { useHistory, filterHistoryItems } from "./useHistoryStore";
 import HistoryListRow from "./HistoryListRow";
 
 const ROW_HEIGHT = 60;
@@ -15,6 +15,7 @@ interface Props {
 export default function HistoryList({ onOpenEditor }: Props) {
   const { t } = useTranslation();
   const items = useHistory((s) => s.items);
+  const searchQuery = useHistory((s) => s.searchQuery);
   const selectedIds = useHistory((s) => s.selectedIds);
   const toggleSelect = useHistory((s) => s.toggleSelect);
   const selectAll = useHistory((s) => s.selectAll);
@@ -25,8 +26,14 @@ export default function HistoryList({ onOpenEditor }: Props) {
 
   const parentRef = useRef<HTMLDivElement>(null);
 
+  const filteredItems = useMemo(
+    () => filterHistoryItems(items, searchQuery),
+    [items, searchQuery],
+  );
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+
   const virtualizer = useVirtualizer({
-    count: items.length,
+    count: filteredItems.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 8,
@@ -34,15 +41,20 @@ export default function HistoryList({ onOpenEditor }: Props) {
   const virtualRows = virtualizer.getVirtualItems();
 
   useEffect(() => {
+    if (!hasMore || loading) return;
     const last = virtualRows[virtualRows.length - 1];
-    if (last && last.index >= items.length - 5 && hasMore && !loading) {
+    if ((last && last.index >= filteredItems.length - 5) || (searchQuery.trim() && filteredItems.length < 24)) {
       loadMore();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [virtualRows.map((r) => r.index).join(","), items.length, hasMore, loading]);
+  }, [virtualRows.map((r) => r.index).join(","), filteredItems.length, searchQuery, hasMore, loading]);
 
-  const allSelected = items.length > 0 && selectedIds.length === items.length;
-  const isIndeterminate = selectedIds.length > 0 && selectedIds.length < items.length;
+  const selectedVisibleCount = useMemo(
+    () => filteredItems.reduce((acc, it) => acc + (selectedSet.has(it.id) ? 1 : 0), 0),
+    [filteredItems, selectedSet],
+  );
+  const allSelected = filteredItems.length > 0 && selectedVisibleCount === filteredItems.length;
+  const isIndeterminate = selectedVisibleCount > 0 && selectedVisibleCount < filteredItems.length;
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
@@ -74,12 +86,12 @@ export default function HistoryList({ onOpenEditor }: Props) {
         <span style={{ width: 56, flexShrink: 0 }}>{t("historyView.durationColumn")}</span>
       </div>
       <div ref={parentRef} style={scrollArea}>
-        {items.length === 0 && !loading ? (
+        {filteredItems.length === 0 && !loading ? (
           <div style={emptyState}>{t("historyView.noCaptures")}</div>
         ) : (
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualRows.map((vRow) => {
-              const item = items[vRow.index];
+              const item = filteredItems[vRow.index];
               return (
                 <div
                   key={vRow.key}
@@ -95,7 +107,7 @@ export default function HistoryList({ onOpenEditor }: Props) {
                 >
                   <HistoryListRow
                     item={item}
-                    selected={selectedIds.includes(item.id)}
+                    selected={selectedSet.has(item.id)}
                     onSelect={(e) => toggleSelect(item.id, e.shiftKey, e.metaKey || e.ctrlKey)}
                     onToggleCheck={() => toggleSelect(item.id, false, true)}
                     onOpenEditor={() => onOpenEditor(item.id)}

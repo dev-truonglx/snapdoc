@@ -141,6 +141,27 @@ export interface Settings {
   language?: string;
 }
 
+export interface ExportProgressPayload {
+  current: number;
+  total: number;
+  filename: string;
+}
+
+export interface ExportHistoryImagesResult {
+  exportedCount: number;
+  skippedCount: number;
+  targetDir: string;
+  firstExportedPath: string | null;
+}
+
+export interface HistoryCounts {
+  all: number;
+  images: number;
+  videos: number;
+  trash: number;
+  totalSize: number;
+}
+
 export const ipc = {
   /** Lấy ảnh "đóng băng màn hình" (JPEG binary bytes) cho overlay `idx` —
    * frontend dùng làm background tĩnh khi kéo chọn vùng, tránh tương tác
@@ -320,6 +341,16 @@ export const ipc = {
   listItemsWithDraft: () => invoke<string[]>("list_items_with_draft"),
   copyHistoryItem: (id: string) => invoke<void>("copy_history_item", { id }),
   revealHistoryItem: (id: string) => invoke<void>("reveal_history_item", { id }),
+  exportHistoryImages: (ids: string[], targetDir: string) =>
+    invoke<ExportHistoryImagesResult>("export_history_images", { ids, targetDir }),
+  revealPath: (path: string) => invoke<void>("reveal_path", { path }),
+  getHistoryCounts: () => invoke<HistoryCounts>("get_history_counts"),
+  prepareHistoryDragItems: (ids: string[]) =>
+    invoke<string[]>("prepare_history_drag_items", { ids }),
+  prepareEditorDragFile: (imageData: string, fileName?: string) =>
+    invoke<string>("prepare_editor_drag_file", { imageData, fileName: fileName ?? null }),
+  batchRenameHistoryItems: (entries: { id: string; title: string }[]) =>
+    invoke<void>("batch_rename_history_items", { entries }),
   /** Ghi lại đường dẫn bản Save/Save As gần nhất ra thư mục tuỳ chọn — gọi
    * ngay sau khi export ảnh/video thành công, để lần sau "Xem file trong Thư
    * mục" mở đúng chỗ user đã lưu thay vì file gốc nội bộ. */

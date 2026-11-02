@@ -116,7 +116,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             "history" => {
                 let app = app.clone();
                 std::thread::spawn(move || {
-                    let _ = windows::open_history(&app);
+                    let _ = windows::open_history_with_nav(&app, Some("all"));
                 });
             }
             "editor" => {
