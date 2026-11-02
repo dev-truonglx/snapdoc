@@ -237,3 +237,56 @@ input[type="range"].editor-slider::-moz-range-thumb {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
   cursor: pointer;
 }
+
+/* Viền 2 thanh công cụ chụp nhanh (QuickToolbar). Mặc định: viền xanh accent
+   + quầng sáng tĩnh + vòng đen mảnh bên ngoài → rõ trên cả ảnh tối lẫn sáng.
+   `.qt-run`: vệt sáng chạy quanh viền vài vòng lúc thanh vừa hiện rồi tự tắt
+   (JS chỉ gắn class khi WebView hỗ trợ `@property` và user không bật Reduce
+   motion — xem `QuickToolbar.tsx`). Nền đặt qua `--qt-bg` để chế độ "inside"
+   đổi độ mờ mà không đè mất lớp gradient viền. */
+@property --qt-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes qt-border-run {
+  to {
+    --qt-angle: 360deg;
+  }
+}
+
+.qt-bar {
+  --qt-bg: rgba(28, 28, 32, 0.97);
+  --qt-angle: 0deg;
+  background: var(--qt-bg);
+  border: 1.5px solid #60a5fa;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 0 12px 1px rgba(59, 130, 246, 0.5),
+    0 6px 24px rgba(0, 0, 0, 0.45);
+}
+
+.qt-bar.qt-run {
+  border-color: transparent;
+  background:
+    linear-gradient(var(--qt-bg), var(--qt-bg)) padding-box,
+    conic-gradient(
+        from var(--qt-angle),
+        #3b82f6 0deg,
+        #3b82f6 250deg,
+        #93c5fd 320deg,
+        #ffffff 345deg,
+        #3b82f6 360deg
+      )
+      border-box;
+  animation: qt-border-run 2.4s linear 3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qt-bar.qt-run {
+    animation: none;
+    border-color: #60a5fa;
+    background: var(--qt-bg);
+  }
+}

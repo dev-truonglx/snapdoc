@@ -8,7 +8,11 @@ const TOOLBAR_W = 44;
 // toolbar không dính sát khung, dễ nhìn/dễ bấm hơn, tránh cảm giác che mất
 // góc ảnh vừa chụp.
 const GAP = 14;
-const EST_V_H = 370; // ước lượng cao thanh dọc (9 nút × 34 + gap + padding)
+// Cao THẬT của thanh dọc: 10 nút (8 tool + màu + undo) × 34 + 9 gap × 6
+// + padding 8×2 + viền 1.5×2 (.qt-bar) = 413. Trước đây ước lượng 370 (thấp
+// hơn thực tế ~43px) nên đáy thanh tràn xuống dưới mép khung, khung sát đáy
+// màn hình thì bị che mất 1 phần. Sửa số nút/kích thước nút → cập nhật ở đây.
+const EST_V_H = 10 * 34 + 9 * 6 + 8 * 2 + 1.5 * 2;
 const BOTTOM_H = 44;
 const BOTTOM_W = 184; // ước lượng rộng thanh ngang (4 nút icon) để canh phải
 // Khoảng trống tối thiểu bên ngoài khung để đặt toolbar ra ngoài.
@@ -17,6 +21,13 @@ const MIN_OUTER_SIDE = TOOLBAR_W + GAP + 4;
 const MIN_OUTER_BOTTOM = BOTTOM_H + GAP + 4;
 
 interface Rect { x: number; y: number; w: number; h: number }
+
+// Vệt sáng chạy quanh viền (`.qt-run`, global.css) chỉ bật khi WebView hỗ trợ
+// `@property` (nếu không, góc conic-gradient không nội suy được → vệt sáng
+// đứng yên 1 chỗ) và user không bật Reduce motion. Xét 1 lần lúc mount.
+const canRunBorder = () =>
+  typeof CSS !== "undefined" && "registerProperty" in CSS
+  && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 // Tools will be initialized in component with translations
 
@@ -192,9 +203,17 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
 
   const stop = (e: React.PointerEvent) => e.stopPropagation();
 
+  // Chạy vài vòng lúc thanh vừa hiện để hút mắt rồi dừng hẳn (về viền tĩnh),
+  // tránh phân tâm khi đang vẽ và đỡ tốn GPU trên overlay trong suốt.
+  const [borderRun, setBorderRun] = useState(canRunBorder);
+  const barClass = borderRun ? "qt-bar qt-run" : "qt-bar";
+  const endBorderRun = (e: React.AnimationEvent) => {
+    if (e.target === e.currentTarget) setBorderRun(false);
+  };
+
   // Khi inside: tăng z-index để phủ lên canvas chú thích, giảm opacity nền một chút.
   const insideStyle: React.CSSProperties = insideMode
-    ? { zIndex: 10, background: "rgba(28,28,32,0.88)" }
+    ? ({ zIndex: 10, "--qt-bg": "rgba(28,28,32,0.88)" } as React.CSSProperties)
     : {};
 
   // Tooltip TỰ VẼ (KHÔNG dùng `title` native) — overlay chụp nhanh gồm NHIỀU
@@ -235,7 +254,12 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
 
   return (
     <>
-      <div style={{ ...sideBar, left: vLeft, top: vTop, ...insideStyle }} onPointerDown={stop}>
+      <div
+        className={barClass}
+        style={{ ...sideBar, left: vLeft, top: vTop, ...insideStyle }}
+        onPointerDown={stop}
+        onAnimationEnd={endBorderRun}
+      >
         {TOOLS.map((t) => (
           <button
             key={t.id}
@@ -277,7 +301,7 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
         </button>
       </div>
 
-      <div style={{ ...bottomBar, left: hLeft, top: hTop, ...insideStyle }} onPointerDown={stop}>
+      <div className={barClass} style={{ ...bottomBar, left: hLeft, top: hTop, ...insideStyle }} onPointerDown={stop}>
         <button
           style={actionBtn()}
           disabled={busy}
@@ -347,21 +371,17 @@ export default function QuickToolbar({ sel, winW, winH, annotating, busy, onPick
   );
 }
 
-// Viền + bóng đổ đậm hơn trước để 2 thanh nổi rõ trên mọi nền (ảnh sáng lẫn
-// tối) thay vì chỉ dựa vào màu nền tối gần như hoà lẫn lúc chụp màn hình tối.
+// Nền, viền xanh phát sáng và hiệu ứng viền chạy nằm ở class `.qt-bar`
+// (global.css) — keyframes/@property không viết inline được.
 const sideBar: React.CSSProperties = {
   position: "absolute", width: TOOLBAR_W,
   display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
-  background: "rgba(28,28,32,0.97)", borderRadius: 10, padding: "8px 4px",
-  border: "1px solid rgba(255,255,255,0.1)",
-  boxShadow: "0 6px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.3)",
+  borderRadius: 10, padding: "8px 4px",
 };
 const bottomBar: React.CSSProperties = {
   position: "absolute", height: BOTTOM_H,
   display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6,
-  background: "rgba(28,28,32,0.97)", borderRadius: 10, padding: "0 8px",
-  border: "1px solid rgba(255,255,255,0.1)",
-  boxShadow: "0 6px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.3)",
+  borderRadius: 10, padding: "0 8px",
 };
 
 function toolBtn(active: boolean, disabled = false): React.CSSProperties {
@@ -385,6 +405,6 @@ function actionBtn(kind: "primary" | "danger" = "primary"): React.CSSProperties 
 const colorPopover: React.CSSProperties = {
   position: "absolute", top: 0,
   display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6,
-  background: "rgba(30,30,36,0.99)", border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(30,30,36,0.99)", border: "1px solid rgba(96,165,250,0.55)",
   borderRadius: 10, padding: 8, boxShadow: "0 4px 20px rgba(0,0,0,0.4)", zIndex: 10,
 };
