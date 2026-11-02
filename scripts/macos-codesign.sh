@@ -29,6 +29,16 @@ PERSIST_P12="${APPLE_SIGNING_P12:-$HOME/.tauri/snapdoc-codesign.p12}"
 # is a low-value self-signed dev identity (no Apple trust), so a static pass is OK.
 P12PASS="${APPLE_SIGNING_P12_PASSWORD:-tauri-dev}"
 
+# SHA-1 of the ONE certificate every public release must be signed with. It is
+# the `certificate leaf = H"…"` in the shipped app's designated requirement —
+# public info (anyone can read it with `codesign -dr -`), not a secret.
+# Releases v3.7.12–v3.8.1 and v3.8.5–v3.8.6 went out signed with a different,
+# auto-generated "SnapDoc Dev" cert from another machine, and every switch made
+# all macOS users re-grant Screen & System Audio Recording. Only enforced with
+# `--require-existing` (release / restore); `dev:mac` may use any local key.
+# Change this ONLY when rotating the key on purpose (users re-grant once).
+RELEASE_SHA1="B9FABFF75DD25DD2C1242E97CF1DC80AE94E235F"
+
 create_and_persist() {
   echo "==> Creating + persisting self-signed code-signing identity: $IDENTITY"
   # Use the system openssl (LibreSSL). A Homebrew/Conda OpenSSL 3 writes a
@@ -102,6 +112,16 @@ ensure_identity() {
     exit 1
   fi
 
+  if [ "$require_existing" = "1" ] && [ "$expected_sha1" != "$RELEASE_SHA1" ]; then
+    echo "ERROR: $PERSIST_P12 is NOT the release signing key." >&2
+    echo "       found SHA-1:    $expected_sha1" >&2
+    echo "       release SHA-1:  $RELEASE_SHA1" >&2
+    echo "       Releasing with it would force ALL macOS users to re-grant" >&2
+    echo "       Screen & System Audio Recording permissions on update!" >&2
+    echo "       Restore the real key (answer 'y' to overwrite): npm run restore:keys" >&2
+    exit 1
+  fi
+
   local keychain_hashes
   keychain_hashes="$(
     security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null \
@@ -119,6 +139,13 @@ ensure_identity() {
   while security delete-certificate -c "$IDENTITY" "$KEYCHAIN" >/dev/null 2>&1; do :; done
   security import "$PERSIST_P12" -k "$KEYCHAIN" -P "$P12PASS" -A >/dev/null
 }
+
+# `--release-sha1`: print the pinned release certificate SHA-1 (used by
+# release-all.sh to verify the built bundle's designated requirement).
+if [ "${1:-}" = "--release-sha1" ]; then
+  echo "$RELEASE_SHA1"
+  exit 0
+fi
 
 # `--ensure-only [--require-existing]`: make the identity available (used before
 # `tauri build` so Tauri signs the bundle with it), then exit without signing anything here.

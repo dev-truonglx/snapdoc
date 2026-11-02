@@ -98,6 +98,7 @@ VERSION="$VERSION" node -e '
 echo "==> [2/6] Building macOS universal bundle (a few minutes)"
 export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-SnapDoc Dev}"
 bash scripts/macos-codesign.sh --ensure-only --require-existing
+RELEASE_SHA1="$(bash scripts/macos-codesign.sh --release-sha1)"
 
 # Release-only: a stale ffmpeg sidecar under src-tauri/binaries can survive
 # across local rebuilds even when `beforeBuildCommand` exists. Purge the macOS
@@ -141,6 +142,18 @@ check_signed() { # $1 = .app path, $2 = label
     || { echo "ERROR: $2 failed signature verification."; exit 1; }
   local dreq
   dreq="$(codesign -dr - "$1" 2>&1 | grep 'designated =>' || true)"
+  # The leaf hash in the designated requirement is what TCC matches on update —
+  # it must be the pinned release cert, for the app AND the ffmpeg sidecar.
+  local bin leaf
+  for bin in "$1" "$1/Contents/MacOS/ffmpeg"; do
+    [ -e "$bin" ] || continue
+    leaf="$(codesign -dr - "$bin" 2>&1 | sed -n 's/.*certificate leaf = H"\([0-9a-fA-F]*\)".*/\1/p' | tr '[:lower:]' '[:upper:]')"
+    if [ "$leaf" != "$RELEASE_SHA1" ]; then
+      echo "ERROR: $2 ($bin) signed with certificate leaf '${leaf:-none}', expected $RELEASE_SHA1."
+      echo "       Shipping it would force ALL macOS users to re-grant Screen Recording."
+      exit 1
+    fi
+  done
   echo "    OK ($2): $(codesign -dvvv "$1" 2>&1 | grep '^Authority=' | head -1) | $dreq"
 }
 
