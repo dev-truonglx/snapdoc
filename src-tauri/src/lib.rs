@@ -474,7 +474,7 @@ pub fn run() {
                 }
             }
 
-            // Startup: kiểm tra update im lặng sau 3s (không chặn khởi động).
+            // Startup & periodic: kiểm tra update im lặng sau 3s và định kỳ mỗi 4 giờ (hoặc khi máy wake up).
             // Khi có update → tự động tải về và cài đặt ở nền, KHÔNG hiện popup.
             // Phiên bản mới sẽ được áp dụng khi app khởi động lại lần tiếp theo.
             //
@@ -490,17 +490,7 @@ pub fn run() {
             {
                 let app_handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    let result = update::check_update(app_handle.clone(), false).await;
-                    if let Ok(info) = result {
-                        if info.available {
-                            tray::set_update_badge(&app_handle);
-                            // Tự động tải và cài — không restart, không hiện cửa sổ.
-                            if let Err(e) = update::silent_download_and_install(app_handle.clone()).await {
-                                log::warn!("[SnapDoc][update] background install failed: {e}");
-                            }
-                        }
-                    }
+                    update::run_periodic_updater(app_handle).await;
                 });
             }
 

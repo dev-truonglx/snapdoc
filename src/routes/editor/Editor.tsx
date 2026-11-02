@@ -1305,11 +1305,6 @@ export default function Editor() {
           onStitch={doStitch}
           onResize={doResize}
           busy={busy}
-          updateReady={updateReady}
-          pendingUpdate={pendingUpdate}
-          isUpdating={isUpdating}
-          onRestart={handleRestartApp}
-          onInstallUpdate={handleInstallUpdate}
         />
       )}
       {!bannerDismissed && (

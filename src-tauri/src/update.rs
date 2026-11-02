@@ -143,6 +143,77 @@ pub async fn silent_download_and_install(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Cờ chống chồng chéo (re-entrancy guard) cho background updater.
+static IS_CHECKING_OR_DOWNLOADING: AtomicBool = AtomicBool::new(false);
+
+struct BackgroundUpdateGuard;
+impl Drop for BackgroundUpdateGuard {
+    fn drop(&mut self) {
+        IS_CHECKING_OR_DOWNLOADING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Chu kỳ kiểm tra cập nhật định kỳ ở chế độ chạy nền (mỗi 4 giờ).
+const PERIODIC_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4 * 3600);
+/// Độ trễ lần đầu sau khi app khởi chạy (3 giây) để không làm chậm cold startup.
+const INITIAL_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+/// Độ trễ thử lại 1 lần nếu gặp lỗi mạng (ví dụ vừa wake up từ sleep chưa kịp kết nối Wi-Fi).
+const RETRY_ON_FAIL_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Vòng lặp kiểm tra cập nhật định kỳ ở luồng nền (Tokio async task).
+/// - An toàn tuyệt đối: chạy hoàn toàn trên Tokio async worker, không bao giờ chặn main UI thread.
+/// - Không hao phí CPU: Tokio timer nằm ở trạng thái `Pending` khi ngủ, 0% CPU usage.
+/// - Không tràn RAM:
+///   + Nếu `UPDATE_READY` đã bật (đã có bản tải sẵn chờ khởi động lại), bỏ qua chu kỳ tải tiếp.
+///   + Cờ `IS_CHECKING_OR_DOWNLOADING` ngăn chặn tình trạng nhiều lượt check/tải chạy song song khi mạng lag.
+///   + Cấu hình `MissedTickBehavior::Skip` giúp khi máy tính Sleep thức dậy, bỏ qua toàn bộ các tick dồn ứ,
+///     chỉ kích hoạt đúng 1 lần duy nhất, tránh tình trạng spam request và CPU burst.
+///   + Thử lại tối đa 1 lần sau 15 giây nếu gặp lỗi mạng (hỗ trợ trường hợp máy vừa mở nắp, Wi-Fi đang reconnect).
+#[cfg_attr(debug_assertions, allow(dead_code))]
+pub async fn run_periodic_updater(app: AppHandle) {
+    let start = tokio::time::Instant::now() + INITIAL_CHECK_DELAY;
+    let mut interval = tokio::time::interval_at(start, PERIODIC_CHECK_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+
+        // Nếu đã có bản cập nhật tải xong đang chờ restart trong RAM, không cần check/tải thêm
+        // nhằm tiết kiệm bộ nhớ, CPU và băng thông mạng.
+        if UPDATE_READY.load(Ordering::Relaxed) {
+            continue;
+        }
+
+        // Đảm bảo tại một thời điểm chỉ có tối đa 1 tác vụ chạy ngầm.
+        if IS_CHECKING_OR_DOWNLOADING
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            continue;
+        }
+        let _guard = BackgroundUpdateGuard;
+
+        let mut result = check_update(app.clone(), false).await;
+        // Nếu thất bại (thường do máy vừa wake up từ sleep chưa kịp kết nối Wi-Fi), thử lại 1 lần sau 15s.
+        if result.is_err() {
+            tokio::time::sleep(RETRY_ON_FAIL_DELAY).await;
+            if UPDATE_READY.load(Ordering::Relaxed) {
+                continue;
+            }
+            result = check_update(app.clone(), false).await;
+        }
+
+        if let Ok(info) = result {
+            if info.available {
+                crate::tray::set_update_badge(&app);
+                if let Err(e) = silent_download_and_install(app.clone()).await {
+                    log::warn!("[SnapDoc][update] periodic background install failed: {e}");
+                }
+            }
+        }
+    }
+}
+
 async fn fetch(app: &AppHandle) -> tauri_plugin_updater::Result<Option<Update>> {
     // Windows: installer thoát app bằng `std::process::exit(0)` — không qua
     // `ExitRequested`/`Exit` của Tauri. Hook này là cơ hội cuối để chốt bản
