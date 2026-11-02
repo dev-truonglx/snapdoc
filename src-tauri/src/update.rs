@@ -60,7 +60,6 @@ pub struct UpdateInfo {
 /// `manual = false` (startup): caller handles silent download+install — no popup shown.
 /// Errors are returned to the caller; on the silent path they are just logged.
 pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, String> {
-    let _ = manual; // kept for API compatibility with commands.rs
     match fetch(&app).await {
         Ok(Some(update)) => {
             let info = UpdateInfo {
@@ -69,7 +68,9 @@ pub async fn check_update(app: AppHandle, manual: bool) -> Result<UpdateInfo, St
                 current_version: update.current_version.clone(),
             };
             *app.state::<PendingUpdate>().0.lock().unwrap_or_else(|e| e.into_inner()) = Some(update);
-            let _ = app.emit("update-available", &info);
+            if manual {
+                let _ = app.emit("update-available", &info);
+            }
             Ok(info)
         }
         Ok(None) => Ok(UpdateInfo {
@@ -205,7 +206,6 @@ pub async fn run_periodic_updater(app: AppHandle) {
 
         if let Ok(info) = result {
             if info.available {
-                crate::tray::set_update_badge(&app);
                 if let Err(e) = silent_download_and_install(app.clone()).await {
                     log::warn!("[SnapDoc][update] periodic background install failed: {e}");
                 }
@@ -375,9 +375,13 @@ pub async fn install_pending(app: AppHandle) -> Result<(), String> {
         pair
     } else {
         // Take the update out of state first so the lock isn't held across `.await`.
-        let update = app.state::<PendingUpdate>().0.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let Some(update) = update else {
-            return Err("No update is pending.".to_string());
+        let cached = app.state::<PendingUpdate>().0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let update = match cached {
+            Some(u) => u,
+            None => fetch(&app)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "No update is pending.".to_string())?,
         };
         let bytes = update
             .download(|_chunk, _total| {}, || {})

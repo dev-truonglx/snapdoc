@@ -179,6 +179,9 @@ export default function Editor() {
     }
 
     const img = new window.Image();
+    if (!dataUrl.startsWith("data:") && !dataUrl.startsWith("blob:")) {
+      img.crossOrigin = "anonymous";
+    }
     img.onload = () => {
       console.log("[SnapDoc Drag] img.onload success - natural size:", img.naturalWidth, "x", img.naturalHeight);
       imageAnnCache.set(dataUrl, img);
@@ -276,10 +279,20 @@ export default function Editor() {
     });
   };
 
-  const loadFilePathAsDataUrl = (path: string): Promise<string> => {
+  const loadFilePathAsDataUrl = async (path: string): Promise<string> => {
+    const src = convertFileSrc(path);
+    try {
+      const res = await fetch(src);
+      if (res.ok) {
+        const blob = await res.blob();
+        return await readFileAsDataUrl(blob);
+      }
+    } catch {
+      // Fallback sang Image + Canvas có crossOrigin="anonymous" bên dưới
+    }
     return new Promise((resolve, reject) => {
-      const src = convertFileSrc(path);
       const img = new window.Image();
+      img.crossOrigin = "anonymous";
       img.onload = () => {
         try {
           const canvas = document.createElement("canvas");
@@ -287,13 +300,13 @@ export default function Editor() {
           canvas.height = img.naturalHeight;
           const ctx = canvas.getContext("2d");
           if (!ctx) {
-            resolve(src);
+            reject(new Error("Cannot create 2d context"));
             return;
           }
           ctx.drawImage(img, 0, 0);
           resolve(canvas.toDataURL("image/png"));
-        } catch {
-          resolve(src);
+        } catch (err) {
+          reject(err);
         }
       };
       img.onerror = () => reject(new Error("Cannot load image from path"));

@@ -243,6 +243,9 @@ const AnnotationStage = forwardRef<StageHandle, AnnotationStageProps>(({ hideZoo
     let cancelled = false;
     setImgLoading(true);
     const el = new window.Image();
+    if (!safe.url.startsWith("data:") && !safe.url.startsWith("blob:")) {
+      el.crossOrigin = "anonymous";
+    }
 
     const onDone = () => {
       if (!cancelled) {

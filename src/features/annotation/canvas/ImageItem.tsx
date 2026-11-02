@@ -17,16 +17,26 @@ export interface ImageItemProps {
 }
 
 export function ImageItem({ ann, draggable, isSelected, activeIds, onSelect, onDragEnd, onTransformEnd }: ImageItemProps) {
-  const [loadedImg, setLoadedImg] = useState<HTMLImageElement | null>(() => imageAnnCache.get(ann.src) ?? null);
+  const isLocalDataOrBlob = ann.src.startsWith("data:") || ann.src.startsWith("blob:");
+  const [loadedImg, setLoadedImg] = useState<HTMLImageElement | null>(() => {
+    const cached = imageAnnCache.get(ann.src);
+    if (cached && (isLocalDataOrBlob || cached.crossOrigin === "anonymous")) {
+      return cached;
+    }
+    return null;
+  });
 
   useEffect(() => {
-    if (imageAnnCache.has(ann.src)) {
-      setLoadedImg(imageAnnCache.get(ann.src)!);
+    const cached = imageAnnCache.get(ann.src);
+    if (cached && (isLocalDataOrBlob || cached.crossOrigin === "anonymous")) {
+      setLoadedImg(cached);
       return;
     }
     let cancelled = false;
     const el = new window.Image();
-    el.crossOrigin = "anonymous";
+    if (!isLocalDataOrBlob) {
+      el.crossOrigin = "anonymous";
+    }
     const onDone = () => {
       imageAnnCache.set(ann.src, el);
       if (!cancelled) setLoadedImg(el);
