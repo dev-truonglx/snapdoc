@@ -4,6 +4,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation, Trans } from "react-i18next";
 import Toolbar from "./Toolbar";
+import UpdateBanner from "./UpdateBanner";
 import HistoryStrip from "./HistoryStrip";
 import AnnotationStage, { type StageHandle, imageAnnCache } from "../../features/annotation/canvas/AnnotationStage";
 import VideoTrimmer from "../../features/video-trim/VideoTrimmer";
@@ -22,7 +23,7 @@ import {
   suspendActive,
   openLibraryImage,
 } from "../../features/annotation/sessions";
-import { uid, type ImageAnn } from "../../features/annotation/model";
+import { uid, type ImageAnn, scaleAnnotation, scaleBackgroundConfig } from "../../features/annotation/model";
 import {
   copyToClipboard,
   saveToFile,
@@ -31,10 +32,11 @@ import {
   stampVideoName,
   dirnameOf,
 } from "../../features/output/useOutput";
-import { ipc, type Pending, type HistoryItem, type VideoCrop, type KeepRange } from "../../lib/ipc";
+import { ipc, type Pending, type HistoryItem, type VideoCrop, type KeepRange, type UpdateInfo } from "../../lib/ipc";
 import { editorToolFromKey } from "../../lib/toolShortcuts";
 import StitchDialog from "../../features/annotation/compose/StitchDialog";
 import type { StitchResult } from "../../features/annotation/compose/stitch";
+import ResizeDialog, { type ResizeResult } from "../../features/annotation/compose/ResizeDialog";
 import { base64ToBlob } from "../../lib/blobUtils";
 
 interface VideoDoc {
@@ -88,6 +90,7 @@ export default function Editor() {
   const [showFlattenConfirm, setShowFlattenConfirm] = useState(false);
   const [showOverwriteConfirm, setShowOverwriteConfirm] = useState(false);
   const [stitchImage, setStitchImage] = useState<string | null>(null);
+  const [showResizeDialog, setShowResizeDialog] = useState(false);
   // Video đang xem/cắt trong Editor (song song với `doc` — ảnh — trong store
   // `useEditor`; chỉ 1 trong 2 được render tại 1 thời điểm, xem JSX bên dưới).
   const [videoDoc, setVideoDoc] = useState<VideoDoc | null>(null);
@@ -108,6 +111,49 @@ export default function Editor() {
   // Tiến độ lưu/mã hóa video (0.0 -> 1.0) từ backend qua event "trim-progress"
   const [saveProgress, setSaveProgress] = useState<number | null>(null);
   const [saveProgressTitle, setSaveProgressTitle] = useState<string>("");
+
+  // Trạng thái cập nhật phần mềm (Update)
+  const [updateReady, setUpdateReady] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState<UpdateInfo | null>(null);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
+
+  useEffect(() => {
+    // 1. Khởi tạo trạng thái update từ backend
+    ipc.getUpdateReady().then((ready) => {
+      if (ready) setUpdateReady(true);
+    }).catch(() => {});
+
+    ipc.getPendingUpdate().then((info) => {
+      if (info?.available) setPendingUpdate(info);
+    }).catch(() => {});
+
+    // 2. Lắng nghe khi phát hiện bản update mới
+    const unlistenAvailable = listen<UpdateInfo>("update-available", (e) => {
+      if (e.payload?.available) {
+        setPendingUpdate(e.payload);
+        setBannerDismissed(false);
+      }
+    });
+
+    // 3. Lắng nghe khi bản cập nhật đã sẵn sàng khởi động lại
+    const unlistenReady = listen<string>("update-ready-to-relaunch", (e) => {
+      setUpdateReady(true);
+      if (e.payload) {
+        setPendingUpdate((prev) =>
+          prev
+            ? { ...prev, available: true, version: e.payload }
+            : { available: true, version: e.payload, currentVersion: "" },
+        );
+      }
+      setBannerDismissed(false);
+    });
+
+    return () => {
+      unlistenAvailable.then((f) => f());
+      unlistenReady.then((f) => f());
+    };
+  }, []);
 
   useEffect(() => {
     const un = listen<number>("trim-progress", (event) => {
@@ -818,6 +864,10 @@ export default function Editor() {
       if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
         e.shiftKey ? s.redo() : s.undo();
+      } else if (mod && ((e.shiftKey && e.key.toLowerCase() === "r") || (e.altKey && e.key.toLowerCase() === "i"))) {
+        // Ctrl/Cmd+Shift+R hoặc Ctrl/Cmd+Alt+I = Đổi kích thước ảnh (chuẩn ngành)
+        e.preventDefault();
+        doResize();
       } else if (mod && e.key.toLowerCase() === "s") {
         // Ctrl/Cmd+S = Save; Ctrl/Cmd+Shift+S = Save As (chuẩn ngành, giống
         // Photoshop/Office/Sketch); Ctrl/Cmd+Alt+S = Save+Copy (dời từ
@@ -1147,6 +1197,41 @@ export default function Editor() {
     flash(t("editorMain.imageStitched"));
   };
 
+  const doResize = () => {
+    const doc = useEditor.getState().doc;
+    if (!doc) return;
+    setShowResizeDialog(true);
+  };
+
+  const handleResizeApply = (result: ResizeResult) => {
+    setShowResizeDialog(false);
+    const doc = useEditor.getState().doc;
+    if (!doc) return;
+
+    const sx = result.width / (doc.imgW || 1);
+    const sy = result.height / (doc.imgH || 1);
+    const avgScale = (sx + sy) / 2;
+
+    const scaledAnnotations = result.scaleAnnotations
+      ? doc.annotations.map((a) => scaleAnnotation(a, sx, sy))
+      : doc.annotations;
+
+    const scaledBg = result.scaleAnnotations && doc.background
+      ? scaleBackgroundConfig(doc.background, avgScale)
+      : doc.background;
+
+    useEditor.getState().applyResize(
+      result.dataUrl,
+      result.width,
+      result.height,
+      result.scaleFactor,
+      scaledAnnotations,
+      scaledBg
+    );
+
+    flash(t("editorMain.imageResized"));
+  };
+
   const confirmFlatten = () => {
     setShowFlattenConfirm(false);
     // Export canvas thành data URL rồi loadDoc lại với annotations rỗng.
@@ -1185,6 +1270,20 @@ export default function Editor() {
     el.src = url;
   };
 
+  const handleRestartApp = () => {
+    ipc.restartApp();
+  };
+
+  const handleInstallUpdate = async () => {
+    setIsUpdating(true);
+    try {
+      await ipc.installUpdate();
+    } catch (e) {
+      setIsUpdating(false);
+      flash(t("updates.networkError") + ": " + String(e));
+    }
+  };
+
   return (
     <div
       className="solid-bg"
@@ -1204,7 +1303,23 @@ export default function Editor() {
           onNew={doNew}
           onOpen={doOpen}
           onStitch={doStitch}
+          onResize={doResize}
           busy={busy}
+          updateReady={updateReady}
+          pendingUpdate={pendingUpdate}
+          isUpdating={isUpdating}
+          onRestart={handleRestartApp}
+          onInstallUpdate={handleInstallUpdate}
+        />
+      )}
+      {!bannerDismissed && (
+        <UpdateBanner
+          updateReady={updateReady}
+          pendingUpdate={pendingUpdate}
+          isUpdating={isUpdating}
+          onRestart={handleRestartApp}
+          onInstall={handleInstallUpdate}
+          onDismiss={() => setBannerDismissed(true)}
         />
       )}
       <div
@@ -1234,7 +1349,7 @@ export default function Editor() {
             onFlash={flash}
           />
         ) : (
-          <AnnotationStage ref={stageRef} onFlash={flash} />
+          <AnnotationStage ref={stageRef} onFlash={flash} onOpenResize={doResize} />
         )}
       </div>
       <HistoryStrip
@@ -1289,6 +1404,16 @@ export default function Editor() {
           initialImage={stitchImage}
           onApply={handleStitchApply}
           onCancel={() => setStitchImage(null)}
+        />
+      )}
+      {showResizeDialog && useEditor.getState().doc && (
+        <ResizeDialog
+          initialWidth={useEditor.getState().doc!.imgW}
+          initialHeight={useEditor.getState().doc!.imgH}
+          scaleFactor={useEditor.getState().doc!.scaleFactor}
+          imageSrc={useEditor.getState().doc!.image}
+          onApply={handleResizeApply}
+          onCancel={() => setShowResizeDialog(false)}
         />
       )}
     </div>

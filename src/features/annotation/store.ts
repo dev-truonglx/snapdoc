@@ -160,6 +160,15 @@ interface EditorState {
   applyCrop: (image: string, imgW: number, imgH: number, annotations: Annotation[]) => void;
   /** Nối ảnh: thay ảnh nền bằng ảnh đã ghép, ĐI QUA history → Ctrl/Cmd+Z hoàn tác được. */
   applyStitch: (image: string, imgW: number, imgH: number) => void;
+  /** Đổi kích thước ảnh: cập nhật ảnh nền, kích thước, scaleFactor và toàn bộ annotations, ĐI QUA history. */
+  applyResize: (
+    image: string,
+    imgW: number,
+    imgH: number,
+    scaleFactor: number,
+    annotations: Annotation[],
+    background?: BackgroundConfig,
+  ) => void;
 
   // history
   undo: () => void;
@@ -849,6 +858,27 @@ export const useEditor = create<EditorState>((set, get) => ({
         // Giữ `filePath` — xem giải thích ở `applyCrop`.
         ...commit(s, { image, imgW, imgH, scaleFactor: 1, annotations: [], historyId: s.doc.historyId, filePath: s.doc.filePath }),
         selectedId: null,
+        baseDirty: true,
+      };
+    }),
+
+  applyResize: (image, imgW, imgH, scaleFactor, annotations, background) =>
+    set((s) => {
+      if (!s.doc) return {};
+      return {
+        ...commit(s, {
+          image,
+          imgW,
+          imgH,
+          scaleFactor,
+          annotations,
+          background: background !== undefined ? background : s.doc.background,
+          historyId: s.doc.historyId,
+          captureMode: s.doc.captureMode,
+          filePath: s.doc.filePath,
+        }),
+        selectedId: null,
+        selectedIds: [],
         baseDirty: true,
       };
     }),

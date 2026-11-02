@@ -291,6 +291,158 @@ export const translateAnnotation = (a: Annotation, dx: number, dy: number): Anno
   return moved;
 };
 
+/** Co giãn annotation theo tỉ lệ (sx, sy) khi resize tài liệu/ảnh. */
+export const scaleAnnotation = (a: Annotation, sx: number, sy: number): Annotation => {
+  const avg = (sx + sy) / 2;
+  const scaleStroke = (sw: number) => Math.max(1, Math.round(sw * avg));
+  const scaleX = (x: number) => Math.round(x * sx);
+  const scaleY = (y: number) => Math.round(y * sy);
+
+  switch (a.type) {
+    case "rect":
+    case "ellipse":
+    case "highlight":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        strokeWidth: scaleStroke(a.strokeWidth),
+        width: Math.max(1, scaleX(a.width)),
+        height: Math.max(1, scaleY(a.height)),
+      };
+
+    case "numbered-rect":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        strokeWidth: scaleStroke(a.strokeWidth),
+        width: Math.max(1, scaleX(a.width)),
+        height: Math.max(1, scaleY(a.height)),
+        radius: Math.max(6, Math.round(a.radius * avg)),
+      };
+
+    case "step":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        strokeWidth: scaleStroke(a.strokeWidth),
+        radius: Math.max(6, Math.round(a.radius * avg)),
+      };
+
+    case "blur":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        strokeWidth: scaleStroke(a.strokeWidth),
+        width: Math.max(1, scaleX(a.width)),
+        height: Math.max(1, scaleY(a.height)),
+        blurRadius: Math.max(1, Math.round(a.blurRadius * avg)),
+      };
+
+    case "image":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        width: Math.max(1, scaleX(a.width)),
+        height: Math.max(1, scaleY(a.height)),
+      };
+
+    case "arrow":
+    case "double-arrow":
+    case "line":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        strokeWidth: scaleStroke(a.strokeWidth),
+        x2: scaleX(a.x2),
+        y2: scaleY(a.y2),
+        cx: a.cx !== undefined ? scaleX(a.cx) : undefined,
+        cy: a.cy !== undefined ? scaleY(a.cy) : undefined,
+      };
+
+    case "numbered-arrow":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        strokeWidth: scaleStroke(a.strokeWidth),
+        x2: scaleX(a.x2),
+        y2: scaleY(a.y2),
+        cx: a.cx !== undefined ? scaleX(a.cx) : undefined,
+        cy: a.cy !== undefined ? scaleY(a.cy) : undefined,
+        radius: Math.max(6, Math.round(a.radius * avg)),
+      };
+
+    case "text":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        strokeWidth: scaleStroke(a.strokeWidth),
+        fontSize: Math.max(8, Math.round((a.fontSize || 22) * avg)),
+        width: a.width !== undefined ? Math.max(20, scaleX(a.width)) : undefined,
+        targetX: a.targetX !== undefined ? scaleX(a.targetX) : undefined,
+        targetY: a.targetY !== undefined ? scaleY(a.targetY) : undefined,
+      };
+
+    case "pen":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        strokeWidth: scaleStroke(a.strokeWidth),
+        points: a.points.map((pt, i) => (i % 2 === 0 ? scaleX(pt) : scaleY(pt))),
+      };
+
+    case "spotlight":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        width: Math.max(1, scaleX(a.width)),
+        height: Math.max(1, scaleY(a.height)),
+      };
+
+    case "magnifier":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        strokeWidth: scaleStroke(a.strokeWidth),
+        radius: Math.max(12, Math.round(a.radius * avg)),
+      };
+
+    case "emoji":
+      return {
+        ...a,
+        x: scaleX(a.x),
+        y: scaleY(a.y),
+        size: Math.max(8, Math.round(a.size * avg)),
+      };
+
+    default:
+      return a;
+  }
+};
+
+/** Tỉ lệ lại cấu hình khung nền khi resize ảnh. */
+export const scaleBackgroundConfig = (
+  bg: BackgroundConfig | undefined,
+  scale: number
+): BackgroundConfig | undefined => {
+  if (!bg) return undefined;
+  return {
+    ...bg,
+    padding: Math.max(0, Math.round(bg.padding * scale)),
+    borderRadius: Math.max(0, Math.round(bg.borderRadius * scale)),
+  };
+};
+
 /** Khung bao (ước lượng) của annotation trong không gian ảnh. */
 export const annotationBounds = (a: Annotation): { x1: number; y1: number; x2: number; y2: number } => {
   let x1 = a.x;

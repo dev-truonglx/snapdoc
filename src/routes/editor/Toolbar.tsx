@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
+import type { UpdateInfo } from "../../lib/ipc";
 import { useEditor } from "../../features/annotation/store";
 import { addStylePreset, loadStylePresets, MAX_PRESETS, saveStylePresets } from "../../features/annotation/stylePresets";
 import {
@@ -173,7 +174,13 @@ interface Props {
   onNew: () => void;
   onOpen: () => void;
   onStitch: () => void;
+  onResize?: () => void;
   busy: boolean;
+  updateReady?: boolean;
+  pendingUpdate?: UpdateInfo | null;
+  isUpdating?: boolean;
+  onRestart?: () => void;
+  onInstallUpdate?: () => void;
 }
 
 /**
@@ -414,7 +421,8 @@ function ColorStopButton({
 }
 
 export default function Toolbar({
-  mode, onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, busy,
+  mode, onSave, onSaveAs, onCopy, onSaveCopy, onFlatten, onNew, onOpen, onStitch, onResize, busy,
+  updateReady, pendingUpdate, isUpdating, onRestart, onInstallUpdate,
 }: Props) {
   const { t } = useTranslation();
 
@@ -601,6 +609,18 @@ export default function Toolbar({
                   </svg>
                   <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.stitchButton")}</span>
                 </button>
+
+                {/* Resize */}
+                {onResize && (
+                  <button onClick={onResize} style={newBtn} title={t("editorToolbar.resizeImage")}>
+                    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <path d="M2 5.5V2.5A.5.5 0 0 1 2.5 2h3M14 10.5v3a.5.5 0 0 1-.5.5h-3" strokeLinecap="round" strokeLinejoin="round" />
+                      <path d="M14 5.5V2.5a.5.5 0 0 0-.5-.5h-3M2 10.5v3a.5.5 0 0 0 .5.5h3" strokeLinecap="round" strokeLinejoin="round" />
+                      <path d="M6 10l4-4m0 0H7m3 0v3" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                    <span style={{ fontSize: 12, fontWeight: 600 }}>{t("editorToolbar.resizeBtn")}</span>
+                  </button>
+                )}
               </div>
 
               <div style={sep} />
@@ -1337,8 +1357,45 @@ export default function Toolbar({
             </div>
           </div>
 
-          {/* CỘT PHẢI: KHU VỰC CÁC NÚT ACTION XUẤT (Save, Save+Copy, Copy) */}
+          {/* CỘT PHẢI: KHU VỰC CÁC NÚT ACTION XUẤT (Save, Save+Copy, Copy) & UPDATE */}
           <div style={rightSection}>
+            {/* Update action button: chỉ hiện khi có bản update hoặc đã sẵn sàng restart */}
+            {updateReady && onRestart && (
+              <button
+                onClick={onRestart}
+                style={updatePillRestartBtn}
+                title={t("editorUpdate.updateReadyMsg", { version: pendingUpdate?.version || "" })}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                  <path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9L1.5 6.5M1.5 2v4.5H6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>
+                  {t("editorUpdate.restartToolbar", { version: pendingUpdate?.version || "" })}
+                </span>
+              </button>
+            )}
+            {!updateReady && pendingUpdate?.available && onInstallUpdate && (
+              <button
+                onClick={onInstallUpdate}
+                disabled={isUpdating}
+                style={{
+                  ...updatePillInstallBtn,
+                  opacity: isUpdating ? 0.75 : 1,
+                  cursor: isUpdating ? "wait" : "pointer",
+                }}
+                title={t("editorUpdate.updateAvailableMsg", { version: pendingUpdate.version })}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                  <path d="M8 2v8m0 0 3-3m-3 3-3-3M2 12v1.5a.5.5 0 0 0 .5.5h11a.5.5 0 0 0 .5-.5V12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <span style={{ fontSize: 12, fontWeight: 600 }}>
+                  {isUpdating
+                    ? t("editorUpdate.updating")
+                    : t("editorUpdate.updateToolbar", { version: pendingUpdate.version })}
+                </span>
+              </button>
+            )}
+
             {/* Save: split button */}
             <div ref={saveMenuRef} style={splitGroup}>
               <button
@@ -1472,6 +1529,38 @@ const actionBtn: React.CSSProperties = {
   cursor: "pointer",
   flexShrink: 0,
   whiteSpace: "nowrap",
+};
+
+const updatePillRestartBtn: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  height: 32,
+  padding: "0 11px",
+  borderRadius: 6,
+  border: "1px solid rgba(255, 255, 255, 0.2)",
+  background: "#059669",
+  color: "#fff",
+  cursor: "pointer",
+  flexShrink: 0,
+  whiteSpace: "nowrap",
+  boxShadow: "0 1px 3px rgba(0, 0, 0, 0.2)",
+};
+
+const updatePillInstallBtn: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  height: 32,
+  padding: "0 11px",
+  borderRadius: 6,
+  border: "1px solid rgba(255, 255, 255, 0.2)",
+  background: "#2563eb",
+  color: "#fff",
+  cursor: "pointer",
+  flexShrink: 0,
+  whiteSpace: "nowrap",
+  boxShadow: "0 1px 3px rgba(0, 0, 0, 0.2)",
 };
 
 const group: React.CSSProperties = { display: "flex", alignItems: "center", gap: 3, flexShrink: 0 };

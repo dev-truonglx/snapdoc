@@ -886,15 +886,48 @@ pub async fn copy_frozen_pixel(app: AppHandle, idx: usize, fx: f64, fy: f64) -> 
 
 /// Mở thư mục chứa file log (`SnapDoc.log`, xem `lib::log_plugin`) — Settings
 /// dùng để người dùng gửi log khi báo lỗi.
+/// Trên macOS: dùng `reveal_item_in_dir` (NSWorkspace) để mở Finder và highlight
+/// file log, tránh lỗi LaunchServices error -54 khi dùng `open` với thư mục trong ~/Library/Logs.
 #[tauri::command]
 pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
     use tauri::Manager;
     use tauri_plugin_opener::OpenerExt;
     let dir = app.path().app_log_dir().map_err(|e| format!("Không xác định được thư mục log: {e}"))?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Không tạo được thư mục log: {e}"))?;
-    app.opener()
-        .open_path(dir.to_string_lossy(), None::<&str>)
-        .map_err(|e| format!("Không mở được thư mục log: {e}"))
+
+    let log_file = dir.join("SnapDoc.log");
+    let target = if log_file.exists() {
+        log_file
+    } else {
+        // Fallback: nếu dev build ghi log ở com.snapdoc.app thay vì com.snapdoc.app.dev
+        let alt = app.path().home_dir().ok().map(|h| h.join("Library/Logs/com.snapdoc.app/SnapDoc.log"));
+        if let Some(alt_file) = alt.filter(|p| p.exists()) {
+            alt_file
+        } else {
+            // Đảm bảo file tồn tại để Finder/Explorer mở vào bên trong thư mục và chọn đúng file
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open(&log_file);
+            log_file
+        }
+    };
+
+    if let Err(e) = app.opener().reveal_item_in_dir(&target) {
+        log::warn!("[SnapDoc] reveal_item_in_dir thất bại: {e}");
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("/usr/bin/open")
+                .arg("-R")
+                .arg(&target)
+                .status()
+                .map_err(|e2| format!("Không mở được thư mục log: {e2}"))?;
+            if !status.success() {
+                return Err(format!("Lệnh open -R thất bại: {status:?}"));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        return Err(e.to_string());
+    }
+
+    Ok(())
 }
 
 #[tauri::command]

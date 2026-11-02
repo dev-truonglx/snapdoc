@@ -226,7 +226,16 @@ export default function Settings() {
           <button
             style={updateBtn}
             title={t("updates.openLogsTitle")}
-            onClick={() => ipc.openLogDir().catch((e) => console.error("Open log dir failed:", e))}
+            onClick={async () => {
+              try {
+                await ipc.openLogDir();
+              } catch (e) {
+                console.error("Open log dir failed:", e);
+                setUpdateErr(String(e));
+                setUpdateStatus("err");
+                window.setTimeout(() => setUpdateStatus("idle"), 4000);
+              }
+            }}
           >
             {t("updates.openLogs")}
           </button>

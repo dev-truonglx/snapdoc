@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Annotation, Doc, EmojiAnn, PenAnn, RectAnn, TextAnn } from "./model";
-import { annotationBounds, simplifyPoints } from "./model";
+import { annotationBounds, scaleAnnotation, scaleBackgroundConfig, simplifyPoints } from "./model";
 import { useEditor } from "./store";
 
 const rect = (id: string, x = 10): RectAnn => ({ id, type: "rect", color: "#ef4444", strokeWidth: 2, x, y: 10, width: 50, height: 40 });
@@ -124,6 +124,59 @@ describe("dirty / markSaved", () => {
     expect(st().doc!.imgW).toBe(400);
     st().undo();
     expect(st().doc!.image).toBe("blob:base");
+  });
+
+  it("resize đổi nền: cập nhật kích thước, scaleFactor, đánh dấu baseDirty, giữ historyId, undo được", () => {
+    st().addAnnotation(rect("a", 100));
+    const scaledAnn = scaleAnnotation(rect("a", 100), 0.5, 0.5);
+    expect(scaledAnn.x).toBe(50);
+    expect((scaledAnn as RectAnn).width).toBe(25);
+
+    st().applyResize("blob:resized", 400, 300, 1.0, [scaledAnn]);
+    expect(st().baseDirty).toBe(true);
+    expect(st().doc!.historyId).toBe("h1");
+    expect(st().doc!.imgW).toBe(400);
+    expect(st().doc!.imgH).toBe(300);
+    expect(st().doc!.annotations[0].x).toBe(50);
+
+    st().undo();
+    expect(st().doc!.image).toBe("blob:base");
+    expect(st().doc!.imgW).toBe(800);
+    expect(st().doc!.imgH).toBe(600);
+    expect(st().doc!.annotations[0].x).toBe(100);
+  });
+});
+
+describe("scaleAnnotation", () => {
+  it("scale hình chữ nhật, mũi tên, văn bản và nét vẽ", () => {
+    const r = scaleAnnotation({ id: "1", type: "rect", color: "#f00", strokeWidth: 4, x: 100, y: 50, width: 200, height: 100 }, 0.5, 0.5) as RectAnn;
+    expect(r.x).toBe(50);
+    expect(r.y).toBe(25);
+    expect(r.width).toBe(100);
+    expect(r.height).toBe(50);
+    expect(r.strokeWidth).toBe(2);
+
+    const arrow = scaleAnnotation({ id: "2", type: "arrow", color: "#f00", strokeWidth: 2, x: 10, y: 20, x2: 100, y2: 200, cx: 50, cy: 100 }, 2, 2) as any;
+    expect(arrow.x).toBe(20);
+    expect(arrow.y).toBe(40);
+    expect(arrow.x2).toBe(200);
+    expect(arrow.y2).toBe(400);
+    expect(arrow.cx).toBe(100);
+    expect(arrow.cy).toBe(200);
+
+    const text = scaleAnnotation({ id: "3", type: "text", color: "#000", strokeWidth: 1, x: 40, y: 60, text: "hi", fontSize: 20, targetX: 100, targetY: 120 }, 0.5, 0.5) as TextAnn;
+    expect(text.fontSize).toBe(10);
+    expect(text.targetX).toBe(50);
+    expect(text.targetY).toBe(60);
+
+    const pen = scaleAnnotation({ id: "4", type: "pen", color: "#000", strokeWidth: 2, x: 10, y: 10, points: [0, 0, 10, 20, 30, 40] }, 2, 3) as PenAnn;
+    expect(pen.x).toBe(20);
+    expect(pen.y).toBe(30);
+    expect(pen.points).toEqual([0, 0, 20, 60, 60, 120]);
+
+    const bg = scaleBackgroundConfig({ enabled: true, type: "solid", colors: ["#000"], padding: 32, borderRadius: 12, shadow: "medium" }, 0.5);
+    expect(bg?.padding).toBe(16);
+    expect(bg?.borderRadius).toBe(6);
   });
 });
 
